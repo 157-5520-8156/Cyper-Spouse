@@ -1,0 +1,34 @@
+# Cost Control
+
+目标预算：每月约 80 元人民币，日硬上限约 3 元人民币，日自动调用软上限约 2 元人民币。
+
+## 默认策略
+
+- 日常文字聊天继续使用 DeepSeek，不把所有消息都转到 OpenAI。
+- OpenAI 只用于必要的多模态能力：图片理解、语音转写、少量虚拟生活照/自拍。
+- 图片生成默认不自动触发，只有显式运行 `companion-life-event --generate-image` 才会尝试。
+- 同一个附件 URL 的理解结果会复用本地记忆，避免重复调用视觉/转写。
+- 每次 OpenAI 多模态调用都会写入 `usage_events`，记录的是本项目的人民币估算，不是官方账单。
+
+## 当前闸门
+
+- `MONTHLY_BUDGET_CNY=80`
+- `DAILY_BUDGET_CNY=3`
+- `SOFT_DAILY_BUDGET_CNY=2`
+- `MONTHLY_IMAGE_LIMIT=20`
+- `MONTHLY_VISION_LIMIT=120`
+- `MONTHLY_AUDIO_LIMIT=60`
+
+## 估算单价
+
+- 图片理解：`0.03 CNY`
+- 语音转写：`0.05 CNY`
+- 图片生成：`0.35 CNY`
+
+这些数字用于本地拦截和保守规划。真实价格以 OpenAI 后台账单为准，模型或汇率变化时应更新这里和 `src/companion_daemon/budget.py`。
+
+## 参考
+
+- OpenAI cost optimization guide: https://platform.openai.com/docs/guides/cost-optimization
+- OpenAI image and vision guide: https://platform.openai.com/docs/guides/images-vision
+- OpenAI speech to text guide: https://platform.openai.com/docs/guides/speech-to-text

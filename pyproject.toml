@@ -1,0 +1,47 @@
+[project]
+name = "girl-agent"
+version = "0.1.0"
+description = "Local-first cyber companion daemon for QQ/WeChat plus SillyTavern-style companion state."
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi>=0.116.0",
+  "httpx>=0.28.0",
+  "pillow>=12.0.0",
+  "pynacl>=1.5.0",
+  "pydantic>=2.11.0",
+  "pydantic-settings>=2.10.0",
+  "pyyaml>=6.0.0",
+  "uvicorn[standard]>=0.35.0",
+  "qq-botpy>=1.2.1",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.4.0",
+  "pytest-asyncio>=1.2.0",
+  "ruff>=0.12.0",
+]
+
+[project.scripts]
+companion-daemon = "companion_daemon.app:main"
+companion-sim = "companion_daemon.cli:main"
+companion-qq-ws = "companion_daemon.qq_websocket:main"
+companion-proactive = "companion_daemon.proactive_cli:main"
+companion-send-sticker = "companion_daemon.qq_sticker_cli:main"
+companion-proactive-scheduler = "companion_daemon.proactive_scheduler:main"
+companion-life-event = "companion_daemon.life_event:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/companion_daemon"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+exclude = [".venv", "external"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

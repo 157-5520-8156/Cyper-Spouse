@@ -1,0 +1,2 @@
+"""Companion daemon package."""
+

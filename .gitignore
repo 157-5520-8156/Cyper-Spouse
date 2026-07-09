@@ -1,0 +1,17 @@
+.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+.uv-cache/
+
+data/
+logs/
+botpy.log
+assets/life/
+
+external/SillyTavern/
+external/SillyTavern/node_modules/
+external/SillyTavern/config.yaml
+external/SillyTavern/data/
+
+.env

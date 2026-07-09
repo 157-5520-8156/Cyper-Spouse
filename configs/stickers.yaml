@@ -1,0 +1,41 @@
+stickers:
+  - id: happy
+    category: happy
+    mood: happy
+    intent: greeting
+    path: assets/stickers/rin-happy.png
+  - id: sulk
+    category: sulk
+    mood: sulking
+    intent: soft_complaint
+    path: assets/stickers/rin-sulk.png
+  - id: miss_you
+    category: miss_you
+    mood: miss_you
+    intent: reaching_out
+    path: assets/stickers/rin-miss-you.png
+  - id: jealous_soft
+    category: jealous_soft
+    mood: jealous_soft
+    intent: mild_jealousy
+    path: assets/stickers/rin-jealous-soft.png
+  - id: angry_soft
+    category: angry_soft
+    mood: sulking
+    intent: boundary
+    path: assets/stickers/rin-angry-soft.png
+  - id: sleepy
+    category: sleepy
+    mood: sleepy
+    intent: tired
+    path: assets/stickers/rin-sleepy.png
+  - id: comfort
+    category: comfort
+    mood: calm
+    intent: comfort
+    path: assets/stickers/rin-comfort.png
+  - id: teasing
+    category: teasing
+    mood: happy
+    intent: teasing
+    path: assets/stickers/rin-teasing.png

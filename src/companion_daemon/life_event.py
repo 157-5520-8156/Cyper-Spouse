@@ -1,0 +1,176 @@
+import argparse
+import asyncio
+from dataclasses import dataclass
+from pathlib import Path
+
+from companion_daemon.budget import ESTIMATES, BudgetGate
+from companion_daemon.config import get_settings
+from companion_daemon.image_generation import OpenAIImageGenerator, life_image_prompt
+from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel
+from companion_daemon.qq_client import QQOfficialClient
+from companion_daemon.relationship import relationship_instruction, relationship_status_line
+from companion_daemon.runtime import build_companion_engine
+from companion_daemon.stickers import load_stickers
+
+
+@dataclass(frozen=True)
+class LifeEvent:
+    topic: str
+    messages: list[str]
+    sticker_category: str | None = None
+
+
+class LifeEventGenerator:
+    def __init__(self, model):
+        self.model = model
+
+    async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str) -> LifeEvent:
+        prompt = [
+            {
+                "role": "system",
+                "content": (
+                    "你是沈知栀，一个真实感很强的中国女大学生。"
+                    "生成一件今天刚发生的小事，用 QQ 私聊连续发 2-4 条消息分享。"
+                    "不要写舞台动作，不要说这是编的。"
+                    "亲疏程度必须符合当前关系，不要跳过关系阶段。"
+                    "输出严格 JSON: topic, messages, sticker_category。"
+                    "sticker_category 可选 happy, sulk, miss_you, jealous_soft, angry_soft, sleepy, comfort, teasing。"
+                ),
+            },
+            {
+                "role": "user",
+                "content": (
+                    f"当前心情: {mood}\n"
+                    f"{relationship_status}\n"
+                    f"关系阶段说明: {relationship_instruction(relationship_stage)}"
+                ),
+            },
+        ]
+        raw = await self.model.complete(prompt, temperature=0.9)
+        return parse_life_event(raw)
+
+
+def parse_life_event(raw: str) -> LifeEvent:
+    import json
+
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return LifeEvent(topic="随手分享", messages=[raw.strip()[:300]], sticker_category="comfort")
+    messages = [str(item).strip() for item in data.get("messages", []) if str(item).strip()]
+    if not messages:
+        messages = ["我刚刚遇到一件小事，突然有点想跟你说。"]
+    return LifeEvent(
+        topic=str(data.get("topic") or "随手分享"),
+        messages=messages[:4],
+        sticker_category=data.get("sticker_category"),
+    )
+
+
+async def run(
+    *,
+    user_id: str,
+    send: bool,
+    sandbox: bool,
+    generate_image: bool,
+    image_kind: str,
+) -> bool:
+    settings = get_settings()
+    engine = build_companion_engine()
+    state = engine.store.get_mood_state(user_id)
+    model = (
+        DeepSeekChatModel(settings.deepseek_api_key, settings.deepseek_base_url, settings.deepseek_model)
+        if settings.deepseek_api_key
+        else FakeCompanionModel()
+    )
+    event = await LifeEventGenerator(model).generate(
+        mood=state.mood,
+        relationship_stage=state.relationship_stage,
+        relationship_status=relationship_status_line(state),
+    )
+    print(f"topic: {event.topic}")
+    for index, message in enumerate(event.messages, start=1):
+        print(f"{index}. {message}")
+    print(f"sticker_category: {event.sticker_category or ''}")
+    generated_path = None
+    if generate_image:
+        if not settings.openai_api_key:
+            print("image not generated: OPENAI_API_KEY is missing")
+        else:
+            budget_gate = BudgetGate(
+                engine.store,
+                monthly_budget_cny=settings.monthly_budget_cny,
+                daily_budget_cny=settings.daily_budget_cny,
+                soft_daily_budget_cny=settings.soft_daily_budget_cny,
+                monthly_image_limit=settings.monthly_image_limit,
+                monthly_vision_limit=settings.monthly_vision_limit,
+                monthly_audio_limit=settings.monthly_audio_limit,
+            )
+            estimate = ESTIMATES["image_generation"]
+            decision = budget_gate.check(estimate, automatic=not send)
+            if not decision.allowed:
+                print(f"image not generated: {decision.reason}")
+            else:
+                output = Path("assets/life") / f"life-{event.topic[:24].replace('/', '-')}.png"
+                generated = await OpenAIImageGenerator(
+                    settings.openai_api_key,
+                    base_url=settings.openai_base_url,
+                    model=settings.image_model,
+                ).generate(
+                    life_image_prompt(
+                        event.topic,
+                        kind=image_kind,
+                        visual_identity_path=settings.visual_identity_path,
+                    ),
+                    output_path=output,
+                )
+                budget_gate.record(estimate, note=f"life_event:{image_kind}:{event.topic}")
+                generated_path = generated.path
+                print(f"generated image: {generated_path}")
+    if not send:
+        return False
+
+    openid = engine.store.platform_user_id(user_id, "qq")
+    if not openid:
+        print("not sent: no QQ account mapping")
+        return False
+    if not settings.qq_bot_app_id or not settings.qq_bot_secret:
+        print("not sent: QQ credentials missing")
+        return False
+
+    api_base_url = "https://sandbox.api.sgroup.qq.com" if sandbox else "https://api.sgroup.qq.com"
+    client = QQOfficialClient(settings.qq_bot_app_id, settings.qq_bot_secret, api_base_url=api_base_url)
+    for message in event.messages:
+        await client.send_c2c_text(openid, message, is_wakeup=True)
+
+    if generated_path:
+        await client.send_c2c_local_image(openid, generated_path, is_wakeup=True)
+        print(f"sent generated image: {generated_path}")
+
+    if event.sticker_category and not generated_path:
+        catalog = load_stickers(str(settings.stickers_path))
+        sticker = next((item for item in catalog.stickers if item.category == event.sticker_category), None)
+        if sticker:
+            await client.send_c2c_local_image(openid, Path(sticker.path), is_wakeup=True)
+            print(f"sent sticker: {sticker.path}")
+    engine.store.record_proactive_delivery(user_id, "qq:life_event")
+    return True
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Generate and optionally send a life-event share.")
+    parser.add_argument("--user", default="geoff")
+    parser.add_argument("--send", action="store_true")
+    parser.add_argument("--sandbox", action="store_true")
+    parser.add_argument("--generate-image", action="store_true")
+    parser.add_argument("--image-kind", default="life", choices=["life", "selfie", "food"])
+    args = parser.parse_args()
+    asyncio.run(
+        run(
+            user_id=args.user,
+            send=args.send,
+            sandbox=args.sandbox,
+            generate_image=args.generate_image,
+            image_kind=args.image_kind,
+        )
+    )
