@@ -20,6 +20,7 @@ from companion_daemon.mood import (
 from companion_daemon.multimodal import summarize_attachments
 from companion_daemon.multimodal_analysis import AttachmentInsight, MultimodalAnalyzer
 from companion_daemon.prompts import proactive_prompt
+from companion_daemon.proactive_triggers import evaluate_proactive_trigger
 from companion_daemon.relationship import advance_relationship
 from companion_daemon.sanitize import sanitize_chat_text
 from companion_daemon.stickers import StickerCatalog
@@ -130,11 +131,20 @@ class CompanionEngine:
     async def proactive_tick(self, canonical_user_id: str) -> ProactiveDecision:
         state = self.store.get_mood_state(canonical_user_id)
         recent_lines = self._recent_lines(canonical_user_id)
+        recent_rows = self._recent_dicts(canonical_user_id, limit=16)
+        trigger = evaluate_proactive_trigger(
+            state=state,
+            recent_messages=recent_rows,
+            trigger_history=self.store.recent_proactive_trigger_history(canonical_user_id),
+            now=utc_now(),
+        )
         raw = await self.model.complete(
-            proactive_prompt(state, recent_lines, self.companion_system_prompt),
+            proactive_prompt(state, recent_lines, self.companion_system_prompt, trigger),
             temperature=0.7,
         )
         decision = self._parse_decision(canonical_user_id, raw, state)
+        if trigger and decision.should_send:
+            decision = decision.model_copy(update={"trigger_type": trigger.type})
         if decision.message:
             decision = decision.model_copy(update={"message": sanitize_chat_text(decision.message)})
         decision = self._attach_sticker(decision, state)
@@ -146,6 +156,7 @@ class CompanionEngine:
             decision.message_type,
             decision.message,
             decision.sticker_category,
+            decision.trigger_type,
             decision.cooldown_minutes,
         )
         if decision.should_send and decision.platform and decision.message:
@@ -158,6 +169,17 @@ class CompanionEngine:
             who = "你" if row["direction"] == "in" else "她"
             lines.append(f"[{row['platform']}] {who}: {row['text']}")
         return lines
+
+    def _recent_dicts(self, canonical_user_id: str, limit: int = 16) -> list[dict[str, str]]:
+        return [
+            {
+                "direction": str(row["direction"]),
+                "platform": str(row["platform"]),
+                "text": str(row["text"]),
+                "sent_at": str(row["sent_at"]),
+            }
+            for row in self.store.recent_messages(canonical_user_id, limit=limit)
+        ]
 
     def _attachment_source(self, message: IncomingMessage, attachment: MessageAttachment) -> str:
         if attachment.url:
@@ -187,6 +209,7 @@ class CompanionEngine:
         data.setdefault("message", None)
         data.setdefault("sticker_category", None)
         data.setdefault("sticker_path", None)
+        data.setdefault("trigger_type", None)
         data.setdefault("cooldown_minutes", 30)
         return ProactiveDecision(**data)
 

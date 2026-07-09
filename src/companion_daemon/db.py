@@ -104,6 +104,7 @@ class CompanionStore:
                   message_type text not null,
                   message text,
                   sticker_category text,
+                  trigger_type text,
                   cooldown_minutes integer not null,
                   created_at text not null
                 );
@@ -157,6 +158,7 @@ class CompanionStore:
             self._ensure_column(conn, "mood_state", "emotion_affinity_json", "text not null default '{}'")
             self._ensure_column(conn, "mood_state", "last_emotion_impact_json", "text not null default '{}'")
             self._ensure_column(conn, "mood_state", "last_emotion_source", "text")
+            self._ensure_column(conn, "proactive_events", "trigger_type", "text")
 
     def _ensure_column(
         self,
@@ -397,6 +399,30 @@ class CompanionStore:
             ).fetchall()
         return list(reversed(rows))
 
+    def recent_proactive_trigger_history(
+        self,
+        canonical_user_id: str,
+        limit: int = 80,
+    ) -> dict[str, datetime]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select trigger_type, created_at
+                from proactive_events
+                where canonical_user_id = ? and trigger_type is not null
+                order by id desc
+                limit ?
+                """,
+                (canonical_user_id, limit),
+            ).fetchall()
+        history: dict[str, datetime] = {}
+        for row in rows:
+            trigger_type = row["trigger_type"]
+            if not trigger_type or trigger_type in history:
+                continue
+            history[str(trigger_type)] = datetime.fromisoformat(row["created_at"])
+        return history
+
     def incoming_message_count(self, canonical_user_id: str) -> int:
         with self.connect() as conn:
             row = conn.execute(
@@ -565,6 +591,7 @@ class CompanionStore:
         message_type: str,
         message: str | None,
         sticker_category: str | None,
+        trigger_type: str | None,
         cooldown_minutes: int,
     ) -> None:
         with self.connect() as conn:
@@ -572,8 +599,8 @@ class CompanionStore:
                 """
                 insert into proactive_events (
                   canonical_user_id, private_thought, should_send, platform,
-                  message_type, message, sticker_category, cooldown_minutes, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  message_type, message, sticker_category, trigger_type, cooldown_minutes, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     canonical_user_id,
@@ -583,6 +610,7 @@ class CompanionStore:
                     message_type,
                     message,
                     sticker_category,
+                    trigger_type,
                     cooldown_minutes,
                     utc_now().isoformat(),
                 ),

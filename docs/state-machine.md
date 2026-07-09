@@ -66,6 +66,25 @@
 
 后续仍应继续借鉴 EchoText 的 proactive trigger timeline：早安、深夜、冷场、修复冲突、记忆提醒、庆祝、焦虑安抚等。
 
+## Proactive Trigger Timeline
+
+已迁移 EchoText 的主动触发器思路：
+
+- 核心重连：`checkin`, `pregnant_pause`, `dormancy_break`
+- 时间氛围：`late_night`, `morning_wave`, `lunch_nudge`, `evening_winddown`, `weekend_ping`
+- 情绪驱动：`repair_attempt`, `curiosity_ping`, `anxiety_reassurance`, `celebration_nudge`, `sharing_impulse`, `nostalgia_wave`, `longing_ping`, `playful_tease`, `jealousy_nudge`, `boredom_break`, `overwhelm_check`, `gratitude_burst`, `suppressed_thought`
+- 随机生活感：`thinking_of_you`, `random_thought`, `dream_mention`, `song_stuck`, `overthinking_spiral`, `craving_share`, `inside_joke_callback`, `quiet_productive`
+- 对话后续：`double_text`, `seen_no_reply_soft`, `followup_callback`, `memory_nudge`
+
+为了避免“同一种感觉连发”，trigger 会被归入语义类别并单独冷却：
+
+- `happy_outreach`
+- `missing_you`
+- `anxious_reach`
+- `random_impulse`
+
+当 `anger` 或 `disgust` 较高时，状态机会进入 ghost window，主动触发器暂时不发。
+
 ## Open Source Position
 
 现成项目有可借鉴部分，但目前不直接替代本项目核心状态机：

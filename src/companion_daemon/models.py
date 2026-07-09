@@ -60,6 +60,7 @@ class ProactiveDecision(BaseModel):
     message: str | None = None
     sticker_category: str | None = None
     sticker_path: str | None = None
+    trigger_type: str | None = None
     cooldown_minutes: int = 30
 
 

@@ -1,5 +1,6 @@
 from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.emotion_core import emotion_context_line
+from companion_daemon.proactive_triggers import proactive_context_instruction, ProactiveTrigger
 from companion_daemon.relationship import relationship_instruction, relationship_status_line
 
 
@@ -46,6 +47,7 @@ def proactive_prompt(
     mood_state: MoodState,
     recent_lines: list[str],
     companion_system_prompt: str,
+    trigger: ProactiveTrigger | None = None,
 ) -> list[dict[str, str]]:
     recent = "\n".join(recent_lines) if recent_lines else "暂无历史。"
     return [
@@ -58,6 +60,7 @@ def proactive_prompt(
 好感度、当前关系、心情会影响主动程度：关系越近越自然，但仍不要机械地定时问候。
 如果边界等级高、情绪残留强，主动消息应该更克制，甚至暂时不发。
 如果用户刚道歉或刚分享脆弱情绪，可以更温柔；如果用户刚冒犯你，不要立刻假装没事。
+优先服从主动触发器；没有强触发时，倾向不发。
 Return strict JSON only with keys:
 private_thought, should_send, platform, message_type, message, sticker_category, cooldown_minutes.
 platform can be qq, wechat, simulator, or null.
@@ -80,6 +83,8 @@ message_type can be none, text, sticker, text_sticker.
 本轮回复风格提示: {mood_state.reply_style_hint or "自然私聊"}
 未解决情绪: {mood_state.unresolved_emotion or "无"}
 {emotion_context_line(mood_state)}
+主动触发器:
+{proactive_context_instruction(trigger)}
 最近聊天:
 {recent}
 """,

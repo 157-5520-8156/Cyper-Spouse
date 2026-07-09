@@ -164,6 +164,8 @@ Implemented:
 - Interaction events are persisted in SQLite.
 - State is injected into both normal replies and proactive decisions.
 - Boundary, hurt, anger, and disgust states reduce proactive frequency and life-event probability.
+- EchoText-inspired proactive trigger timeline chooses concrete outreach reasons such as hanging question, late night, repair attempt, longing, random thought, inside joke, or soft follow-up.
+- Trigger history and semantic category cooldowns reduce repetitive proactive messages.
 - Sticker selection maps newer moods such as `hurt`, `guarded`, `curious`, and `affectionate` to available visual assets.
 
 See `docs/state-machine.md`.
