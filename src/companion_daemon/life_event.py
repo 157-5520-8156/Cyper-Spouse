@@ -3,6 +3,7 @@ import asyncio
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+import re
 
 from companion_daemon.budget import ESTIMATES, BudgetGate
 from companion_daemon.config import get_settings
@@ -15,6 +16,7 @@ from companion_daemon.stickers import load_stickers
 
 
 logger = logging.getLogger(__name__)
+LOCAL_INVITATION_RE = re.compile(r"你要不要(?:也)?(?:来|去|一起|过来)[^。！？!?]*[。！？!?]?")
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,8 @@ class LifeEventGenerator:
                     "生成一件今天刚发生的小事，用 QQ 私聊连续发 2-4 条消息分享。"
                     "不要写舞台动作，不要说这是编的。"
                     "亲疏程度必须符合当前关系，不要跳过关系阶段。"
+                    "她在上海上学，用户在成都；可以分享自己的本地生活，但不要邀请用户立刻去她身边的店、学校或活动。"
+                    "具体经历要像事后可写进生活连续性账本的小事，不要编造和用户共同经历过的线下事件。"
                     "输出严格 JSON: topic, messages, sticker_category。"
                     "sticker_category 可选 happy, sulk, miss_you, jealous_soft, angry_soft, sleepy, comfort, teasing。"
                 ),
@@ -61,7 +65,8 @@ def parse_life_event(raw: str) -> LifeEvent:
         data = json.loads(raw)
     except json.JSONDecodeError:
         return LifeEvent(topic="随手分享", messages=[raw.strip()[:300]], sticker_category="comfort")
-    messages = [str(item).strip() for item in data.get("messages", []) if str(item).strip()]
+    messages = [_clean_life_event_message(str(item)) for item in data.get("messages", []) if str(item).strip()]
+    messages = [message for message in messages if message]
     if not messages:
         messages = ["我刚刚遇到一件小事，突然有点想跟你说。"]
     return LifeEvent(
@@ -69,6 +74,12 @@ def parse_life_event(raw: str) -> LifeEvent:
         messages=messages[:4],
         sticker_category=data.get("sticker_category"),
     )
+
+
+def _clean_life_event_message(message: str) -> str:
+    cleaned = message.strip()
+    cleaned = LOCAL_INVITATION_RE.sub("下次拍给你看。", cleaned)
+    return cleaned[:300].strip()
 
 
 async def run(

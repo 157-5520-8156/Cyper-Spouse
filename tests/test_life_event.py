@@ -20,6 +20,36 @@ def test_parse_life_event_json() -> None:
     assert event.sticker_category == "happy"
 
 
+def test_parse_life_event_rewrites_unrealistic_local_invitation() -> None:
+    event = parse_life_event(
+        '{"topic":"猫咖","messages":["学校后门新开了一家猫咖。","你要不要去？我明天下午没课"],"sticker_category":"happy"}'
+    )
+
+    assert event.messages == ["学校后门新开了一家猫咖。", "下次拍给你看。我明天下午没课"]
+
+
+@pytest.mark.asyncio
+async def test_life_event_prompt_sets_grounded_fiction_rules() -> None:
+    class CapturingModel:
+        prompt = None
+
+        async def complete(self, prompt, temperature: float) -> str:
+            type(self).prompt = prompt
+            return '{"topic":"小事","messages":["刚刚吃了饭。"]}'
+
+    model = CapturingModel()
+    await life_event_module.LifeEventGenerator(model).generate(
+        mood="calm",
+        relationship_stage="friend",
+        relationship_status="关系状态：朋友",
+    )
+
+    system_prompt = model.prompt[0]["content"]
+    assert "用户在成都" in system_prompt
+    assert "不要邀请用户立刻去她身边" in system_prompt
+    assert "生活连续性账本" in system_prompt
+
+
 @pytest.mark.asyncio
 async def test_life_event_send_records_outgoing_and_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")

@@ -12,6 +12,8 @@ def test_sanitize_softens_assistantese_and_limits_questions() -> None:
     assert sanitize_chat_text("那你还不早点睡？半夜一点还在外面晃，明天考试能撑住吗？") == "那你还不早点睡？半夜一点还在外面晃。"
     assert sanitize_chat_text("嗯？怎么了？大半夜说这种话。") == "怎么了？大半夜说这种话。"
     assert sanitize_chat_text("淋着了还是找到伞了。") == "淋着了还是找到伞了？"
+    assert sanitize_chat_text("我有时候也会去校园里走一圈。你要不要也试试？") == "我有时候也会去校园里走一圈。"
+    assert sanitize_chat_text("你别整段硬啃，拆成小块可能会好一点。") == ""
 
 
 def test_sanitize_removes_acquaintance_crutch_variants() -> None:
@@ -24,8 +26,13 @@ def test_sanitize_removes_acquaintance_crutch_variants() -> None:
     assert sanitize_chat_text("我明天也有一门考试，刚背完知识点，准备睡了。") == ""
     assert sanitize_chat_text("毛概真的好难背啊，我去年考的时候也是熬夜翻来覆去地背。") == "毛概真的好难背啊。"
     assert sanitize_chat_text("毛概难背……我上学期也被折磨过。") == "毛概难背……"
+    assert sanitize_chat_text("毛概有点绕，我上学期背得也头疼。") == "毛概有点绕。"
     assert sanitize_chat_text("我之前期末背的时候，会在纸上画时间线。") == ""
+    assert (
+        sanitize_chat_text("我上次找不到伞，最后翻出来一把快散架的，撑到一半差点被风吹翻。") == ""
+    )
     assert sanitize_chat_text("上次听说成都理工附近有个夜市挺有名的。") == ""
+    assert sanitize_chat_text("成都理工啊。听说秋天的时候学校还挺好看的。") == "成都理工啊。"
     assert sanitize_chat_text("那你这趟也不算白淋雨，至少没被点到名。") == ""
     assert sanitize_chat_text("淋着雨去上课了。") == ""
 
@@ -37,6 +44,7 @@ def test_sanitize_repairs_chengdu_location_confusion() -> None:
 def test_sanitize_removes_explicit_unsupported_memory_claims() -> None:
     assert sanitize_chat_text("怎么了？我记得你之前说自己忙得有点离谱。") == "怎么了？"
     assert sanitize_chat_text("之前听你说在成都来着。") == ""
+    assert sanitize_chat_text("你呢？之前群里看到你在成都。") == "你呢？"
     assert sanitize_chat_text("我记得之前群里有人发过照片，晚上那边好多小摊。") == ""
     assert sanitize_chat_text("我之前看群里有人发过照片，烟火气很足的样子。") == ""
     assert sanitize_chat_text("我之前做城市散步笔记的时候，刚好查过那边。") == ""

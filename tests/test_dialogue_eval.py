@@ -13,6 +13,11 @@ def test_evaluate_reply_flags_common_ai_smells() -> None:
     assert "too_many_questions" in codes
     assert "question_after_question" in codes
 
+    soft_advice = evaluate_reply("我有时候会出去走一圈。你要不要也试试？", user_text="我心里闷闷的")
+    study_advice = evaluate_reply("你别整段硬啃，拆成小块可能会好一点。", user_text="毛概，好难背")
+    assert "problem_solver" in {issue.code for issue in soft_advice.issues}
+    assert "problem_solver" in {issue.code for issue in study_advice.issues}
+
 
 def test_evaluate_reply_flags_stage_and_acquaintance_crutch() -> None:
     result = evaluate_reply("（刚看到）我有个高中同学也这样说过。")
@@ -42,10 +47,12 @@ def test_evaluate_reply_flags_ungrounded_local_details_and_hidden_questions() ->
         user_text="我在成都上学呀，在成都理工哦",
     )
     local_known = evaluate_reply("成理啊，我知道那附近有家面馆挺有名的。", user_text="我在成都理工哦")
+    local_scenery = evaluate_reply("成都理工啊。听说秋天的时候学校还挺好看的。", user_text="我在成都理工哦")
     hidden_question = evaluate_reply("淋着去的还是找到伞了。", user_text="早上起来雨下很大，我伞还找不到")
 
     assert "ungrounded_local_detail" in {issue.code for issue in local.issues}
     assert "ungrounded_local_detail" in {issue.code for issue in local_known.issues}
+    assert "ungrounded_local_detail" in {issue.code for issue in local_scenery.issues}
     assert "flattened_question" in {issue.code for issue in hidden_question.issues}
 
 
@@ -62,10 +69,13 @@ def test_evaluate_reply_flags_unsupported_mirroring_and_city_stereotypes() -> No
     mirrored_pre = evaluate_reply("我明天也有个pre，咱俩都早点休息。", user_text="我明天考试")
     mirrored_past = evaluate_reply("我去年考的时候也是熬夜翻来覆去地背。", user_text="毛概，好难背")
     mirrored_semester = evaluate_reply("我上学期也被折磨过。", user_text="毛概，好难背")
+    mirrored_study_pain = evaluate_reply("我上学期背得也头疼。", user_text="毛概，好难背")
     mirrored_final = evaluate_reply("我之前期末背的时候，会在纸上画时间线。", user_text="毛概，好难背")
+    mirrored_rain = evaluate_reply("我上次找不到伞，最后也被淋到了。", user_text="早上起来雨下很大，我伞还找不到")
     stereotype = evaluate_reply("好像成都好多好吃的呀！", user_text="我在成都上学呀，在成都理工哦")
     memory_claim = evaluate_reply("哦对，你之前在群里说过在成都来着。", user_text="我在成都理工哦")
     heard_claim = evaluate_reply("之前听你说在成都来着。", user_text="我想聊聊你来着，你在哪上学哦")
+    group_city_claim = evaluate_reply("你呢？之前群里看到你在成都。", user_text="我想聊聊你来着，你在哪上学哦")
     group_claim = evaluate_reply("我记得之前群里有人发过照片，晚上那边好多小摊。", user_text="我在成都理工哦")
     group_photo_claim = evaluate_reply("我之前看群里有人发过照片，烟火气很足的样子。", user_text="我在成都理工哦")
     familiarity = evaluate_reply("哦，成理啊。之前有听说过。", user_text="我在成都上学呀，在成都理工哦")
@@ -75,10 +85,13 @@ def test_evaluate_reply_flags_unsupported_mirroring_and_city_stereotypes() -> No
     assert "ungrounded_self_event" in {issue.code for issue in mirrored_pre.issues}
     assert "ungrounded_self_event" in {issue.code for issue in mirrored_past.issues}
     assert "ungrounded_self_event" in {issue.code for issue in mirrored_semester.issues}
+    assert "ungrounded_self_event" in {issue.code for issue in mirrored_study_pain.issues}
     assert "ungrounded_self_event" in {issue.code for issue in mirrored_final.issues}
+    assert "ungrounded_self_event" in {issue.code for issue in mirrored_rain.issues}
     assert "stereotype_reply" in {issue.code for issue in stereotype.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in memory_claim.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in heard_claim.issues}
+    assert "unsupported_memory_claim" in {issue.code for issue in group_city_claim.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in group_claim.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in group_photo_claim.issues}
     assert "unsupported_familiarity_claim" in {issue.code for issue in familiarity.issues}
