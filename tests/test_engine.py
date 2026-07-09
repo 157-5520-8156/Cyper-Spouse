@@ -6,7 +6,7 @@ from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.image_generation import GeneratedImage
 from companion_daemon.llm import FakeCompanionModel
-from companion_daemon.models import IncomingMessage
+from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.stickers import StickerCatalog, Sticker
 from companion_daemon.character import load_character
 from companion_daemon.budget import BudgetGate
@@ -100,6 +100,50 @@ async def test_proactive_tick_attaches_sticker_path(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_proactive_tick_can_attach_self_initiated_image(tmp_path: Path) -> None:
+    class ImageModel(FakeCompanionModel):
+        async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
+            if any("Return strict JSON" in message["content"] for message in messages):
+                return (
+                    '{"private_thought":"路过图书馆窗边，突然想拍给你看",'
+                    '"should_send":true,"platform":"qq","message_type":"text_image",'
+                    '"message":"刚刚窗边光很好，突然想给你看一下。",'
+                    '"sticker_category":null,"cooldown_minutes":45}'
+                )
+            return await super().complete(messages, temperature=temperature)
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(
+        store,
+        initial_state=MoodState(
+            relationship_stage="close_friend",
+            trust=68,
+            intimacy=52,
+            security=60,
+            initiative=72,
+            last_platform="qq",
+        ),
+    )
+    image_generator = FakeImageGenerator()
+    engine = CompanionEngine(
+        store,
+        ImageModel(),
+        TEST_PROMPT,
+        character_profile=load_character("configs/character.yaml"),
+        image_generator=image_generator,
+        image_output_dir=tmp_path / "images",
+    )
+
+    decision = await engine.proactive_tick("geoff")
+
+    assert decision.message_type == "text_image"
+    assert decision.image_path
+    assert Path(decision.image_path).exists()
+    assert "virtual-life selfie-style" in image_generator.prompts[0]
+    assert any(row["kind"] == "generated_image" for row in store.memories("geoff"))
+
+
+@pytest.mark.asyncio
 async def test_handle_message_attaches_ordinary_reply_sticker(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
@@ -143,7 +187,15 @@ class FakeImageGenerator:
 @pytest.mark.asyncio
 async def test_handle_message_generates_requested_image(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
-    seed_user(store)
+    seed_user(
+        store,
+        initial_state=MoodState(
+            relationship_stage="close_friend",
+            trust=70,
+            intimacy=55,
+            security=62,
+        ),
+    )
     image_generator = FakeImageGenerator()
     engine = CompanionEngine(
         store,
@@ -166,9 +218,43 @@ async def test_handle_message_generates_requested_image(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_auto_image_generation_respects_budget_gate(tmp_path: Path) -> None:
+async def test_handle_message_can_defer_early_selfie_request(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
+    image_generator = FakeImageGenerator()
+    model = FakeCompanionModel()
+    engine = CompanionEngine(
+        store,
+        model,
+        TEST_PROMPT,
+        character_profile=load_character("configs/character.yaml"),
+        image_generator=image_generator,
+        image_output_dir=tmp_path / "images",
+    )
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="给我发一张自拍看看")
+    )
+
+    assert reply.image_path is None
+    assert image_generator.prompts == []
+    prompt_text = "\n".join(message["content"] for message in model.calls[-1])
+    assert "不要立刻发自拍" in prompt_text
+    assert any(row["kind"] == "selfie_deferred" for row in store.memories("geoff"))
+
+
+@pytest.mark.asyncio
+async def test_auto_image_generation_respects_budget_gate(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(
+        store,
+        initial_state=MoodState(
+            relationship_stage="close_friend",
+            trust=70,
+            intimacy=55,
+            security=62,
+        ),
+    )
     image_generator = FakeImageGenerator()
     budget = BudgetGate(
         store,

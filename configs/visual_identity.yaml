@@ -1,5 +1,5 @@
 name: 沈知栀 / Celia Shen
-reference_asset: assets/stickers/rin-sticker-sheet-v1.png
+reference_asset: assets/reference/celia-reference-01-portrait.png
 anchor_prompt: |
   沈知栀是一个原创虚拟中国女大学生形象，20岁，气质温和、清淡、慢热。
   她有自然黑色及肩发，刘海常用一枚低饱和青绿色小发夹别住。
@@ -16,5 +16,5 @@ negative_prompt: |
   不要文字、水印、logo、畸形手指、过度锐化、过度二次元。
 consistency_notes:
   - 第一阶段使用视觉身份锚点和少量人工筛选图片，建立一组稳定参考。
-  - 第二阶段生成 6-12 张角色参考图，保留发型、发夹、脸型、穿搭色系。
+  - 第二阶段已开始使用 assets/reference/celia-reference-*.png 作为角色参考集。
   - 第三阶段如需高一致性，使用本地 ComfyUI 的 IP-Adapter/FaceID 或训练 LoRA。

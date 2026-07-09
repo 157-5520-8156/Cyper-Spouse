@@ -98,7 +98,10 @@ Verified behavior:
 - The turn-taking policy waits longer for likely unfinished fragments and replies sooner for complete questions or explicit "you can answer now" cues.
 - Local sticker/image sending through QQ official rich-media APIs works in sandbox.
 - Ordinary QQ replies can attach a mood-appropriate local sticker after the text reply.
-- Explicit image/selfie requests can generate and attach an OpenAI image when `ALLOW_AUTO_IMAGE_GENERATION=true`, `OPENAI_API_KEY` is configured, and the local budget gate allows it.
+- Explicit image/selfie requests can generate and attach an OpenAI image when `ALLOW_AUTO_IMAGE_GENERATION=true`, `OPENAI_API_KEY` is configured, the character boundary check allows it, and the local budget gate allows it.
+- Early, pushy, or emotionally badly timed selfie requests are deferred/refused in prompt context instead of generating an image.
+- Proactive decisions can rarely attach a self-initiated life image/selfie when relationship state, mood, image generator configuration, and budget allow it.
+- The first沈知栀 visual reference set is saved under `assets/reference/`; LoRA/FaceID training has not been done yet.
 
 Verified command:
 
@@ -176,7 +179,8 @@ Implemented:
 - Near-duplicate memory entries are merged instead of stored as separate facts.
 - EchoText-inspired image request detection recognizes direct selfie/image requests and affirmative responses to recent image offers.
 - EchoText-inspired image prompt building classifies character/object/creative image requests and carries visual identity/context into stable generation prompts.
-- Automatic image generation is guarded by the local CNY budget gate and records blocked requests instead of silently spending.
+- Automatic image generation is guarded by character boundary checks and the local CNY budget gate, recording blocked/deferred requests instead of silently spending.
+- Self-initiated proactive image sharing is supported as a rare state-machine outcome, separate from user-demanded selfies.
 - EchoText-inspired reaction selection can suggest lightweight reactions from emotional deltas.
 - EchoText-inspired reply timing model estimates read/reply/ghost delays from emotion vectors.
 - EchoText-inspired image style detection carries user-requested styles into generation prompts.

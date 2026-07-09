@@ -17,6 +17,8 @@ async def run_simulation(text: str, fake: bool) -> None:
         print(f"[proactive:{decision.platform}] {decision.message}")
         if decision.sticker_path:
             print(f"[sticker] {decision.sticker_path}")
+        if decision.image_path:
+            print(f"[image] {decision.image_path}")
     else:
         print("[proactive] no message")
 

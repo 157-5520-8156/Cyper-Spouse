@@ -7,7 +7,8 @@ from companion_daemon.conversation import ConversationCore, PromptedConversation
 from companion_daemon.db import CompanionStore
 from companion_daemon.emotion_state import interpret_interaction
 from companion_daemon.emotion_reactions import select_character_reaction
-from companion_daemon.image_generation import OpenAIImageGenerator
+from companion_daemon.image_agency import decide_image_agency, image_agency_prompt_line
+from companion_daemon.image_generation import OpenAIImageGenerator, life_image_prompt
 from companion_daemon.image_prompt_builder import ChatImageMessage, build_image_prompt
 from companion_daemon.image_requests import detect_image_request
 from companion_daemon.llm import ChatModel
@@ -108,11 +109,13 @@ class CompanionEngine:
             ],
         )
         if image_request.triggered:
+            image_agency = decide_image_agency(image_request, next_state, message.text)
             attachment_lines.append(
                 "图片请求: 用户可能在请求图片/自拍；"
                 f"类型={image_request.type}；指向={image_request.directive or '未指定'}；"
                 f"风格={image_request.style_tags or '默认'}。"
             )
+            attachment_lines.append(image_agency_prompt_line(image_agency))
             self.store.upsert_memory(
                 canonical_user_id,
                 kind="image_request",
@@ -120,6 +123,16 @@ class CompanionEngine:
                 source=f"{message.platform}:{message.message_id or ''}",
                 confidence=image_request.confidence,
             )
+            if not image_agency.allow_generation:
+                self.store.upsert_memory(
+                    canonical_user_id,
+                    kind=image_agency.kind,
+                    content=f"{image_agency.reason}: {image_request.directive or message.text}",
+                    source=f"{message.platform}:{message.message_id or ''}",
+                    confidence=0.82,
+                )
+        else:
+            image_agency = None
         tool_request = detect_tool_request(message.text)
         if tool_request:
             attachment_lines.append(tool_prompt_line(tool_request))
@@ -132,7 +145,7 @@ class CompanionEngine:
         generated_image_path = await self._maybe_generate_requested_image(
             canonical_user_id,
             message,
-            image_request.triggered,
+            image_request.triggered and bool(image_agency and image_agency.allow_generation),
         )
         for attachment in message.attachments:
             source = self._attachment_source(message, attachment)
@@ -258,6 +271,7 @@ class CompanionEngine:
         if decision.message:
             decision = decision.model_copy(update={"message": sanitize_chat_text(decision.message)})
         decision = self._attach_sticker(decision, state)
+        decision = await self._attach_proactive_image(canonical_user_id, decision, state)
         self.store.save_proactive_event(
             canonical_user_id,
             decision.private_thought,
@@ -319,6 +333,7 @@ class CompanionEngine:
         data.setdefault("message", None)
         data.setdefault("sticker_category", None)
         data.setdefault("sticker_path", None)
+        data.setdefault("image_path", None)
         data.setdefault("trigger_type", None)
         data.setdefault("cooldown_minutes", 30)
         return ProactiveDecision(**data)
@@ -339,6 +354,52 @@ class CompanionEngine:
                 "sticker_path": str(sticker.path),
             }
         )
+
+    async def _attach_proactive_image(
+        self,
+        canonical_user_id: str,
+        decision: ProactiveDecision,
+        state: MoodState,
+    ) -> ProactiveDecision:
+        if not decision.should_send or decision.message_type not in {"image", "text_image"}:
+            return decision
+        if not self.image_generator or not self.character_profile:
+            return decision.model_copy(update={"message_type": "text" if decision.message else "none"})
+        if state.relationship_stage not in {"friend", "close_friend", "ambiguous", "lover"}:
+            return decision.model_copy(update={"message_type": "text" if decision.message else "none"})
+        if state.mood in {"guarded", "hurt"} or state.boundary_level >= 35:
+            return decision.model_copy(update={"message_type": "text" if decision.message else "none"})
+
+        estimate = ESTIMATES["image_generation"]
+        if self.budget_gate:
+            budget_decision = self.budget_gate.check(estimate, automatic=True)
+            if not budget_decision.allowed:
+                self.store.upsert_memory(
+                    canonical_user_id,
+                    kind="proactive_image_blocked",
+                    content=f"{budget_decision.reason}: {decision.message or decision.private_thought[:80]}",
+                    source="proactive_tick",
+                    confidence=0.8,
+                )
+                return decision.model_copy(update={"message_type": "text" if decision.message else "none"})
+
+        kind = "selfie" if state.relationship_stage in {"close_friend", "ambiguous", "lover"} and state.trust >= 55 else "life"
+        topic = decision.message or decision.private_thought
+        output_path = self.image_output_dir / f"proactive-{canonical_user_id}-{int(utc_now().timestamp())}.png"
+        generated = await self.image_generator.generate(
+            life_image_prompt(topic, kind=kind, visual_identity_path=self.visual_identity_path),
+            output_path=output_path,
+        )
+        if self.budget_gate:
+            self.budget_gate.record(estimate, note=f"proactive_image:{kind}:{topic[:40]}")
+        self.store.upsert_memory(
+            canonical_user_id,
+            kind="generated_image",
+            content=f"proactive_{kind}: {topic[:120]}",
+            source=str(generated.path),
+            confidence=0.82,
+        )
+        return decision.model_copy(update={"image_path": str(generated.path)})
 
 
 def seed_user(

@@ -17,6 +17,8 @@ async def run(user_id: str, *, send: bool, sandbox: bool) -> None:
     print(f"message: {decision.message or ''}")
     if decision.sticker_path:
         print(f"sticker: {decision.sticker_path}")
+    if decision.image_path:
+        print(f"image: {decision.image_path}")
 
     if not send:
         return
@@ -40,7 +42,14 @@ async def run(user_id: str, *, send: bool, sandbox: bool) -> None:
         settings.qq_bot_secret,
         api_base_url=api_base_url,
     )
-    if decision.sticker_path:
+    if decision.image_path:
+        await client.send_c2c_local_image(
+            openid,
+            Path(decision.image_path),
+            content=decision.message,
+            is_wakeup=True,
+        )
+    elif decision.sticker_path:
         await client.send_c2c_local_image(
             openid,
             Path(decision.sticker_path),

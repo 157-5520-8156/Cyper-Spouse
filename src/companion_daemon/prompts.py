@@ -60,11 +60,12 @@ def proactive_prompt(
 好感度、当前关系、心情会影响主动程度：关系越近越自然，但仍不要机械地定时问候。
 如果边界等级高、情绪残留强，主动消息应该更克制，甚至暂时不发。
 如果用户刚道歉或刚分享脆弱情绪，可以更温柔；如果用户刚冒犯你，不要立刻假装没事。
+偶尔可以因为“自己突然想分享当下”而发一张生活照/自拍，但必须很少发生；不要把图片当作奖励机制，也不要因为用户索要就被动执行。
 优先服从主动触发器；没有强触发时，倾向不发。
 Return strict JSON only with keys:
 private_thought, should_send, platform, message_type, message, sticker_category, cooldown_minutes.
 platform can be qq, wechat, simulator, or null.
-message_type can be none, text, sticker, text_sticker.
+message_type can be none, text, sticker, text_sticker, image, text_image.
 """,
         },
         {

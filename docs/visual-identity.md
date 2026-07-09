@@ -10,13 +10,14 @@
 
 ## Phase B: Reference Set
 
-后续应筛出 6-12 张稳定参考图，覆盖：
+已生成第一组 GPT 参考图，作为 LoRA/IP-Adapter 之前的视觉基准：
 
-- 正脸、半侧脸、不同光线。
-- 图书馆、路边、宿舍桌面、咖啡店等日常场景。
-- 同一发夹、相近脸型、相近穿搭色系。
+- `assets/reference/celia-reference-01-portrait.png`: 图书馆窗边正脸参考。
+- `assets/reference/celia-reference-02-campus.png`: 校园半身参考。
+- `assets/reference/celia-reference-03-desk-selfie.png`: 桌面前置自拍参考。
+- `assets/reference/celia-reference-04-cafe-profile.png`: 咖啡店半侧脸参考。
 
-这组图作为之后更强一致性工作流的基准。
+这组图还不是 LoRA。它的作用是先固定脸型、发夹、发色、穿搭色系和气质，让后续所有自拍/生活照有一个人工筛选基准。真正训练 LoRA 前，建议继续扩到 8-12 张，剔除脸部漂移明显的图，再做裁切和标签。
 
 ## Phase C: Local Consistency Workflow
 
@@ -26,7 +27,16 @@
 - IP-Adapter/FaceID：更轻，适合用参考图做身份约束，但稳定度通常低于训练 LoRA。
 - Reference-only prompt：最便宜，但漂移最大，只适合早期试用。
 
-项目当前先停在 Phase A，避免在没有参考集和预算控制前直接进入高成本图片流。
+项目当前处于 Phase B 初版：参考图已经落库，LoRA/FaceID 尚未训练。这样可以先低成本验证“沈知栀长什么样”，再决定是否进入本地训练。
+
+## Selfie Agency
+
+自拍不是用户一要就发。当前聊天状态机会先判断关系阶段、信任、安全感、心情和用户语气：
+
+- 刚认识、信任低、安全感低时，她会自然拒绝或说以后熟一点再给你看。
+- 用户语气有压迫感时，她会守住边界，不生成图片。
+- 关系和情绪允许时，才会把自拍请求交给图像生成器。
+- 主动消息里，她可以很少地因为“突然想分享当下”发生活照或自拍，但仍受预算闸门限制。
 
 ## Asset Strategy
 

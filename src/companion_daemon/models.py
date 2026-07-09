@@ -58,10 +58,11 @@ class ProactiveDecision(BaseModel):
     private_thought: str
     should_send: bool
     platform: Platform | None = None
-    message_type: Literal["none", "text", "sticker", "text_sticker"] = "none"
+    message_type: Literal["none", "text", "sticker", "text_sticker", "image", "text_image"] = "none"
     message: str | None = None
     sticker_category: str | None = None
     sticker_path: str | None = None
+    image_path: str | None = None
     trigger_type: str | None = None
     cooldown_minutes: int = 30
 
