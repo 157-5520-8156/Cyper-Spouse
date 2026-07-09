@@ -1,9 +1,14 @@
 import json
+from pathlib import Path
 
+from companion_daemon.budget import ESTIMATES, BudgetGate
+from companion_daemon.character import CharacterProfile
 from companion_daemon.conversation import ConversationCore, PromptedConversationCore
 from companion_daemon.db import CompanionStore
 from companion_daemon.emotion_state import interpret_interaction
 from companion_daemon.emotion_reactions import select_character_reaction
+from companion_daemon.image_generation import OpenAIImageGenerator
+from companion_daemon.image_prompt_builder import ChatImageMessage, build_image_prompt
 from companion_daemon.image_requests import detect_image_request
 from companion_daemon.llm import ChatModel
 from companion_daemon.memory import extract_memories, memory_lines
@@ -24,9 +29,11 @@ from companion_daemon.multimodal_analysis import AttachmentInsight, MultimodalAn
 from companion_daemon.prompts import proactive_prompt
 from companion_daemon.proactive_triggers import evaluate_proactive_trigger
 from companion_daemon.relationship import advance_relationship
+from companion_daemon.reply_stickers import choose_reply_sticker
 from companion_daemon.sanitize import sanitize_chat_text
 from companion_daemon.stickers import StickerCatalog
 from companion_daemon.time import utc_now
+from companion_daemon.tool_requests import detect_tool_request, tool_prompt_line
 
 
 class CompanionEngine:
@@ -38,12 +45,22 @@ class CompanionEngine:
         stickers: StickerCatalog | None = None,
         multimodal_analyzer: MultimodalAnalyzer | None = None,
         conversation_core: ConversationCore | None = None,
+        character_profile: CharacterProfile | None = None,
+        image_generator: OpenAIImageGenerator | None = None,
+        budget_gate: BudgetGate | None = None,
+        visual_identity_path: Path | None = Path("configs/visual_identity.yaml"),
+        image_output_dir: Path = Path("assets/life"),
     ):
         self.store = store
         self.model = model
         self.companion_system_prompt = companion_system_prompt
         self.stickers = stickers
         self.multimodal_analyzer = multimodal_analyzer or MultimodalAnalyzer()
+        self.character_profile = character_profile
+        self.image_generator = image_generator
+        self.budget_gate = budget_gate
+        self.visual_identity_path = visual_identity_path
+        self.image_output_dir = image_output_dir
         self.conversation_core = conversation_core or PromptedConversationCore(
             model,
             companion_system_prompt,
@@ -103,6 +120,20 @@ class CompanionEngine:
                 source=f"{message.platform}:{message.message_id or ''}",
                 confidence=image_request.confidence,
             )
+        tool_request = detect_tool_request(message.text)
+        if tool_request:
+            attachment_lines.append(tool_prompt_line(tool_request))
+            self.store.record_tool_proposal(
+                canonical_user_id,
+                kind=tool_request.kind,
+                risk=tool_request.risk,
+                summary=tool_request.summary,
+            )
+        generated_image_path = await self._maybe_generate_requested_image(
+            canonical_user_id,
+            message,
+            image_request.triggered,
+        )
         for attachment in message.attachments:
             source = self._attachment_source(message, attachment)
             cached = self.store.memory_by_source(
@@ -145,15 +176,67 @@ class CompanionEngine:
         )
         self.store.save_outgoing(canonical_user_id, message.platform, text)
         suggested_reaction = select_character_reaction(message.text, next_state)
+        sticker = choose_reply_sticker(
+            self.stickers,
+            next_state,
+            message,
+            suggested_reaction=suggested_reaction.reaction_id if suggested_reaction else None,
+        )
+        if generated_image_path:
+            sticker = None
         return CompanionReply(
             canonical_user_id=canonical_user_id,
             mood=next_state.mood,
             text=text,
             platform_context=context,
+            sticker_path=str(sticker.path) if sticker else None,
+            image_path=str(generated_image_path) if generated_image_path else None,
             suggested_reaction=(
                 suggested_reaction.reaction_id if suggested_reaction and suggested_reaction.probability >= 0.25 else None
             ),
         )
+
+    async def _maybe_generate_requested_image(
+        self,
+        canonical_user_id: str,
+        message: IncomingMessage,
+        image_requested: bool,
+    ) -> Path | None:
+        if not image_requested or not self.image_generator or not self.character_profile:
+            return None
+        estimate = ESTIMATES["image_generation"]
+        if self.budget_gate:
+            decision = self.budget_gate.check(estimate, automatic=True)
+            if not decision.allowed:
+                self.store.upsert_memory(
+                    canonical_user_id,
+                    kind="image_request_blocked",
+                    content=f"{decision.reason}: {message.text[:80]}",
+                    source=f"{message.platform}:{message.message_id or ''}",
+                    confidence=0.8,
+                )
+                return None
+        payload = build_image_prompt(
+            message.text,
+            character=self.character_profile,
+            recent_messages=[
+                ChatImageMessage(text=str(row["text"]), is_user=row["direction"] == "in")
+                for row in self.store.recent_messages(canonical_user_id, limit=8)
+            ],
+            visual_identity_path=self.visual_identity_path,
+        )
+        output_path = self.image_output_dir / f"reply-{canonical_user_id}-{int(utc_now().timestamp())}.png"
+        generated = await self.image_generator.generate(payload.prompt, output_path=output_path)
+        if self.budget_gate:
+            self.budget_gate.record(estimate, note=f"chat_image:{payload.mode}:{payload.directive[:40]}")
+        self.store.upsert_memory(
+            canonical_user_id,
+            kind="generated_image",
+            content=f"{payload.mode}: {payload.directive}",
+            source=str(generated.path),
+            confidence=0.8,
+        )
+        return generated.path
 
     async def proactive_tick(self, canonical_user_id: str) -> ProactiveDecision:
         state = self.store.get_mood_state(canonical_user_id)

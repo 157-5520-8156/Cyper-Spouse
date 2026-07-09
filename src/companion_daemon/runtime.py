@@ -7,6 +7,7 @@ from companion_daemon.budget import BudgetGate
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.emotion_personality import initial_mood_for_character
+from companion_daemon.image_generation import OpenAIImageGenerator
 from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel
 from companion_daemon.multimodal_analysis import MultimodalAnalyzer, OpenAIMultimodalAnalyzer
 from companion_daemon.stickers import load_stickers
@@ -53,6 +54,13 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             allow_vision=settings.allow_auto_vision,
             allow_transcription=settings.allow_auto_transcription,
         )
+    image_generator = None
+    if settings.allow_auto_image_generation and settings.openai_api_key:
+        image_generator = OpenAIImageGenerator(
+            settings.openai_api_key,
+            base_url=settings.openai_base_url,
+            model=settings.image_model,
+        )
     return CompanionEngine(
         store,
         model,
@@ -60,4 +68,8 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         stickers,
         multimodal_analyzer=multimodal_analyzer,
         conversation_core=conversation_core,
+        character_profile=character,
+        image_generator=image_generator,
+        budget_gate=budget_gate,
+        visual_identity_path=settings.visual_identity_path,
     )

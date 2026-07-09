@@ -6,7 +6,7 @@
 
 - 日常文字聊天继续使用 DeepSeek，不把所有消息都转到 OpenAI。
 - OpenAI 只用于必要的多模态能力：图片理解、语音转写、少量虚拟生活照/自拍。
-- 图片生成默认不自动触发，只有显式运行 `companion-life-event --generate-image` 才会尝试。
+- 图片生成默认不自动触发。显式运行 `companion-life-event --generate-image` 会尝试；普通聊天里的图片/自拍请求只有在 `ALLOW_AUTO_IMAGE_GENERATION=true` 且预算闸门允许时才会自动生成。
 - 同一个附件 URL 的理解结果会复用本地记忆，避免重复调用视觉/转写。
 - 每次 OpenAI 多模态调用都会写入 `usage_events`，记录的是本项目的人民币估算，不是官方账单。
 

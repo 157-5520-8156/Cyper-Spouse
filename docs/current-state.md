@@ -97,6 +97,8 @@ Verified behavior:
 - Rapid messages from the same QQ user are handled by a turn-taking state machine before one reply.
 - The turn-taking policy waits longer for likely unfinished fragments and replies sooner for complete questions or explicit "you can answer now" cues.
 - Local sticker/image sending through QQ official rich-media APIs works in sandbox.
+- Ordinary QQ replies can attach a mood-appropriate local sticker after the text reply.
+- Explicit image/selfie requests can generate and attach an OpenAI image when `ALLOW_AUTO_IMAGE_GENERATION=true`, `OPENAI_API_KEY` is configured, and the local budget gate allows it.
 
 Verified command:
 
@@ -174,11 +176,13 @@ Implemented:
 - Near-duplicate memory entries are merged instead of stored as separate facts.
 - EchoText-inspired image request detection recognizes direct selfie/image requests and affirmative responses to recent image offers.
 - EchoText-inspired image prompt building classifies character/object/creative image requests and carries visual identity/context into stable generation prompts.
+- Automatic image generation is guarded by the local CNY budget gate and records blocked requests instead of silently spending.
 - EchoText-inspired reaction selection can suggest lightweight reactions from emotional deltas.
 - EchoText-inspired reply timing model estimates read/reply/ghost delays from emotion vectors.
 - EchoText-inspired image style detection carries user-requested styles into generation prompts.
 - External context emotion bleed is capped to keep SillyTavern/MCP/multimodal context from overwhelming the core state.
 - Sticker selection maps newer moods such as `hurt`, `guarded`, `curious`, and `affectionate` to available visual assets.
+- Tool/computer-operation requests are detected and logged as proposals. Risky actions are injected into the prompt as requiring explicit user confirmation; no MCP/computer action executes automatically yet.
 
 See `docs/state-machine.md`.
 
@@ -240,7 +244,7 @@ uv run pytest
 Current local verification count:
 
 ```text
-33 tests passed
+81 tests passed
 ruff check passed
 ```
 
@@ -285,4 +289,6 @@ Implemented after this note:
   uv run companion-proactive --user geoff --sandbox --send
 - QQ sticker/image sending:
   uv run companion-send-sticker --user geoff --category happy --sandbox
+- ordinary reply sticker/image delivery through QQ WebSocket
+- guarded tool request proposal logging for future MCP integration
 ```

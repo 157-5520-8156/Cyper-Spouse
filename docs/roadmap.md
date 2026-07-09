@@ -102,7 +102,7 @@ Exit criteria:
 - Mood affects message length and tone.
 - The same situation does not produce repetitive canned messages.
 
-Status: partially complete. The daemon has a proactive decision loop, delivery cooldown records, a guarded CLI, and a guarded scheduler. It only sends to QQ when explicitly invoked with `--send`, because official C2C proactive messages are limited.
+Status: mostly complete locally. The daemon has a proactive decision loop, delivery cooldown records, a guarded CLI, and a guarded scheduler. It only sends to QQ when explicitly invoked with `--send`, because official C2C proactive messages are limited.
 
 The scheduler can run one pass or loop continuously:
 
@@ -131,7 +131,9 @@ Exit criteria:
 
 Status: complete for QQ image/sticker sending. An original沈知栀 sticker sheet was generated, cropped into 8 local PNGs, connected to daemon-side sticker metadata, and verified through QQ official rich-media APIs in sandbox with `rin-happy.png` and `rin-teasing.png`.
 
-Remaining future enhancement: automatic sticker selection during ordinary replies, not only proactive/manual sends.
+Ordinary replies can now attach mood-appropriate local stickers automatically after the text reply.
+
+Image/selfie requests can now generate and attach an OpenAI image when `ALLOW_AUTO_IMAGE_GENERATION=true`, an OpenAI key is configured, and the budget gate allows the automatic spend.
 
 ## Phase 6: WeChat Adapter
 
@@ -168,3 +170,5 @@ Exit criteria:
 - Tool use does not make the companion feel like a generic assistant.
 - Risky actions require confirmation.
 - The daemon can explain why a tool was used.
+
+Status: foundation implemented. The daemon detects likely tool/computer-operation requests, records tool proposals, and injects confirmation requirements into the prompt. Actual MCP execution is intentionally not enabled yet.

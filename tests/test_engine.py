@@ -4,9 +4,12 @@ import pytest
 
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
+from companion_daemon.image_generation import GeneratedImage
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import IncomingMessage
 from companion_daemon.stickers import StickerCatalog, Sticker
+from companion_daemon.character import load_character
+from companion_daemon.budget import BudgetGate
 
 TEST_PROMPT = "你是凛，用户的赛博女友。"
 
@@ -94,3 +97,120 @@ async def test_proactive_tick_attaches_sticker_path(tmp_path: Path) -> None:
 
     assert decision.message_type == "sticker"
     assert decision.sticker_path == "assets/stickers/rin-miss-you.png"
+
+
+@pytest.mark.asyncio
+async def test_handle_message_attaches_ordinary_reply_sticker(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    stickers = StickerCatalog(
+        stickers=[
+            Sticker(
+                id="comfort",
+                category="comfort",
+                mood="calm",
+                intent="comfort",
+                path=Path("assets/stickers/rin-comfort.png"),
+            )
+        ]
+    )
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, stickers)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我今天好累，有点难受")
+    )
+
+    assert reply.sticker_path == "assets/stickers/rin-comfort.png"
+
+
+class FakeImageGenerator:
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def generate(
+        self,
+        prompt: str,
+        *,
+        output_path: Path,
+        size: str = "1024x1024",
+    ) -> GeneratedImage:
+        self.prompts.append(prompt)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_bytes(b"fake-png")
+        return GeneratedImage(output_path, prompt)
+
+
+@pytest.mark.asyncio
+async def test_handle_message_generates_requested_image(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    image_generator = FakeImageGenerator()
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        TEST_PROMPT,
+        character_profile=load_character("configs/character.yaml"),
+        image_generator=image_generator,
+        image_output_dir=tmp_path / "images",
+    )
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="给我发一张水彩风格自拍看看")
+    )
+
+    assert reply.image_path
+    assert Path(reply.image_path).exists()
+    assert reply.sticker_path is None
+    assert "Character identity anchor" in image_generator.prompts[0]
+    assert any(row["kind"] == "generated_image" for row in store.memories("geoff"))
+
+
+@pytest.mark.asyncio
+async def test_auto_image_generation_respects_budget_gate(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    image_generator = FakeImageGenerator()
+    budget = BudgetGate(
+        store,
+        monthly_budget_cny=80,
+        daily_budget_cny=3,
+        soft_daily_budget_cny=0.1,
+        monthly_image_limit=20,
+        monthly_vision_limit=120,
+        monthly_audio_limit=60,
+    )
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        TEST_PROMPT,
+        character_profile=load_character("configs/character.yaml"),
+        image_generator=image_generator,
+        budget_gate=budget,
+        image_output_dir=tmp_path / "images",
+    )
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="给我发一张自拍看看")
+    )
+
+    assert reply.image_path is None
+    assert image_generator.prompts == []
+    assert any(row["kind"] == "image_request_blocked" for row in store.memories("geoff"))
+
+
+@pytest.mark.asyncio
+async def test_handle_message_records_tool_request_without_executing(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT)
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="帮我打开浏览器看一下这个网页")
+    )
+
+    proposals = store.recent_tool_proposals("geoff")
+    assert proposals
+    assert proposals[-1]["kind"] == "computer_assist"
+    sent_prompt = "\n".join(message["content"] for message in model.calls[-1])
+    assert "必须先请求用户明确确认" in sent_prompt

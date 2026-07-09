@@ -135,6 +135,16 @@ class CompanionStore:
                   message_id text,
                   created_at text not null
                 );
+
+                create table if not exists tool_proposals (
+                  id integer primary key autoincrement,
+                  canonical_user_id text not null references users(id),
+                  kind text not null,
+                  risk text not null,
+                  summary text not null,
+                  status text not null,
+                  created_at text not null
+                );
                 """
             )
             self._ensure_column(conn, "messages", "attachments_json", "text not null default '[]'")
@@ -385,6 +395,39 @@ class CompanionStore:
                 """
                 select event_kind, user_intent, intensity, private_note, platform, created_at
                 from interaction_events
+                where canonical_user_id = ?
+                order by id desc
+                limit ?
+                """,
+                (canonical_user_id, limit),
+            ).fetchall()
+        return list(reversed(rows))
+
+    def record_tool_proposal(
+        self,
+        canonical_user_id: str,
+        *,
+        kind: str,
+        risk: str,
+        summary: str,
+        status: str = "proposed",
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                insert into tool_proposals (
+                  canonical_user_id, kind, risk, summary, status, created_at
+                ) values (?, ?, ?, ?, ?, ?)
+                """,
+                (canonical_user_id, kind, risk, summary, status, utc_now().isoformat()),
+            )
+
+    def recent_tool_proposals(self, canonical_user_id: str, limit: int = 8) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select kind, risk, summary, status, created_at
+                from tool_proposals
                 where canonical_user_id = ?
                 order by id desc
                 limit ?

@@ -30,3 +30,19 @@ def test_upsert_memory_merges_near_duplicates(tmp_path: Path) -> None:
     assert len(memories) == 1
     assert memories[0]["content"] == "我人在成都"
     assert memories[0]["confidence"] == 0.8
+
+
+def test_store_records_tool_proposals(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+
+    store.record_tool_proposal(
+        "geoff",
+        kind="computer_assist",
+        risk="confirmation_required",
+        summary="用户请求打开浏览器。",
+    )
+
+    proposals = store.recent_tool_proposals("geoff")
+    assert len(proposals) == 1
+    assert proposals[0]["kind"] == "computer_assist"
+    assert proposals[0]["status"] == "proposed"

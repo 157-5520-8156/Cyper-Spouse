@@ -4,6 +4,7 @@ from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import logging
+from pathlib import Path
 import time
 
 import botpy
@@ -13,6 +14,7 @@ from companion_daemon.engine import CompanionEngine
 from companion_daemon.config import get_settings
 from companion_daemon.models import CompanionReply, IncomingMessage, MessageAttachment
 from companion_daemon.multimodal import attachment_kind
+from companion_daemon.qq_client import QQOfficialClient
 from companion_daemon.turn_taking import TurnInput, TurnTakingPolicy
 from companion_daemon.runtime import build_companion_engine
 
@@ -38,11 +40,15 @@ class QQMessageCoalescer:
         delay_seconds: float,
         turn_policy: TurnTakingPolicy | None = None,
         on_reply: Callable[[CompanionReply], Awaitable[None]] | None = None,
+        on_sticker: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None = None,
+        on_image: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None = None,
     ):
         self.engine = engine
         self.delay_seconds = delay_seconds
         self.turn_policy = turn_policy or TurnTakingPolicy(short_wait_seconds=delay_seconds)
         self.on_reply = on_reply
+        self.on_sticker = on_sticker
+        self.on_image = on_image
         self._pending: dict[str, list[QueuedQQMessage]] = defaultdict(list)
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -84,6 +90,16 @@ class QQMessageCoalescer:
             except Exception:
                 logger.exception("failed to send QQ reply")
                 return
+            if self.on_sticker and reply.sticker_path:
+                try:
+                    await self.on_sticker(merged, reply)
+                except Exception:
+                    logger.exception("failed to send QQ sticker reply")
+            if self.on_image and reply.image_path:
+                try:
+                    await self.on_image(merged, reply)
+                except Exception:
+                    logger.exception("failed to send QQ image reply")
             if self.on_reply:
                 await self.on_reply(reply)
         except asyncio.CancelledError:
@@ -96,14 +112,23 @@ class QQMessageCoalescer:
 
 class CompanionQQClient(botpy.Client):
     def __init__(self, *, use_fake_model: bool = False, **kwargs):
+        is_sandbox = bool(kwargs.get("is_sandbox", False))
         super().__init__(**kwargs)
         self.engine = build_companion_engine(use_fake_model=use_fake_model)
         settings = get_settings()
+        api_base_url = "https://sandbox.api.sgroup.qq.com" if is_sandbox else "https://api.sgroup.qq.com"
+        self.qq_api = (
+            QQOfficialClient(settings.qq_bot_app_id, settings.qq_bot_secret, api_base_url=api_base_url)
+            if settings.qq_bot_app_id and settings.qq_bot_secret
+            else None
+        )
         self.coalescer = QQMessageCoalescer(
             self.engine,
             delay_seconds=settings.qq_message_batch_seconds,
             turn_policy=TurnTakingPolicy(short_wait_seconds=settings.qq_message_batch_seconds),
             on_reply=self._log_reply,
+            on_sticker=self._send_reply_sticker,
+            on_image=self._send_reply_image,
         )
 
     async def on_ready(self) -> None:
@@ -140,6 +165,30 @@ class CompanionQQClient(botpy.Client):
 
     async def _log_reply(self, reply: CompanionReply) -> None:
         logger.info("replied to %s; mood=%s", reply.canonical_user_id, reply.mood)
+
+    async def _send_reply_sticker(self, incoming: IncomingMessage, reply: CompanionReply) -> None:
+        if reply.sticker_path:
+            await self._send_local_image(incoming, Path(reply.sticker_path))
+
+    async def _send_reply_image(self, incoming: IncomingMessage, reply: CompanionReply) -> None:
+        if reply.image_path:
+            await self._send_local_image(incoming, Path(reply.image_path))
+
+    async def _send_local_image(self, incoming: IncomingMessage, path: Path) -> None:
+        if not self.qq_api:
+            return
+        if incoming.channel_id:
+            await self.qq_api.send_group_local_image(
+                incoming.channel_id,
+                path,
+                msg_id=incoming.message_id,
+            )
+        else:
+            await self.qq_api.send_c2c_local_image(
+                incoming.platform_user_id,
+                path,
+                msg_id=incoming.message_id,
+            )
 
 
 def _clean_content(content: str | None) -> str:
