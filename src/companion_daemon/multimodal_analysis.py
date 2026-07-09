@@ -46,7 +46,7 @@ class MultimodalAnalyzer:
                 f"用户发来文件 {attachment.filename or '未命名'}，当前暂未解析此文件类型。",
                 0.35,
             )
-        async with httpx.AsyncClient(timeout=10) as client:
+        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
             response = await client.get(attachment.url)
             response.raise_for_status()
         text = response.text.strip()
@@ -165,7 +165,7 @@ class OpenAIMultimodalAnalyzer(MultimodalAnalyzer):
         return AttachmentInsight("audio", f"语音转写：{transcript}", 0.85)
 
     def _client(self, *, timeout: float) -> httpx.AsyncClient:
-        return httpx.AsyncClient(timeout=timeout, transport=self.transport)
+        return httpx.AsyncClient(timeout=timeout, transport=self.transport, trust_env=False)
 
     def _headers(self) -> dict[str, str]:
         return {

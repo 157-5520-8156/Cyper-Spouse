@@ -30,6 +30,7 @@ companion-proactive = "companion_daemon.proactive_cli:main"
 companion-send-sticker = "companion_daemon.qq_sticker_cli:main"
 companion-proactive-scheduler = "companion_daemon.proactive_scheduler:main"
 companion-life-event = "companion_daemon.life_event:main"
+companion-eval-dialogue = "companion_daemon.dialogue_eval:main"
 
 [build-system]
 requires = ["hatchling"]

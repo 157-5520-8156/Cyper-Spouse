@@ -5,6 +5,7 @@ import httpx
 from companion_daemon.llm import ChatModel
 from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.prompts import reply_prompt
+from companion_daemon.reply_postprocess import postprocess_reply_text
 from companion_daemon.relationship import relationship_instruction, relationship_status_line
 from companion_daemon.sanitize import sanitize_chat_text
 
@@ -67,10 +68,10 @@ class PromptedConversationCore:
             ),
             temperature=0.75,
         )
-        text = sanitize_chat_text(text)
+        text = postprocess_reply_text(text, recent_lines=recent_lines, user_text=message.text)
         if self.rewrite_model and len(text) >= 5:
             text = await self._rewrite_for_naturalness(text)
-        return text
+        return postprocess_reply_text(text, recent_lines=recent_lines, user_text=message.text)
 
     async def _rewrite_for_naturalness(self, text: str) -> str:
         try:
@@ -131,7 +132,7 @@ class SillyTavernConversationCore:
                 "platform_context": platform_context,
             },
         }
-        async with httpx.AsyncClient(timeout=60, transport=self.transport) as client:
+        async with httpx.AsyncClient(timeout=60, transport=self.transport, trust_env=False) as client:
             token_response = await client.get(f"{self.base_url}/csrf-token")
             token_response.raise_for_status()
             csrf_token = str(token_response.json().get("token", ""))

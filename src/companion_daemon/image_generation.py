@@ -34,7 +34,7 @@ class OpenAIImageGenerator:
         size: str = "1024x1024",
     ) -> GeneratedImage:
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        async with httpx.AsyncClient(timeout=180) as client:
+        async with httpx.AsyncClient(timeout=180, trust_env=False) as client:
             response = await client.post(
                 f"{self.base_url}/images/generations",
                 headers={

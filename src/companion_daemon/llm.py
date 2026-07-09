@@ -16,7 +16,7 @@ class DeepSeekChatModel:
         self.model = model
 
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
-        async with httpx.AsyncClient(timeout=45) as client:
+        async with httpx.AsyncClient(timeout=45, trust_env=False) as client:
             response = await client.post(
                 f"{self.base_url}/chat/completions",
                 headers={

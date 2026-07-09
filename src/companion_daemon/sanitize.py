@@ -11,7 +11,8 @@ _ASSISTANTESE_PATTERNS = [
         r"我(?:有|认识)(?:个|一个)?(?:[^。！？]{0,8})?"
         r"(?:朋友|同学|室友|高中同学|大学同学|舍友)[^。！？]{0,48}(?:。|！|？)?"
     ),
-    re.compile(r"[^。！？]{0,20}(?:朋友|同学|室友|舍友)(?:也|之前|跟我|和我)[^。！？]{0,48}(?:。|！|？)?"),
+    re.compile(r"(?:不过|但是|而且|然后)?我?(?:朋友|同学|室友|舍友)(?:也|之前|跟我|和我|说)[^。！？]{0,48}(?:。|！|？)?"),
+    re.compile(r"(确实)"),
     re.compile(r"^(说实话[，,]?\s*)"),
     re.compile(r"^(讲真[，,]?\s*)"),
     re.compile(r"^(其实吧[，,]?\s*)"),
@@ -63,15 +64,24 @@ def _looks_like_pure_stage_direction(text: str) -> bool:
 def _soften_assistantese(text: str) -> str:
     for pattern in _ASSISTANTESE_PATTERNS:
         text = pattern.sub("", text)
+    text = re.sub(r"[，,]\s*(不过|但是|然后|而且)\s*$", "。", text)
+    text = re.sub(r"(不过|但是|然后|而且)\s*$", "", text)
+    text = re.sub(r"[，,]\s*$", "。", text)
     return text.strip()
 
 
 def _limit_questions(text: str) -> str:
-    """Keep at most one question mark; convert extras to periods."""
-    question_marks = list(re.finditer(r"[？?]", text))
-    if len(question_marks) <= 1:
-        return text
-    result = list(text)
-    for match in question_marks[1:]:
-        result[match.start()] = "。"
-    return "".join(result)
+    """Keep at most one question mark; remove extra question tails when possible."""
+    result = text
+    while True:
+        question_marks = list(re.finditer(r"[？?]", result))
+        if len(question_marks) <= 1:
+            return result
+        extra = question_marks[1]
+        prefix = result[: extra.start()]
+        comma = max(prefix.rfind("，"), prefix.rfind(","))
+        sentence = max(prefix.rfind("。"), prefix.rfind("！"), prefix.rfind("？"), prefix.rfind("!"), prefix.rfind("?"))
+        if comma > sentence:
+            result = result[:comma] + "。" + result[extra.end() :]
+        else:
+            result = result[: extra.start()] + "。" + result[extra.end() :]

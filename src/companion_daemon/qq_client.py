@@ -188,7 +188,7 @@ class QQOfficialClient:
 
     async def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         token = await self._access_token()
-        async with httpx.AsyncClient(transport=self.transport, timeout=10) as client:
+        async with httpx.AsyncClient(transport=self.transport, timeout=10, trust_env=False) as client:
             response = await client.post(
                 f"{self.api_base_url}{path}",
                 headers={"Authorization": f"QQBot {token}"},
@@ -200,7 +200,7 @@ class QQOfficialClient:
     async def _access_token(self) -> str:
         if self._token and self._token.expires_at - monotonic() > 60:
             return self._token.value
-        async with httpx.AsyncClient(transport=self.transport, timeout=10) as client:
+        async with httpx.AsyncClient(transport=self.transport, timeout=10, trust_env=False) as client:
             response = await client.post(
                 self.token_url,
                 json={"appId": self.app_id, "clientSecret": self.app_secret},
