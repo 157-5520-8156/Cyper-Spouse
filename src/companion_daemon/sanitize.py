@@ -12,38 +12,25 @@ _ASSISTANTESE_PATTERNS = [
         r"(?:朋友|同学|室友|高中同学|大学同学|舍友)[^。！？]{0,48}(?:。|！|？)?"
     ),
     re.compile(r"(?:不过|但是|而且|然后)?我?(?:朋友|同学|室友|舍友)(?:也|之前|跟我|和我|说)[^。！？]{0,48}(?:。|！|？)?"),
-    re.compile(r"(确实)"),
-    re.compile(r"^(说实话[，,]?\s*)"),
-    re.compile(r"^(讲真[，,]?\s*)"),
-    re.compile(r"^(其实吧[，,]?\s*)"),
-    re.compile(r"^(不得不说[，,]?\s*)"),
-    re.compile(r"^(不得不说的是[，,]?\s*)"),
+    re.compile(r"^(不得不说(?:的是)?[，,]?\s*)"),
     re.compile(r"^(有趣的是[，,]?\s*)"),
-    re.compile(r"^(值得一提的是[，,]?\s*)"),
-    re.compile(r"^(忍不住想说[，,]?\s*)"),
+    re.compile(r"^(值得一提(?:的是)?[，,]?\s*)"),
     re.compile(r"^(作为(?:一个)?(?:过来人|朋友)[，,]?\s*)"),
-    re.compile(r"^(总的来说[，,]?\s*)"),
-    re.compile(r"^(总的来说[，,]?\s*说[，,]?\s*)"),
-    re.compile(r"(不过话说回来[，,]?\s*)"),
-    re.compile(r"^(说到这个[，,]?\s*)"),
-    re.compile(r"^(说到这儿[，,]?\s*)"),
-    re.compile(r"^(你知道(?:吗|的)[，,]?\s*)"),
-    re.compile(r"(?:我记得你之前|我记得之前|你之前|之前听你)[^。！？]{0,50}(?:。|！|？)?"),
-    re.compile(r"我之前[^。！？]{0,24}(?:查过那边|做[^。！？]{0,12}笔记)[^。！？]{0,30}(?:。|！|？)?"),
-    re.compile(r"^(让我想想[，,。]?\s*)"),
-    re.compile(r"^(嗯[，,]?\s*让我想想[，,。]?\s*)"),
-    re.compile(r"^(哈哈[，,]?\s*这个问题[，,]?\s*)"),
+    re.compile(r"^(总的来说[，,]?\s*说?[，,]?\s*)"),
+    re.compile(r"^(不过话说回来[，,]?\s*)"),
     re.compile(r"^(好问题[！!]?[，,]?\s*)"),
     re.compile(r"^(这是个好问题[。！]?[，,]?\s*)"),
+    re.compile(r"^(哈哈[，,]?\s*这个问题[，,]?\s*)"),
     re.compile(r"^(你这句话?说(?:得)?挺[^，。！？]{1,12}[，,。]?\s*)"),
     re.compile(r"^(这个(?:问题|话)(?:挺|太|有点)(?:突然|直接|冒昧)[，,。]?\s*)"),
     re.compile(r"(听着还挺[^，。！？]{1,8}[，,。]?\s*)"),
     re.compile(r"(这话?说得挺[^，。！？]{1,10}[，,。]?\s*)"),
+    re.compile(r"(?:我记得你之前|我记得之前|你之前|之前听你)[^。！？]{0,50}(?:。|！|？)?"),
+    re.compile(r"我之前[^。！？]{0,24}(?:查过那边|做[^。！？]{0,12}笔记)[^。！？]{0,30}(?:。|！|？)?"),
 ]
 
 
 def sanitize_chat_text(text: str) -> str:
-    """Remove roleplay-style stage directions and AI-ish patterns from IM replies."""
     cleaned_lines: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -78,7 +65,6 @@ def _soften_assistantese(text: str) -> str:
 
 
 def _limit_questions(text: str) -> str:
-    """Keep at most one question mark; remove extra question tails when possible."""
     result = _drop_leading_question_murmur(text)
     while True:
         question_marks = list(re.finditer(r"[？?]", result))
