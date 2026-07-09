@@ -356,6 +356,49 @@ class CompanionEngine:
         except Exception:
             logger.exception("background consolidation failed")
 
+    async def generate_afterthought(
+        self,
+        canonical_user_id: str,
+        reply_sent_at: datetime,
+    ) -> str | None:
+        """Generate a short follow-up message after a reply, if conditions are right.
+
+        Returns the afterthought text, or None if no afterthought should be sent.
+        """
+        state = self.store.get_mood_state(canonical_user_id)
+        if state.mood in {"guarded", "hurt", "sulking"}:
+            return None
+        if state.boundary_level >= 35:
+            return None
+        new_count = self.store.message_count_since(
+            canonical_user_id, direction="in", since_iso=reply_sent_at.isoformat()
+        )
+        if new_count > 0:
+            return None
+        recent_lines = self._recent_lines(canonical_user_id)
+        prompt = (
+            "你刚刚和用户聊完，过了一小会儿又想到一个跟刚才话题相关的小想法。\n"
+            "发一条很短的消息，像随手补一句。不要再问问题。不要太刻意。\n"
+            "只输出消息内容，不加解释。\n\n"
+            f"最近聊天：\n{chr(10).join(recent_lines[-6:])}\n"
+        )
+        try:
+            raw = await self.model.complete(
+                [{"role": "user", "content": prompt}],
+                temperature=0.7,
+            )
+        except Exception:
+            logger.exception("afterthought generation failed")
+            return None
+        text = sanitize_chat_text(raw)
+        if not text or len(text) > 60:
+            return None
+        self.store.save_outgoing(canonical_user_id, "qq", text)
+        expressed = apply_expression_after_reply(state, was_proactive=True)
+        self.store.save_mood_state(canonical_user_id, expressed)
+        return text
+
+
     async def _maybe_generate_requested_image(
         self,
         canonical_user_id: str,
