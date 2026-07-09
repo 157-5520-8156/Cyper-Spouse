@@ -1,4 +1,5 @@
 import json
+from datetime import datetime
 from pathlib import Path
 
 from companion_daemon.budget import ESTIMATES, BudgetGate
@@ -11,6 +12,7 @@ from companion_daemon.image_agency import decide_image_agency, image_agency_prom
 from companion_daemon.image_generation import OpenAIImageGenerator, life_image_prompt
 from companion_daemon.image_prompt_builder import ChatImageMessage, build_image_prompt
 from companion_daemon.image_requests import detect_image_request
+from companion_daemon.life_continuity import build_life_continuity
 from companion_daemon.llm import ChatModel
 from companion_daemon.memory import extract_memories, memory_lines
 from companion_daemon.models import (
@@ -29,6 +31,7 @@ from companion_daemon.mood import (
 from companion_daemon.multimodal import summarize_attachments
 from companion_daemon.multimodal_analysis import AttachmentInsight, MultimodalAnalyzer
 from companion_daemon.prompts import proactive_prompt
+from companion_daemon.proactive_feedback import apply_proactive_feedback, classify_proactive_feedback
 from companion_daemon.proactive_triggers import evaluate_proactive_trigger
 from companion_daemon.relationship import advance_relationship
 from companion_daemon.reply_stickers import choose_reply_sticker
@@ -36,6 +39,7 @@ from companion_daemon.sanitize import sanitize_chat_text
 from companion_daemon.stickers import StickerCatalog
 from companion_daemon.time import utc_now
 from companion_daemon.tool_requests import detect_tool_request, tool_prompt_line
+from companion_daemon.withheld_impulse import apply_withheld_impulse, build_withheld_impulse
 
 
 class CompanionEngine:
@@ -74,6 +78,10 @@ class CompanionEngine:
         context = platform_context(previous_state, message)
         event = interpret_interaction(message, previous_state)
         next_state = update_mood_for_message(previous_state, message)
+        proactive_feedback = None
+        if self._is_reply_to_recent_proactive(canonical_user_id, message.platform):
+            proactive_feedback = classify_proactive_feedback(message.text)
+            next_state = apply_proactive_feedback(next_state, proactive_feedback)
 
         self.store.save_incoming(canonical_user_id, message)
         self.store.record_interaction_event(
@@ -101,6 +109,27 @@ class CompanionEngine:
                 confidence=extracted.confidence,
             )
         attachment_lines = summarize_attachments(message.attachments)
+        life_continuity = build_life_continuity(
+            next_state,
+            previous_content=self._latest_life_continuity(canonical_user_id),
+        )
+        attachment_lines.append(life_continuity.prompt_line)
+        self.store.upsert_memory(
+            canonical_user_id,
+            kind="life_continuity",
+            content=life_continuity.content,
+            source=f"{message.platform}:{message.message_id or 'turn'}",
+            confidence=0.72,
+        )
+        if proactive_feedback:
+            attachment_lines.append(proactive_feedback.prompt_line)
+            self.store.upsert_memory(
+                canonical_user_id,
+                kind="proactive_response",
+                content=proactive_feedback.memory_content,
+                source=f"{message.platform}:{message.message_id or 'turn'}",
+                confidence=0.82,
+            )
         image_request = detect_image_request(
             message.text,
             [
@@ -275,6 +304,21 @@ class CompanionEngine:
         decision = self._parse_decision(canonical_user_id, raw, state)
         if trigger and decision.should_send:
             decision = decision.model_copy(update={"trigger_type": trigger.type})
+        elif trigger and not decision.should_send:
+            impulse = build_withheld_impulse(
+                trigger_type=trigger.type,
+                private_thought=decision.private_thought,
+            )
+            if impulse:
+                self.store.upsert_memory(
+                    canonical_user_id,
+                    kind="withheld_proactive_impulse",
+                    content=impulse.memory_content,
+                    source="proactive_tick",
+                    confidence=0.76,
+                )
+                state = apply_withheld_impulse(state, impulse)
+                self.store.save_mood_state(canonical_user_id, state)
         if decision.message:
             decision = decision.model_copy(update={"message": sanitize_chat_text(decision.message)})
         decision = self._attach_sticker(decision, state)
@@ -323,6 +367,23 @@ class CompanionEngine:
         if attachment.url:
             return f"attachment:{attachment.url}"
         return f"{message.platform}:{message.message_id or ''}:{attachment.kind}:{attachment.filename or ''}"
+
+    def _latest_life_continuity(self, canonical_user_id: str) -> str | None:
+        row = self.store.latest_memory(canonical_user_id, kind="life_continuity")
+        return str(row["content"]) if row else None
+
+    def _is_reply_to_recent_proactive(self, canonical_user_id: str, platform: str) -> bool:
+        last_sent = self.store.last_proactive_delivery(canonical_user_id, platform)
+        if not last_sent:
+            return False
+        sent_at = datetime.fromisoformat(last_sent)
+        if (utc_now() - sent_at).total_seconds() > 12 * 60 * 60:
+            return False
+        return self.store.message_count_since(
+            canonical_user_id,
+            direction="in",
+            since_iso=last_sent,
+        ) == 0
 
     def _parse_decision(
         self, canonical_user_id: str, raw: str, state: MoodState

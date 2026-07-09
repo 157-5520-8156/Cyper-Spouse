@@ -1,3 +1,4 @@
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -10,6 +11,7 @@ from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.stickers import StickerCatalog, Sticker
 from companion_daemon.character import load_character
 from companion_daemon.budget import BudgetGate
+from companion_daemon.time import utc_now
 
 TEST_PROMPT = "你是凛，用户的赛博女友。"
 
@@ -43,6 +45,37 @@ async def test_handle_message_injects_human_rhythm_context(tmp_path: Path) -> No
     prompt_text = "\n".join(message["content"] for message in model.calls[-1])
     assert "生活节律" in prompt_text
     assert "不要写舞台动作" in prompt_text
+    assert any(row["kind"] == "life_continuity" for row in store.memories("geoff"))
+
+
+@pytest.mark.asyncio
+async def test_handle_message_relaxes_after_warm_proactive_response(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(
+        store,
+        initial_state=MoodState(
+            mood="miss_you",
+            security=35,
+            initiative=45,
+            emotional_charge=18,
+            last_platform="qq",
+        ),
+    )
+    store.record_proactive_delivery("geoff", "qq")
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT)
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我在呀，刚刚忙完")
+    )
+
+    state = store.get_mood_state("geoff")
+    assert state.security > 35
+    assert state.initiative < 45
+    assert state.emotional_charge < 18
+    assert any(row["kind"] == "proactive_response" for row in store.memories("geoff"))
+    prompt_text = "\n".join(message["content"] for message in model.calls[-1])
+    assert "主动反馈" in prompt_text
 
 
 @pytest.mark.asyncio
@@ -160,6 +193,49 @@ async def test_proactive_tick_can_attach_self_initiated_image(tmp_path: Path) ->
     assert Path(decision.image_path).exists()
     assert "virtual-life selfie-style" in image_generator.prompts[0]
     assert any(row["kind"] == "generated_image" for row in store.memories("geoff"))
+
+
+@pytest.mark.asyncio
+async def test_proactive_tick_records_withheld_impulse(tmp_path: Path) -> None:
+    class NoSendModel(FakeCompanionModel):
+        async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
+            if any("Return strict JSON" in message["content"] for message in messages):
+                return (
+                    '{"private_thought":"有点想问他后来怎么样，但怕打扰",'
+                    '"should_send":false,"platform":null,"message_type":"none",'
+                    '"message":null,"sticker_category":null,"cooldown_minutes":30}'
+                )
+            return await super().complete(messages, temperature=temperature)
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(
+        store,
+        initial_state=MoodState(
+            relationship_stage="friend",
+            trust=50,
+            intimacy=35,
+            initiative=30,
+            emotional_charge=4,
+        ),
+    )
+    engine = CompanionEngine(store, NoSendModel(), TEST_PROMPT)
+    await engine.handle_message(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            text="所以你觉得呢？",
+            sent_at=utc_now() - timedelta(hours=1),
+        )
+    )
+    before_tick = store.get_mood_state("geoff")
+
+    decision = await engine.proactive_tick("geoff")
+
+    assert decision.should_send is False
+    state = store.get_mood_state("geoff")
+    assert state.initiative > before_tick.initiative
+    assert state.emotional_charge > before_tick.emotional_charge
+    assert any(row["kind"] == "withheld_proactive_impulse" for row in store.memories("geoff"))
 
 
 @pytest.mark.asyncio

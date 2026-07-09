@@ -450,6 +450,26 @@ class CompanionStore:
             ).fetchall()
         return list(reversed(rows))
 
+    def message_count_since(
+        self,
+        canonical_user_id: str,
+        *,
+        direction: str,
+        since_iso: str,
+    ) -> int:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select count(*) as count
+                from messages
+                where canonical_user_id = ?
+                  and direction = ?
+                  and sent_at > ?
+                """,
+                (canonical_user_id, direction, since_iso),
+            ).fetchone()
+        return int(row["count"])
+
     def recent_proactive_trigger_history(
         self,
         canonical_user_id: str,
@@ -560,6 +580,19 @@ class CompanionStore:
                 (canonical_user_id, limit),
             ).fetchall()
         return list(rows)
+
+    def latest_memory(self, canonical_user_id: str, *, kind: str) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                select kind, content, confidence, updated_at
+                from memories
+                where canonical_user_id = ? and kind = ?
+                order by updated_at desc
+                limit 1
+                """,
+                (canonical_user_id, kind),
+            ).fetchone()
 
     def memory_by_source(
         self,
