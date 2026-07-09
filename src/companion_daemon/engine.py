@@ -30,7 +30,7 @@ from companion_daemon.models import (
     MoodState,
     ProactiveDecision,
 )
-from companion_daemon.human_rhythm import apply_expression_after_reply
+from companion_daemon.human_rhythm import apply_expression_after_reply, human_rhythm_snapshot
 from companion_daemon.mood import (
     platform_context,
     update_mood_for_attachment_insight,
@@ -63,6 +63,23 @@ from companion_daemon.unanswered_question import (
 from companion_daemon.withheld_impulse import apply_withheld_impulse, build_withheld_impulse
 
 logger = logging.getLogger(__name__)
+
+_DEEP_NIGHT_AFTERTHOUGHT_MOODS = {"miss_you", "worried", "affectionate", "sad", "anxious"}
+_DEEP_NIGHT_RECENT_ALLOWED_TOKENS = (
+    "累",
+    "难过",
+    "心里",
+    "闷",
+    "睡不着",
+    "想你",
+    "在吗",
+    "怎么",
+    "为什么",
+    "？",
+    "?",
+    "离谱",
+    "刚刚",
+)
 
 
 class CompanionEngine:
@@ -350,9 +367,23 @@ class CompanionEngine:
         try:
             if not should_consolidate(self.store, canonical_user_id):
                 return
+            estimate = ESTIMATES["memory_maintenance"]
+            if self.budget_gate:
+                decision = self.budget_gate.check(estimate, automatic=True)
+                if not decision.allowed:
+                    self.store.upsert_memory(
+                        canonical_user_id,
+                        kind="memory_maintenance_blocked",
+                        content=decision.reason,
+                        source="budget_gate",
+                        confidence=0.9,
+                    )
+                    return
             logger.info("triggering memory consolidation for %s", canonical_user_id)
             await consolidate_memories(self.store, self.model, canonical_user_id)
             await build_self_core(self.store, self.model, canonical_user_id, state)
+            if self.budget_gate:
+                self.budget_gate.record(estimate, note="memory_consolidation:self_core")
         except Exception:
             logger.exception("background consolidation failed")
 
@@ -370,11 +401,27 @@ class CompanionEngine:
             return None
         if state.boundary_level >= 35:
             return None
+        rhythm = human_rhythm_snapshot(state)
+        recent_rows = self._recent_dicts(canonical_user_id, limit=8)
+        if rhythm.phase == "deep_night" and not _deep_night_afterthought_allowed(state, recent_rows):
+            return None
         new_count = self.store.message_count_since(
             canonical_user_id, direction="in", since_iso=reply_sent_at.isoformat()
         )
         if new_count > 0:
             return None
+        estimate = ESTIMATES["afterthought"]
+        if self.budget_gate:
+            decision = self.budget_gate.check(estimate, automatic=True)
+            if not decision.allowed:
+                self.store.upsert_memory(
+                    canonical_user_id,
+                    kind="afterthought_blocked",
+                    content=decision.reason,
+                    source="budget_gate",
+                    confidence=0.85,
+                )
+                return None
         recent_lines = self._recent_lines(canonical_user_id)
         prompt = (
             "你刚刚和用户聊完，过了一小会儿又想到一个跟刚才话题相关的小想法。\n"
@@ -394,6 +441,8 @@ class CompanionEngine:
         if not text or len(text) > 60:
             return None
         self.store.save_outgoing(canonical_user_id, "qq", text)
+        if self.budget_gate:
+            self.budget_gate.record(estimate, note="qq_afterthought")
         expressed = apply_expression_after_reply(state, was_proactive=True)
         self.store.save_mood_state(canonical_user_id, expressed)
         return text
@@ -464,10 +513,34 @@ class CompanionEngine:
             trigger_history=self.store.recent_proactive_trigger_history(canonical_user_id),
             now=utc_now(),
         )
+        estimate = ESTIMATES["proactive_decision"]
+        if self.budget_gate:
+            budget_decision = self.budget_gate.check(estimate, automatic=True)
+            if not budget_decision.allowed:
+                decision = ProactiveDecision(
+                    canonical_user_id=canonical_user_id,
+                    private_thought=f"预算阀门阻止主动决策：{budget_decision.reason}",
+                    should_send=False,
+                    trigger_type=trigger.type if trigger else None,
+                )
+                self.store.save_proactive_event(
+                    canonical_user_id,
+                    decision.private_thought,
+                    decision.should_send,
+                    decision.platform,
+                    decision.message_type,
+                    decision.message,
+                    decision.sticker_category,
+                    decision.trigger_type,
+                    decision.cooldown_minutes,
+                )
+                return decision
         raw = await self.model.complete(
             proactive_prompt(state, recent_lines, self.companion_system_prompt, trigger),
             temperature=0.7,
         )
+        if self.budget_gate:
+            self.budget_gate.record(estimate, note=f"proactive_decision:{trigger.type if trigger else 'none'}")
         decision = self._parse_decision(canonical_user_id, raw, state)
         if trigger and decision.should_send:
             decision = decision.model_copy(update={"trigger_type": trigger.type})
@@ -645,6 +718,13 @@ class CompanionEngine:
             confidence=0.82,
         )
         return decision.model_copy(update={"image_path": str(generated.path)})
+
+
+def _deep_night_afterthought_allowed(state: MoodState, recent_rows: list[dict[str, str]]) -> bool:
+    if state.mood in _DEEP_NIGHT_AFTERTHOUGHT_MOODS:
+        return True
+    recent_text = "\n".join(row.get("text", "") for row in recent_rows[-6:])
+    return any(token in recent_text for token in _DEEP_NIGHT_RECENT_ALLOWED_TOKENS)
 
 
 def seed_user(

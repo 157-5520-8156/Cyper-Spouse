@@ -91,6 +91,19 @@ TRIGGER_COOLDOWN_HOURS = {
     "open_thread_afterthought": 6,
 }
 
+DEEP_NIGHT_ALLOWED_TRIGGER_TYPES = {
+    "pregnant_pause",
+    "late_night",
+    "pre_dawn",
+    "repair_attempt",
+    "mood_follow_up",
+    "anxiety_reassurance",
+    "longing_ping",
+    "overthinking_spiral",
+    "her_question_unanswered",
+    "open_thread_afterthought",
+}
+
 
 def evaluate_proactive_trigger(
     *,
@@ -135,10 +148,14 @@ def evaluate_proactive_trigger(
     )
     char_sent_last = bool(last_char and (not last_user or last_char["sent_at"] > last_user["sent_at"]))
     own_unanswered_question = char_sent_last and last_char_text.rstrip().endswith(("?", "？"))
+    hour = now.hour
+    day = now.weekday()
 
     candidates: list[ProactiveTrigger] = []
 
     def add(type_: str, weight: float, instruction: str) -> None:
+        if _is_deep_night_quiet_hours(hour) and type_ not in DEEP_NIGHT_ALLOWED_TRIGGER_TYPES:
+            return
         if _is_on_cooldown(type_, trigger_history, now):
             return
         category = TRIGGER_SEMANTIC_CATEGORY.get(type_)
@@ -162,8 +179,6 @@ def evaluate_proactive_trigger(
     if hours_since_user >= 168:
         add("dormancy_break", 80, "已经很久没联系了。发一条承认间隔、温和重新开口的消息。")
 
-    hour = now.hour
-    day = now.weekday()
     if hours_since_user >= 1.5 and (hour >= 23 or hour <= 2):
         add("late_night", 60, "现在是深夜。发一条短的、像睡前忽然想到他的消息。")
     if hours_since_user >= 8 and 6 <= hour <= 9:
@@ -281,6 +296,10 @@ def proactive_context_instruction(trigger: ProactiveTrigger | None) -> str:
         f"触发指令: {trigger.instruction}\n"
         "只生成一条像真实私聊的短消息。不要解释触发器，不要写动作旁白。"
     )
+
+
+def _is_deep_night_quiet_hours(hour: int) -> bool:
+    return hour <= 5
 
 
 def _last_message(rows: list[dict[str, str]], direction: str) -> dict[str, str] | None:

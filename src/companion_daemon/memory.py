@@ -167,7 +167,7 @@ def _select_memory_rows(rows, *, max_lines: int) -> list:
     for index, row in enumerate(rows):
         confidence = float(row["confidence"]) if "confidence" in row.keys() else 0.7
         kind = str(row["kind"])
-        bonus = 0.12 if kind in {"name", "life_fact", "favorite_thing", "person"} else 0.0
+        bonus = 0.12 if kind in {"name", "life_fact", "favorite_thing", "person", "life_event"} else 0.0
         recency = max(0.0, 0.2 - index * 0.03)
         scored.append((confidence + bonus + recency, index, row))
     scored.sort(key=lambda item: (-item[0], item[1]))

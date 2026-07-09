@@ -21,7 +21,13 @@ def test_sanitize_removes_acquaintance_crutch_variants() -> None:
     )
     assert sanitize_chat_text("毛概确实要背好多啊，不过我室友说画了重点会好背一点。") == "毛概要背好多啊。"
     assert sanitize_chat_text("成都理工啊，我好像有个高中同学在那。") == "成都理工啊。"
+    assert sanitize_chat_text("我明天也有一门考试，刚背完知识点，准备睡了。") == ""
     assert sanitize_chat_text("毛概真的好难背啊，我去年考的时候也是熬夜翻来覆去地背。") == "毛概真的好难背啊。"
+    assert sanitize_chat_text("毛概难背……我上学期也被折磨过。") == "毛概难背……"
+    assert sanitize_chat_text("我之前期末背的时候，会在纸上画时间线。") == ""
+    assert sanitize_chat_text("上次听说成都理工附近有个夜市挺有名的。") == ""
+    assert sanitize_chat_text("那你这趟也不算白淋雨，至少没被点到名。") == ""
+    assert sanitize_chat_text("淋着雨去上课了。") == ""
 
 
 def test_sanitize_repairs_chengdu_location_confusion() -> None:
@@ -32,4 +38,6 @@ def test_sanitize_removes_explicit_unsupported_memory_claims() -> None:
     assert sanitize_chat_text("怎么了？我记得你之前说自己忙得有点离谱。") == "怎么了？"
     assert sanitize_chat_text("之前听你说在成都来着。") == ""
     assert sanitize_chat_text("我记得之前群里有人发过照片，晚上那边好多小摊。") == ""
+    assert sanitize_chat_text("我之前看群里有人发过照片，烟火气很足的样子。") == ""
     assert sanitize_chat_text("我之前做城市散步笔记的时候，刚好查过那边。") == ""
+    assert sanitize_chat_text("成理啊，我知道那附近有家面馆挺有名的。") == "成理啊。"
