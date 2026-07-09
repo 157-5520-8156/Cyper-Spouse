@@ -93,7 +93,8 @@ class CompanionEngine:
         if image_request.triggered:
             attachment_lines.append(
                 "图片请求: 用户可能在请求图片/自拍；"
-                f"类型={image_request.type}；指向={image_request.directive or '未指定'}。"
+                f"类型={image_request.type}；指向={image_request.directive or '未指定'}；"
+                f"风格={image_request.style_tags or '默认'}。"
             )
             self.store.upsert_memory(
                 canonical_user_id,

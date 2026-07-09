@@ -1,4 +1,5 @@
 from pathlib import Path
+import random
 
 import pytest
 
@@ -6,10 +7,11 @@ from companion_daemon.db import CompanionStore
 from companion_daemon.context_emotion_bleed import ContextMessage, context_emotion_deltas
 from companion_daemon.emotion_reactions import select_character_reaction
 from companion_daemon.engine import CompanionEngine, seed_user
-from companion_daemon.image_requests import detect_image_request
+from companion_daemon.image_requests import detect_image_request, detect_style_tags
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.memory import detect_memory_candidates, extract_memories
 from companion_daemon.models import IncomingMessage, MoodState
+from companion_daemon.reply_timing import emotion_reply_timing
 
 
 def test_memory_candidates_detect_life_fact_and_favorite() -> None:
@@ -48,6 +50,14 @@ def test_detect_image_request_direct_and_offer_response() -> None:
     assert offered.type == "offer_response"
 
 
+def test_image_request_detects_style_tags() -> None:
+    request = detect_image_request("给我发一张水彩风格自拍看看")
+
+    assert request.triggered
+    assert "watercolor" in request.style_tags
+    assert "pixel art" in detect_style_tags("像素风格头像")
+
+
 def test_context_emotion_bleed_is_capped() -> None:
     deltas = context_emotion_deltas(
         [
@@ -59,6 +69,17 @@ def test_context_emotion_bleed_is_capped() -> None:
     assert deltas
     assert max(abs(value) for value in deltas.values()) <= 2.0
     assert sum(abs(value) for value in deltas.values()) <= 5.0
+
+
+def test_emotion_reply_timing_ghosts_more_when_cold() -> None:
+    warm = emotion_reply_timing(MoodState(emotion_vector={"joy": 70, "trust": 70}), rng=random.Random(1))
+    cold = emotion_reply_timing(
+        MoodState(emotion_vector={"anger": 85, "sadness": 70, "fear": 60}),
+        rng=random.Random(1),
+    )
+
+    assert cold.read_delay_ms > warm.read_delay_ms
+    assert cold.ghost_delay_ms > 0
 
 
 @pytest.mark.asyncio

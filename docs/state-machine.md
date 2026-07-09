@@ -59,6 +59,7 @@
 - prompt 中注入行为指导，而不是让模型直接照读数值。
 - 角色 reaction selection：根据用户消息造成的情绪 delta 推断 heart/haha/wow/sad/fire/like/star/bolt 等轻反应。
 - ST context emotion bleed 的思想：外部上下文只做低权重情绪渗透，并设置单项/总量上限，避免状态被打爆。
+- 情绪化回复时机模型：温暖状态更快读/回，生气、低落、不安时读回更慢，必要时出现 ghost delay。
 
 保留为本项目自己的改进：
 
@@ -93,6 +94,7 @@
 
 - Memory highlight detection：从用户消息里识别 life fact、favorite thing、hobby、important person、recent event、shared moment，并写入长期记忆。
 - Image request detection：识别直接图片/自拍请求，以及用户对最近图片邀约的肯定回应。当前先进入 prompt 和记忆，后续可接自动图片生成和预算闸门。
+- Image style detection：识别水彩、油画、像素、漫画、二次元、Q版、写实、素描等风格标签，并写入图片 prompt。
 
 ## Open Source Position
 

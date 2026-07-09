@@ -4,6 +4,7 @@ from pathlib import Path
 
 import httpx
 
+from companion_daemon.image_requests import detect_style_tags
 from companion_daemon.visual_identity import load_visual_identity
 
 
@@ -62,6 +63,7 @@ def life_image_prompt(
     kind: str = "life",
     visual_identity_path: Path | None = Path("configs/visual_identity.yaml"),
 ) -> str:
+    style_tags = detect_style_tags(topic)
     if kind == "selfie":
         identity_block = ""
         if visual_identity_path and visual_identity_path.exists():
@@ -70,15 +72,15 @@ def life_image_prompt(
             "Create an original virtual-life selfie-style image of沈知栀 / Celia Shen, "
             "a gentle Chinese college student with shoulder-length dark hair and a subtle teal hairpin. "
             "It should feel like a tasteful fictional character selfie, not a real person's photo. "
-            f"Moment/topic: {topic}. No text, no watermark."
+            f"Moment/topic: {topic}. Style: {style_tags}. No text, no watermark."
             f"{identity_block}"
         )
     if kind == "food":
         return (
             "Create a cozy phone-photo style image of a small meal or snack a Chinese college student might share. "
-            f"Moment/topic: {topic}. Natural lighting, realistic but clearly AI-generated, no text, no watermark."
+            f"Moment/topic: {topic}. Style: {style_tags}. Natural lighting, realistic but clearly AI-generated, no text, no watermark."
         )
     return (
         "Create a cozy phone-photo style fictional life snapshot from a Chinese college student's day. "
-        f"Moment/topic: {topic}. No text, no watermark."
+        f"Moment/topic: {topic}. Style: {style_tags}. No text, no watermark."
     )

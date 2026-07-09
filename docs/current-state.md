@@ -169,6 +169,8 @@ Implemented:
 - EchoText-inspired memory highlight detection extracts life facts, favorites, hobbies, important people, recent events, and shared moments.
 - EchoText-inspired image request detection recognizes direct selfie/image requests and affirmative responses to recent image offers.
 - EchoText-inspired reaction selection can suggest lightweight reactions from emotional deltas.
+- EchoText-inspired reply timing model estimates read/reply/ghost delays from emotion vectors.
+- EchoText-inspired image style detection carries user-requested styles into generation prompts.
 - External context emotion bleed is capped to keep SillyTavern/MCP/multimodal context from overwhelming the core state.
 - Sticker selection maps newer moods such as `hurt`, `guarded`, `curious`, and `affectionate` to available visual assets.
 
