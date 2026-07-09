@@ -79,5 +79,10 @@ class MoodState(BaseModel):
     last_user_intent: str | None = None
     last_interaction_event: str | None = None
     reply_style_hint: str | None = None
+    emotion_vector: dict[str, float] = Field(default_factory=dict)
+    emotion_baseline: dict[str, float] = Field(default_factory=dict)
+    emotion_affinity: dict[str, float] = Field(default_factory=dict)
+    last_emotion_impact: dict[str, float] = Field(default_factory=dict)
+    last_emotion_source: str | None = None
     last_platform: Platform | None = None
     updated_at: datetime = Field(default_factory=utc_now)

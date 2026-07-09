@@ -160,9 +160,10 @@ Implemented:
 
 - Interaction event classification for rude/control/warmth/apology/vulnerable/busy/returning/question/attachment-only messages.
 - Expanded mood state: patience, security, curiosity, initiative, emotional charge, and boundary level.
+- EchoText-inspired Plutchik emotion vector with baseline, affinity drift, natural decay, opposite-emotion suppression, and text intensity multipliers.
 - Interaction events are persisted in SQLite.
 - State is injected into both normal replies and proactive decisions.
-- Boundary and hurt states reduce proactive frequency and life-event probability.
+- Boundary, hurt, anger, and disgust states reduce proactive frequency and life-event probability.
 - Sticker selection maps newer moods such as `hurt`, `guarded`, `curious`, and `affectionate` to available visual assets.
 
 See `docs/state-machine.md`.

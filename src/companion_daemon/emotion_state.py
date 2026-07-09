@@ -1,5 +1,10 @@
 from dataclasses import dataclass
 
+from companion_daemon.emotion_core import (
+    apply_emotion_decay,
+    apply_emotion_deltas,
+    emotion_deltas_for_event,
+)
 from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.time import utc_now
 
@@ -109,8 +114,9 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
 
 
 def transition_emotional_state(previous: MoodState, event: InteractionEvent) -> MoodState:
-    state = previous.model_copy(deep=True)
-    state.updated_at = utc_now()
+    now = utc_now()
+    state = apply_emotion_decay(previous.model_copy(deep=True), now)
+    state.updated_at = now
     state.last_user_intent = event.user_intent
     state.last_interaction_event = event.kind
     state.reply_style_hint = event.reply_style_hint
@@ -190,6 +196,12 @@ def transition_emotional_state(previous: MoodState, event: InteractionEvent) -> 
         state.mood = "sulking"
     if state.security >= 70 and state.intimacy >= 45 and state.mood == "happy":
         state.mood = "affectionate"
+    state = apply_emotion_deltas(
+        state,
+        emotion_deltas_for_event(event.kind, event.intensity),
+        source="interaction_event",
+        update_affinity=False,
+    )
     return state
 
 

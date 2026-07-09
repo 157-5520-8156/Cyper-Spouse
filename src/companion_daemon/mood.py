@@ -1,3 +1,4 @@
+from companion_daemon.emotion_core import apply_emotion_deltas, text_emotion_deltas
 from companion_daemon.emotion_state import interpret_interaction, transition_emotional_state
 from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.multimodal_analysis import AttachmentInsight
@@ -16,6 +17,14 @@ def update_mood_for_message(previous: MoodState, message: IncomingMessage) -> Mo
         state.intimacy = min(100, state.intimacy + 2)
         state.attachment = min(100, state.attachment + 1)
         state.unresolved_emotion = None
+    deltas = text_emotion_deltas(text, is_user=True)
+    if deltas:
+        state = apply_emotion_deltas(
+            state,
+            deltas,
+            source="user_message",
+            update_affinity=True,
+        )
 
     state.last_platform = message.platform
     return state

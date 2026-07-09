@@ -2,7 +2,15 @@ from companion_daemon.models import MoodState, RelationshipStage
 
 
 def affection_score(state: MoodState) -> int:
-    return round((state.intimacy * 0.55) + (state.trust * 0.25) + (state.attachment * 0.20))
+    love = state.emotion_vector.get("love", 10)
+    trust_emotion = state.emotion_vector.get("trust", 20)
+    return round(
+        (state.intimacy * 0.45)
+        + (state.trust * 0.20)
+        + (state.attachment * 0.15)
+        + (love * 0.12)
+        + (trust_emotion * 0.08)
+    )
 
 
 def advance_relationship(state: MoodState, *, user_message_count: int) -> MoodState:
@@ -72,6 +80,7 @@ def proactive_cooldown_minutes(state: MoodState, base_minutes: int) -> int:
     attachment_multiplier = max(0.65, 1.0 - (state.attachment / 250))
     boundary_multiplier = 1.0 + (state.boundary_level / 80)
     initiative_multiplier = max(0.65, 1.0 - (state.initiative / 250))
+    ghost_multiplier = 1.0 + (emotion_ghost_window_hours(state) / 5)
     minutes = round(
         base_minutes
         * stage_multiplier
@@ -79,6 +88,7 @@ def proactive_cooldown_minutes(state: MoodState, base_minutes: int) -> int:
         * attachment_multiplier
         * boundary_multiplier
         * initiative_multiplier
+        * ghost_multiplier
     )
     return max(12, min(360, minutes))
 
@@ -107,6 +117,27 @@ def life_event_probability(state: MoodState) -> float:
     }[state.mood]
     score_bonus = (affection_score(state) / 100) * 0.10
     boundary_penalty = state.boundary_level / 250
+    emotion = state.emotion_vector
     initiative_bonus = state.initiative / 500
-    probability = stage_base + mood_bonus + score_bonus + initiative_bonus - boundary_penalty
+    emotion_bonus = (
+        emotion.get("anticipation", 0) / 600
+        + emotion.get("love", 0) / 700
+        + emotion.get("sadness", 0) / 900
+    )
+    aversion_penalty = (emotion.get("anger", 0) + emotion.get("disgust", 0)) / 500
+    probability = stage_base + mood_bonus + score_bonus + initiative_bonus + emotion_bonus - boundary_penalty - aversion_penalty
     return max(0.01, min(0.45, probability))
+
+
+def emotion_ghost_window_hours(state: MoodState) -> float:
+    anger = state.emotion_vector.get("anger", 0)
+    disgust = state.emotion_vector.get("disgust", 0)
+    if anger >= 85 and disgust >= 85:
+        return 12
+    if anger >= 85 or disgust >= 85:
+        return 8
+    if anger >= 70 or disgust >= 70:
+        return 4
+    if anger >= 50 or disgust >= 50:
+        return 1.5
+    return 0

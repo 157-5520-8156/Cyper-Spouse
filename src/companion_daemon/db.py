@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -73,6 +74,11 @@ class CompanionStore:
                   last_user_intent text,
                   last_interaction_event text,
                   reply_style_hint text,
+                  emotion_vector_json text not null default '{}',
+                  emotion_baseline_json text not null default '{}',
+                  emotion_affinity_json text not null default '{}',
+                  last_emotion_impact_json text not null default '{}',
+                  last_emotion_source text,
                   last_platform text,
                   updated_at text not null
                 );
@@ -146,6 +152,11 @@ class CompanionStore:
             self._ensure_column(conn, "mood_state", "last_user_intent", "text")
             self._ensure_column(conn, "mood_state", "last_interaction_event", "text")
             self._ensure_column(conn, "mood_state", "reply_style_hint", "text")
+            self._ensure_column(conn, "mood_state", "emotion_vector_json", "text not null default '{}'")
+            self._ensure_column(conn, "mood_state", "emotion_baseline_json", "text not null default '{}'")
+            self._ensure_column(conn, "mood_state", "emotion_affinity_json", "text not null default '{}'")
+            self._ensure_column(conn, "mood_state", "last_emotion_impact_json", "text not null default '{}'")
+            self._ensure_column(conn, "mood_state", "last_emotion_source", "text")
 
     def _ensure_column(
         self,
@@ -248,7 +259,9 @@ class CompanionStore:
                   mood, intimacy, trust, attachment, patience, security, curiosity,
                   initiative, emotional_charge, boundary_level, relationship_stage,
                   unresolved_emotion, last_user_intent, last_interaction_event,
-                  reply_style_hint, last_platform, updated_at
+                  reply_style_hint, emotion_vector_json, emotion_baseline_json,
+                  emotion_affinity_json, last_emotion_impact_json, last_emotion_source,
+                  last_platform, updated_at
                 from mood_state
                 where canonical_user_id = ?
                 """,
@@ -272,6 +285,11 @@ class CompanionStore:
             last_user_intent=row["last_user_intent"],
             last_interaction_event=row["last_interaction_event"],
             reply_style_hint=row["reply_style_hint"],
+            emotion_vector=_json_map(row["emotion_vector_json"]),
+            emotion_baseline=_json_map(row["emotion_baseline_json"]),
+            emotion_affinity=_json_map(row["emotion_affinity_json"]),
+            last_emotion_impact=_json_map(row["last_emotion_impact_json"]),
+            last_emotion_source=row["last_emotion_source"],
             last_platform=row["last_platform"],
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
@@ -285,8 +303,9 @@ class CompanionStore:
                   patience, security, curiosity, initiative, emotional_charge,
                   boundary_level, relationship_stage, unresolved_emotion,
                   last_user_intent, last_interaction_event, reply_style_hint,
-                  last_platform, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  emotion_vector_json, emotion_baseline_json, emotion_affinity_json,
+                  last_emotion_impact_json, last_emotion_source, last_platform, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     canonical_user_id,
@@ -305,6 +324,11 @@ class CompanionStore:
                     state.last_user_intent,
                     state.last_interaction_event,
                     state.reply_style_hint,
+                    json.dumps(state.emotion_vector, ensure_ascii=False),
+                    json.dumps(state.emotion_baseline, ensure_ascii=False),
+                    json.dumps(state.emotion_affinity, ensure_ascii=False),
+                    json.dumps(state.last_emotion_impact, ensure_ascii=False),
+                    state.last_emotion_source,
                     state.last_platform,
                     state.updated_at.isoformat(),
                 ),
@@ -563,3 +587,21 @@ class CompanionStore:
                     utc_now().isoformat(),
                 ),
             )
+
+
+def _json_map(raw: str | None) -> dict[str, float]:
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    result = {}
+    for key, value in data.items():
+        try:
+            result[str(key)] = float(value)
+        except (TypeError, ValueError):
+            continue
+    return result
