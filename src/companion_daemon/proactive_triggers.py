@@ -74,6 +74,17 @@ TRIGGER_COOLDOWN_HOURS = {
     "inside_joke_callback": 30,
     "followup_callback": 16,
     "memory_nudge": 12,
+    "afternoon_slump": 20,
+    "pre_dawn": 30,
+    "commute_ping": 16,
+    "post_work": 18,
+    "sunday_evening": 20,
+    "post_midnight_impulse": 24,
+    "monday_reboot": 96,
+    "friday_feeling": 96,
+    "sunday_scaries": 96,
+    "midweek_check": 96,
+    "pride_share": 28,
 }
 
 
@@ -89,6 +100,8 @@ def evaluate_proactive_trigger(
     if emotion_ghost_window_hours(state) > 0:
         return None
     if not recent_messages:
+        return None
+    if _unanswered_outgoing_count(recent_messages) >= 2:
         return None
 
     last_user = _last_message(recent_messages, "in")
@@ -124,11 +137,13 @@ def evaluate_proactive_trigger(
         category = TRIGGER_SEMANTIC_CATEGORY.get(type_)
         if category and _is_category_on_cooldown(category, trigger_history, now):
             return
+        daily_noise = (_daily_seed(type_, now) - 0.5) * 8
+        random_spike = rng.uniform(-7, 7)
         candidates.append(
             ProactiveTrigger(
                 type=type_,
                 instruction=instruction,
-                weight=weight + rng.uniform(-5, 5),
+                weight=weight + daily_noise + random_spike,
                 category=category,
             )
         )
@@ -152,6 +167,26 @@ def evaluate_proactive_trigger(
         add("evening_winddown", 60, "晚上收尾。发一条放松、像一天结束时想起他的消息。")
     if hours_since_user >= 6 and day >= 5:
         add("weekend_ping", 50, "周末。发一条松弛一点的随机消息。")
+    if hours_since_user >= 2 and day < 5 and 14 <= hour <= 16:
+        add("afternoon_slump", 52, "工作日午后，有点犯困或精神掉线。发一条短的、生活感强的消息。")
+    if hours_since_user >= 1 and 4 <= hour <= 5:
+        add("pre_dawn", 55, "凌晨快天亮时醒了一下。发得含糊、安静，不要像正式问候。")
+    if hours_since_user >= 3 and day < 5 and (7 <= hour <= 9 or 17 <= hour <= 18):
+        add("commute_ping", 54, "通勤/路上时间。像在路上顺手发一句，带一点现实生活细节。")
+    if hours_since_user >= 4 and day < 5 and 17 <= hour <= 19:
+        add("post_work", 58, "傍晚课程或事情告一段落。发一条有一天收束感的消息。")
+    if hours_since_user >= 3 and day == 6 and 18 <= hour <= 21:
+        add("sunday_evening", 62, "周日晚上。发一条带一点明天前情绪的、轻轻的消息。")
+    if hours_since_user >= 1 and 0 <= hour <= 1:
+        add("post_midnight_impulse", 56, "刚过零点，有个一闪而过的小念头。短一点，别沉重。")
+    if hours_since_user >= 8 and day == 0 and 7 <= hour <= 11:
+        add("monday_reboot", 60, "周一早上。像重新启动一周，轻轻问候或吐槽一下。")
+    if hours_since_user >= 4 and day == 4 and 12 <= hour <= 18:
+        add("friday_feeling", 62, "周五下午。发一条带一点快到周末的轻松感的消息。")
+    if hours_since_user >= 4 and day == 6 and 15 <= hour <= 20:
+        add("sunday_scaries", 58, "周日后半天，有一点不想面对新一周。发得真实但不丧。")
+    if hours_since_user >= 6 and day == 2 and 10 <= hour <= 20:
+        add("midweek_check", 50, "周三。像从一周中间探头出来，问一句近况。")
 
     if hours_since_user >= 1.5 and (anger >= 55 or sadness >= 55):
         add("repair_attempt", 75 + sadness * 0.2, "最近有一点情绪或摩擦。发一条低压力的缓和消息。")
@@ -178,6 +213,8 @@ def evaluate_proactive_trigger(
         add("overwhelm_check", 62, "你有点被事情压住，想找他说句话。短、真实、别卖惨。")
     if hours_since_user >= 2 and joy >= 65 and trust >= 70:
         add("gratitude_burst", 58, "突然很感谢他在。发一条短而真诚的消息。")
+    if hours_since_user >= 1.5 and anticipation >= 70:
+        add("pride_share", 55 + anticipation * 0.15, "你有一点想分享小成就或状态变好。不要炫耀，像悄悄告诉他。")
     if hours_since_user >= 3 and 35 <= disgust < 70 and anger < 60:
         add("suppressed_thought", 48, "你有点话压在心里。发一条含蓄的、未完全说开的消息。")
 
@@ -236,6 +273,17 @@ def _last_message(rows: list[dict[str, str]], direction: str) -> dict[str, str] 
     return None
 
 
+def _unanswered_outgoing_count(rows: list[dict[str, str]]) -> int:
+    count = 0
+    for row in reversed(rows):
+        direction = row.get("direction")
+        if direction == "in":
+            return count
+        if direction == "out":
+            count += 1
+    return count
+
+
 def _hours_since(raw: str | None, now: datetime) -> float | None:
     if not raw:
         return None
@@ -262,3 +310,12 @@ def _is_category_on_cooldown(category: str, trigger_history: dict[str, datetime]
         if (now - trigger_history[type_]).total_seconds() / 3600 < cooldown:
             return True
     return False
+
+
+def _daily_seed(type_: str, now: datetime) -> float:
+    key = f"{type_}:{now.date().isoformat()}"
+    value = 2166136261
+    for char in key:
+        value ^= ord(char)
+        value = (value * 16777619) & 0xFFFFFFFF
+    return value / 0xFFFFFFFF

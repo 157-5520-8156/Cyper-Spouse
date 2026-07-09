@@ -296,6 +296,14 @@ class CompanionStore:
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
+    def has_mood_state(self, canonical_user_id: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "select 1 from mood_state where canonical_user_id = ?",
+                (canonical_user_id,),
+            ).fetchone()
+        return row is not None
+
     def save_mood_state(self, canonical_user_id: str, state: MoodState) -> None:
         with self.connect() as conn:
             conn.execute(

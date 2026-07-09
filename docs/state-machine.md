@@ -51,12 +51,14 @@
 已迁移：
 
 - Plutchik 9 维情绪向量。
+- MBTI/personality baseline anchors：当前优先读取角色卡里的显式 `mbti`，例如沈知栀的 INFJ 会让初始基线更克制、更重视情绪和言外之意，而不是每次从完全中性值开始。
 - 情绪自然衰减到 baseline。
 - 长期 affinity drift，反复互动会改变 baseline。
 - 相反情绪互相抑制，如愉悦/低落、信任/反感。
 - 强标点和强烈词汇会放大情绪影响。
 - 反感/生气高时进入 ghost window，主动消息更克制。
 - prompt 中注入行为指导，而不是让模型直接照读数值。
+- 启动时只初始化一次初始状态，避免重启 daemon 后把长期心情和关系状态覆盖掉。
 - 角色 reaction selection：根据用户消息造成的情绪 delta 推断 heart/haha/wow/sad/fire/like/star/bolt 等轻反应。
 - ST context emotion bleed 的思想：外部上下文只做低权重情绪渗透，并设置单项/总量上限，避免状态被打爆。
 - 情绪化回复时机模型：温暖状态更快读/回，生气、低落、不安时读回更慢，必要时出现 ghost delay。
@@ -75,6 +77,7 @@
 
 - 核心重连：`checkin`, `pregnant_pause`, `dormancy_break`
 - 时间氛围：`late_night`, `morning_wave`, `lunch_nudge`, `evening_winddown`, `weekend_ping`
+- 生活节律：`afternoon_slump`, `pre_dawn`, `commute_ping`, `post_work`, `sunday_evening`, `post_midnight_impulse`, `monday_reboot`, `friday_feeling`, `sunday_scaries`, `midweek_check`
 - 情绪驱动：`repair_attempt`, `curiosity_ping`, `anxiety_reassurance`, `celebration_nudge`, `sharing_impulse`, `nostalgia_wave`, `longing_ping`, `playful_tease`, `jealousy_nudge`, `boredom_break`, `overwhelm_check`, `gratitude_burst`, `suppressed_thought`
 - 随机生活感：`thinking_of_you`, `random_thought`, `dream_mention`, `song_stuck`, `overthinking_spiral`, `craving_share`, `inside_joke_callback`, `quiet_productive`
 - 对话后续：`double_text`, `seen_no_reply_soft`, `followup_callback`, `memory_nudge`
@@ -88,13 +91,23 @@
 
 当 `anger` 或 `disgust` 较高时，状态机会进入 ghost window，主动触发器暂时不发。
 
+为了避免“追着发”，最后一条用户消息之后如果沈知栀已经连续发出 2 条未被回应的消息，主动触发器会停止，直到用户再次回复。触发候选还会加入日内稳定随机数，让她的主动节奏每天有细微差异，但不完全乱跳。
+
 ## Memory And Image Ports
 
 继续迁移了 EchoText 的两个实用模块思想：
 
 - Memory highlight detection：从用户消息里识别 life fact、favorite thing、hobby、important person、recent event、shared moment，并写入长期记忆。
+- Memory injection：默认只注入少量高信号记忆，偏向身份、地点、喜好和重要人物，避免每次回复都像把全部档案背出来。
 - Image request detection：识别直接图片/自拍请求，以及用户对最近图片邀约的肯定回应。当前先进入 prompt 和记忆，后续可接自动图片生成和预算闸门。
 - Image style detection：识别水彩、油画、像素、漫画、二次元、Q版、写实、素描等风格标签，并写入图片 prompt。
+- Image prompt builder：把用户图片请求整理成 `character` / `object` / `creative` 三类，并把视觉身份锚点、用户指定风格、最近对话里的“那张/刚刚那个”上下文合成稳定 prompt。默认不自动生成，避免额外费用。
+
+未迁移：
+
+- EchoText 的前端弹窗、gallery、theme editor、save/load modal 等 SillyTavern UI。
+- EchoText 的 group chat 前端管理。当前项目目标是单一沈知栀在 QQ/微信之间共享记忆，暂不需要多角色群聊。
+- 图片请求的 LLM 预解析。当前用本地规则处理，以节省 token 和图片前的额外模型调用；后续只有在规则无法解析复杂指代时再加低频 LLM 解析。
 
 ## Open Source Position
 

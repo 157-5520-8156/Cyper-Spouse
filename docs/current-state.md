@@ -161,13 +161,17 @@ Implemented:
 - Interaction event classification for rude/control/warmth/apology/vulnerable/busy/returning/question/attachment-only messages.
 - Expanded mood state: patience, security, curiosity, initiative, emotional charge, and boundary level.
 - EchoText-inspired Plutchik emotion vector with baseline, affinity drift, natural decay, opposite-emotion suppression, and text intensity multipliers.
+- EchoText-inspired MBTI/personality baseline anchors are applied from the character profile on first initialization only.
 - Interaction events are persisted in SQLite.
 - State is injected into both normal replies and proactive decisions.
+- Existing mood state is no longer reset when the runtime builds a new engine.
 - Boundary, hurt, anger, and disgust states reduce proactive frequency and life-event probability.
 - EchoText-inspired proactive trigger timeline chooses concrete outreach reasons such as hanging question, late night, repair attempt, longing, random thought, inside joke, or soft follow-up.
-- Trigger history and semantic category cooldowns reduce repetitive proactive messages.
+- Trigger history, semantic category cooldowns, daily-stable jitter, and a max-unanswered-proactive guard reduce repetitive or needy proactive messages.
 - EchoText-inspired memory highlight detection extracts life facts, favorites, hobbies, important people, recent events, and shared moments.
+- Memory injection now selects a small high-signal subset instead of always injecting every recent memory.
 - EchoText-inspired image request detection recognizes direct selfie/image requests and affirmative responses to recent image offers.
+- EchoText-inspired image prompt building classifies character/object/creative image requests and carries visual identity/context into stable generation prompts.
 - EchoText-inspired reaction selection can suggest lightweight reactions from emotional deltas.
 - EchoText-inspired reply timing model estimates read/reply/ghost delays from emotion vectors.
 - EchoText-inspired image style detection carries user-requested styles into generation prompts.

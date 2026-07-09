@@ -258,6 +258,14 @@ class CompanionEngine:
         )
 
 
-def seed_user(store: CompanionStore, canonical_user_id: str = "geoff") -> None:
+def seed_user(
+    store: CompanionStore,
+    canonical_user_id: str = "geoff",
+    initial_state: MoodState | None = None,
+) -> None:
     store.map_account("simulator", "geoff", canonical_user_id)
-    store.save_mood_state(canonical_user_id, MoodState(updated_at=utc_now()))
+    if not store.has_mood_state(canonical_user_id):
+        store.save_mood_state(
+            canonical_user_id,
+            (initial_state or MoodState()).model_copy(update={"updated_at": utc_now()}),
+        )

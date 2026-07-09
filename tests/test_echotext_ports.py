@@ -5,11 +5,17 @@ import pytest
 
 from companion_daemon.db import CompanionStore
 from companion_daemon.context_emotion_bleed import ContextMessage, context_emotion_deltas
+from companion_daemon.character import CharacterProfile
+from companion_daemon.emotion_personality import (
+    extract_mbti,
+    initial_mood_for_character,
+    personality_baseline,
+)
 from companion_daemon.emotion_reactions import select_character_reaction
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.image_requests import detect_image_request, detect_style_tags
 from companion_daemon.llm import FakeCompanionModel
-from companion_daemon.memory import detect_memory_candidates, extract_memories
+from companion_daemon.memory import detect_memory_candidates, extract_memories, memory_lines
 from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.reply_timing import emotion_reply_timing
 
@@ -27,6 +33,24 @@ def test_extract_memories_includes_echotext_style_candidates() -> None:
     )
 
     assert any(memory.kind == "shared_moment" and "明天" in memory.content for memory in memories)
+
+
+def test_memory_lines_injects_small_high_signal_subset(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    for kind, content, confidence in [
+        ("shared_moment", "用户昨天散步", 0.55),
+        ("favorite_thing", "用户喜欢桂花乌龙", 0.68),
+        ("life_fact", "用户人在成都", 0.7),
+        ("custom", "普通碎片", 0.4),
+        ("person", "用户提到室友", 0.65),
+    ]:
+        store.upsert_memory("geoff", kind=kind, content=content, source=content, confidence=confidence)
+
+    lines = memory_lines(store.memories("geoff", limit=10))
+
+    assert len(lines) == 3
+    assert any("成都" in line for line in lines)
+    assert any("桂花乌龙" in line for line in lines)
 
 
 def test_select_character_reaction_matches_emotional_delta() -> None:
@@ -80,6 +104,41 @@ def test_emotion_reply_timing_ghosts_more_when_cold() -> None:
 
     assert cold.read_delay_ms > warm.read_delay_ms
     assert cold.ghost_delay_ms > 0
+
+
+def test_personality_baseline_uses_explicit_mbti() -> None:
+    character = CharacterProfile(
+        base_prompt="你是沈知栀。",
+        identity={"mbti": "INFJ，但她不太喜欢把人简单归类"},
+    )
+
+    baseline = personality_baseline(character)
+
+    assert extract_mbti(character.identity["mbti"]) == "INFJ"
+    assert baseline["love"] > 10
+    assert baseline["trust"] > 20
+    assert baseline["joy"] < 25
+    assert baseline["anticipation"] > 25
+
+
+def test_seed_user_preserves_existing_mood_state(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    store.save_mood_state(
+        "geoff",
+        MoodState(mood="hurt", trust=12, emotion_vector={"anger": 72, "sadness": 45}),
+    )
+
+    seed_user(
+        store,
+        initial_state=initial_mood_for_character(
+            CharacterProfile(base_prompt="你是沈知栀。", identity={"mbti": "INFJ"})
+        ),
+    )
+
+    state = store.get_mood_state("geoff")
+    assert state.mood == "hurt"
+    assert state.trust == 12
+    assert state.emotion_vector["anger"] == 72
 
 
 @pytest.mark.asyncio

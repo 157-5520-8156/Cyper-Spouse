@@ -6,6 +6,7 @@ from companion_daemon.conversation import SillyTavernConversationCore
 from companion_daemon.budget import BudgetGate
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
+from companion_daemon.emotion_personality import initial_mood_for_character
 from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel
 from companion_daemon.multimodal_analysis import MultimodalAnalyzer, OpenAIMultimodalAnalyzer
 from companion_daemon.stickers import load_stickers
@@ -14,8 +15,8 @@ from companion_daemon.stickers import load_stickers
 def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
     settings = get_settings()
     store = CompanionStore(Path(settings.database_path), primary_user_id=settings.primary_user_id)
-    seed_user(store)
     character = load_character(str(settings.character_path))
+    seed_user(store, settings.primary_user_id, initial_mood_for_character(character))
     stickers = load_stickers(str(settings.stickers_path))
     if settings.deepseek_api_key and not use_fake_model:
         model = DeepSeekChatModel(

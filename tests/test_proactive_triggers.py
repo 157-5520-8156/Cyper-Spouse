@@ -1,4 +1,4 @@
-from datetime import timedelta
+from datetime import datetime, timedelta
 import random
 
 import pytest
@@ -57,6 +57,43 @@ def test_proactive_trigger_category_cooldown_blocks_similar_outreach() -> None:
 
     assert trigger
     assert trigger.category != "happy_outreach"
+
+
+def test_proactive_trigger_stops_after_unanswered_outgoing_messages() -> None:
+    trigger = evaluate_proactive_trigger(
+        state=MoodState(emotion_vector={"joy": 80, "trust": 80, "anticipation": 70}),
+        recent_messages=[
+            _row("in", "我去忙了", 4),
+            _row("out", "那你先忙。", 3),
+            _row("out", "我刚刚又想到一句。", 2),
+        ],
+        trigger_history={},
+        now=utc_now(),
+        rng=random.Random(1),
+    )
+
+    assert trigger is None
+
+
+def test_proactive_trigger_includes_daily_life_rhythm() -> None:
+    now = datetime.fromisoformat("2026-07-10T15:00:00+00:00")
+    trigger = evaluate_proactive_trigger(
+        state=MoodState(emotion_vector={"joy": 20, "trust": 20, "anticipation": 20}),
+        recent_messages=[
+            {
+                "direction": "in",
+                "platform": "qq",
+                "text": "下午还要忙一会儿",
+                "sent_at": (now - timedelta(hours=3)).isoformat(),
+            }
+        ],
+        trigger_history={},
+        now=now,
+        rng=random.Random(2),
+    )
+
+    assert trigger
+    assert trigger.type in {"afternoon_slump", "random_thought", "boredom_break", "craving_share"}
 
 
 @pytest.mark.asyncio
