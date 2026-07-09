@@ -41,9 +41,11 @@ def test_evaluate_reply_flags_ungrounded_local_details_and_hidden_questions() ->
         "哦，成都理工啊。我之前刷到你们学校附近好像有家老书店，不知道现在还在不在。",
         user_text="我在成都上学呀，在成都理工哦",
     )
+    local_known = evaluate_reply("成理啊，我知道那附近有家面馆挺有名的。", user_text="我在成都理工哦")
     hidden_question = evaluate_reply("淋着去的还是找到伞了。", user_text="早上起来雨下很大，我伞还找不到")
 
     assert "ungrounded_local_detail" in {issue.code for issue in local.issues}
+    assert "ungrounded_local_detail" in {issue.code for issue in local_known.issues}
     assert "flattened_question" in {issue.code for issue in hidden_question.issues}
 
 
@@ -58,19 +60,27 @@ def test_evaluate_reply_flags_location_confusion_without_false_positive_ne() -> 
 def test_evaluate_reply_flags_unsupported_mirroring_and_city_stereotypes() -> None:
     mirrored = evaluate_reply("我明天也有一门，打算早点起来再过一遍。", user_text="我明天考试")
     mirrored_pre = evaluate_reply("我明天也有个pre，咱俩都早点休息。", user_text="我明天考试")
+    mirrored_past = evaluate_reply("我去年考的时候也是熬夜翻来覆去地背。", user_text="毛概，好难背")
+    mirrored_semester = evaluate_reply("我上学期也被折磨过。", user_text="毛概，好难背")
+    mirrored_final = evaluate_reply("我之前期末背的时候，会在纸上画时间线。", user_text="毛概，好难背")
     stereotype = evaluate_reply("好像成都好多好吃的呀！", user_text="我在成都上学呀，在成都理工哦")
     memory_claim = evaluate_reply("哦对，你之前在群里说过在成都来着。", user_text="我在成都理工哦")
     heard_claim = evaluate_reply("之前听你说在成都来着。", user_text="我想聊聊你来着，你在哪上学哦")
     group_claim = evaluate_reply("我记得之前群里有人发过照片，晚上那边好多小摊。", user_text="我在成都理工哦")
+    group_photo_claim = evaluate_reply("我之前看群里有人发过照片，烟火气很足的样子。", user_text="我在成都理工哦")
     familiarity = evaluate_reply("哦，成理啊。之前有听说过。", user_text="我在成都上学呀，在成都理工哦")
     fake_research = evaluate_reply("我之前做城市散步笔记的时候，刚好查过那边。", user_text="我在成都理工哦")
 
     assert "ungrounded_self_event" in {issue.code for issue in mirrored.issues}
     assert "ungrounded_self_event" in {issue.code for issue in mirrored_pre.issues}
+    assert "ungrounded_self_event" in {issue.code for issue in mirrored_past.issues}
+    assert "ungrounded_self_event" in {issue.code for issue in mirrored_semester.issues}
+    assert "ungrounded_self_event" in {issue.code for issue in mirrored_final.issues}
     assert "stereotype_reply" in {issue.code for issue in stereotype.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in memory_claim.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in heard_claim.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in group_claim.issues}
+    assert "unsupported_memory_claim" in {issue.code for issue in group_photo_claim.issues}
     assert "unsupported_familiarity_claim" in {issue.code for issue in familiarity.issues}
     assert "unsupported_familiarity_claim" in {issue.code for issue in fake_research.issues}
 
@@ -93,6 +103,14 @@ def test_evaluate_reply_flags_question_nagging() -> None:
     result = evaluate_reply("毛概挺难背的，不过我刚问你的问题你好像还没回我诶。", user_text="毛概，好难背")
 
     assert "question_nag" in {issue.code for issue in result.issues}
+
+
+def test_evaluate_reply_flags_unsupported_outcome_assumptions() -> None:
+    result = evaluate_reply("那你这趟也不算白淋雨，至少没被点到名。", user_text="结果赶到教室发现老师也迟到了")
+    rain = evaluate_reply("淋着雨去上课了。", user_text="早上起来就发现雨下很大，然后我伞还找不到")
+
+    assert "unsupported_outcome_assumption" in {issue.code for issue in result.issues}
+    assert "unsupported_outcome_assumption" in {issue.code for issue in rain.issues}
 
 
 def test_evaluate_reply_allows_short_ack_for_short_ack_user_message() -> None:

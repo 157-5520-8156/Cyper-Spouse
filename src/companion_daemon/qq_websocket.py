@@ -3,6 +3,7 @@ import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 import logging
 from pathlib import Path
 import random
@@ -24,6 +25,7 @@ from companion_daemon.reply_decision import (
     decide_reply,
     is_urgent_interrupt,
 )
+from companion_daemon.time import utc_now
 from companion_daemon.turn_taking import TurnInput, TurnTakingPolicy
 from companion_daemon.runtime import build_companion_engine
 
@@ -81,8 +83,10 @@ class QQMessageCoalescer:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._deferred: dict[str, DeferredReply] = {}
         self._deferred_tasks: dict[str, asyncio.Task[None]] = {}
+        self._afterthought_tasks: dict[str, asyncio.Task[None]] = {}
 
     async def add(self, key: str, incoming: IncomingMessage, reply_target: ReplyTarget) -> None:
+        self._cancel_afterthought(key)
         if key in self._deferred:
             self._cancel_deferred(key)
             deferred = self._deferred.pop(key, None)
@@ -166,7 +170,7 @@ class QQMessageCoalescer:
                     )
                     return
 
-            await self._generate_and_send(merged, last.reply_target)
+            await self._generate_and_send(merged, last.reply_target, key=key)
         except asyncio.CancelledError:
             return
         finally:
@@ -185,7 +189,7 @@ class QQMessageCoalescer:
                 return
             logger.info("firing deferred reply for %s", key)
             await self._generate_and_send(
-                deferred.merged, deferred.reply_target, context_hint=DEFERRED_CONTEXT_HINT
+                deferred.merged, deferred.reply_target, key=key, context_hint=DEFERRED_CONTEXT_HINT
             )
         except asyncio.CancelledError:
             return
@@ -200,6 +204,7 @@ class QQMessageCoalescer:
         merged: IncomingMessage,
         reply_target: ReplyTarget,
         *,
+        key: str = "",
         context_hint: str | None = None,
     ) -> None:
         kwargs: dict[str, object] = {}
@@ -233,6 +238,52 @@ class QQMessageCoalescer:
                 logger.exception("failed to send QQ image reply")
         if self.on_reply:
             await self.on_reply(reply)
+        self._schedule_afterthought(key, merged, reply_target, utc_now())
+
+    def _schedule_afterthought(
+        self,
+        key: str,
+        merged: IncomingMessage,
+        reply_target: ReplyTarget,
+        reply_sent_at: datetime,
+    ) -> None:
+        if not self.human_timing:
+            return
+        delay = self.rng.uniform(30, 120)
+        self._afterthought_tasks[key] = asyncio.create_task(
+            self._fire_afterthought(key, delay, merged, reply_target, reply_sent_at)
+        )
+
+    async def _fire_afterthought(
+        self,
+        key: str,
+        delay: float,
+        merged: IncomingMessage,
+        reply_target: ReplyTarget,
+        reply_sent_at: datetime,
+    ) -> None:
+        try:
+            await self.sleep(delay)
+            if self.rng.random() > 0.35:
+                return
+            canonical_user_id = self.engine.store.resolve_user(
+                merged.platform, merged.platform_user_id
+            )
+            text = await self.engine.generate_afterthought(canonical_user_id, reply_sent_at)
+            if not text:
+                return
+            logger.info("sending afterthought for %s", key)
+            await self.sleep(self.rng.uniform(1.5, 4.0))
+            await reply_target.reply(content=text, msg_seq=_reply_msg_seq())
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            logger.exception("afterthought failed")
+
+    def _cancel_afterthought(self, key: str) -> None:
+        task = self._afterthought_tasks.pop(key, None)
+        if task and not task.done():
+            task.cancel()
 
 
 class CompanionQQClient(botpy.Client):

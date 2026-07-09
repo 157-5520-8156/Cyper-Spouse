@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timezone
 import random
 
 import pytest
@@ -58,6 +59,62 @@ def test_duplicate_detection_falls_back_to_text_without_message_id() -> None:
 
     assert client._is_duplicate(None, "user", "哈哈") is False
     assert client._is_duplicate(None, "user", "哈哈") is True
+
+
+@pytest.mark.asyncio
+async def test_afterthought_uses_original_reply_time() -> None:
+    class FakeStore:
+        def resolve_user(self, platform: str, platform_user_id: str) -> str:
+            return "geoff"
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = FakeStore()
+            self.seen_reply_sent_at = None
+
+        async def generate_afterthought(self, canonical_user_id: str, reply_sent_at: datetime) -> str:
+            self.seen_reply_sent_at = reply_sent_at
+            return "刚刚还想补一句。"
+
+    class FakeTarget:
+        def __init__(self):
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs) -> None:
+            self.replies.append(kwargs["content"])
+
+    class AlwaysSendRandom:
+        def uniform(self, low: float, high: float) -> float:
+            return low
+
+        def random(self) -> float:
+            return 0.0
+
+    async def fake_sleep(seconds: float) -> None:
+        return None
+
+    engine = FakeEngine()
+    target = FakeTarget()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        human_timing=True,
+        sleep=fake_sleep,
+        rng=AlwaysSendRandom(),
+    )
+    reply_sent_at = datetime(2026, 7, 10, 1, 2, 3, tzinfo=timezone.utc)
+
+    coalescer._schedule_afterthought(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="刚才那事"),
+        target,
+        reply_sent_at,
+    )
+    task = coalescer._afterthought_tasks["c2c:user"]
+    await task
+
+    assert engine.seen_reply_sent_at == reply_sent_at
+    assert target.replies == ["刚刚还想补一句。"]
 
 
 @pytest.mark.asyncio

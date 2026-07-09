@@ -38,19 +38,25 @@ _ASSISTANT_PHRASES = (
 )
 _PROBLEM_SOLVER_PHRASES = ("你可以", "建议你", "不妨", "解决方案", "步骤")
 _UNGROUNDED_LOCAL_DETAIL_RE = re.compile(
-    r"(?:刷到|听说|听人说|好像).{0,16}(?:你们学校|学校附近|附近|后门|校门口).{0,20}"
+    r"(?:刷到|听说|听人说|好像|知道).{0,16}(?:你们学校|学校附近|附近|后门|校门口).{0,20}"
     r"(?:有家|有个|一条|那家|店|书店|小吃|串串|冰粉)"
 )
 _UNGROUNDED_SELF_EVENT_RE = re.compile(
     r"我(?:明天|今天|等会儿|一会儿|待会儿)也(?:有|要|得).{0,14}"
     r"(?:一门|考试|复习|上课|交作业|开会|pre|presentation|汇报|展示)"
+    r"|我(?:上次|去年|之前|以前|上学期).{0,20}(?:考|考试|期末|复习|背到|背的时候|被.{0,8}折磨)"
 )
 _STEREOTYPE_REPLY_RE = re.compile(r"(?:成都|四川).{0,8}(?:好吃|美食|火锅|串串)")
 _UNSUPPORTED_MEMORY_CLAIM_RE = re.compile(
-    r"(?:你之前|我记得你|我记得之前|你上次|之前你|之前听你).{0,24}(?:说过|提过|聊过|告诉我|说|群里)"
+    r"(?:你之前|我记得你|我记得之前|我之前看群里|你上次|之前你|之前听你).{0,24}(?:说过|提过|聊过|告诉我|说|群里|照片)"
 )
 _UNSUPPORTED_FAMILIARITY_RE = re.compile(r"(?:之前)?(?:有)?(?:听说过|刷到过|了解过|查过那边|做[^。！？]{0,12}笔记)")
 _QUESTION_NAG_RE = re.compile(r"(?:我刚|刚才|刚刚)问(?:你)?的(?:问题)?(?:你)?(?:好像)?还没回")
+_UNSUPPORTED_OUTCOME_RE = re.compile(
+    r"(?:至少)?没被(?:老师)?(?:点到名|点名|抓到迟到)|"
+    r"(?:雨算|不算|也不算)?白淋(?:雨)?|"
+    r"淋着雨去上课了"
+)
 _THIN_REPLIES = {
     "嗯。",
     "嗯嗯。",
@@ -146,9 +152,9 @@ def evaluate_reply(text: str, *, user_text: str = "", recent_assistant_questions
         issues.append(ReplyIssue("problem_solver", "sounds like solving instead of chatting"))
     if _has_flattened_question(text) or _has_flattened_question(cleaned):
         issues.append(ReplyIssue("flattened_question", "question particle was flattened into a period"))
-    if _UNGROUNDED_LOCAL_DETAIL_RE.search(cleaned):
+    if _UNGROUNDED_LOCAL_DETAIL_RE.search(text) or _UNGROUNDED_LOCAL_DETAIL_RE.search(cleaned):
         issues.append(ReplyIssue("ungrounded_local_detail", "invents a specific local detail as if she knows it"))
-    if _UNGROUNDED_SELF_EVENT_RE.search(cleaned):
+    if _UNGROUNDED_SELF_EVENT_RE.search(text) or _UNGROUNDED_SELF_EVENT_RE.search(cleaned):
         issues.append(ReplyIssue("ungrounded_self_event", "mirrors the user's situation with an unsupported same-day event"))
     if "成都理工" in user_text and _STEREOTYPE_REPLY_RE.search(cleaned):
         issues.append(ReplyIssue("stereotype_reply", "answers a specific school detail with a generic city stereotype"))
@@ -164,6 +170,8 @@ def evaluate_reply(text: str, *, user_text: str = "", recent_assistant_questions
         issues.append(ReplyIssue("emotion_question_only", "responds to emotion with only a question"))
     if _INCOMPLETE_TRAILING_RE.search(cleaned):
         issues.append(ReplyIssue("incomplete_trailing", "reply trails off as an unfinished sentence"))
+    if _UNSUPPORTED_OUTCOME_RE.search(text) or _UNSUPPORTED_OUTCOME_RE.search(cleaned):
+        issues.append(ReplyIssue("unsupported_outcome_assumption", "assumes an outcome the user has not said"))
     if _is_low_engagement(cleaned, user_text):
         issues.append(ReplyIssue("low_engagement", "reply is too thin for the user's meaningful message"))
     if _is_echo_only(cleaned, user_text):

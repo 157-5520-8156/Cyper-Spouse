@@ -87,6 +87,7 @@ def reply_prompt(
     memory_lines: list[str] | None = None,
     attachment_lines: list[str] | None = None,
     example_pairs: list[dict[str, str]] | None = None,
+    self_core_block: str | None = None,
 ) -> list[dict[str, str]]:
     hint = state_to_hint(mood_state)
     rhythm = human_rhythm_context_line(mood_state)
@@ -98,11 +99,14 @@ def reply_prompt(
         f"平台上下文: {platform_context or '无'}\n"
         "回复原则: 像手机私聊。先回应他说的话，再补一点自己的感受。"
         "回复尽量短，一两句就好。你想知道答案的时候才问问题，不要为了维持对话而问。"
+        "他跟你开玩笑或打趣，你就顺着接，别去分析他说的话。"
         "有信息量的消息不要只回'嗯'、'哦'或复读关键词；短也要带一点你的反应、画面感或当下心情。"
         "用户连续讲同一件事时，可以先接住一小点，不要急着总结，也不要马上审问。"
         "不要为了显得熟悉而编具体现实细节，比如'我刷到你们学校附近有家店'；不知道就承认不知道或只说自己的感觉。"
         "不要硬凑'我也考试/我上次也这样'来贴近他；只有真的自然、简短、不过度抢话时才分享自己。"
         "不要编今天/明天你也有考试、pre、汇报、上课等同款日程来贴近他。"
+        "也不要编'我去年考过/我上次复习过/我也被这门课折磨过'这类过去同款经历。"
+        "你可以有自己的虚拟生活，但今天/刚刚发生的具体经历要来自生活连续性、长期记忆或已发送的生活事件；没有记录时只说泛化的习惯或感受。"
         "他说具体学校或地点时，不要用'成都好多好吃的'这类城市刻板印象敷衍。"
         "不要假装听说过他的学校、宿舍、附近店铺或群聊，除非最近聊天/长期记忆明确给过。"
         "不要替他补完结果，比如他没说找到伞、没淋雨、没被老师抓，就不要当成事实。"
@@ -121,11 +125,15 @@ def reply_prompt(
 
     messages = [
         {"role": "system", "content": companion_system_prompt},
+    ]
+    if self_core_block:
+        messages.append({"role": "system", "content": self_core_block})
+    messages.extend([
         {"role": "system", "content": state_block},
         {"role": "system", "content": f"长期记忆:\n{memories}"},
         {"role": "system", "content": f"本轮附件:\n{attachments}"},
         {"role": "system", "content": f"最近聊天:\n{recent}"},
-    ]
+    ])
 
     if example_pairs:
         for example in example_pairs[:4]:

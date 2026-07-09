@@ -149,9 +149,17 @@ def memory_from_attachment(attachment: MessageAttachment) -> ExtractedMemory | N
     return None
 
 
-def memory_lines(rows, *, max_lines: int = 3) -> list[str]:
+def memory_lines(rows, *, max_lines: int = 3, char_budget: int = 600) -> list[str]:
     selected = _select_memory_rows(rows, max_lines=max_lines)
-    return [f"- [{row['kind']}] {row['content']}" for row in selected]
+    lines: list[str] = []
+    total = 0
+    for row in selected:
+        line = f"- [{row['kind']}] {row['content']}"
+        if total + len(line) > char_budget and lines:
+            break
+        lines.append(line)
+        total += len(line)
+    return lines
 
 
 def _select_memory_rows(rows, *, max_lines: int) -> list:
@@ -159,7 +167,7 @@ def _select_memory_rows(rows, *, max_lines: int) -> list:
     for index, row in enumerate(rows):
         confidence = float(row["confidence"]) if "confidence" in row.keys() else 0.7
         kind = str(row["kind"])
-        bonus = 0.12 if kind in {"name", "life_fact", "favorite_thing", "person"} else 0.0
+        bonus = 0.12 if kind in {"name", "life_fact", "favorite_thing", "person", "life_event"} else 0.0
         recency = max(0.0, 0.2 - index * 0.03)
         scored.append((confidence + bonus + recency, index, row))
     scored.sort(key=lambda item: (-item[0], item[1]))

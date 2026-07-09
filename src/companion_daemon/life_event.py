@@ -83,11 +83,26 @@ async def run(
         if settings.deepseek_api_key
         else FakeCompanionModel()
     )
+    budget_gate = BudgetGate(
+        engine.store,
+        monthly_budget_cny=settings.monthly_budget_cny,
+        daily_budget_cny=settings.daily_budget_cny,
+        soft_daily_budget_cny=settings.soft_daily_budget_cny,
+        monthly_image_limit=settings.monthly_image_limit,
+        monthly_vision_limit=settings.monthly_vision_limit,
+        monthly_audio_limit=settings.monthly_audio_limit,
+    )
+    event_estimate = ESTIMATES["life_event"]
+    event_budget = budget_gate.check(event_estimate, automatic=True)
+    if not event_budget.allowed:
+        print(f"life event not generated: {event_budget.reason}")
+        return False
     event = await LifeEventGenerator(model).generate(
         mood=state.mood,
         relationship_stage=state.relationship_stage,
         relationship_status=relationship_status_line(state),
     )
+    budget_gate.record(event_estimate, note=f"life_event:{event.topic[:40]}")
     print(f"topic: {event.topic}")
     for index, message in enumerate(event.messages, start=1):
         print(f"{index}. {message}")
@@ -97,17 +112,8 @@ async def run(
         if not settings.openai_api_key:
             print("image not generated: OPENAI_API_KEY is missing")
         else:
-            budget_gate = BudgetGate(
-                engine.store,
-                monthly_budget_cny=settings.monthly_budget_cny,
-                daily_budget_cny=settings.daily_budget_cny,
-                soft_daily_budget_cny=settings.soft_daily_budget_cny,
-                monthly_image_limit=settings.monthly_image_limit,
-                monthly_vision_limit=settings.monthly_vision_limit,
-                monthly_audio_limit=settings.monthly_audio_limit,
-            )
             estimate = ESTIMATES["image_generation"]
-            decision = budget_gate.check(estimate, automatic=not send)
+            decision = budget_gate.check(estimate, automatic=True)
             if not decision.allowed:
                 print(f"image not generated: {decision.reason}")
             else:
@@ -142,6 +148,7 @@ async def run(
     client = QQOfficialClient(settings.qq_bot_app_id, settings.qq_bot_secret, api_base_url=api_base_url)
     for message in event.messages:
         await client.send_c2c_text(openid, message, is_wakeup=True)
+        engine.store.save_outgoing(user_id, "qq", message)
 
     if generated_path:
         await client.send_c2c_local_image(openid, generated_path, is_wakeup=True)
@@ -154,6 +161,13 @@ async def run(
             await client.send_c2c_local_image(openid, Path(sticker.path), is_wakeup=True)
             print(f"sent sticker: {sticker.path}")
     engine.store.record_proactive_delivery(user_id, "qq:life_event")
+    engine.store.upsert_memory(
+        user_id,
+        kind="life_event",
+        content=f"{event.topic}: {' / '.join(event.messages)}",
+        source="life_event",
+        confidence=0.82,
+    )
     return True
 
 

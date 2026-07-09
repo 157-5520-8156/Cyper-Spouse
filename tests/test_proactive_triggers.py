@@ -139,6 +139,50 @@ def test_proactive_trigger_includes_daily_life_rhythm() -> None:
     assert trigger.type in {"afternoon_slump", "random_thought", "boredom_break", "craving_share"}
 
 
+def test_deep_night_blocks_casual_idle_triggers() -> None:
+    now = datetime.fromisoformat("2026-07-10T03:05:00+00:00")
+    trigger = evaluate_proactive_trigger(
+        state=MoodState(emotion_vector={"joy": 20, "trust": 20, "anticipation": 20}),
+        recent_messages=[
+            {
+                "direction": "in",
+                "platform": "qq",
+                "text": "我去忙了",
+                "sent_at": (now - timedelta(hours=3)).isoformat(),
+            }
+        ],
+        trigger_history={},
+        now=now,
+        rng=random.Random(2),
+    )
+
+    assert trigger is None
+
+
+def test_deep_night_still_allows_unresolved_emotional_triggers() -> None:
+    now = datetime.fromisoformat("2026-07-10T02:05:00+00:00")
+    trigger = evaluate_proactive_trigger(
+        state=MoodState(
+            emotion_vector={"trust": 45, "sadness": 45},
+            last_emotion_impact={"sadness": 20},
+        ),
+        recent_messages=[
+            {
+                "direction": "in",
+                "platform": "qq",
+                "text": "刚才心里有点闷",
+                "sent_at": (now - timedelta(hours=2)).isoformat(),
+            }
+        ],
+        trigger_history={},
+        now=now,
+        rng=random.Random(3),
+    )
+
+    assert trigger
+    assert trigger.type == "mood_follow_up"
+
+
 def test_proactive_trigger_follows_up_after_emotion_shift() -> None:
     now = datetime.fromisoformat("2026-07-10T10:00:00+00:00")
     trigger = evaluate_proactive_trigger(

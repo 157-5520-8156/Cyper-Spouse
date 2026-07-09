@@ -12,34 +12,33 @@ _ASSISTANTESE_PATTERNS = [
         r"(?:朋友|同学|室友|高中同学|大学同学|舍友)[^。！？]{0,48}(?:。|！|？)?"
     ),
     re.compile(r"(?:不过|但是|而且|然后)?我?(?:朋友|同学|室友|舍友)(?:也|之前|跟我|和我|说)[^。！？]{0,48}(?:。|！|？)?"),
+    re.compile(r"我(?:明天|今天|等会儿|一会儿|待会儿)也(?:有|要|得)[^。！？]{0,24}(?:考试|一门|pre|汇报|展示)[^。！？]{0,24}(?:。|！|？)?"),
+    re.compile(r"我(?:上次|去年|之前|以前|上学期)[^。！？]{0,32}(?:考|考试|期末|复习|背到|背的时候|被.{0,8}折磨)[^。！？]{0,32}(?:。|！|？)?"),
     re.compile(r"(确实)"),
-    re.compile(r"^(说实话[，,]?\s*)"),
-    re.compile(r"^(讲真[，,]?\s*)"),
-    re.compile(r"^(其实吧[，,]?\s*)"),
-    re.compile(r"^(不得不说[，,]?\s*)"),
-    re.compile(r"^(不得不说的是[，,]?\s*)"),
+    re.compile(r"(?:上次)?听说[^。！？]{0,48}(?:附近|夜市|有名|小摊)[^。！？]{0,32}(?:。|！|？)?"),
+    re.compile(r"(?:至少)?没被(?:老师)?(?:点到名|点名|抓到迟到)[^。！？]{0,16}(?:。|！|？)?"),
+    re.compile(r"[^。！？]{0,16}(?:雨算|不算|也不算)?白淋(?:雨)?[^。！？]{0,16}(?:。|！|？)?"),
+    re.compile(r"淋着雨去上课了(?:。|！|？)?"),
+    re.compile(r"^(不得不说(?:的是)?[，,]?\s*)"),
     re.compile(r"^(有趣的是[，,]?\s*)"),
-    re.compile(r"^(值得一提的是[，,]?\s*)"),
-    re.compile(r"^(忍不住想说[，,]?\s*)"),
+    re.compile(r"^(值得一提(?:的是)?[，,]?\s*)"),
     re.compile(r"^(作为(?:一个)?(?:过来人|朋友)[，,]?\s*)"),
-    re.compile(r"^(总的来说[，,]?\s*)"),
-    re.compile(r"^(总的来说[，,]?\s*说[，,]?\s*)"),
-    re.compile(r"(不过话说回来[，,]?\s*)"),
-    re.compile(r"^(说到这个[，,]?\s*)"),
-    re.compile(r"^(说到这儿[，,]?\s*)"),
-    re.compile(r"^(你知道(?:吗|的)[，,]?\s*)"),
-    re.compile(r"(?:我记得你之前|我记得之前|你之前|之前听你)[^。！？]{0,50}(?:。|！|？)?"),
-    re.compile(r"我之前[^。！？]{0,24}(?:查过那边|做[^。！？]{0,12}笔记)[^。！？]{0,30}(?:。|！|？)?"),
-    re.compile(r"^(让我想想[，,。]?\s*)"),
-    re.compile(r"^(嗯[，,]?\s*让我想想[，,。]?\s*)"),
-    re.compile(r"^(哈哈[，,]?\s*这个问题[，,]?\s*)"),
+    re.compile(r"^(总的来说[，,]?\s*说?[，,]?\s*)"),
+    re.compile(r"^(不过话说回来[，,]?\s*)"),
     re.compile(r"^(好问题[！!]?[，,]?\s*)"),
     re.compile(r"^(这是个好问题[。！]?[，,]?\s*)"),
+    re.compile(r"^(哈哈[，,]?\s*这个问题[，,]?\s*)"),
+    re.compile(r"^(你这句话?说(?:得)?挺[^，。！？]{1,12}[，,。]?\s*)"),
+    re.compile(r"^(这个(?:问题|话)(?:挺|太|有点)(?:突然|直接|冒昧)[，,。]?\s*)"),
+    re.compile(r"(听着还挺[^，。！？]{1,8}[，,。]?\s*)"),
+    re.compile(r"(这话?说得挺[^，。！？]{1,10}[，,。]?\s*)"),
+    re.compile(r"(?:我记得你之前|我记得之前|我之前看群里|你之前|之前听你)[^。！？]{0,50}(?:。|！|？)?"),
+    re.compile(r"我之前[^。！？]{0,24}(?:查过那边|做[^。！？]{0,12}笔记)[^。！？]{0,30}(?:。|！|？)?"),
+    re.compile(r"(?:我知道|知道)[^。！？]{0,18}(?:附近|后门|校门口)[^。！？]{0,24}(?:有家|有个|夜市|面馆|店)[^。！？]{0,24}(?:。|！|？)?"),
 ]
 
 
 def sanitize_chat_text(text: str) -> str:
-    """Remove roleplay-style stage directions and AI-ish patterns from IM replies."""
     cleaned_lines: list[str] = []
     for line in text.splitlines():
         stripped = line.strip()
@@ -74,7 +73,6 @@ def _soften_assistantese(text: str) -> str:
 
 
 def _limit_questions(text: str) -> str:
-    """Keep at most one question mark; remove extra question tails when possible."""
     result = _drop_leading_question_murmur(text)
     while True:
         question_marks = list(re.finditer(r"[？?]", result))

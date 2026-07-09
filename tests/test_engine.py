@@ -446,6 +446,93 @@ async def test_auto_image_generation_respects_budget_gate(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_proactive_tick_respects_budget_gate(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.save_incoming(
+        "geoff",
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我先忙一会儿"),
+    )
+    store.record_usage("vision", 1.0)
+    budget = BudgetGate(
+        store,
+        monthly_budget_cny=80,
+        daily_budget_cny=3,
+        soft_daily_budget_cny=1.0,
+        monthly_image_limit=20,
+        monthly_vision_limit=120,
+        monthly_audio_limit=60,
+    )
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT, budget_gate=budget)
+
+    decision = await engine.proactive_tick("geoff")
+
+    assert decision.should_send is False
+    assert "预算阀门" in decision.private_thought
+    assert model.calls == []
+
+
+@pytest.mark.asyncio
+async def test_afterthought_respects_budget_gate(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store, initial_state=MoodState(mood="miss_you"))
+    store.save_incoming(
+        "geoff",
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我刚才心里有点闷"),
+    )
+    store.save_outgoing("geoff", "qq", "我在听。")
+    store.record_usage("vision", 1.0)
+    budget = BudgetGate(
+        store,
+        monthly_budget_cny=80,
+        daily_budget_cny=3,
+        soft_daily_budget_cny=1.0,
+        monthly_image_limit=20,
+        monthly_vision_limit=120,
+        monthly_audio_limit=60,
+    )
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT, budget_gate=budget)
+
+    text = await engine.generate_afterthought("geoff", utc_now())
+
+    assert text is None
+    assert model.calls == []
+    assert any(row["kind"] == "afterthought_blocked" for row in store.memories("geoff"))
+
+
+@pytest.mark.asyncio
+async def test_memory_maintenance_respects_budget_gate(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    for index in range(22):
+        store.save_incoming(
+            "geoff",
+            IncomingMessage(platform="qq", platform_user_id="geoff", text=f"消息{index}"),
+        )
+    for index in range(5):
+        store.upsert_memory("geoff", kind="life_fact", content=f"用户事实{index}", source="test", confidence=0.7)
+    store.record_usage("vision", 1.0)
+    budget = BudgetGate(
+        store,
+        monthly_budget_cny=80,
+        daily_budget_cny=3,
+        soft_daily_budget_cny=1.0,
+        monthly_image_limit=20,
+        monthly_vision_limit=120,
+        monthly_audio_limit=60,
+    )
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT, budget_gate=budget)
+
+    await engine._maybe_consolidate("geoff", MoodState())
+
+    assert model.calls == []
+    assert any(row["kind"] == "memory_maintenance_blocked" for row in store.memories("geoff"))
+
+
+@pytest.mark.asyncio
 async def test_handle_message_records_tool_request_without_executing(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
