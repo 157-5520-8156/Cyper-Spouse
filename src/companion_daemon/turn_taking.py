@@ -39,11 +39,13 @@ class TurnTakingPolicy:
         short_wait_seconds: float = 2.5,
         long_wait_seconds: float = 5.5,
         long_burst_seconds: float = 15.0,
+        longform_start_seconds: float = 300.0,
     ):
         self.immediate_seconds = immediate_seconds
         self.short_wait_seconds = short_wait_seconds
         self.long_wait_seconds = long_wait_seconds
         self.long_burst_seconds = long_burst_seconds
+        self.longform_start_seconds = longform_start_seconds
 
     def decide(self, turn: TurnInput) -> TurnDecision:
         latest = turn.latest_text.strip()
@@ -58,6 +60,14 @@ class TurnTakingPolicy:
                 ReplyTiming.IMMEDIATE,
                 self.immediate_seconds,
                 "explicit_stop_or_urgent",
+            )
+
+        if turn.pending_count == 1 and _looks_like_longform_opener(latest):
+            return TurnDecision(
+                TurnState.COLLECTING,
+                ReplyTiming.LONG_WAIT,
+                self.longform_start_seconds,
+                "longform_opener_waiting_for_user",
             )
 
         if turn.pending_count == 1 and _looks_like_complete_short_turn(latest):
@@ -137,6 +147,33 @@ def _looks_like_continuation(text: str) -> bool:
     if lowered.startswith(continuation_starts):
         return True
     return _ends_in_open_continuation(text)
+
+
+def _looks_like_longform_opener(text: str) -> bool:
+    stripped = text.strip()
+    if _ends_like_question_or_completion(stripped) and len(stripped) >= 32:
+        return False
+    opener_tokens = (
+        "我跟你说",
+        "我和你说",
+        "跟你说个事",
+        "跟你讲个事",
+        "我想跟你说",
+        "我想跟你讲",
+        "有个事",
+        "有件事",
+        "说来话长",
+        "我今天真的有点离谱",
+        "今天真的有点离谱",
+        "我今天遇到个事",
+        "我刚刚遇到个事",
+        "我有点不知道怎么说",
+        "其实吧",
+        "怎么说呢",
+    )
+    if any(token in stripped for token in opener_tokens):
+        return True
+    return stripped.endswith(("我跟你说", "我想说", "说来话长", "有点离谱"))
 
 
 def _ends_in_open_continuation(text: str) -> bool:

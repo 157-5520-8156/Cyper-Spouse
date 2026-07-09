@@ -97,6 +97,7 @@ def _needs_more_presence(text: str, user_text: str) -> bool:
         "好的。",
         "行。",
         "那有点惨。",
+        "那就好。",
         "怎么了？",
         "我懂那种感觉。",
         "我有点好奇。",

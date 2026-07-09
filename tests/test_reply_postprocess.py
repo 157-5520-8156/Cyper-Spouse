@@ -97,6 +97,16 @@ def test_postprocess_adds_presence_to_thin_curiosity() -> None:
     assert text == "我有点好奇。我刚刚停了一下，脑子里有画面了。"
 
 
+def test_postprocess_adds_presence_to_bare_relief() -> None:
+    text = postprocess_reply_text(
+        "那就好。",
+        recent_lines=[],
+        user_text="我在那里坐着突然觉得很好笑",
+    )
+
+    assert text == "那就好。我刚刚停了一下，脑子里有画面了。"
+
+
 def test_postprocess_adds_presence_to_bare_whats_wrong() -> None:
     text = postprocess_reply_text(
         "怎么了？",

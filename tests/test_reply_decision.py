@@ -19,6 +19,32 @@ def test_ack_can_be_skipped_without_marking_unread() -> None:
     assert decision.mark_unread is False
 
 
+def test_ack_can_be_deferred_when_it_looks_low_energy_in_context() -> None:
+    state = MoodState(mood="hurt", unresolved_emotion="用户刚才有点敷衍")
+
+    decision = decide_reply("嗯", state=state, rng=random.Random(4))
+
+    assert decision.action == ReplyAction.DEFER
+    assert decision.mark_unread is True
+    assert decision.reason == "low_energy_ack_needs_space"
+    assert decision.defer_minutes is not None
+
+
+def test_ack_can_leave_open_thread_without_marking_unread() -> None:
+    state = MoodState(
+        mood="curious",
+        relationship_stage="close_friend",
+        initiative=50,
+    )
+
+    decision = decide_reply("嗯", state=state, rng=random.Random(4))
+
+    assert decision.action == ReplyAction.DEFER
+    assert decision.mark_unread is False
+    assert decision.reason == "ack_leaves_open_thread"
+    assert decision.defer_minutes is not None
+
+
 def test_unread_or_pending_message_makes_ack_replyable() -> None:
     assert decide_reply("嗯嗯", has_unread=True).action == ReplyAction.REPLY_NOW
     assert decide_reply("嗯嗯", has_pending_reply=True).action == ReplyAction.REPLY_NOW

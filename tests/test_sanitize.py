@@ -13,6 +13,8 @@ def test_sanitize_softens_assistantese_and_limits_questions() -> None:
     assert sanitize_chat_text("嗯？怎么了？大半夜说这种话。") == "怎么了？大半夜说这种话。"
     assert sanitize_chat_text("淋着了还是找到伞了。") == "淋着了还是找到伞了？"
     assert sanitize_chat_text("我有时候也会去校园里走一圈。你要不要也试试？") == "我有时候也会去校园里走一圈。"
+    assert sanitize_chat_text("我先陪你待一会儿。要不要听首歌，或者就随便说说话也行？") == "我先陪你待一会儿。"
+    assert sanitize_chat_text("你今晚早点休息，或者去洗个热水澡，可能会好一些。") == ""
     assert sanitize_chat_text("你别整段硬啃，拆成小块可能会好一点。") == ""
 
 
@@ -23,11 +25,13 @@ def test_sanitize_removes_acquaintance_crutch_variants() -> None:
     )
     assert sanitize_chat_text("毛概确实要背好多啊，不过我室友说画了重点会好背一点。") == "毛概要背好多啊。"
     assert sanitize_chat_text("成都理工啊，我好像有个高中同学在那。") == "成都理工啊。"
+    assert sanitize_chat_text("我一个高中同学在那儿读过，说晚上特别热闹。") == ""
     assert sanitize_chat_text("我明天也有一门考试，刚背完知识点，准备睡了。") == ""
     assert sanitize_chat_text("毛概真的好难背啊，我去年考的时候也是熬夜翻来覆去地背。") == "毛概真的好难背啊。"
     assert sanitize_chat_text("毛概难背……我上学期也被折磨过。") == "毛概难背……"
     assert sanitize_chat_text("毛概有点绕，我上学期背得也头疼。") == "毛概有点绕。"
     assert sanitize_chat_text("我之前期末背的时候，会在纸上画时间线。") == ""
+    assert sanitize_chat_text("我在图书馆看到好多人抱着毛概书在走廊来回走，边念边叹气。") == ""
     assert (
         sanitize_chat_text("我上次找不到伞，最后翻出来一把快散架的，撑到一半差点被风吹翻。") == ""
     )
@@ -35,6 +39,8 @@ def test_sanitize_removes_acquaintance_crutch_variants() -> None:
     assert sanitize_chat_text("成都理工啊。听说秋天的时候学校还挺好看的。") == "成都理工啊。"
     assert sanitize_chat_text("那你这趟也不算白淋雨，至少没被点到名。") == ""
     assert sanitize_chat_text("淋着雨去上课了。") == ""
+    assert sanitize_chat_text("是雨停了老师才到，那种事后的滑稽感。") == ""
+    assert sanitize_chat_text("不过淋了雨还白等，有点亏。") == ""
 
 
 def test_sanitize_repairs_chengdu_location_confusion() -> None:
@@ -45,6 +51,7 @@ def test_sanitize_removes_explicit_unsupported_memory_claims() -> None:
     assert sanitize_chat_text("怎么了？我记得你之前说自己忙得有点离谱。") == "怎么了？"
     assert sanitize_chat_text("之前听你说在成都来着。") == ""
     assert sanitize_chat_text("你呢？之前群里看到你在成都。") == "你呢？"
+    assert sanitize_chat_text("我知道！\n之前刷到一个学长发的照片，说那边晚上烟火气特别足。") == ""
     assert sanitize_chat_text("我记得之前群里有人发过照片，晚上那边好多小摊。") == ""
     assert sanitize_chat_text("我之前看群里有人发过照片，烟火气很足的样子。") == ""
     assert sanitize_chat_text("我之前做城市散步笔记的时候，刚好查过那边。") == ""

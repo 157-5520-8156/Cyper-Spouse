@@ -15,20 +15,26 @@ def test_evaluate_reply_flags_common_ai_smells() -> None:
 
     soft_advice = evaluate_reply("我有时候会出去走一圈。你要不要也试试？", user_text="我心里闷闷的")
     study_advice = evaluate_reply("你别整段硬啃，拆成小块可能会好一点。", user_text="毛概，好难背")
+    music_advice = evaluate_reply("要不要听首歌，或者就随便说说话也行？", user_text="我心里闷闷的")
+    bath_advice = evaluate_reply("你今晚早点休息，或者去洗个热水澡，可能会好一些。", user_text="我心里闷闷的")
     assert "problem_solver" in {issue.code for issue in soft_advice.issues}
     assert "problem_solver" in {issue.code for issue in study_advice.issues}
+    assert "problem_solver" in {issue.code for issue in music_advice.issues}
+    assert "problem_solver" in {issue.code for issue in bath_advice.issues}
 
 
 def test_evaluate_reply_flags_stage_and_acquaintance_crutch() -> None:
     result = evaluate_reply("（刚看到）我有个高中同学也这样说过。")
     friend_photo = evaluate_reply("我之前看一个成都的朋友发过照片，感觉烟火气特别浓。")
     vague_classmate = evaluate_reply("成都理工啊，我好像有个高中同学在那。")
+    classmate_study = evaluate_reply("我一个高中同学在那儿读过，说晚上特别热闹。")
     codes = {issue.code for issue in result.issues}
 
     assert "stage_direction" in codes
     assert "acquaintance_crutch" in codes
     assert "acquaintance_crutch" in {issue.code for issue in friend_photo.issues}
     assert "acquaintance_crutch" in {issue.code for issue in vague_classmate.issues}
+    assert "acquaintance_crutch" in {issue.code for issue in classmate_study.issues}
 
 
 def test_evaluate_reply_flags_thin_or_echo_only_replies() -> None:
@@ -72,10 +78,12 @@ def test_evaluate_reply_flags_unsupported_mirroring_and_city_stereotypes() -> No
     mirrored_study_pain = evaluate_reply("我上学期背得也头疼。", user_text="毛概，好难背")
     mirrored_final = evaluate_reply("我之前期末背的时候，会在纸上画时间线。", user_text="毛概，好难背")
     mirrored_rain = evaluate_reply("我上次找不到伞，最后也被淋到了。", user_text="早上起来雨下很大，我伞还找不到")
+    local_scene = evaluate_reply("我在图书馆看到好多人抱着毛概书在走廊来回走。", user_text="毛概，好难背")
     stereotype = evaluate_reply("好像成都好多好吃的呀！", user_text="我在成都上学呀，在成都理工哦")
     memory_claim = evaluate_reply("哦对，你之前在群里说过在成都来着。", user_text="我在成都理工哦")
     heard_claim = evaluate_reply("之前听你说在成都来着。", user_text="我想聊聊你来着，你在哪上学哦")
     group_city_claim = evaluate_reply("你呢？之前群里看到你在成都。", user_text="我想聊聊你来着，你在哪上学哦")
+    senior_photo_claim = evaluate_reply("之前刷到一个学长发的照片，说那边晚上烟火气特别足。", user_text="我在成都理工哦")
     group_claim = evaluate_reply("我记得之前群里有人发过照片，晚上那边好多小摊。", user_text="我在成都理工哦")
     group_photo_claim = evaluate_reply("我之前看群里有人发过照片，烟火气很足的样子。", user_text="我在成都理工哦")
     familiarity = evaluate_reply("哦，成理啊。之前有听说过。", user_text="我在成都上学呀，在成都理工哦")
@@ -88,10 +96,12 @@ def test_evaluate_reply_flags_unsupported_mirroring_and_city_stereotypes() -> No
     assert "ungrounded_self_event" in {issue.code for issue in mirrored_study_pain.issues}
     assert "ungrounded_self_event" in {issue.code for issue in mirrored_final.issues}
     assert "ungrounded_self_event" in {issue.code for issue in mirrored_rain.issues}
+    assert "ungrounded_self_event" in {issue.code for issue in local_scene.issues}
     assert "stereotype_reply" in {issue.code for issue in stereotype.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in memory_claim.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in heard_claim.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in group_city_claim.issues}
+    assert "unsupported_memory_claim" in {issue.code for issue in senior_photo_claim.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in group_claim.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in group_photo_claim.issues}
     assert "unsupported_familiarity_claim" in {issue.code for issue in familiarity.issues}
@@ -121,9 +131,13 @@ def test_evaluate_reply_flags_question_nagging() -> None:
 def test_evaluate_reply_flags_unsupported_outcome_assumptions() -> None:
     result = evaluate_reply("那你这趟也不算白淋雨，至少没被点到名。", user_text="结果赶到教室发现老师也迟到了")
     rain = evaluate_reply("淋着雨去上课了。", user_text="早上起来就发现雨下很大，然后我伞还找不到")
+    rain_stopped = evaluate_reply("是雨停了老师才到，那种事后的滑稽感。", user_text="结果赶到教室发现老师也迟到了")
+    waiting = evaluate_reply("不过淋了雨还白等，有点亏。", user_text="结果赶到教室发现老师也迟到了")
 
     assert "unsupported_outcome_assumption" in {issue.code for issue in result.issues}
     assert "unsupported_outcome_assumption" in {issue.code for issue in rain.issues}
+    assert "unsupported_outcome_assumption" in {issue.code for issue in rain_stopped.issues}
+    assert "unsupported_outcome_assumption" in {issue.code for issue in waiting.issues}
 
 
 def test_evaluate_reply_allows_short_ack_for_short_ack_user_message() -> None:

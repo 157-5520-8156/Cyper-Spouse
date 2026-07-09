@@ -38,6 +38,8 @@ _URGENT_HINTS = (
     "在吗", "在不在", "人呢", "你人呢", "回我", "怎么不回",
     "在么", "在不", "??", "？？", "你还在吗", "理我",
 )
+LOW_ENERGY_ACK_DEFER_RANGE = (6, 18)
+OPEN_THREAD_ACK_DEFER_RANGE = (3, 14)
 
 
 def classify_message(text: str) -> str:
@@ -143,6 +145,20 @@ def decide_reply(
     if msg_type == "ack":
         if has_pending_reply or has_unread:
             return ReplyDecision(ReplyAction.REPLY_NOW, reason="ack_after_pending")
+        if state and _ack_may_be_low_energy_emotion(state):
+            return ReplyDecision(
+                ReplyAction.DEFER,
+                defer_minutes=rng.uniform(*LOW_ENERGY_ACK_DEFER_RANGE),
+                reason="low_energy_ack_needs_space",
+                mark_unread=True,
+            )
+        if state and _ack_may_leave_open_thread(state, rng):
+            return ReplyDecision(
+                ReplyAction.DEFER,
+                defer_minutes=rng.uniform(*OPEN_THREAD_ACK_DEFER_RANGE),
+                reason="ack_leaves_open_thread",
+                mark_unread=False,
+            )
         return ReplyDecision(ReplyAction.SKIP, reason="pure_acknowledgment", mark_unread=False)
 
     if msg_type == "empty":
@@ -193,3 +209,24 @@ def _defer_minutes_for_phase(phase: str, rng: random.Random) -> float:
     }
     low, high = ranges.get(phase, (5, 15))
     return rng.uniform(low, high)
+
+
+def _ack_may_be_low_energy_emotion(state: MoodState) -> bool:
+    if state.unresolved_emotion:
+        return True
+    if state.mood in {"hurt", "guarded", "sulking", "worried"}:
+        return True
+    return state.emotional_charge >= 45 and state.security <= 40
+
+
+def _ack_may_leave_open_thread(state: MoodState, rng: random.Random) -> bool:
+    chance = 0.08
+    if state.relationship_stage in {"close_friend", "ambiguous", "lover"}:
+        chance += 0.12
+    if state.mood in {"curious", "affectionate", "miss_you", "happy"}:
+        chance += 0.10
+    if state.initiative >= 45:
+        chance += 0.08
+    if state.mood in {"sleepy", "guarded"}:
+        chance -= 0.08
+    return rng.random() < max(0.0, min(0.35, chance))

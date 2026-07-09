@@ -12,12 +12,21 @@ from companion_daemon.life_event import LifeEvent, parse_life_event, run
 
 def test_parse_life_event_json() -> None:
     event = parse_life_event(
-        '{"topic":"食堂","messages":["刚刚吃到一个好甜的南瓜。","我认真怀疑阿姨今天心情很好。"],"sticker_category":"happy"}'
+        '{"topic":"食堂","messages":["刚刚吃到一个好甜的南瓜。","我认真怀疑阿姨今天心情很好。"],"sticker_category":"happy","memory_mode":"planned_today"}'
     )
 
     assert event.topic == "食堂"
     assert len(event.messages) == 2
     assert event.sticker_category == "happy"
+    assert event.memory_mode == "planned_today"
+
+
+def test_parse_life_event_supports_spontaneous_recall() -> None:
+    event = parse_life_event(
+        '{"topic":"午饭小插曲","messages":["我刚突然想起来，中午那份饭里有根头发。"],"memory_mode":"spontaneous_recall"}'
+    )
+
+    assert event.memory_mode == "spontaneous_recall"
 
 
 def test_parse_life_event_rewrites_unrealistic_local_invitation() -> None:
@@ -48,6 +57,7 @@ async def test_life_event_prompt_sets_grounded_fiction_rules() -> None:
     assert "用户在成都" in system_prompt
     assert "不要邀请用户立刻去她身边" in system_prompt
     assert "生活连续性账本" in system_prompt
+    assert "spontaneous_recall" in system_prompt
 
 
 @pytest.mark.asyncio
@@ -65,7 +75,7 @@ async def test_life_event_send_records_outgoing_and_memory(tmp_path: Path, monke
             self.model = model
 
         async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str) -> LifeEvent:
-            return LifeEvent(topic="午饭", messages=["刚刚吃了南瓜。", "有点甜。"])
+            return LifeEvent(topic="午饭", messages=["刚刚吃了南瓜。", "有点甜。"], memory_mode="spontaneous_recall")
 
     class FakeQQClient:
         sent: list[str] = []
@@ -103,7 +113,12 @@ async def test_life_event_send_records_outgoing_and_memory(tmp_path: Path, monke
     assert sent is True
     assert FakeQQClient.sent == ["刚刚吃了南瓜。", "有点甜。"]
     assert [row["text"] for row in store.recent_messages("geoff", limit=2)] == ["刚刚吃了南瓜。", "有点甜。"]
-    assert any(row["kind"] == "life_event" and "午饭" in row["content"] for row in store.memories("geoff", limit=10))
+    memories = store.memories("geoff", limit=10)
+    assert any(row["kind"] == "private_life_event" and "午饭" in row["content"] for row in memories)
+    assert any(row["kind"] == "life_event" and "午饭" in row["content"] for row in memories)
+    private = store.memory_by_source("geoff", kind="private_life_event", source="life_event:spontaneous_recall")
+    assert private is not None
+    assert private["confidence"] == pytest.approx(0.68)
     assert store.usage_count("life_event", "month", datetime.now(UTC)) == 1
 
 
@@ -159,10 +174,54 @@ async def test_life_event_text_send_failure_does_not_record_lived_memory(
 
     assert sent is False
     memories = store.memories("geoff", limit=10)
+    assert any(row["kind"] == "private_life_event" and "午饭" in row["content"] for row in memories)
     assert not any(row["kind"] == "life_event" for row in memories)
     assert any(row["kind"] == "life_event_send_failed" and "午饭" in row["content"] for row in memories)
     assert store.last_proactive_delivery("geoff", "qq:life_event") is None
     assert store.recent_messages("geoff", limit=5) == []
+
+
+@pytest.mark.asyncio
+async def test_life_event_dry_run_does_not_record_private_life(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = store
+
+    class FakeGenerator:
+        def __init__(self, model):
+            self.model = model
+
+        async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str) -> LifeEvent:
+            return LifeEvent(topic="午饭", messages=["刚刚吃了南瓜。"])
+
+    monkeypatch.setattr(life_event_module, "build_companion_engine", lambda: FakeEngine())
+    monkeypatch.setattr(life_event_module, "LifeEventGenerator", FakeGenerator)
+    monkeypatch.setattr(
+        life_event_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            deepseek_api_key=None,
+            deepseek_base_url="https://api.deepseek.com",
+            deepseek_model="deepseek-chat",
+            monthly_budget_cny=80,
+            daily_budget_cny=3,
+            soft_daily_budget_cny=2,
+            monthly_image_limit=20,
+            monthly_vision_limit=120,
+            monthly_audio_limit=60,
+            openai_api_key=None,
+            qq_bot_app_id="app",
+            qq_bot_secret="secret",
+        ),
+    )
+
+    sent = await run(user_id="geoff", send=False, sandbox=True, generate_image=False, image_kind="life")
+
+    assert sent is False
+    assert not any(row["kind"] == "private_life_event" for row in store.memories("geoff", limit=10))
 
 
 @pytest.mark.asyncio

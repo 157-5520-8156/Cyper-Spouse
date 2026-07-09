@@ -25,6 +25,23 @@ def test_short_wait_for_complete_question() -> None:
     assert decision.wait_seconds == 2.0
 
 
+def test_waits_much_longer_for_longform_opener() -> None:
+    policy = TurnTakingPolicy(short_wait_seconds=2.0, long_wait_seconds=5.0, longform_start_seconds=300.0)
+
+    decision = policy.decide(
+        TurnInput(
+            pending_count=1,
+            latest_text="我今天真的有点离谱",
+            merged_text="我今天真的有点离谱",
+        )
+    )
+
+    assert decision.state == TurnState.COLLECTING
+    assert decision.timing == ReplyTiming.LONG_WAIT
+    assert decision.wait_seconds == 300.0
+    assert decision.reason == "longform_opener_waiting_for_user"
+
+
 def test_several_messages_become_ready_when_not_open_ended() -> None:
     policy = TurnTakingPolicy(short_wait_seconds=2.0, long_wait_seconds=5.0)
 

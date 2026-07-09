@@ -109,7 +109,7 @@ async def build_self_core(
         if r["kind"] in {
             "life_fact", "favorite_thing", "hobby", "person",
             "shared_moment", "recent_event", "consolidated",
-            "name", "preference", "status", "life_event",
+            "name", "preference", "status", "life_event", "private_life_event",
             "key_relationship_event", "interaction_pattern",
         }
     ]

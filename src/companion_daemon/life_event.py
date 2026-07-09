@@ -24,6 +24,7 @@ class LifeEvent:
     topic: str
     messages: list[str]
     sticker_category: str | None = None
+    memory_mode: str = "planned_today"
 
 
 class LifeEventGenerator:
@@ -41,7 +42,10 @@ class LifeEventGenerator:
                     "亲疏程度必须符合当前关系，不要跳过关系阶段。"
                     "她在上海上学，用户在成都；可以分享自己的本地生活，但不要邀请用户立刻去她身边的店、学校或活动。"
                     "具体经历要像事后可写进生活连续性账本的小事，不要编造和用户共同经历过的线下事件。"
-                    "输出严格 JSON: topic, messages, sticker_category。"
+                    "生活记忆模式 memory_mode 可选 planned_today 或 spontaneous_recall："
+                    "planned_today 表示今天按生活节奏实际发生的小事；"
+                    "spontaneous_recall 表示刚突然想起的微小生活碎片，比如午饭吃到怪东西、路上听见一句话。"
+                    "输出严格 JSON: topic, messages, sticker_category, memory_mode。"
                     "sticker_category 可选 happy, sulk, miss_you, jealous_soft, angry_soft, sleepy, comfort, teasing。"
                 ),
             },
@@ -69,10 +73,14 @@ def parse_life_event(raw: str) -> LifeEvent:
     messages = [message for message in messages if message]
     if not messages:
         messages = ["我刚刚遇到一件小事，突然有点想跟你说。"]
+    memory_mode = str(data.get("memory_mode") or "planned_today").strip()
+    if memory_mode not in {"planned_today", "spontaneous_recall"}:
+        memory_mode = "planned_today"
     return LifeEvent(
         topic=str(data.get("topic") or "随手分享"),
         messages=messages[:4],
         sticker_category=data.get("sticker_category"),
+        memory_mode=memory_mode,
     )
 
 
@@ -80,6 +88,18 @@ def _clean_life_event_message(message: str) -> str:
     cleaned = message.strip()
     cleaned = LOCAL_INVITATION_RE.sub("下次拍给你看。", cleaned)
     return cleaned[:300].strip()
+
+
+def _life_event_memory_content(event: LifeEvent) -> str:
+    return f"{event.topic}: {' / '.join(event.messages)}"
+
+
+def _private_life_event_source(event: LifeEvent) -> str:
+    return f"life_event:{event.memory_mode}"
+
+
+def _private_life_event_confidence(event: LifeEvent) -> float:
+    return 0.78 if event.memory_mode == "planned_today" else 0.68
 
 
 async def run(
@@ -118,6 +138,14 @@ async def run(
         relationship_status=relationship_status_line(state),
     )
     budget_gate.record(event_estimate, note=f"life_event:{event.topic[:40]}")
+    if send:
+        engine.store.upsert_memory(
+            user_id,
+            kind="private_life_event",
+            content=_life_event_memory_content(event),
+            source=_private_life_event_source(event),
+            confidence=_private_life_event_confidence(event),
+        )
     print(f"topic: {event.topic}")
     for index, message in enumerate(event.messages, start=1):
         print(f"{index}. {message}")
@@ -199,7 +227,7 @@ async def run(
     engine.store.upsert_memory(
         user_id,
         kind="life_event",
-        content=f"{event.topic}: {' / '.join(event.messages)}",
+        content=_life_event_memory_content(event),
         source="life_event",
         confidence=0.82,
     )
