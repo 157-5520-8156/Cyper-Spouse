@@ -28,15 +28,22 @@ from companion_daemon.mood import (
     update_mood_for_attachment_insight,
     update_mood_for_message,
 )
+from companion_daemon.inner_subtext import infer_inner_subtext
 from companion_daemon.multimodal import summarize_attachments
 from companion_daemon.multimodal_analysis import AttachmentInsight, MultimodalAnalyzer
+from companion_daemon.personality_drift import apply_personality_drift, personality_drift_line
 from companion_daemon.prompts import proactive_prompt
 from companion_daemon.proactive_feedback import apply_proactive_feedback, classify_proactive_feedback
 from companion_daemon.proactive_triggers import evaluate_proactive_trigger
-from companion_daemon.relationship import advance_relationship
+from companion_daemon.proactive_waiting import apply_waiting_after_proactive
+from companion_daemon.relationship import advance_relationship, key_event_bonus
+from companion_daemon.relationship_events import apply_key_relationship_event, detect_key_relationship_event
+from companion_daemon.repair_curve import apply_repair_curve
+from companion_daemon.reply_segments import split_reply_text
 from companion_daemon.reply_stickers import choose_reply_sticker
 from companion_daemon.sanitize import sanitize_chat_text
 from companion_daemon.stickers import StickerCatalog
+from companion_daemon.tone_inertia import build_tone_inertia, classify_outgoing_tone
 from companion_daemon.time import utc_now
 from companion_daemon.tool_requests import detect_tool_request, tool_prompt_line
 from companion_daemon.withheld_impulse import apply_withheld_impulse, build_withheld_impulse
@@ -78,6 +85,10 @@ class CompanionEngine:
         context = platform_context(previous_state, message)
         event = interpret_interaction(message, previous_state)
         next_state = update_mood_for_message(previous_state, message)
+        key_event = detect_key_relationship_event(message)
+        next_state = apply_key_relationship_event(next_state, key_event)
+        next_state = apply_repair_curve(next_state, message_text=message.text)
+        next_state = apply_personality_drift(next_state)
         proactive_feedback = None
         if self._is_reply_to_recent_proactive(canonical_user_id, message.platform):
             proactive_feedback = classify_proactive_feedback(message.text)
@@ -109,6 +120,10 @@ class CompanionEngine:
                 confidence=extracted.confidence,
             )
         attachment_lines = summarize_attachments(message.attachments)
+        recent_lines = self._recent_lines(canonical_user_id)
+        tone_inertia = build_tone_inertia(next_state, recent_lines)
+        attachment_lines.append(tone_inertia.prompt_line)
+        attachment_lines.append(personality_drift_line(next_state))
         life_continuity = build_life_continuity(
             next_state,
             previous_content=self._latest_life_continuity(canonical_user_id),
@@ -121,6 +136,25 @@ class CompanionEngine:
             source=f"{message.platform}:{message.message_id or 'turn'}",
             confidence=0.72,
         )
+        if key_event:
+            attachment_lines.append(key_event.prompt_line)
+            self.store.upsert_memory(
+                canonical_user_id,
+                kind="key_relationship_event",
+                content=key_event.memory,
+                source=f"{message.platform}:{message.message_id or 'turn'}",
+                confidence=0.86,
+            )
+        subtext = infer_inner_subtext(next_state)
+        if subtext:
+            attachment_lines.append(subtext.prompt_line)
+            self.store.upsert_memory(
+                canonical_user_id,
+                kind="inner_subtext",
+                content=subtext.memory,
+                source=f"{message.platform}:{message.message_id or 'turn'}",
+                confidence=0.74,
+            )
         if proactive_feedback:
             attachment_lines.append(proactive_feedback.prompt_line)
             self.store.upsert_memory(
@@ -205,10 +239,16 @@ class CompanionEngine:
         next_state = advance_relationship(
             next_state,
             user_message_count=self.store.incoming_message_count(canonical_user_id),
+            key_event_score=key_event_bonus(
+                [
+                    str(row["content"])
+                    for row in self.store.memories(canonical_user_id, limit=20)
+                    if row["kind"] == "key_relationship_event"
+                ]
+            ),
         )
         self.store.save_mood_state(canonical_user_id, next_state)
 
-        recent_lines = self._recent_lines(canonical_user_id)
         text = await self.conversation_core.reply(
             message,
             next_state,
@@ -223,7 +263,15 @@ class CompanionEngine:
             was_proactive=False,
             sent_image=bool(generated_image_path),
         )
+        text_parts = split_reply_text(text, expressed_state)
         self.store.save_mood_state(canonical_user_id, expressed_state)
+        self.store.upsert_memory(
+            canonical_user_id,
+            kind="tone_inertia",
+            content=f"last_outgoing_tone={classify_outgoing_tone(text, expressed_state)}",
+            source=f"{message.platform}:outgoing",
+            confidence=0.65,
+        )
         suggested_reaction = select_character_reaction(message.text, next_state)
         sticker = choose_reply_sticker(
             self.stickers,
@@ -237,6 +285,7 @@ class CompanionEngine:
             canonical_user_id=canonical_user_id,
             mood=expressed_state.mood,
             text=text,
+            text_parts=text_parts,
             platform_context=context,
             sticker_path=str(sticker.path) if sticker else None,
             image_path=str(generated_image_path) if generated_image_path else None,
@@ -289,6 +338,17 @@ class CompanionEngine:
 
     async def proactive_tick(self, canonical_user_id: str) -> ProactiveDecision:
         state = self.store.get_mood_state(canonical_user_id)
+        last_sent = self.store.last_proactive_delivery(canonical_user_id, "qq")
+        state = apply_waiting_after_proactive(
+            state,
+            last_sent_iso=last_sent,
+            incoming_since=(
+                self.store.message_count_since(canonical_user_id, direction="in", since_iso=last_sent)
+                if last_sent
+                else 0
+            ),
+        )
+        self.store.save_mood_state(canonical_user_id, state)
         recent_lines = self._recent_lines(canonical_user_id)
         recent_rows = self._recent_dicts(canonical_user_id, limit=16)
         trigger = evaluate_proactive_trigger(

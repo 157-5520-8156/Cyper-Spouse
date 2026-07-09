@@ -158,6 +158,41 @@ async def test_coalescer_sends_sticker_after_text_reply() -> None:
 
 
 @pytest.mark.asyncio
+async def test_coalescer_sends_reply_parts_in_order() -> None:
+    class FakeEngine:
+        async def handle_message(self, incoming: IncomingMessage) -> CompanionReply:
+            return CompanionReply(
+                canonical_user_id="geoff",
+                mood="happy",
+                text="我在。刚刚想到你。",
+                text_parts=["我在。", "刚刚想到你。"],
+            )
+
+    class FakeTarget:
+        def __init__(self):
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs) -> None:
+            self.replies.append(kwargs["content"])
+
+    target = FakeTarget()
+    coalescer = QQMessageCoalescer(
+        FakeEngine(),
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+    )
+
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="在吗"),
+        target,
+    )
+    await asyncio.sleep(1.0)
+
+    assert target.replies == ["我在。", "刚刚想到你。"]
+
+
+@pytest.mark.asyncio
 async def test_coalescer_sends_generated_image_after_text_reply() -> None:
     class FakeEngine:
         async def handle_message(self, incoming: IncomingMessage) -> CompanionReply:

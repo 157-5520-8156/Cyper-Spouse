@@ -86,7 +86,7 @@ class QQMessageCoalescer:
             )
             reply = await self.engine.handle_message(merged)
             try:
-                await last.reply_target.reply(content=reply.text, msg_seq=_reply_msg_seq())
+                await _send_reply_parts(last.reply_target, reply.text_parts or [reply.text])
             except Exception:
                 logger.exception("failed to send QQ reply")
                 return
@@ -197,6 +197,13 @@ def _clean_content(content: str | None) -> str:
 
 def _reply_msg_seq() -> int:
     return int(time.time() * 1000) % 1_000_000
+
+
+async def _send_reply_parts(reply_target: ReplyTarget, parts: list[str]) -> None:
+    for index, part in enumerate(parts):
+        if index:
+            await asyncio.sleep(min(1.8, 0.45 + len(part) / 45))
+        await reply_target.reply(content=part, msg_seq=_reply_msg_seq())
 
 
 def _attachments_from_botpy(raw_attachments) -> list[MessageAttachment]:

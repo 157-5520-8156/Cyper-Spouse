@@ -13,11 +13,34 @@ def affection_score(state: MoodState) -> int:
     )
 
 
-def advance_relationship(state: MoodState, *, user_message_count: int) -> MoodState:
-    next_stage = stage_for_scores(state.intimacy, state.trust, user_message_count)
+def advance_relationship(
+    state: MoodState,
+    *,
+    user_message_count: int,
+    key_event_score: int = 0,
+) -> MoodState:
+    next_stage = stage_for_scores(
+        state.intimacy,
+        state.trust,
+        user_message_count + key_event_score,
+    )
     if next_stage == state.relationship_stage:
         return state
     return state.model_copy(update={"relationship_stage": next_stage})
+
+
+def key_event_bonus(events: list[str]) -> int:
+    score = 0
+    for event in events:
+        if "记得" in event or "小事" in event:
+            score += 3
+        elif "认真修复" in event or "认真" in event:
+            score += 4
+        elif "解释" in event or "没回" in event:
+            score += 2
+        else:
+            score += 1
+    return min(18, score)
 
 
 def stage_for_scores(intimacy: int, trust: int, user_message_count: int) -> RelationshipStage:
