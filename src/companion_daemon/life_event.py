@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 from dataclasses import dataclass
+import logging
 from pathlib import Path
 
 from companion_daemon.budget import ESTIMATES, BudgetGate
@@ -11,6 +12,9 @@ from companion_daemon.qq_client import QQOfficialClient
 from companion_daemon.relationship import relationship_instruction, relationship_status_line
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.stickers import load_stickers
+
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -147,19 +151,39 @@ async def run(
     api_base_url = "https://sandbox.api.sgroup.qq.com" if sandbox else "https://api.sgroup.qq.com"
     client = QQOfficialClient(settings.qq_bot_app_id, settings.qq_bot_secret, api_base_url=api_base_url)
     for message in event.messages:
-        await client.send_c2c_text(openid, message, is_wakeup=True)
+        try:
+            await client.send_c2c_text(openid, message, is_wakeup=True)
+        except Exception as exc:
+            logger.exception("life event text send failed")
+            print(f"life event not fully sent: {exc}")
+            engine.store.upsert_memory(
+                user_id,
+                kind="life_event_send_failed",
+                content=f"{event.topic}: {message[:120]}",
+                source="life_event",
+                confidence=0.2,
+            )
+            return False
         engine.store.save_outgoing(user_id, "qq", message)
 
     if generated_path:
-        await client.send_c2c_local_image(openid, generated_path, is_wakeup=True)
-        print(f"sent generated image: {generated_path}")
+        try:
+            await client.send_c2c_local_image(openid, generated_path, is_wakeup=True)
+            print(f"sent generated image: {generated_path}")
+        except Exception as exc:
+            logger.exception("life event image send failed")
+            print(f"generated image not sent: {exc}")
 
     if event.sticker_category and not generated_path:
         catalog = load_stickers(str(settings.stickers_path))
         sticker = next((item for item in catalog.stickers if item.category == event.sticker_category), None)
         if sticker:
-            await client.send_c2c_local_image(openid, Path(sticker.path), is_wakeup=True)
-            print(f"sent sticker: {sticker.path}")
+            try:
+                await client.send_c2c_local_image(openid, Path(sticker.path), is_wakeup=True)
+                print(f"sent sticker: {sticker.path}")
+            except Exception as exc:
+                logger.exception("life event sticker send failed")
+                print(f"sticker not sent: {exc}")
     engine.store.record_proactive_delivery(user_id, "qq:life_event")
     engine.store.upsert_memory(
         user_id,

@@ -1,9 +1,15 @@
 import random
+from types import SimpleNamespace
 
+import pytest
+
+import companion_daemon.proactive_scheduler as proactive_scheduler
+from companion_daemon.models import MoodState
 from companion_daemon.proactive_scheduler import (
     _jittered_cooldown_minutes,
     _minutes_since,
     _next_sleep_seconds,
+    scheduler_loop,
 )
 
 
@@ -45,3 +51,42 @@ def test_next_sleep_seconds_adds_scheduler_jitter() -> None:
 
     assert 585 <= sleep <= 1215
     assert sleep != 900
+
+
+@pytest.mark.asyncio
+async def test_scheduler_survives_life_event_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeStore:
+        def canonical_users(self) -> list[str]:
+            return ["geoff"]
+
+        def get_mood_state(self, user_id: str) -> MoodState:
+            return MoodState(relationship_stage="friend", mood="calm", attachment=20)
+
+        def last_proactive_delivery(self, user_id: str, channel: str) -> None:
+            return None
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = FakeStore()
+
+    async def fake_run_once(user_id: str, *, send: bool, sandbox: bool) -> None:
+        return None
+
+    async def failing_life_event(**kwargs) -> bool:
+        raise RuntimeError("qq 400")
+
+    monkeypatch.setattr(proactive_scheduler, "build_companion_engine", lambda: FakeEngine())
+    monkeypatch.setattr(proactive_scheduler, "get_settings", lambda: SimpleNamespace(proactive_min_cooldown_minutes=30))
+    monkeypatch.setattr(proactive_scheduler, "run_once", fake_run_once)
+    monkeypatch.setattr(proactive_scheduler, "run_life_event", failing_life_event)
+    monkeypatch.setattr(proactive_scheduler, "life_event_probability", lambda state: 1.0)
+    monkeypatch.setattr(proactive_scheduler.random, "random", lambda: 0.0)
+
+    await scheduler_loop(
+        send=True,
+        sandbox=True,
+        once=True,
+        life_events=True,
+        generate_life_images=False,
+        life_image_kind="life",
+    )

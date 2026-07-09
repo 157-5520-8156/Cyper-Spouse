@@ -2,6 +2,7 @@ import argparse
 import asyncio
 from datetime import datetime
 import hashlib
+import logging
 import random
 
 from companion_daemon.config import get_settings
@@ -9,6 +10,9 @@ from companion_daemon.life_event import run as run_life_event
 from companion_daemon.proactive_cli import run as run_once
 from companion_daemon.relationship import life_event_probability, proactive_cooldown_minutes
 from companion_daemon.runtime import build_companion_engine
+
+
+logger = logging.getLogger(__name__)
 
 
 def _minutes_since(iso_timestamp: str | None) -> float | None:
@@ -93,13 +97,17 @@ async def scheduler_loop(
             if random.random() > probability:
                 print(f"skip {user_id}: life-event probability {probability:.2f}", flush=True)
                 continue
-            await run_life_event(
-                user_id=user_id,
-                send=send,
-                sandbox=sandbox,
-                generate_image=generate_life_images,
-                image_kind=life_image_kind,
-            )
+            try:
+                await run_life_event(
+                    user_id=user_id,
+                    send=send,
+                    sandbox=sandbox,
+                    generate_image=generate_life_images,
+                    image_kind=life_image_kind,
+                )
+            except Exception as exc:
+                logger.exception("life-event scheduler step failed")
+                print(f"life-event failed for {user_id}: {exc}", flush=True)
         if once:
             return
         await asyncio.sleep(_next_sleep_seconds(settings.proactive_interval_seconds))

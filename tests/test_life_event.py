@@ -78,6 +78,64 @@ async def test_life_event_send_records_outgoing_and_memory(tmp_path: Path, monke
 
 
 @pytest.mark.asyncio
+async def test_life_event_text_send_failure_does_not_record_lived_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.map_account("qq", "openid", "geoff")
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = store
+
+    class FakeGenerator:
+        def __init__(self, model):
+            self.model = model
+
+        async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str) -> LifeEvent:
+            return LifeEvent(topic="午饭", messages=["刚刚吃了南瓜。", "有点甜。"])
+
+    class FailingQQClient:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        async def send_c2c_text(self, openid: str, message: str, *, is_wakeup: bool) -> None:
+            raise RuntimeError("qq 400")
+
+    monkeypatch.setattr(life_event_module, "build_companion_engine", lambda: FakeEngine())
+    monkeypatch.setattr(life_event_module, "LifeEventGenerator", FakeGenerator)
+    monkeypatch.setattr(life_event_module, "QQOfficialClient", FailingQQClient)
+    monkeypatch.setattr(
+        life_event_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            deepseek_api_key=None,
+            deepseek_base_url="https://api.deepseek.com",
+            deepseek_model="deepseek-chat",
+            monthly_budget_cny=80,
+            daily_budget_cny=3,
+            soft_daily_budget_cny=2,
+            monthly_image_limit=20,
+            monthly_vision_limit=120,
+            monthly_audio_limit=60,
+            openai_api_key=None,
+            qq_bot_app_id="app",
+            qq_bot_secret="secret",
+        ),
+    )
+
+    sent = await run(user_id="geoff", send=True, sandbox=True, generate_image=False, image_kind="life")
+
+    assert sent is False
+    memories = store.memories("geoff", limit=10)
+    assert not any(row["kind"] == "life_event" for row in memories)
+    assert any(row["kind"] == "life_event_send_failed" and "午饭" in row["content"] for row in memories)
+    assert store.last_proactive_delivery("geoff", "qq:life_event") is None
+    assert store.recent_messages("geoff", limit=5) == []
+
+
+@pytest.mark.asyncio
 async def test_life_event_respects_budget_before_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
