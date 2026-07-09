@@ -44,6 +44,7 @@ _UNGROUNDED_LOCAL_DETAIL_RE = re.compile(
 _UNGROUNDED_SELF_EVENT_RE = re.compile(
     r"我(?:明天|今天|等会儿|一会儿|待会儿)也(?:有|要|得).{0,14}"
     r"(?:一门|考试|复习|上课|交作业|开会|pre|presentation|汇报|展示)"
+    r"|我(?:上次|去年|之前|以前).{0,16}(?:考|考试|复习|背到|被它折磨)"
 )
 _STEREOTYPE_REPLY_RE = re.compile(r"(?:成都|四川).{0,8}(?:好吃|美食|火锅|串串)")
 _UNSUPPORTED_MEMORY_CLAIM_RE = re.compile(
@@ -148,7 +149,7 @@ def evaluate_reply(text: str, *, user_text: str = "", recent_assistant_questions
         issues.append(ReplyIssue("flattened_question", "question particle was flattened into a period"))
     if _UNGROUNDED_LOCAL_DETAIL_RE.search(cleaned):
         issues.append(ReplyIssue("ungrounded_local_detail", "invents a specific local detail as if she knows it"))
-    if _UNGROUNDED_SELF_EVENT_RE.search(cleaned):
+    if _UNGROUNDED_SELF_EVENT_RE.search(text) or _UNGROUNDED_SELF_EVENT_RE.search(cleaned):
         issues.append(ReplyIssue("ungrounded_self_event", "mirrors the user's situation with an unsupported same-day event"))
     if "成都理工" in user_text and _STEREOTYPE_REPLY_RE.search(cleaned):
         issues.append(ReplyIssue("stereotype_reply", "answers a specific school detail with a generic city stereotype"))

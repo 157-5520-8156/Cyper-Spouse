@@ -19,8 +19,9 @@ def test_sanitize_removes_acquaintance_crutch_variants() -> None:
         sanitize_chat_text("成都理工啊，那你们学校后门是不是有条街全是串串和冰粉？我有个高中同学在那读土木，她跟我提过。")
         == "成都理工啊，那你们学校后门是不是有条街全是串串和冰粉？"
     )
-    assert sanitize_chat_text("毛概确实要背好多啊，不过我室友说画了重点会好背一点。") == "毛概确实要背好多啊。"
+    assert sanitize_chat_text("毛概确实要背好多啊，不过我室友说画了重点会好背一点。") == "毛概要背好多啊。"
     assert sanitize_chat_text("成都理工啊，我好像有个高中同学在那。") == "成都理工啊。"
+    assert sanitize_chat_text("毛概真的好难背啊，我去年考的时候也是熬夜翻来覆去地背。") == "毛概真的好难背啊。"
 
 
 def test_sanitize_repairs_chengdu_location_confusion() -> None:

@@ -21,6 +21,8 @@ CONSOLIDATION_PROMPT = """你在整理自己的记忆。下面是你最近记住
 规则：
 - 合并相关的条目，比如"用户在成都"+"用户在成都理工上学" → "用户在成都理工大学读书"
 - 保留具体细节，不要过度概括
+- 不要把两个没有明确关系的事实硬合成一个新事实
+- 不要新增原始条目里没有的学校、地点、朋友、群聊、经历或时间
 - 如果两条记忆矛盾，保留更近期的
 - 输出 JSON 数组，每个元素包含 kind 和 content 两个字段
 - 最多输出 20 条合并后的记忆
@@ -133,6 +135,10 @@ async def build_self_core(
     core = parse_self_core(raw)
     if not core:
         return None
+    memory_text = "\n".join(item["content"] for item in memories_for_prompt)
+    if _self_core_has_unsupported_specifics(core, memory_text):
+        logger.warning("rejected self-core with unsupported specifics for %s", canonical_user_id)
+        return None
     store.upsert_memory(
         canonical_user_id,
         kind="self_core",
@@ -171,6 +177,7 @@ def _last_consolidation_time(
 
 
 def _parse_consolidation(raw: str) -> list[dict[str, str]]:
+    raw = _strip_json_fence(raw)
     try:
         data = json.loads(raw)
         if isinstance(data, list):
@@ -180,9 +187,49 @@ def _parse_consolidation(raw: str) -> list[dict[str, str]]:
                 if item.get("content")
             ]
     except json.JSONDecodeError:
-        pass
-    lines = [line.strip() for line in raw.strip().splitlines() if line.strip()]
-    return [{"kind": "consolidated", "content": line} for line in lines[:20]]
+        logger.warning("memory consolidation returned non-json output")
+    return []
+
+
+def _strip_json_fence(raw: str) -> str:
+    stripped = raw.strip()
+    if stripped.startswith("```"):
+        lines = stripped.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        return "\n".join(lines).strip()
+    return stripped
+
+
+def _self_core_has_unsupported_specifics(core: SelfCore, memory_text: str) -> bool:
+    combined = "\n".join(
+        [
+            core.identity,
+            core.user_profile,
+            core.relationship,
+            "\n".join(core.active_threads),
+        ]
+    )
+    risky_markers = (
+        "我记得",
+        "你之前",
+        "之前听",
+        "群里",
+        "朋友",
+        "同学",
+        "室友",
+        "听说",
+        "刷到",
+        "查过",
+        "大学",
+        "学校",
+        "专业",
+        "工作",
+        "成都理工",
+    )
+    return any(marker in combined and marker not in memory_text for marker in risky_markers)
 
 
 def _trim_memories(store: CompanionStore, canonical_user_id: str) -> None:

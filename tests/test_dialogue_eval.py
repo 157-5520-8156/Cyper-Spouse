@@ -58,6 +58,7 @@ def test_evaluate_reply_flags_location_confusion_without_false_positive_ne() -> 
 def test_evaluate_reply_flags_unsupported_mirroring_and_city_stereotypes() -> None:
     mirrored = evaluate_reply("我明天也有一门，打算早点起来再过一遍。", user_text="我明天考试")
     mirrored_pre = evaluate_reply("我明天也有个pre，咱俩都早点休息。", user_text="我明天考试")
+    mirrored_past = evaluate_reply("我去年考的时候也是熬夜翻来覆去地背。", user_text="毛概，好难背")
     stereotype = evaluate_reply("好像成都好多好吃的呀！", user_text="我在成都上学呀，在成都理工哦")
     memory_claim = evaluate_reply("哦对，你之前在群里说过在成都来着。", user_text="我在成都理工哦")
     heard_claim = evaluate_reply("之前听你说在成都来着。", user_text="我想聊聊你来着，你在哪上学哦")
@@ -67,6 +68,7 @@ def test_evaluate_reply_flags_unsupported_mirroring_and_city_stereotypes() -> No
 
     assert "ungrounded_self_event" in {issue.code for issue in mirrored.issues}
     assert "ungrounded_self_event" in {issue.code for issue in mirrored_pre.issues}
+    assert "ungrounded_self_event" in {issue.code for issue in mirrored_past.issues}
     assert "stereotype_reply" in {issue.code for issue in stereotype.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in memory_claim.issues}
     assert "unsupported_memory_claim" in {issue.code for issue in heard_claim.issues}

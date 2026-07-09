@@ -3,6 +3,7 @@ import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from datetime import datetime
 import logging
 from pathlib import Path
 import random
@@ -24,6 +25,7 @@ from companion_daemon.reply_decision import (
     decide_reply,
     is_urgent_interrupt,
 )
+from companion_daemon.time import utc_now
 from companion_daemon.turn_taking import TurnInput, TurnTakingPolicy
 from companion_daemon.runtime import build_companion_engine
 
@@ -236,19 +238,20 @@ class QQMessageCoalescer:
                 logger.exception("failed to send QQ image reply")
         if self.on_reply:
             await self.on_reply(reply)
-        self._schedule_afterthought(key, merged, reply_target)
+        self._schedule_afterthought(key, merged, reply_target, utc_now())
 
     def _schedule_afterthought(
         self,
         key: str,
         merged: IncomingMessage,
         reply_target: ReplyTarget,
+        reply_sent_at: datetime,
     ) -> None:
         if not self.human_timing:
             return
         delay = self.rng.uniform(30, 120)
         self._afterthought_tasks[key] = asyncio.create_task(
-            self._fire_afterthought(key, delay, merged, reply_target)
+            self._fire_afterthought(key, delay, merged, reply_target, reply_sent_at)
         )
 
     async def _fire_afterthought(
@@ -257,6 +260,7 @@ class QQMessageCoalescer:
         delay: float,
         merged: IncomingMessage,
         reply_target: ReplyTarget,
+        reply_sent_at: datetime,
     ) -> None:
         try:
             await self.sleep(delay)
@@ -265,8 +269,7 @@ class QQMessageCoalescer:
             canonical_user_id = self.engine.store.resolve_user(
                 merged.platform, merged.platform_user_id
             )
-            from companion_daemon.time import utc_now
-            text = await self.engine.generate_afterthought(canonical_user_id, utc_now())
+            text = await self.engine.generate_afterthought(canonical_user_id, reply_sent_at)
             if not text:
                 return
             logger.info("sending afterthought for %s", key)

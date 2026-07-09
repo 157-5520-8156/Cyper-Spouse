@@ -29,7 +29,7 @@ class ConsolidationFakeModel(FakeCompanionModel):
         if "自我认知" in joined:
             return (
                 "我叫沈知栀，通过读书群认识了用户。\n"
-                "---\n他在成都，好像在读理工类大学。\n"
+                "---\n他在成都。\n"
                 "---\n刚认识，聊过书和天气。\n"
                 "---\n不知道他的真名和具体专业。\n"
                 "---\n他上次说考试快到了"
@@ -93,4 +93,45 @@ async def test_build_self_core_creates_entry(tmp_path: Path) -> None:
 def test_load_self_core_returns_none_when_empty(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
+    assert load_self_core(store, "geoff") is None
+
+
+@pytest.mark.asyncio
+async def test_consolidate_memories_rejects_non_json_output(tmp_path: Path) -> None:
+    class BadJsonModel(FakeCompanionModel):
+        async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
+            return "我整理好了：用户在成都。"
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    for index in range(5):
+        store.upsert_memory("geoff", kind="life_fact", content=f"用户事实{index}", source="test", confidence=0.7)
+
+    count = await consolidate_memories(store, BadJsonModel(), "geoff")
+
+    assert count == 0
+    assert not [r for r in store.memories("geoff", limit=50) if r["kind"] == "consolidated"]
+
+
+@pytest.mark.asyncio
+async def test_build_self_core_rejects_unsupported_specifics(tmp_path: Path) -> None:
+    class HallucinatedCoreModel(FakeCompanionModel):
+        async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
+            return (
+                "我叫沈知栀。\n"
+                "---\n他在成都，好像在读理工类大学。\n"
+                "---\n刚认识。\n"
+                "---\n不知道他的真名。\n"
+                "---\n"
+            )
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.upsert_memory("geoff", kind="life_fact", content="用户在成都", source="test", confidence=0.7)
+    store.upsert_memory("geoff", kind="favorite_thing", content="用户读过《我与地坛》", source="test", confidence=0.7)
+    store.upsert_memory("geoff", kind="recent_event", content="用户明天考试", source="test", confidence=0.65)
+
+    core = await build_self_core(store, HallucinatedCoreModel(), "geoff", MoodState())
+
+    assert core is None
     assert load_self_core(store, "geoff") is None
