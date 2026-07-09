@@ -49,6 +49,7 @@ class CompanionReply(BaseModel):
     text: str
     platform_context: str | None = None
     sticker_path: str | None = None
+    suggested_reaction: str | None = None
 
 
 class ProactiveDecision(BaseModel):

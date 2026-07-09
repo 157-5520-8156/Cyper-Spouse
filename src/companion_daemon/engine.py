@@ -3,6 +3,8 @@ import json
 from companion_daemon.conversation import ConversationCore, PromptedConversationCore
 from companion_daemon.db import CompanionStore
 from companion_daemon.emotion_state import interpret_interaction
+from companion_daemon.emotion_reactions import select_character_reaction
+from companion_daemon.image_requests import detect_image_request
 from companion_daemon.llm import ChatModel
 from companion_daemon.memory import extract_memories, memory_lines
 from companion_daemon.models import (
@@ -80,6 +82,26 @@ class CompanionEngine:
                 confidence=extracted.confidence,
             )
         attachment_lines = summarize_attachments(message.attachments)
+        image_request = detect_image_request(
+            message.text,
+            [
+                row["text"]
+                for row in self.store.recent_messages(canonical_user_id, limit=6)
+                if row["direction"] == "out"
+            ],
+        )
+        if image_request.triggered:
+            attachment_lines.append(
+                "图片请求: 用户可能在请求图片/自拍；"
+                f"类型={image_request.type}；指向={image_request.directive or '未指定'}。"
+            )
+            self.store.upsert_memory(
+                canonical_user_id,
+                kind="image_request",
+                content=f"{image_request.type}: {image_request.directive or message.text}",
+                source=f"{message.platform}:{message.message_id or ''}",
+                confidence=image_request.confidence,
+            )
         for attachment in message.attachments:
             source = self._attachment_source(message, attachment)
             cached = self.store.memory_by_source(
@@ -121,11 +143,15 @@ class CompanionEngine:
             attachment_lines,
         )
         self.store.save_outgoing(canonical_user_id, message.platform, text)
+        suggested_reaction = select_character_reaction(message.text, next_state)
         return CompanionReply(
             canonical_user_id=canonical_user_id,
             mood=next_state.mood,
             text=text,
             platform_context=context,
+            suggested_reaction=(
+                suggested_reaction.reaction_id if suggested_reaction and suggested_reaction.probability >= 0.25 else None
+            ),
         )
 
     async def proactive_tick(self, canonical_user_id: str) -> ProactiveDecision:
