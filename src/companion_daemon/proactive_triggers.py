@@ -25,6 +25,7 @@ TRIGGER_SEMANTIC_CATEGORY = {
     "nostalgia_wave": "missing_you",
     "memory_nudge": "missing_you",
     "inside_joke_callback": "missing_you",
+    "her_question_unanswered": "anxious_reach",
     "anxiety_reassurance": "anxious_reach",
     "overwhelm_check": "anxious_reach",
     "overthinking_spiral": "anxious_reach",
@@ -85,6 +86,7 @@ TRIGGER_COOLDOWN_HOURS = {
     "sunday_scaries": 96,
     "midweek_check": 96,
     "pride_share": 28,
+    "her_question_unanswered": 14,
 }
 
 
@@ -121,6 +123,7 @@ def evaluate_proactive_trigger(
     anticipation = emotion.get("anticipation", 0)
     love = emotion.get("love", 0)
     last_user_text = (last_user.get("text") or "").lower() if last_user else ""
+    last_char_text = (last_char.get("text") or "") if last_char else ""
     unresolved_question = last_user_text.rstrip().endswith(("?", "？"))
     emotion_shift = _emotion_shift_score(state.last_emotion_impact)
     has_recent_shared_moment = any(
@@ -129,6 +132,7 @@ def evaluate_proactive_trigger(
         for token in ["记得", "上次", "刚刚", "昨天", "成都", "桂花乌龙", "图书馆"]
     )
     char_sent_last = bool(last_char and (not last_user or last_char["sent_at"] > last_user["sent_at"]))
+    own_unanswered_question = char_sent_last and last_char_text.rstrip().endswith(("?", "？"))
 
     candidates: list[ProactiveTrigger] = []
 
@@ -240,6 +244,8 @@ def evaluate_proactive_trigger(
 
     if char_sent_last and 1 <= (hours_since_char or 0) <= 8 and (joy >= 55 or anticipation >= 55):
         add("double_text", 52, "你想起刚刚漏说了一句。发很短的补充，不要尴尬。")
+    if own_unanswered_question and 0.5 <= (hours_since_char or 0) <= 8 and trust >= 25:
+        add("her_question_unanswered", 92, "你刚刚问了一个问题但没等到回答。可以轻轻把问题放软，或假装顺手换个说法，不要连环追问。")
     if char_sent_last and 4 <= (hours_since_char or 0) <= 24 and trust >= 40 and anger < 50:
         add("seen_no_reply_soft", 48, "你上一条没有等到回复。低需求地补一句，不要催。")
     if 2 <= hours_since_user <= 48 and last_user:
@@ -249,6 +255,10 @@ def evaluate_proactive_trigger(
 
     if not candidates:
         return None
+    if own_unanswered_question:
+        for candidate in candidates:
+            if candidate.type == "her_question_unanswered":
+                return candidate
     total = sum(max(1, candidate.weight) for candidate in candidates)
     roll = rng.random() * total
     for candidate in candidates:

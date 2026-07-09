@@ -7,6 +7,12 @@ from companion_daemon.relationship import key_event_bonus, stage_for_scores
 from companion_daemon.repair_curve import apply_repair_curve
 from companion_daemon.reply_segments import split_reply_text
 from companion_daemon.tone_inertia import build_tone_inertia
+from companion_daemon.unanswered_question import (
+    PendingQuestion,
+    apply_question_response,
+    apply_unanswered_question_waiting,
+    classify_response_to_own_question,
+)
 
 
 def test_key_event_bonus_can_advance_relationship_effective_count() -> None:
@@ -71,3 +77,33 @@ def test_split_reply_text_keeps_reserved_replies_single() -> None:
 
     assert reserved == [text]
     assert len(soft) > 1
+
+
+def test_unanswered_own_question_creates_confusion_once() -> None:
+    question = PendingQuestion(
+        text="你刚刚是不是在忙？",
+        sent_at=(datetime.now(UTC) - timedelta(hours=1)).isoformat(),
+    )
+    state = MoodState(security=45, curiosity=40, emotional_charge=2)
+
+    first = apply_unanswered_question_waiting(state, question)
+    second = apply_unanswered_question_waiting(first, question)
+
+    assert first.security < state.security
+    assert first.curiosity > state.curiosity
+    assert first.emotional_charge > state.emotional_charge
+    assert second == first
+
+
+def test_response_to_own_question_can_be_answered_or_skipped() -> None:
+    question = PendingQuestion(text="你刚刚是不是在忙？", sent_at=datetime.now(UTC).isoformat())
+
+    answered = classify_response_to_own_question("嗯，刚才在忙", question)
+    skipped = classify_response_to_own_question("我回来了", question)
+
+    assert answered and answered.kind == "answered"
+    assert skipped and skipped.kind == "skipped"
+    relieved = apply_question_response(MoodState(security=40, emotional_charge=10), answered)
+    confused = apply_question_response(MoodState(security=40, emotional_charge=10), skipped)
+    assert relieved.security > 40
+    assert confused.security < 40

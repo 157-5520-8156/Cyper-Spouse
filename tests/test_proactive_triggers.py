@@ -75,6 +75,22 @@ def test_proactive_trigger_stops_after_unanswered_outgoing_messages() -> None:
     assert trigger is None
 
 
+def test_proactive_trigger_detects_her_unanswered_question() -> None:
+    trigger = evaluate_proactive_trigger(
+        state=MoodState(emotion_vector={"trust": 45, "anticipation": 45}),
+        recent_messages=[
+            _row("in", "我先忙一会儿", 2),
+            _row("out", "你刚刚是不是在忙？", 1),
+        ],
+        trigger_history={},
+        now=utc_now(),
+        rng=random.Random(4),
+    )
+
+    assert trigger
+    assert trigger.type in {"her_question_unanswered", "double_text", "seen_no_reply_soft"}
+
+
 def test_proactive_trigger_includes_daily_life_rhythm() -> None:
     now = datetime.fromisoformat("2026-07-10T15:00:00+00:00")
     trigger = evaluate_proactive_trigger(

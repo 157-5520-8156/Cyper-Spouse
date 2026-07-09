@@ -46,6 +46,12 @@ from companion_daemon.stickers import StickerCatalog
 from companion_daemon.tone_inertia import build_tone_inertia, classify_outgoing_tone
 from companion_daemon.time import utc_now
 from companion_daemon.tool_requests import detect_tool_request, tool_prompt_line
+from companion_daemon.unanswered_question import (
+    apply_question_response,
+    apply_unanswered_question_waiting,
+    classify_response_to_own_question,
+    last_unanswered_own_question,
+)
 from companion_daemon.withheld_impulse import apply_withheld_impulse, build_withheld_impulse
 
 
@@ -82,6 +88,8 @@ class CompanionEngine:
     async def handle_message(self, message: IncomingMessage) -> CompanionReply:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         previous_state = self.store.get_mood_state(canonical_user_id)
+        recent_dicts_before = self._recent_dicts(canonical_user_id, limit=16)
+        pending_own_question = last_unanswered_own_question(recent_dicts_before)
         context = platform_context(previous_state, message)
         event = interpret_interaction(message, previous_state)
         next_state = update_mood_for_message(previous_state, message)
@@ -93,6 +101,8 @@ class CompanionEngine:
         if self._is_reply_to_recent_proactive(canonical_user_id, message.platform):
             proactive_feedback = classify_proactive_feedback(message.text)
             next_state = apply_proactive_feedback(next_state, proactive_feedback)
+        question_response = classify_response_to_own_question(message.text, pending_own_question)
+        next_state = apply_question_response(next_state, question_response)
 
         self.store.save_incoming(canonical_user_id, message)
         self.store.record_interaction_event(
@@ -163,6 +173,15 @@ class CompanionEngine:
                 content=proactive_feedback.memory_content,
                 source=f"{message.platform}:{message.message_id or 'turn'}",
                 confidence=0.82,
+            )
+        if question_response:
+            attachment_lines.append(question_response.prompt_line)
+            self.store.upsert_memory(
+                canonical_user_id,
+                kind=f"own_question_{question_response.kind}",
+                content=question_response.memory,
+                source=f"{message.platform}:{message.message_id or 'turn'}",
+                confidence=0.78,
             )
         image_request = detect_image_request(
             message.text,
@@ -348,6 +367,8 @@ class CompanionEngine:
                 else 0
             ),
         )
+        pending_question = last_unanswered_own_question(self._recent_dicts(canonical_user_id, limit=16))
+        state = apply_unanswered_question_waiting(state, pending_question)
         self.store.save_mood_state(canonical_user_id, state)
         recent_lines = self._recent_lines(canonical_user_id)
         recent_rows = self._recent_dicts(canonical_user_id, limit=16)

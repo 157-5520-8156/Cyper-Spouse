@@ -79,6 +79,25 @@ async def test_handle_message_relaxes_after_warm_proactive_response(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_handle_message_notices_skipped_own_question(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.save_outgoing("geoff", "qq", "你刚刚是不是在忙？")
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT)
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我回来了")
+    )
+
+    state = store.get_mood_state("geoff")
+    assert state.security < 45
+    assert any(row["kind"] == "own_question_skipped" for row in store.memories("geoff"))
+    prompt_text = "\n".join(message["content"] for message in model.calls[-1])
+    assert "没有回答她刚刚问的问题" in prompt_text
+
+
+@pytest.mark.asyncio
 async def test_platform_switch_context_is_reported(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
