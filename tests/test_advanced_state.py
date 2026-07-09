@@ -107,3 +107,12 @@ def test_response_to_own_question_can_be_answered_or_skipped() -> None:
     confused = apply_question_response(MoodState(security=40, emotional_charge=10), skipped)
     assert relieved.security > 40
     assert confused.security < 40
+
+
+def test_location_answer_counts_as_answer_to_school_question() -> None:
+    question = PendingQuestion(text="你呢，是在成都上学吗？", sent_at=datetime.now(UTC).isoformat())
+
+    answered = classify_response_to_own_question("我在成都上学呀，在成都理工哦", question)
+
+    assert answered
+    assert answered.kind == "answered"

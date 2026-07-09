@@ -448,7 +448,10 @@ class CompanionEngine:
         lines = []
         for row in self.store.recent_messages(canonical_user_id):
             who = "你" if row["direction"] == "in" else "她"
-            lines.append(f"[{row['platform']}] {who}: {row['text']}")
+            text = str(row["text"])
+            if row["direction"] == "out":
+                text = sanitize_chat_text(text)
+            lines.append(f"[{row['platform']}] {who}: {text}")
         return lines
 
     def _recent_dicts(self, canonical_user_id: str, limit: int = 16) -> list[dict[str, str]]:

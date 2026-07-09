@@ -91,7 +91,7 @@ def classify_response_to_own_question(
     text = user_text.strip()
     if not text:
         return None
-    if _looks_like_answer(text):
+    if _looks_like_answer(text, question.text):
         return QuestionResponse(
             "answered",
             "问题反馈: 用户回答了她刚刚问的问题；她会松一口气，可以自然接住答案。",
@@ -132,13 +132,17 @@ def _looks_like_question(text: str) -> bool:
     )
 
 
-def _looks_like_answer(text: str) -> bool:
+def _looks_like_answer(text: str, question_text: str = "") -> bool:
     if text.rstrip().endswith(("?", "？")):
         return False
+    if any(token in question_text for token in ["在哪", "哪里", "哪儿", "上学", "学校", "城市"]):
+        if any(token in text for token in ["在", "成都", "上海", "学校", "大学", "理工"]):
+            return True
     return any(
         token in text
         for token in [
             "因为",
+            "在",
             "是",
             "不是",
             "可以",

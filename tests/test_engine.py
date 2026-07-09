@@ -80,6 +80,21 @@ async def test_handle_message_injects_human_rhythm_context(tmp_path: Path) -> No
     assert any(row["kind"] == "life_continuity" for row in store.memories("geoff"))
 
 
+def test_recent_lines_sanitize_previous_bad_outgoing(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+    store.save_outgoing(
+        "geoff",
+        "qq",
+        "成都理工啊，那你们学校后门是不是有条街全是串串和冰粉？我有个高中同学在那读土木，她跟我提过。",
+    )
+
+    recent = engine._recent_lines("geoff")
+
+    assert "高中同学" not in "\n".join(recent)
+
+
 @pytest.mark.asyncio
 async def test_handle_message_relaxes_after_warm_proactive_response(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")

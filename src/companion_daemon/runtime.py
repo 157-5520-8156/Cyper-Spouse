@@ -1,4 +1,5 @@
 from pathlib import Path
+import logging
 
 from companion_daemon.character import load_character
 from companion_daemon.config import get_settings
@@ -11,6 +12,8 @@ from companion_daemon.image_generation import OpenAIImageGenerator
 from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel
 from companion_daemon.multimodal_analysis import MultimodalAnalyzer, OpenAIMultimodalAnalyzer
 from companion_daemon.stickers import load_stickers
+
+logger = logging.getLogger(__name__)
 
 
 def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
@@ -33,6 +36,13 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             settings.sillytavern_base_url,
             character.system_prompt(),
         )
+    logger.info(
+        "building companion engine: core=%s reply_decision=%s reply_rewrite=%s fake_model=%s",
+        settings.conversation_core,
+        settings.enable_reply_decision,
+        settings.enable_reply_rewrite,
+        use_fake_model,
+    )
     budget_gate = BudgetGate(
         store,
         monthly_budget_cny=settings.monthly_budget_cny,
