@@ -30,6 +30,22 @@ async def test_handle_message_updates_mood_and_replies(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_handle_message_injects_human_rhythm_context(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT)
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我先忙一会儿")
+    )
+
+    prompt_text = "\n".join(message["content"] for message in model.calls[-1])
+    assert "生活节律" in prompt_text
+    assert "不要写舞台动作" in prompt_text
+
+
+@pytest.mark.asyncio
 async def test_platform_switch_context_is_reported(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
@@ -50,7 +66,7 @@ async def test_platform_switch_context_is_reported(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_proactive_tick_records_decision(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
-    seed_user(store)
+    seed_user(store, initial_state=MoodState(initiative=60, emotional_charge=15))
     engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
 
     await engine.handle_message(
@@ -61,6 +77,9 @@ async def test_proactive_tick_records_decision(tmp_path: Path) -> None:
     assert decision.should_send is True
     assert decision.platform == "qq"
     assert decision.message
+    state = store.get_mood_state("geoff")
+    assert state.initiative < 60
+    assert state.emotional_charge < 15
 
 
 @pytest.mark.asyncio

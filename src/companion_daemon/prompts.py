@@ -1,5 +1,6 @@
 from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.emotion_core import emotion_context_line
+from companion_daemon.human_rhythm import human_rhythm_context_line, proactive_rhythm_context_line
 from companion_daemon.proactive_triggers import proactive_context_instruction, ProactiveTrigger
 from companion_daemon.relationship import relationship_instruction, relationship_status_line
 
@@ -29,6 +30,7 @@ def reply_prompt(
 未解决情绪: {mood_state.unresolved_emotion or "无"}
 平台上下文: {platform_context or "无"}
 {emotion_context_line(mood_state)}
+{human_rhythm_context_line(mood_state)}
 """
     recent = "\n".join(recent_lines) if recent_lines else "暂无历史。"
     memories = "\n".join(memory_lines or []) if memory_lines else "暂无可靠长期记忆。"
@@ -84,6 +86,7 @@ message_type can be none, text, sticker, text_sticker, image, text_image.
 本轮回复风格提示: {mood_state.reply_style_hint or "自然私聊"}
 未解决情绪: {mood_state.unresolved_emotion or "无"}
 {emotion_context_line(mood_state)}
+{proactive_rhythm_context_line(mood_state)}
 主动触发器:
 {proactive_context_instruction(trigger)}
 最近聊天:

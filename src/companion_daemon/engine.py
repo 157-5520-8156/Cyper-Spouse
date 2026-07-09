@@ -20,6 +20,7 @@ from companion_daemon.models import (
     MoodState,
     ProactiveDecision,
 )
+from companion_daemon.human_rhythm import apply_expression_after_reply
 from companion_daemon.mood import (
     platform_context,
     update_mood_for_attachment_insight,
@@ -188,6 +189,12 @@ class CompanionEngine:
             attachment_lines,
         )
         self.store.save_outgoing(canonical_user_id, message.platform, text)
+        expressed_state = apply_expression_after_reply(
+            next_state,
+            was_proactive=False,
+            sent_image=bool(generated_image_path),
+        )
+        self.store.save_mood_state(canonical_user_id, expressed_state)
         suggested_reaction = select_character_reaction(message.text, next_state)
         sticker = choose_reply_sticker(
             self.stickers,
@@ -199,7 +206,7 @@ class CompanionEngine:
             sticker = None
         return CompanionReply(
             canonical_user_id=canonical_user_id,
-            mood=next_state.mood,
+            mood=expressed_state.mood,
             text=text,
             platform_context=context,
             sticker_path=str(sticker.path) if sticker else None,
@@ -285,6 +292,13 @@ class CompanionEngine:
         )
         if decision.should_send and decision.platform and decision.message:
             self.store.save_outgoing(canonical_user_id, decision.platform, decision.message)
+        if decision.should_send:
+            expressed_state = apply_expression_after_reply(
+                state,
+                was_proactive=True,
+                sent_image=bool(decision.image_path),
+            )
+            self.store.save_mood_state(canonical_user_id, expressed_state)
         return decision
 
     def _recent_lines(self, canonical_user_id: str) -> list[str]:

@@ -102,6 +102,8 @@ Verified behavior:
 - Early, pushy, or emotionally badly timed selfie requests are deferred/refused in prompt context instead of generating an image.
 - Proactive decisions can rarely attach a self-initiated life image/selfie when relationship state, mood, image generator configuration, and budget allow it.
 - The first沈知栀 visual reference set is saved under `assets/reference/`; LoRA/FaceID training has not been done yet.
+- A human-rhythm layer injects Chengdu local day phase, private activity, attention mode, and no-stage-direction guidance into chat/proactive prompts.
+- Sending a reply or proactive message now feeds back into mood state by reducing unresolved charge/initiative instead of leaving the state untouched.
 
 Verified command:
 
@@ -185,6 +187,7 @@ Implemented:
 - EchoText-inspired reply timing model estimates read/reply/ghost delays from emotion vectors.
 - EchoText-inspired image style detection carries user-requested styles into generation prompts.
 - External context emotion bleed is capped to keep SillyTavern/MCP/multimodal context from overwhelming the core state.
+- Chengdu-local human rhythm context keeps replies from feeling like an always-on assistant and explicitly suppresses bracketed stage directions.
 - Sticker selection maps newer moods such as `hurt`, `guarded`, `curious`, and `affectionate` to available visual assets.
 - Tool/computer-operation requests are detected and logged as proposals. Risky actions are injected into the prompt as requiring explicit user confirmation; no MCP/computer action executes automatically yet.
 
