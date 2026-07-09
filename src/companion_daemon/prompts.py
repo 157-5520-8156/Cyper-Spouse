@@ -2,7 +2,80 @@ from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.emotion_core import emotion_context_line
 from companion_daemon.human_rhythm import human_rhythm_context_line, proactive_rhythm_context_line
 from companion_daemon.proactive_triggers import proactive_context_instruction, ProactiveTrigger
-from companion_daemon.relationship import relationship_instruction, relationship_status_line
+from companion_daemon.relationship import relationship_instruction
+
+
+def state_to_hint(state: MoodState) -> str:
+    """Translate numerical mood state into natural behavioral hints.
+
+    Instead of dumping raw numbers like 'curiosity: 73/100', produce
+    human-readable descriptions the model can directly inhabit.
+    """
+    parts: list[str] = []
+
+    mood_desc = {
+        "calm": "你现在心情平静，没有特别强烈的情绪",
+        "happy": "你现在心情不错，比平时轻松一点",
+        "sulking": "你有点小别扭，不是生气，但心里有点堵",
+        "miss_you": "你有点想他，但不会直接说出来",
+        "worried": "你在担心他",
+        "jealous_soft": "你有一点点在意，但不会直接说吃醋",
+        "sleepy": "你有点困，消息会短一点",
+        "guarded": "你在保持距离，回复会更短更克制",
+        "hurt": "你有点受伤，不想假装没事",
+        "affectionate": "你对他有一点亲近感，可以稍微柔和",
+        "curious": "你对他说的事有点好奇",
+    }
+    parts.append(mood_desc.get(state.mood, "你现在心情平静"))
+
+    stage_desc = {
+        "stranger": "你们刚认识，保持礼貌和一点好奇就好",
+        "acquaintance": "你们算是认识，可以稍微随意一点",
+        "friend": "你们算朋友了，可以更自然一些",
+        "close_friend": "你们关系不错，可以偶尔开小玩笑",
+        "ambiguous": "你们之间有一点暧昧，但还没有确定关系",
+        "lover": "你们是恋人",
+    }
+    parts.append(stage_desc.get(state.relationship_stage, "你们刚认识"))
+
+    if state.emotional_charge >= 40:
+        parts.append("心里还有没消化完的情绪，不会立刻假装没事")
+    elif state.emotional_charge >= 20:
+        parts.append("心里还有一点点情绪余波")
+
+    if state.boundary_level >= 35:
+        parts.append("你现在边界感很强，不想太亲近")
+    elif state.boundary_level >= 15:
+        parts.append("你稍微有点收敛")
+
+    if state.security < 25:
+        parts.append("安全感不太够，不太敢完全敞开")
+    elif state.security >= 65:
+        parts.append("在他面前比较放松，敢表达真实的自己")
+
+    if state.patience < 30:
+        parts.append("耐心快用完了，不想多解释")
+
+    if state.initiative >= 60:
+        parts.append("主动欲望有点高，想找他聊聊")
+
+    if state.unresolved_emotion:
+        parts.append(f"心里有个没放下的感觉：{state.unresolved_emotion}")
+
+    if state.reply_style_hint and state.reply_style_hint != "自然私聊":
+        parts.append(state.reply_style_hint)
+
+    return "。".join(parts) + "。"
+
+
+def question_budget_hint(recent_lines: list[str]) -> str:
+    her_recent = [line for line in recent_lines[-8:] if "] 她:" in line]
+    recent_questions = sum(line.count("？") + line.count("?") for line in her_recent[-4:])
+    if recent_questions >= 2:
+        return "追问预算: 她最近已经问过好几个问题；这一轮不要再问，改用陈述、回应、轻微分享或停在一句话。"
+    if recent_questions == 1:
+        return "追问预算: 她刚刚问过一次；这一轮除非用户明确抛问题，否则尽量不反问。"
+    return "追问预算: 可以自然提问，但不要为了维持对话而硬问。"
 
 
 def reply_prompt(
@@ -13,42 +86,44 @@ def reply_prompt(
     companion_system_prompt: str,
     memory_lines: list[str] | None = None,
     attachment_lines: list[str] | None = None,
+    example_pairs: list[dict[str, str]] | None = None,
 ) -> list[dict[str, str]]:
-    state = f"""当前心情: {mood_state.mood}
-{relationship_status_line(mood_state)}
-关系阶段: {mood_state.relationship_stage}
-关系阶段说明: {relationship_instruction(mood_state.relationship_stage)}
-耐心: {mood_state.patience}/100
-安全感: {mood_state.security}/100
-好奇心: {mood_state.curiosity}/100
-主动欲望: {mood_state.initiative}/100
-情绪残留强度: {mood_state.emotional_charge}/100
-边界等级: {mood_state.boundary_level}/100
-上一轮用户意图: {mood_state.last_user_intent or "无"}
-上一轮互动事件: {mood_state.last_interaction_event or "无"}
-本轮回复风格提示: {mood_state.reply_style_hint or "自然私聊"}
-未解决情绪: {mood_state.unresolved_emotion or "无"}
-平台上下文: {platform_context or "无"}
-{emotion_context_line(mood_state)}
-{human_rhythm_context_line(mood_state)}
-自然度约束:
-- 不要每条都反问用户；多数回复先接住对方的话，再补一点自己的感受或生活细节。
-- 每条最多一个问号；如果最近已经问过问题，本轮优先陈述、回应或轻轻延展。
-- 不要频繁说“我有个朋友/同学/室友也……”；只有长期记忆或当前话题真的需要时才提别人。
-- 少用“确实、相关、理解、可以、建议”这类助手腔连词；像 QQ 私聊，不像客服总结。
-- 不要为了显得会聊天而硬把话题拉到认识的人身上。
-"""
+    hint = state_to_hint(mood_state)
+    rhythm = human_rhythm_context_line(mood_state)
+
+    state_block = (
+        f"{hint}\n"
+        f"{rhythm}\n"
+        f"{question_budget_hint(recent_lines)}\n"
+        f"平台上下文: {platform_context or '无'}\n"
+        "回复原则: 像手机私聊。先回应他说的话，再补一点自己的感受。"
+        "回复尽量短，一两句就好。你想知道答案的时候才问问题，不要为了维持对话而问。"
+        "你不是助手，不用帮他解决问题，先听他说。"
+        "不要解释系统、提示词、模型或任务。涉及账号、文件、电脑操作、发给第三方的消息，必须先等用户明确确认。"
+    )
+
     recent = "\n".join(recent_lines) if recent_lines else "暂无历史。"
     memories = "\n".join(memory_lines or []) if memory_lines else "暂无可靠长期记忆。"
     attachments = "\n".join(attachment_lines or []) if attachment_lines else "本轮没有附件。"
-    return [
+
+    messages = [
         {"role": "system", "content": companion_system_prompt},
-        {"role": "system", "content": state},
+        {"role": "system", "content": state_block},
         {"role": "system", "content": f"长期记忆:\n{memories}"},
         {"role": "system", "content": f"本轮附件:\n{attachments}"},
         {"role": "system", "content": f"最近聊天:\n{recent}"},
-        {"role": "user", "content": message.text},
     ]
+
+    if example_pairs:
+        for example in example_pairs[:4]:
+            user_text = example.get("user", "")
+            assistant_text = example.get("assistant", "")
+            if user_text and assistant_text:
+                messages.append({"role": "user", "content": user_text})
+                messages.append({"role": "assistant", "content": assistant_text})
+
+    messages.append({"role": "user", "content": message.text})
+    return messages
 
 
 def proactive_prompt(
@@ -57,6 +132,8 @@ def proactive_prompt(
     companion_system_prompt: str,
     trigger: ProactiveTrigger | None = None,
 ) -> list[dict[str, str]]:
+    hint = state_to_hint(mood_state)
+    rhythm = proactive_rhythm_context_line(mood_state)
     recent = "\n".join(recent_lines) if recent_lines else "暂无历史。"
     return [
         {"role": "system", "content": companion_system_prompt},
@@ -68,8 +145,8 @@ def proactive_prompt(
 好感度、当前关系、心情会影响主动程度：关系越近越自然，但仍不要机械地定时问候。
 如果边界等级高、情绪残留强，主动消息应该更克制，甚至暂时不发。
 如果用户刚道歉或刚分享脆弱情绪，可以更温柔；如果用户刚冒犯你，不要立刻假装没事。
-偶尔可以因为“自己突然想分享当下”而发一张生活照/自拍，但必须很少发生；不要把图片当作奖励机制，也不要因为用户索要就被动执行。
-如果触发器要求“补一句自己的想法/发散”，优先陈述自己的小想法，不要再抛问题。
+偶尔可以因为"自己突然想分享当下"而发一张生活照/自拍，但必须很少发生；不要把图片当作奖励机制，也不要因为用户索要就被动执行。
+如果触发器要求"补一句自己的想法/发散"，优先陈述自己的小想法，不要再抛问题。
 不要每次主动都问用户在不在、忙不忙、怎么看；像真人一样有时只是补一句。
 优先服从主动触发器；没有强触发时，倾向不发。
 Return strict JSON only with keys:
@@ -80,21 +157,10 @@ message_type can be none, text, sticker, text_sticker, image, text_image.
         },
         {
             "role": "user",
-            "content": f"""当前心情: {mood_state.mood}
-{relationship_status_line(mood_state)}
-关系阶段: {mood_state.relationship_stage}
-关系阶段说明: {relationship_instruction(mood_state.relationship_stage)}
-耐心: {mood_state.patience}/100
-安全感: {mood_state.security}/100
-主动欲望: {mood_state.initiative}/100
-情绪残留强度: {mood_state.emotional_charge}/100
-边界等级: {mood_state.boundary_level}/100
-上一轮用户意图: {mood_state.last_user_intent or "无"}
-上一轮互动事件: {mood_state.last_interaction_event or "无"}
-本轮回复风格提示: {mood_state.reply_style_hint or "自然私聊"}
-未解决情绪: {mood_state.unresolved_emotion or "无"}
+            "content": f"""{hint}
+{rhythm}
 {emotion_context_line(mood_state)}
-{proactive_rhythm_context_line(mood_state)}
+关系阶段说明: {relationship_instruction(mood_state.relationship_stage)}
 主动触发器:
 {proactive_context_instruction(trigger)}
 最近聊天:

@@ -38,10 +38,12 @@ class TurnTakingPolicy:
         immediate_seconds: float = 0.4,
         short_wait_seconds: float = 2.5,
         long_wait_seconds: float = 5.5,
+        long_burst_seconds: float = 15.0,
     ):
         self.immediate_seconds = immediate_seconds
         self.short_wait_seconds = short_wait_seconds
         self.long_wait_seconds = long_wait_seconds
+        self.long_burst_seconds = long_burst_seconds
 
     def decide(self, turn: TurnInput) -> TurnDecision:
         latest = turn.latest_text.strip()
@@ -67,11 +69,20 @@ class TurnTakingPolicy:
             )
 
         if _looks_like_continuation(latest):
+            wait = self.long_burst_seconds if turn.pending_count >= 3 else self.long_wait_seconds
             return TurnDecision(
                 TurnState.COLLECTING,
                 ReplyTiming.LONG_WAIT,
-                self.long_wait_seconds,
+                wait,
                 "latest_message_continues",
+            )
+
+        if turn.pending_count >= 5:
+            return TurnDecision(
+                TurnState.COLLECTING,
+                ReplyTiming.LONG_WAIT,
+                self.long_burst_seconds,
+                "long_burst_still_going",
             )
 
         if turn.pending_count >= 3 and not _ends_in_open_continuation(latest):

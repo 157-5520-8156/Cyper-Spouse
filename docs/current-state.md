@@ -192,6 +192,8 @@ Implemented:
 - External context emotion bleed is capped to keep SillyTavern/MCP/multimodal context from overwhelming the core state.
 - Chengdu-local human rhythm context keeps replies from feeling like an always-on assistant and explicitly suppresses bracketed stage directions.
 - QQ WebSocket delivery now adds read/think/typing delay before the first reply and human-sized pauses between split reply parts, instead of sending 2-3 parts in one burst.
+- QQ private chat now has a conservative reply-decision layer enabled by default: pure acknowledgements can be recorded without a reply, questions/emotional/urgent messages always reply, and long story-like messages may be deferred during busy phases with a “just saw this” context hint.
+- Normal replies include a question-budget hint based on recent outgoing messages, so if she has already asked several questions recently the next reply is steered toward statements, reactions, or small self-disclosure instead of another follow-up question.
 - Sticker selection maps newer moods such as `hurt`, `guarded`, `curious`, and `affectionate` to available visual assets.
 - Tool/computer-operation requests are detected and logged as proposals. Risky actions are injected into the prompt as requiring explicit user confirmation; no MCP/computer action executes automatically yet.
 

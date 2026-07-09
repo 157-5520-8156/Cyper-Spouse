@@ -28,7 +28,7 @@ def test_human_rhythm_context_discourages_stage_directions() -> None:
     )
 
     assert "生活节律" in line
-    assert "不要写舞台动作" in line
+    assert "微信打字" in line
     assert "想起你但又不想显得太黏" in line
 
 

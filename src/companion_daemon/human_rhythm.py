@@ -41,9 +41,10 @@ def human_rhythm_snapshot(state: MoodState, now: datetime | None = None) -> Huma
 def human_rhythm_context_line(state: MoodState, now: datetime | None = None) -> str:
     rhythm = human_rhythm_snapshot(state, now)
     return (
-        f"生活节律: 成都本地时间约 {rhythm.local_hour}:00，阶段={rhythm.phase}；"
-        f"她像是在{rhythm.private_activity}；注意力={rhythm.attention_mode}；"
-        f"回复倾向={rhythm.reply_guidance} 不要写舞台动作、括号动作或系统说明。"
+        f"生活节律: 成都本地时间约 {rhythm.local_hour}:00；"
+        f"她像是在{rhythm.private_activity}；"
+        f"回复倾向={rhythm.reply_guidance}。"
+        f"你的消息就是纯粹的私聊文字，像微信打字一样。"
     )
 
 

@@ -80,6 +80,7 @@ class CompanionStore:
                   last_emotion_impact_json text not null default '{}',
                   last_emotion_source text,
                   last_platform text,
+                  has_unread integer not null default 0,
                   updated_at text not null
                 );
 
@@ -168,6 +169,7 @@ class CompanionStore:
             self._ensure_column(conn, "mood_state", "emotion_affinity_json", "text not null default '{}'")
             self._ensure_column(conn, "mood_state", "last_emotion_impact_json", "text not null default '{}'")
             self._ensure_column(conn, "mood_state", "last_emotion_source", "text")
+            self._ensure_column(conn, "mood_state", "has_unread", "integer not null default 0")
             self._ensure_column(conn, "proactive_events", "trigger_type", "text")
 
     def _ensure_column(
@@ -207,13 +209,21 @@ class CompanionStore:
             )
             conn.execute(
                 """
-                insert into platform_accounts
+                insert or ignore into platform_accounts
                   (platform, platform_user_id, canonical_user_id, created_at)
                 values (?, ?, ?, ?)
                 """,
                 (platform, platform_user_id, canonical_user_id, now),
             )
-            return canonical_user_id
+            row = conn.execute(
+                """
+                select canonical_user_id
+                from platform_accounts
+                where platform = ? and platform_user_id = ?
+                """,
+                (platform, platform_user_id),
+            ).fetchone()
+            return str(row["canonical_user_id"]) if row else canonical_user_id
 
     def map_account(self, platform: Platform, platform_user_id: str, canonical_user_id: str) -> None:
         now = utc_now().isoformat()
@@ -273,7 +283,7 @@ class CompanionStore:
                   unresolved_emotion, last_user_intent, last_interaction_event,
                   reply_style_hint, emotion_vector_json, emotion_baseline_json,
                   emotion_affinity_json, last_emotion_impact_json, last_emotion_source,
-                  last_platform, updated_at
+                  last_platform, has_unread, updated_at
                 from mood_state
                 where canonical_user_id = ?
                 """,
@@ -303,6 +313,7 @@ class CompanionStore:
             last_emotion_impact=_json_map(row["last_emotion_impact_json"]),
             last_emotion_source=row["last_emotion_source"],
             last_platform=row["last_platform"],
+            has_unread=bool(row["has_unread"]),
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
 
@@ -324,8 +335,8 @@ class CompanionStore:
                   boundary_level, relationship_stage, unresolved_emotion,
                   last_user_intent, last_interaction_event, reply_style_hint,
                   emotion_vector_json, emotion_baseline_json, emotion_affinity_json,
-                  last_emotion_impact_json, last_emotion_source, last_platform, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  last_emotion_impact_json, last_emotion_source, last_platform, has_unread, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     canonical_user_id,
@@ -350,6 +361,7 @@ class CompanionStore:
                     json.dumps(state.last_emotion_impact, ensure_ascii=False),
                     state.last_emotion_source,
                     state.last_platform,
+                    state.has_unread,
                     state.updated_at.isoformat(),
                 ),
             )

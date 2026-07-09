@@ -4,7 +4,13 @@ import random
 import pytest
 
 from companion_daemon.models import CompanionReply, IncomingMessage, MessageAttachment
-from companion_daemon.qq_websocket import QQMessageCoalescer, _attachments_from_botpy, _clean_content, _send_reply_parts
+from companion_daemon.qq_websocket import (
+    CompanionQQClient,
+    QQMessageCoalescer,
+    _attachments_from_botpy,
+    _clean_content,
+    _send_reply_parts,
+)
 from companion_daemon.turn_taking import TurnTakingPolicy
 
 
@@ -33,6 +39,25 @@ def test_attachments_from_botpy() -> None:
     assert len(attachments) == 1
     assert attachments[0].kind == "image"
     assert attachments[0].url == "https://example.test/photo.png"
+
+
+def test_duplicate_detection_prefers_platform_message_id() -> None:
+    client = object.__new__(CompanionQQClient)
+    client._seen_message_ids = set()
+    client._recent_text_keys = {}
+
+    assert client._is_duplicate("msg-1", "user", "哈哈") is False
+    assert client._is_duplicate("msg-2", "user", "哈哈") is False
+    assert client._is_duplicate("msg-2", "user", "哈哈") is True
+
+
+def test_duplicate_detection_falls_back_to_text_without_message_id() -> None:
+    client = object.__new__(CompanionQQClient)
+    client._seen_message_ids = set()
+    client._recent_text_keys = {}
+
+    assert client._is_duplicate(None, "user", "哈哈") is False
+    assert client._is_duplicate(None, "user", "哈哈") is True
 
 
 @pytest.mark.asyncio
@@ -191,6 +216,71 @@ async def test_coalescer_sends_reply_parts_in_order() -> None:
     await asyncio.sleep(1.0)
 
     assert target.replies == ["我在。", "刚刚想到你。"]
+
+
+@pytest.mark.asyncio
+async def test_coalescer_can_defer_long_story_then_reply() -> None:
+    class DeferRandom(random.Random):
+        def random(self) -> float:
+            return 0.0
+
+        def uniform(self, a: float, b: float) -> float:
+            return a
+
+    class FakeStore:
+        def resolve_user(self, platform: str, platform_user_id: str) -> str:
+            return "geoff"
+
+        def get_mood_state(self, canonical_user_id: str):
+            from companion_daemon.models import MoodState
+
+            return MoodState()
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = FakeStore()
+            self.seen_texts: list[str] = []
+            self.context_hints: list[str | None] = []
+
+        async def handle_message(self, incoming: IncomingMessage, **kwargs) -> CompanionReply:
+            self.seen_texts.append(incoming.text)
+            self.context_hints.append(kwargs.get("context_hint"))
+            return CompanionReply(canonical_user_id="geoff", mood="calm", text="刚看到。")
+
+    class FakeTarget:
+        def __init__(self):
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs) -> None:
+            self.replies.append(kwargs["content"])
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    engine = FakeEngine()
+    target = FakeTarget()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+        enable_reply_decision=True,
+        sleep=fake_sleep,
+        rng=DeferRandom(),
+    )
+
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="我刚刚想了很久，" * 8),
+        target,
+    )
+    await asyncio.sleep(0.01)
+
+    assert engine.seen_texts == ["我刚刚想了很久，" * 8]
+    assert engine.context_hints[0]
+    assert target.replies == ["刚看到。"]
+    assert any(seconds >= 300 for seconds in sleeps)
 
 
 @pytest.mark.asyncio

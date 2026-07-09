@@ -69,6 +69,7 @@ class CompanionEngine:
         budget_gate: BudgetGate | None = None,
         visual_identity_path: Path | None = Path("configs/visual_identity.yaml"),
         image_output_dir: Path = Path("assets/life"),
+        rewrite_model: ChatModel | None = None,
     ):
         self.store = store
         self.model = model
@@ -83,9 +84,20 @@ class CompanionEngine:
         self.conversation_core = conversation_core or PromptedConversationCore(
             model,
             companion_system_prompt,
+            example_messages=(
+                character_profile.example_messages if character_profile else None
+            ),
+            rewrite_model=rewrite_model,
         )
 
-    async def handle_message(self, message: IncomingMessage) -> CompanionReply:
+    async def handle_message(
+        self,
+        message: IncomingMessage,
+        *,
+        skip_reply: bool = False,
+        mark_unread: bool = True,
+        context_hint: str | None = None,
+    ) -> CompanionReply | None:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         previous_state = self.store.get_mood_state(canonical_user_id)
         recent_dicts_before = self._recent_dicts(canonical_user_id, limit=16)
@@ -130,6 +142,8 @@ class CompanionEngine:
                 confidence=extracted.confidence,
             )
         attachment_lines = summarize_attachments(message.attachments)
+        if context_hint:
+            attachment_lines.append(context_hint)
         recent_lines = self._recent_lines(canonical_user_id)
         tone_inertia = build_tone_inertia(next_state, recent_lines)
         attachment_lines.append(tone_inertia.prompt_line)
@@ -266,7 +280,11 @@ class CompanionEngine:
                 ]
             ),
         )
+        next_state = next_state.model_copy(update={"has_unread": mark_unread if skip_reply else False})
         self.store.save_mood_state(canonical_user_id, next_state)
+
+        if skip_reply:
+            return None
 
         text = await self.conversation_core.reply(
             message,

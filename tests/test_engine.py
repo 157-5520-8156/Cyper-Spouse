@@ -32,6 +32,38 @@ async def test_handle_message_updates_mood_and_replies(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_skip_reply_can_avoid_unread_for_pure_ack(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="嗯嗯"),
+        skip_reply=True,
+        mark_unread=False,
+    )
+
+    assert reply is None
+    assert store.get_mood_state("geoff").has_unread is False
+
+
+@pytest.mark.asyncio
+async def test_skip_reply_can_mark_unread_for_deferred_message(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我刚刚想了很久，" * 8),
+        skip_reply=True,
+        mark_unread=True,
+    )
+
+    assert reply is None
+    assert store.get_mood_state("geoff").has_unread is True
+
+
+@pytest.mark.asyncio
 async def test_handle_message_injects_human_rhythm_context(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
@@ -44,7 +76,7 @@ async def test_handle_message_injects_human_rhythm_context(tmp_path: Path) -> No
 
     prompt_text = "\n".join(message["content"] for message in model.calls[-1])
     assert "生活节律" in prompt_text
-    assert "不要写舞台动作" in prompt_text
+    assert "微信打字" in prompt_text
     assert any(row["kind"] == "life_continuity" for row in store.memories("geoff"))
 
 

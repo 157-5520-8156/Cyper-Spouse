@@ -61,6 +61,13 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             base_url=settings.openai_base_url,
             model=settings.image_model,
         )
+    rewrite_model = None
+    if settings.enable_reply_rewrite and settings.deepseek_api_key and not use_fake_model:
+        rewrite_model = DeepSeekChatModel(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            model=settings.deepseek_reply_model or settings.deepseek_model,
+        )
     return CompanionEngine(
         store,
         model,
@@ -72,4 +79,5 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         image_generator=image_generator,
         budget_gate=budget_gate,
         visual_identity_path=settings.visual_identity_path,
+        rewrite_model=rewrite_model,
     )

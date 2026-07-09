@@ -22,12 +22,28 @@ class ConversationCore(Protocol):
         """Return the companion's reply."""
 
 
+_REWRITE_PROMPT = (
+    "下面是一个20岁女大学生在QQ私聊里发的消息。"
+    "如果这句话听起来像AI、客服或助手说的，改写得更自然。"
+    "保持原意和她的语气。如果已经够自然，原样返回。"
+    "只输出最终消息，不加解释。\n\n她的消息：{text}"
+)
+
+
 class PromptedConversationCore:
     """SillyTavern-style prompt core backed by a chat-completions API."""
 
-    def __init__(self, model: ChatModel, companion_system_prompt: str):
+    def __init__(
+        self,
+        model: ChatModel,
+        companion_system_prompt: str,
+        example_messages: list[dict[str, str]] | None = None,
+        rewrite_model: ChatModel | None = None,
+    ):
         self.model = model
         self.companion_system_prompt = companion_system_prompt
+        self.example_messages = example_messages or []
+        self.rewrite_model = rewrite_model
 
     async def reply(
         self,
@@ -47,10 +63,32 @@ class PromptedConversationCore:
                 self.companion_system_prompt,
                 memory_lines,
                 attachment_lines,
+                example_pairs=self.example_messages,
             ),
-            temperature=0.85,
+            temperature=0.75,
         )
-        return sanitize_chat_text(text)
+        text = sanitize_chat_text(text)
+        if self.rewrite_model and len(text) >= 5:
+            text = await self._rewrite_for_naturalness(text)
+        return text
+
+    async def _rewrite_for_naturalness(self, text: str) -> str:
+        try:
+            rewritten = await self.rewrite_model.complete(
+                [
+                    {
+                        "role": "user",
+                        "content": _REWRITE_PROMPT.format(text=text),
+                    }
+                ],
+                temperature=0.2,
+            )
+            rewritten = sanitize_chat_text(rewritten)
+            if rewritten and len(rewritten) <= len(text) * 3:
+                return rewritten
+        except Exception:
+            pass
+        return text
 
 
 class SillyTavernConversationCore:

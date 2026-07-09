@@ -90,4 +90,5 @@ class MoodState(BaseModel):
     last_emotion_impact: dict[str, float] = Field(default_factory=dict)
     last_emotion_source: str | None = None
     last_platform: Platform | None = None
+    has_unread: bool = False
     updated_at: datetime = Field(default_factory=utc_now)

@@ -10,4 +10,4 @@ def test_character_profile_includes_rich_persona() -> None:
     assert "刚认识" in prompt
     assert "成都" in prompt
     assert "城市漫游兴趣群" in prompt
-    assert "不输出括号动作" in prompt
+    assert "纯粹的私聊文字" in prompt
