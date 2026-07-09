@@ -31,6 +31,12 @@ def reply_prompt(
 平台上下文: {platform_context or "无"}
 {emotion_context_line(mood_state)}
 {human_rhythm_context_line(mood_state)}
+自然度约束:
+- 不要每条都反问用户；多数回复先接住对方的话，再补一点自己的感受或生活细节。
+- 每条最多一个问号；如果最近已经问过问题，本轮优先陈述、回应或轻轻延展。
+- 不要频繁说“我有个朋友/同学/室友也……”；只有长期记忆或当前话题真的需要时才提别人。
+- 少用“确实、相关、理解、可以、建议”这类助手腔连词；像 QQ 私聊，不像客服总结。
+- 不要为了显得会聊天而硬把话题拉到认识的人身上。
 """
     recent = "\n".join(recent_lines) if recent_lines else "暂无历史。"
     memories = "\n".join(memory_lines or []) if memory_lines else "暂无可靠长期记忆。"
@@ -63,6 +69,8 @@ def proactive_prompt(
 如果边界等级高、情绪残留强，主动消息应该更克制，甚至暂时不发。
 如果用户刚道歉或刚分享脆弱情绪，可以更温柔；如果用户刚冒犯你，不要立刻假装没事。
 偶尔可以因为“自己突然想分享当下”而发一张生活照/自拍，但必须很少发生；不要把图片当作奖励机制，也不要因为用户索要就被动执行。
+如果触发器要求“补一句自己的想法/发散”，优先陈述自己的小想法，不要再抛问题。
+不要每次主动都问用户在不在、忙不忙、怎么看；像真人一样有时只是补一句。
 优先服从主动触发器；没有强触发时，倾向不发。
 Return strict JSON only with keys:
 private_thought, should_send, platform, message_type, message, sticker_category, cooldown_minutes.

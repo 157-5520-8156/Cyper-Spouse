@@ -70,10 +70,12 @@
 - 小脾气修复有曲线：认真解释会明显缓和，敷衍道歉会让她更戒备，不会“一句对不起就完全重置”。
 - 主动消息没被回应时会产生等待心理：短时间期待，久一点收住，再久会把期待压下去。同一阶段不会每次调度重复叠加。
 - 如果她主动问了一个问题但没得到回答，会进入专门的困惑闭环：短时间困惑自己是不是问得突然，久一点会收住；用户回来但绕开问题时，她会察觉到，不会立刻连环追问。
+- 如果一轮对话像是还没完全收住，并且最后一条是她发的，短时间后可以触发 `open_thread_afterthought`，补一个自己的想法或轻微发散，而不是继续追问。
 - 最近几轮语气会形成 `tone_inertia`：刚刚冷淡过不会突然热情，刚刚柔和过也不会一下变客服。
 - `inner_subtext` 会记录“不说出口”的心理：想被哄但嘴硬、想分享但怕打扰、有点在意但不明说、开心但装平常。
 - 长期性格漂移会读取情绪 affinity：长期被稳定尊重会更放松；长期紧张会更敏感。
-- QQ 发送层支持把较长自然回复拆成 2-3 条短消息发送；受伤/戒备状态默认不拆，避免显得轻快。
+- QQ 发送层支持把较长自然回复拆成 2-3 条短消息发送；受伤/戒备状态默认不拆，避免显得轻快。实际发送时还会加入读消息、想一下、打字和分段间隔，避免一口气刷出多条。
+- 普通回复会被自然度约束和 sanitizer 二次处理：尽量不每条都反问，单条最多保留一个问号，过滤“我理解你的意思/这个问题确实/我有个同学也...”这类助手腔或借人说事的惯性句。
 
 ## EchoText Ideas Ported
 
@@ -109,7 +111,7 @@
 - 生活节律：`afternoon_slump`, `pre_dawn`, `commute_ping`, `post_work`, `sunday_evening`, `post_midnight_impulse`, `monday_reboot`, `friday_feeling`, `sunday_scaries`, `midweek_check`
 - 情绪驱动：`repair_attempt`, `curiosity_ping`, `anxiety_reassurance`, `celebration_nudge`, `sharing_impulse`, `nostalgia_wave`, `longing_ping`, `playful_tease`, `jealousy_nudge`, `boredom_break`, `overwhelm_check`, `gratitude_burst`, `suppressed_thought`
 - 随机生活感：`thinking_of_you`, `random_thought`, `dream_mention`, `song_stuck`, `overthinking_spiral`, `craving_share`, `inside_joke_callback`, `quiet_productive`
-- 对话后续：`double_text`, `seen_no_reply_soft`, `followup_callback`, `memory_nudge`
+- 对话后续：`double_text`, `open_thread_afterthought`, `seen_no_reply_soft`, `followup_callback`, `memory_nudge`
 
 为了避免“同一种感觉连发”，trigger 会被归入语义类别并单独冷却：
 

@@ -34,6 +34,7 @@ TRIGGER_SEMANTIC_CATEGORY = {
     "song_stuck": "random_impulse",
     "craving_share": "random_impulse",
     "dream_mention": "random_impulse",
+    "open_thread_afterthought": "random_impulse",
 }
 
 CATEGORY_COOLDOWN_HOURS = {
@@ -87,6 +88,7 @@ TRIGGER_COOLDOWN_HOURS = {
     "midweek_check": 96,
     "pride_share": 28,
     "her_question_unanswered": 14,
+    "open_thread_afterthought": 6,
 }
 
 
@@ -246,6 +248,8 @@ def evaluate_proactive_trigger(
         add("double_text", 52, "你想起刚刚漏说了一句。发很短的补充，不要尴尬。")
     if own_unanswered_question and 0.5 <= (hours_since_char or 0) <= 8 and trust >= 25:
         add("her_question_unanswered", 92, "你刚刚问了一个问题但没等到回答。可以轻轻把问题放软，或假装顺手换个说法，不要连环追问。")
+    if char_sent_last and 0.15 <= (hours_since_char or 0) <= 1.5 and trust >= 20 and anger < 45:
+        add("open_thread_afterthought", 64, "这轮对话还像没完全收住。补一句自己的小想法或轻微发散，不要再问用户问题。")
     if char_sent_last and 4 <= (hours_since_char or 0) <= 24 and trust >= 40 and anger < 50:
         add("seen_no_reply_soft", 48, "你上一条没有等到回复。低需求地补一句，不要催。")
     if 2 <= hours_since_user <= 48 and last_user:

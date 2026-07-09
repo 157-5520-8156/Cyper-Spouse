@@ -91,6 +91,33 @@ def test_proactive_trigger_detects_her_unanswered_question() -> None:
     assert trigger.type in {"her_question_unanswered", "double_text", "seen_no_reply_soft"}
 
 
+def test_proactive_trigger_can_continue_open_thread() -> None:
+    now = datetime.fromisoformat("2026-07-10T10:00:00+00:00")
+    trigger = evaluate_proactive_trigger(
+        state=MoodState(emotion_vector={"trust": 45, "anger": 10}),
+        recent_messages=[
+            {
+                "direction": "in",
+                "platform": "qq",
+                "text": "我刚到家",
+                "sent_at": (now - timedelta(hours=0.4)).isoformat(),
+            },
+            {
+                "direction": "out",
+                "platform": "qq",
+                "text": "那你先歇一会儿。",
+                "sent_at": (now - timedelta(hours=0.3)).isoformat(),
+            },
+        ],
+        trigger_history={},
+        now=now,
+        rng=random.Random(5),
+    )
+
+    assert trigger
+    assert trigger.type == "open_thread_afterthought"
+
+
 def test_proactive_trigger_includes_daily_life_rhythm() -> None:
     now = datetime.fromisoformat("2026-07-10T15:00:00+00:00")
     trigger = evaluate_proactive_trigger(

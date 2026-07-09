@@ -1,9 +1,10 @@
 import asyncio
+import random
 
 import pytest
 
 from companion_daemon.models import CompanionReply, IncomingMessage, MessageAttachment
-from companion_daemon.qq_websocket import QQMessageCoalescer, _attachments_from_botpy, _clean_content
+from companion_daemon.qq_websocket import QQMessageCoalescer, _attachments_from_botpy, _clean_content, _send_reply_parts
 from companion_daemon.turn_taking import TurnTakingPolicy
 
 
@@ -190,6 +191,34 @@ async def test_coalescer_sends_reply_parts_in_order() -> None:
     await asyncio.sleep(1.0)
 
     assert target.replies == ["我在。", "刚刚想到你。"]
+
+
+@pytest.mark.asyncio
+async def test_send_reply_parts_uses_human_delay_between_parts() -> None:
+    class FakeTarget:
+        def __init__(self):
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs) -> None:
+            self.replies.append(kwargs["content"])
+
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    target = FakeTarget()
+    await _send_reply_parts(
+        target,
+        ["嗯。", "刚刚其实还想补一句。"],
+        sleep=fake_sleep,
+        rng=random.Random(1),
+        human_timing=True,
+    )
+
+    assert target.replies == ["嗯。", "刚刚其实还想补一句。"]
+    assert len(delays) == 1
+    assert delays[0] >= 0.9
 
 
 @pytest.mark.asyncio

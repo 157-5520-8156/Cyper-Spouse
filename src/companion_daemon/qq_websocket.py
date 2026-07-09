@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+import random
 import time
 
 import botpy
@@ -13,6 +14,7 @@ from botpy.message import C2CMessage, GroupMessage
 from companion_daemon.engine import CompanionEngine
 from companion_daemon.config import get_settings
 from companion_daemon.models import CompanionReply, IncomingMessage, MessageAttachment
+from companion_daemon.im_timing import between_part_delay_seconds, initial_reply_delay_seconds
 from companion_daemon.multimodal import attachment_kind
 from companion_daemon.qq_client import QQOfficialClient
 from companion_daemon.turn_taking import TurnInput, TurnTakingPolicy
@@ -42,6 +44,9 @@ class QQMessageCoalescer:
         on_reply: Callable[[CompanionReply], Awaitable[None]] | None = None,
         on_sticker: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None = None,
         on_image: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None = None,
+        human_timing: bool = False,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        rng: random.Random | None = None,
     ):
         self.engine = engine
         self.delay_seconds = delay_seconds
@@ -49,6 +54,9 @@ class QQMessageCoalescer:
         self.on_reply = on_reply
         self.on_sticker = on_sticker
         self.on_image = on_image
+        self.human_timing = human_timing
+        self.sleep = sleep
+        self.rng = rng or random.Random()
         self._pending: dict[str, list[QueuedQQMessage]] = defaultdict(list)
         self._tasks: dict[str, asyncio.Task[None]] = {}
 
@@ -86,7 +94,15 @@ class QQMessageCoalescer:
             )
             reply = await self.engine.handle_message(merged)
             try:
-                await _send_reply_parts(last.reply_target, reply.text_parts or [reply.text])
+                if self.human_timing:
+                    await self.sleep(initial_reply_delay_seconds(merged, reply, rng=self.rng))
+                await _send_reply_parts(
+                    last.reply_target,
+                    reply.text_parts or [reply.text],
+                    sleep=self.sleep,
+                    rng=self.rng,
+                    human_timing=self.human_timing,
+                )
             except Exception:
                 logger.exception("failed to send QQ reply")
                 return
@@ -129,6 +145,7 @@ class CompanionQQClient(botpy.Client):
             on_reply=self._log_reply,
             on_sticker=self._send_reply_sticker,
             on_image=self._send_reply_image,
+            human_timing=True,
         )
 
     async def on_ready(self) -> None:
@@ -199,10 +216,19 @@ def _reply_msg_seq() -> int:
     return int(time.time() * 1000) % 1_000_000
 
 
-async def _send_reply_parts(reply_target: ReplyTarget, parts: list[str]) -> None:
+async def _send_reply_parts(
+    reply_target: ReplyTarget,
+    parts: list[str],
+    *,
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+    rng: random.Random | None = None,
+    human_timing: bool = True,
+) -> None:
+    rng = rng or random.Random()
     for index, part in enumerate(parts):
         if index:
-            await asyncio.sleep(min(1.8, 0.45 + len(part) / 45))
+            delay = between_part_delay_seconds(part, rng=rng) if human_timing else min(1.8, 0.45 + len(part) / 45)
+            await sleep(delay)
         await reply_target.reply(content=part, msg_seq=_reply_msg_seq())
 
 

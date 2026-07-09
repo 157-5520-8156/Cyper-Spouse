@@ -161,6 +161,8 @@ Current profile:
 
 The prompt now explicitly forbids stage directions such as `（手机震了一下）`, action narration, and hidden psychological notes in public QQ/WeChat replies. A sanitizer also removes common roleplay-style stage directions before sending.
 
+The live QQ reply prompt also has a naturalness guard: avoid asking a question every turn, keep at most one question mark per reply, reduce assistant-like phrases such as “我理解/这个问题确实/建议”, and avoid the overused “我有个朋友/同学/室友也...” pattern unless memory or context truly supports it.
+
 ### Emotional State Machine
 
 Implemented:
@@ -176,6 +178,7 @@ Implemented:
 - EchoText-inspired proactive trigger timeline chooses concrete outreach reasons such as hanging question, late night, repair attempt, longing, random thought, inside joke, or soft follow-up.
 - Trigger history, semantic category cooldowns, daily-stable jitter, and a max-unanswered-proactive guard reduce repetitive or needy proactive messages.
 - Recent emotion impact can create a `mood_follow_up` proactive candidate when the state shift is strong enough.
+- A short `open_thread_afterthought` trigger handles the “this turn has not fully ended” case: if she sent the last message 9-90 minutes ago and the mood is safe, she may add one small thought without re-asking the user.
 - EchoText-inspired memory highlight detection extracts life facts, favorites, hobbies, important people, recent events, and shared moments.
 - Memory injection now selects a small high-signal subset instead of always injecting every recent memory.
 - Near-duplicate memory entries are merged instead of stored as separate facts.
@@ -188,6 +191,7 @@ Implemented:
 - EchoText-inspired image style detection carries user-requested styles into generation prompts.
 - External context emotion bleed is capped to keep SillyTavern/MCP/multimodal context from overwhelming the core state.
 - Chengdu-local human rhythm context keeps replies from feeling like an always-on assistant and explicitly suppresses bracketed stage directions.
+- QQ WebSocket delivery now adds read/think/typing delay before the first reply and human-sized pauses between split reply parts, instead of sending 2-3 parts in one burst.
 - Sticker selection maps newer moods such as `hurt`, `guarded`, `curious`, and `affectionate` to available visual assets.
 - Tool/computer-operation requests are detected and logged as proposals. Risky actions are injected into the prompt as requiring explicit user confirmation; no MCP/computer action executes automatically yet.
 
