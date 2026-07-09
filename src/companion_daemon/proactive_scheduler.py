@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 from datetime import datetime
+import hashlib
 import random
 
 from companion_daemon.config import get_settings
@@ -18,6 +19,32 @@ def _minutes_since(iso_timestamp: str | None) -> float | None:
     return (now - then).total_seconds() / 60
 
 
+def _jittered_cooldown_minutes(
+    *,
+    user_id: str,
+    base_minutes: int,
+    state_key: str,
+    last_sent: str | None,
+) -> int:
+    if not last_sent:
+        return base_minutes
+    ratio = _stable_ratio(user_id, state_key, last_sent)
+    multiplier = 0.86 + (ratio * 0.42)
+    if any(token in state_key for token in ("hurt", "guarded", "sulking")):
+        multiplier = max(1.0, multiplier)
+    return max(12, min(420, round(base_minutes * multiplier)))
+
+
+def _next_sleep_seconds(base_seconds: float, rng: random.Random | None = None) -> float:
+    rng = rng or random
+    return max(30.0, base_seconds * rng.uniform(0.65, 1.35))
+
+
+def _stable_ratio(*parts: str) -> float:
+    digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
+    return int(digest[:12], 16) / float(0xFFFFFFFFFFFF)
+
+
 async def scheduler_loop(
     *,
     send: bool,
@@ -33,14 +60,24 @@ async def scheduler_loop(
         users = engine.store.canonical_users() or ["geoff"]
         for user_id in users:
             state = engine.store.get_mood_state(user_id)
-            cooldown_minutes = proactive_cooldown_minutes(
+            base_cooldown_minutes = proactive_cooldown_minutes(
                 state,
                 settings.proactive_min_cooldown_minutes,
             )
             last_sent = engine.store.last_proactive_delivery(user_id, "qq")
+            cooldown_minutes = _jittered_cooldown_minutes(
+                user_id=user_id,
+                base_minutes=base_cooldown_minutes,
+                state_key=f"{state.relationship_stage}:{state.mood}",
+                last_sent=last_sent,
+            )
             elapsed = _minutes_since(last_sent)
             if elapsed is not None and elapsed < cooldown_minutes:
-                print(f"skip {user_id}: proactive cooldown {elapsed:.1f}m/{cooldown_minutes}m")
+                print(
+                    f"skip {user_id}: proactive cooldown {elapsed:.1f}m/{cooldown_minutes}m "
+                    f"(base {base_cooldown_minutes}m)",
+                    flush=True,
+                )
             else:
                 await run_once(user_id, send=send, sandbox=sandbox)
 
@@ -50,11 +87,11 @@ async def scheduler_loop(
             life_elapsed = _minutes_since(life_last_sent)
             life_cooldown = max(cooldown_minutes * 2, 120)
             if life_elapsed is not None and life_elapsed < life_cooldown:
-                print(f"skip {user_id}: life-event cooldown {life_elapsed:.1f}m/{life_cooldown}m")
+                print(f"skip {user_id}: life-event cooldown {life_elapsed:.1f}m/{life_cooldown}m", flush=True)
                 continue
             probability = life_event_probability(state)
             if random.random() > probability:
-                print(f"skip {user_id}: life-event probability {probability:.2f}")
+                print(f"skip {user_id}: life-event probability {probability:.2f}", flush=True)
                 continue
             await run_life_event(
                 user_id=user_id,
@@ -65,7 +102,7 @@ async def scheduler_loop(
             )
         if once:
             return
-        await asyncio.sleep(settings.proactive_interval_seconds)
+        await asyncio.sleep(_next_sleep_seconds(settings.proactive_interval_seconds))
 
 
 def main() -> None:
