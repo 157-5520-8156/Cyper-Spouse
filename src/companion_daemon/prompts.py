@@ -87,6 +87,7 @@ def reply_prompt(
     memory_lines: list[str] | None = None,
     attachment_lines: list[str] | None = None,
     example_pairs: list[dict[str, str]] | None = None,
+    self_core_block: str | None = None,
 ) -> list[dict[str, str]]:
     hint = state_to_hint(mood_state)
     rhythm = human_rhythm_context_line(mood_state)
@@ -121,11 +122,15 @@ def reply_prompt(
 
     messages = [
         {"role": "system", "content": companion_system_prompt},
+    ]
+    if self_core_block:
+        messages.append({"role": "system", "content": self_core_block})
+    messages.extend([
         {"role": "system", "content": state_block},
         {"role": "system", "content": f"长期记忆:\n{memories}"},
         {"role": "system", "content": f"本轮附件:\n{attachments}"},
         {"role": "system", "content": f"最近聊天:\n{recent}"},
-    ]
+    ])
 
     if example_pairs:
         for example in example_pairs[:4]:

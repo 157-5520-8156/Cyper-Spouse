@@ -149,9 +149,17 @@ def memory_from_attachment(attachment: MessageAttachment) -> ExtractedMemory | N
     return None
 
 
-def memory_lines(rows, *, max_lines: int = 3) -> list[str]:
+def memory_lines(rows, *, max_lines: int = 3, char_budget: int = 600) -> list[str]:
     selected = _select_memory_rows(rows, max_lines=max_lines)
-    return [f"- [{row['kind']}] {row['content']}" for row in selected]
+    lines: list[str] = []
+    total = 0
+    for row in selected:
+        line = f"- [{row['kind']}] {row['content']}"
+        if total + len(line) > char_budget and lines:
+            break
+        lines.append(line)
+        total += len(line)
+    return lines
 
 
 def _select_memory_rows(rows, *, max_lines: int) -> list:

@@ -1,4 +1,6 @@
+import asyncio
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -8,6 +10,12 @@ from companion_daemon.conversation import ConversationCore, PromptedConversation
 from companion_daemon.db import CompanionStore
 from companion_daemon.emotion_state import interpret_interaction
 from companion_daemon.emotion_reactions import select_character_reaction
+from companion_daemon.memory_consolidation import (
+    build_self_core,
+    load_self_core,
+    should_consolidate,
+    consolidate_memories,
+)
 from companion_daemon.image_agency import decide_image_agency, image_agency_prompt_line
 from companion_daemon.image_generation import OpenAIImageGenerator, life_image_prompt
 from companion_daemon.image_prompt_builder import ChatImageMessage, build_image_prompt
@@ -53,6 +61,8 @@ from companion_daemon.unanswered_question import (
     last_unanswered_own_question,
 )
 from companion_daemon.withheld_impulse import apply_withheld_impulse, build_withheld_impulse
+
+logger = logging.getLogger(__name__)
 
 
 class CompanionEngine:
@@ -286,6 +296,9 @@ class CompanionEngine:
         if skip_reply:
             return None
 
+        core = load_self_core(self.store, canonical_user_id)
+        self_core_block = core.to_prompt_block() if core else None
+
         text = await self.conversation_core.reply(
             message,
             next_state,
@@ -293,6 +306,7 @@ class CompanionEngine:
             context,
             memory_lines(self.store.memories(canonical_user_id)),
             attachment_lines,
+            self_core_block=self_core_block,
         )
         self.store.save_outgoing(canonical_user_id, message.platform, text)
         expressed_state = apply_expression_after_reply(
@@ -318,6 +332,7 @@ class CompanionEngine:
         )
         if generated_image_path:
             sticker = None
+        asyncio.create_task(self._maybe_consolidate(canonical_user_id, expressed_state))
         return CompanionReply(
             canonical_user_id=canonical_user_id,
             mood=expressed_state.mood,
@@ -330,6 +345,16 @@ class CompanionEngine:
                 suggested_reaction.reaction_id if suggested_reaction and suggested_reaction.probability >= 0.25 else None
             ),
         )
+
+    async def _maybe_consolidate(self, canonical_user_id: str, state: MoodState) -> None:
+        try:
+            if not should_consolidate(self.store, canonical_user_id):
+                return
+            logger.info("triggering memory consolidation for %s", canonical_user_id)
+            await consolidate_memories(self.store, self.model, canonical_user_id)
+            await build_self_core(self.store, self.model, canonical_user_id, state)
+        except Exception:
+            logger.exception("background consolidation failed")
 
     async def _maybe_generate_requested_image(
         self,
