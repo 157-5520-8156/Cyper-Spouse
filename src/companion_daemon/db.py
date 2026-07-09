@@ -468,6 +468,28 @@ class CompanionStore:
     ) -> None:
         now = utc_now().isoformat()
         with self.connect() as conn:
+            duplicates = conn.execute(
+                """
+                select content
+                from memories
+                where canonical_user_id = ? and kind = ?
+                order by updated_at desc
+                limit 30
+                """,
+                (canonical_user_id, kind),
+            ).fetchall()
+            for row in duplicates:
+                existing = str(row["content"])
+                if _text_similarity(existing, content) > 0.55:
+                    conn.execute(
+                        """
+                        update memories
+                        set source = ?, confidence = max(confidence, ?), updated_at = ?
+                        where canonical_user_id = ? and kind = ? and content = ?
+                        """,
+                        (source, confidence, now, canonical_user_id, kind, existing),
+                    )
+                    return
             conn.execute(
                 """
                 insert into memories (
@@ -641,3 +663,24 @@ def _json_map(raw: str | None) -> dict[str, float]:
         except (TypeError, ValueError):
             continue
     return result
+
+
+def _text_similarity(left: str, right: str) -> float:
+    left = left.lower().strip()[:80]
+    right = right.lower().strip()[:80]
+    if not left or not right:
+        return 0.0
+    return _longest_common_substring(left, right) / max(len(left), len(right))
+
+
+def _longest_common_substring(left: str, right: str) -> int:
+    previous = [0] * (len(right) + 1)
+    best = 0
+    for left_char in left:
+        current = [0]
+        for index, right_char in enumerate(right, start=1):
+            value = previous[index - 1] + 1 if left_char == right_char else 0
+            current.append(value)
+            best = max(best, value)
+        previous = current
+    return best

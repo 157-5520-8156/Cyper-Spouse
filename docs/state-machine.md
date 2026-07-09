@@ -93,12 +93,15 @@
 
 为了避免“追着发”，最后一条用户消息之后如果沈知栀已经连续发出 2 条未被回应的消息，主动触发器会停止，直到用户再次回复。触发候选还会加入日内稳定随机数，让她的主动节奏每天有细微差异，但不完全乱跳。
 
+当最近一次互动造成明显情绪冲击时，会加入 `mood_follow_up` 候选。它用于“刚才心里明显动了一下，过一会儿又想补一句”的场景，但仍受冷却、未回复上限和 ghost window 约束。
+
 ## Memory And Image Ports
 
 继续迁移了 EchoText 的两个实用模块思想：
 
 - Memory highlight detection：从用户消息里识别 life fact、favorite thing、hobby、important person、recent event、shared moment，并写入长期记忆。
 - Memory injection：默认只注入少量高信号记忆，偏向身份、地点、喜好和重要人物，避免每次回复都像把全部档案背出来。
+- Memory fuzzy dedupe：近似重复的记忆会合并更新置信度和来源，避免“我人在成都”和“我现在人在成都”变成两条长期记忆。
 - Image request detection：识别直接图片/自拍请求，以及用户对最近图片邀约的肯定回应。当前先进入 prompt 和记忆，后续可接自动图片生成和预算闸门。
 - Image style detection：识别水彩、油画、像素、漫画、二次元、Q版、写实、素描等风格标签，并写入图片 prompt。
 - Image prompt builder：把用户图片请求整理成 `character` / `object` / `creative` 三类，并把视觉身份锚点、用户指定风格、最近对话里的“那张/刚刚那个”上下文合成稳定 prompt。默认不自动生成，避免额外费用。

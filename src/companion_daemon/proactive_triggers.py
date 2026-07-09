@@ -122,6 +122,7 @@ def evaluate_proactive_trigger(
     love = emotion.get("love", 0)
     last_user_text = (last_user.get("text") or "").lower() if last_user else ""
     unresolved_question = last_user_text.rstrip().endswith(("?", "？"))
+    emotion_shift = _emotion_shift_score(state.last_emotion_impact)
     has_recent_shared_moment = any(
         token in (row.get("text") or "")
         for row in recent_messages[-12:]
@@ -190,6 +191,8 @@ def evaluate_proactive_trigger(
 
     if hours_since_user >= 1.5 and (anger >= 55 or sadness >= 55):
         add("repair_attempt", 75 + sadness * 0.2, "最近有一点情绪或摩擦。发一条低压力的缓和消息。")
+    if hours_since_user >= 2 and emotion_shift >= 16:
+        add("mood_follow_up", 60 + min(18, emotion_shift * 0.35), "你刚经历过一次明显情绪波动。发一条后续感很自然的消息，不要解释情绪系统。")
     if hours_since_user >= 2.5 and anticipation >= 50:
         add("curiosity_ping", 55 + anticipation * 0.3, "你现在很想知道他的后续。发一个短问题，像忍不住好奇。")
     if hours_since_user >= 2 and fear >= 50:
@@ -282,6 +285,15 @@ def _unanswered_outgoing_count(rows: list[dict[str, str]]) -> int:
         if direction == "out":
             count += 1
     return count
+
+
+def _emotion_shift_score(impact: dict[str, float]) -> float:
+    if not impact:
+        return 0.0
+    meaningful = [abs(float(value)) for value in impact.values() if abs(float(value)) >= 1.5]
+    if not meaningful:
+        return 0.0
+    return max(meaningful) + sum(meaningful) * 0.35
 
 
 def _hours_since(raw: str | None, now: datetime) -> float | None:

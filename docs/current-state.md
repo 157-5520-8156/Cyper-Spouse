@@ -168,8 +168,10 @@ Implemented:
 - Boundary, hurt, anger, and disgust states reduce proactive frequency and life-event probability.
 - EchoText-inspired proactive trigger timeline chooses concrete outreach reasons such as hanging question, late night, repair attempt, longing, random thought, inside joke, or soft follow-up.
 - Trigger history, semantic category cooldowns, daily-stable jitter, and a max-unanswered-proactive guard reduce repetitive or needy proactive messages.
+- Recent emotion impact can create a `mood_follow_up` proactive candidate when the state shift is strong enough.
 - EchoText-inspired memory highlight detection extracts life facts, favorites, hobbies, important people, recent events, and shared moments.
 - Memory injection now selects a small high-signal subset instead of always injecting every recent memory.
+- Near-duplicate memory entries are merged instead of stored as separate facts.
 - EchoText-inspired image request detection recognizes direct selfie/image requests and affirmative responses to recent image offers.
 - EchoText-inspired image prompt building classifies character/object/creative image requests and carries visual identity/context into stable generation prompts.
 - EchoText-inspired reaction selection can suggest lightweight reactions from emotional deltas.

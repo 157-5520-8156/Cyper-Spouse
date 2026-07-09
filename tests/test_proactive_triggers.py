@@ -96,6 +96,30 @@ def test_proactive_trigger_includes_daily_life_rhythm() -> None:
     assert trigger.type in {"afternoon_slump", "random_thought", "boredom_break", "craving_share"}
 
 
+def test_proactive_trigger_follows_up_after_emotion_shift() -> None:
+    now = datetime.fromisoformat("2026-07-10T10:00:00+00:00")
+    trigger = evaluate_proactive_trigger(
+        state=MoodState(
+            emotion_vector={"trust": 45, "sadness": 45},
+            last_emotion_impact={"sadness": 20, "trust": -8},
+        ),
+        recent_messages=[
+            {
+                "direction": "in",
+                "platform": "qq",
+                "text": "刚才说的话有点重",
+                "sent_at": (now - timedelta(hours=3)).isoformat(),
+            }
+        ],
+        trigger_history={},
+        now=now,
+        rng=random.Random(3),
+    )
+
+    assert trigger
+    assert trigger.type == "mood_follow_up"
+
+
 @pytest.mark.asyncio
 async def test_engine_persists_selected_proactive_trigger(tmp_path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
