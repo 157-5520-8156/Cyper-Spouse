@@ -323,16 +323,16 @@ class QQMessageCoalescer:
             AfterthoughtPlan("topic_drift", self.rng.uniform(35, 120), 0.28),
             AfterthoughtPlan("silence_react", self.rng.uniform(150, 420), 0.18),
         ]
-        tasks: list[asyncio.Task[None]] = []
-        for plan in plans:
-            if self.rng.random() <= plan.probability:
-                tasks.append(
-                    asyncio.create_task(
-                        self._fire_afterthought(key, plan, merged, reply_target, reply_sent_at)
-                    )
-                )
-        if tasks:
-            self._afterthought_tasks[key] = tasks
+        eligible = [plan for plan in plans if self.rng.random() <= plan.probability]
+        if not eligible:
+            return
+        # One reply may invite a small second thought, never a burst of them.
+        selected = eligible[min(len(eligible) - 1, int(self.rng.random() * len(eligible)))]
+        self._afterthought_tasks[key] = [
+            asyncio.create_task(
+                self._fire_afterthought(key, selected, merged, reply_target, reply_sent_at)
+            )
+        ]
 
     async def _fire_afterthought(
         self,

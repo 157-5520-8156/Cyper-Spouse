@@ -70,7 +70,7 @@ def test_classifies_mid_reply_interruption() -> None:
 
 
 @pytest.mark.asyncio
-async def test_afterthought_uses_original_reply_time() -> None:
+async def test_afterthought_uses_original_reply_time_and_sends_at_most_once() -> None:
     class FakeStore:
         def resolve_user(self, platform: str, platform_user_id: str) -> str:
             return "geoff"
@@ -128,12 +128,8 @@ async def test_afterthought_uses_original_reply_time() -> None:
     await asyncio.gather(*tasks)
 
     assert all(seen_at == reply_sent_at for seen_at, _ in engine.seen)
-    assert [mode for _, mode in engine.seen] == ["quick_continue", "topic_drift", "silence_react"]
-    assert target.replies == [
-        "quick_continue:刚刚还想补一句。",
-        "topic_drift:刚刚还想补一句。",
-        "silence_react:刚刚还想补一句。",
-    ]
+    assert [mode for _, mode in engine.seen] == ["quick_continue"]
+    assert target.replies == ["quick_continue:刚刚还想补一句。"]
 
 
 @pytest.mark.asyncio
