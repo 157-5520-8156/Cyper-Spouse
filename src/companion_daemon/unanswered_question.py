@@ -91,6 +91,12 @@ def classify_response_to_own_question(
     text = user_text.strip()
     if not text:
         return None
+    if _looks_like_meta_response(text):
+        return QuestionResponse(
+            "meta",
+            "问题反馈: 用户没有直接回答她的问题，而是在回应她的语气；她会知道自己刚才有点别扭，不要把这当成冷漠逃避。",
+            f"用户回应了她的语气而不是问题：{question.text[:80]}",
+        )
     if _looks_like_answer(text, question.text):
         return QuestionResponse(
             "answered",
@@ -114,6 +120,13 @@ def apply_question_response(state: MoodState, response: QuestionResponse | None)
                 "curiosity": _clamp(state.curiosity + 1),
                 "emotional_charge": _clamp(state.emotional_charge - 5),
                 "unresolved_emotion": None,
+            }
+        )
+    if response.kind == "meta":
+        return state.model_copy(
+            update={
+                "emotional_charge": _clamp(state.emotional_charge + 1),
+                "unresolved_emotion": "用户注意到她刚才的语气，她知道自己有点别扭，但不是因为对方冷漠。",
             }
         )
     return state.model_copy(
@@ -158,6 +171,23 @@ def _looks_like_answer(text: str, question_text: str = "") -> bool:
             "对",
             "没有",
             "有",
+        ]
+    )
+
+
+def _looks_like_meta_response(text: str) -> bool:
+    return any(
+        token in text
+        for token in [
+            "语气",
+            "口气",
+            "怎么啦",
+            "怎么了",
+            "生气",
+            "不开心",
+            "吃醋",
+            "阴阳怪气",
+            "怪怪的",
         ]
     )
 

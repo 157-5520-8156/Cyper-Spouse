@@ -109,6 +109,19 @@ def test_response_to_own_question_can_be_answered_or_skipped() -> None:
     assert confused.security < 40
 
 
+def test_tone_meta_response_to_own_question_is_not_treated_as_cold_skip() -> None:
+    question = PendingQuestion(text="准备去哪儿吃？", sent_at=datetime.now(UTC).isoformat())
+
+    response = classify_response_to_own_question("干嘛这个语气", question)
+
+    assert response
+    assert response.kind == "meta"
+    state = apply_question_response(MoodState(security=40, emotional_charge=10), response)
+    assert state.security == 40
+    assert state.emotional_charge == 11
+    assert "语气" in (state.unresolved_emotion or "")
+
+
 def test_location_answer_counts_as_answer_to_school_question() -> None:
     question = PendingQuestion(text="你呢，是在成都上学吗？", sent_at=datetime.now(UTC).isoformat())
 

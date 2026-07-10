@@ -41,7 +41,7 @@ def _intent_for_message(
     anger = impact.get("anger", 0) + impact.get("disgust", 0)
     normalized = text.lower()
 
-    if state.mood in {"guarded", "hurt"} and (anger >= 4 or state.boundary_level >= 2):
+    if state.mood in {"guarded", "hurt"} and (anger >= 4 or state.boundary_level >= 35):
         return "boundary"
     if state.mood in {"miss_you", "affectionate"} and state.attachment >= 12:
         return mood_intent
@@ -51,6 +51,16 @@ def _intent_for_message(
         return "teasing" if suggested_reaction in {"haha", "star"} else "greeting"
     if any(token in normalized for token in ["累", "难受", "崩溃", "不开心", "失眠"]):
         return "comfort"
+    if state.mood == "sulking":
+        if any(token in normalized for token in ["语气", "口气", "生气", "不开心", "吃醋", "阴阳怪气", "怪怪"]):
+            return "soft_complaint"
+        if anger >= 5:
+            return "soft_complaint"
+        return None
+    if state.mood in {"hurt", "guarded"}:
+        if anger >= 5 or state.boundary_level >= 35:
+            return "boundary" if state.mood == "guarded" else "soft_complaint"
+        return None
     if joy >= 5 and suggested_reaction in {"heart", "like", "star", "haha"}:
         return "teasing" if suggested_reaction == "haha" else "greeting"
     if sadness >= 5 and state.trust >= 25:
