@@ -9,6 +9,7 @@ class ExtractedMemory:
     kind: str
     content: str
     confidence: float = 0.7
+    fact_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -34,7 +35,9 @@ def extract_memories(message: IncomingMessage) -> list[ExtractedMemory]:
         for match in re.finditer(pattern, text):
             value = match.group(1).strip()
             if value:
-                memories.append(ExtractedMemory(kind=kind, content=value))
+                memories.append(
+                    ExtractedMemory(kind=kind, content=value, fact_key=_fact_key(kind, value))
+                )
 
     for candidate in detect_memory_candidates(text):
         memories.append(
@@ -42,6 +45,7 @@ def extract_memories(message: IncomingMessage) -> list[ExtractedMemory]:
                 kind=candidate.kind,
                 content=candidate.text,
                 confidence=candidate.confidence,
+                fact_key=_fact_key(candidate.kind, candidate.text),
             )
         )
 
@@ -51,6 +55,27 @@ def extract_memories(message: IncomingMessage) -> list[ExtractedMemory]:
             memories.append(summary)
 
     return memories
+
+
+_DURABLE_FACT_KINDS = {"name", "preference", "dislike", "status", "life_fact", "favorite_thing", "hobby", "person"}
+
+
+def is_durable_user_fact(memory: ExtractedMemory) -> bool:
+    return memory.kind in _DURABLE_FACT_KINDS
+
+
+def _fact_key(kind: str, content: str) -> str | None:
+    normalized = re.sub(r"\s+", "", content)
+    if kind == "name":
+        return "identity:name"
+    if kind == "status":
+        return "identity:status"
+    if kind == "life_fact":
+        if any(token in normalized for token in ("住在", "搬到", "人在", "来自", "家在")):
+            return "location:current"
+        if any(token in normalized for token in ("就读", "毕业", "学生", "大学", "专业")):
+            return "education:current"
+    return None
 
 
 MEMORY_CANDIDATE_PATTERNS: list[tuple[str, str, str, list[str]]] = [

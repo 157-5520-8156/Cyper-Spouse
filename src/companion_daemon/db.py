@@ -57,6 +57,26 @@ class CompanionStore:
                   sent_at text not null
                 );
 
+                create table if not exists fact_ledger (
+                  id integer primary key autoincrement,
+                  canonical_user_id text not null references users(id),
+                  subject text not null,
+                  predicate text not null,
+                  fact_key text,
+                  value text not null,
+                  status text not null default 'active',
+                  confidence real not null,
+                  source text not null,
+                  valid_from text not null,
+                  valid_to text,
+                  created_at text not null,
+                  updated_at text not null
+                );
+                create index if not exists idx_fact_ledger_active
+                  on fact_ledger (canonical_user_id, subject, status, updated_at);
+                create index if not exists idx_fact_ledger_key
+                  on fact_ledger (canonical_user_id, subject, fact_key, status);
+
                 create table if not exists outbox_messages (
                   id integer primary key autoincrement,
                   canonical_user_id text not null references users(id),
@@ -1221,6 +1241,100 @@ class CompanionStore:
                 """,
                 (canonical_user_id, kind, content, source, confidence, now, now),
             )
+
+    def record_fact_observation(
+        self,
+        canonical_user_id: str,
+        *,
+        subject: str,
+        predicate: str,
+        value: str,
+        source: str,
+        confidence: float,
+        fact_key: str | None = None,
+    ) -> None:
+        """Append a sourced fact and supersede only an explicitly conflicting key.
+
+        The normal memories table is a retrieval index. This ledger is the
+        narrower authority for concrete assertions: it never accepts model
+        flavor, and it preserves replaced values for point-in-time inspection.
+        """
+        now = utc_now().isoformat()
+        with self.connect() as conn:
+            if fact_key:
+                conn.execute(
+                    """
+                    update fact_ledger
+                    set status = 'superseded', valid_to = ?, updated_at = ?
+                    where canonical_user_id = ? and subject = ? and fact_key = ?
+                      and status = 'active' and value <> ?
+                    """,
+                    (now, now, canonical_user_id, subject, fact_key, value),
+                )
+            duplicate = conn.execute(
+                """
+                select id from fact_ledger
+                where canonical_user_id = ? and subject = ? and predicate = ?
+                  and value = ? and status = 'active'
+                order by id desc limit 1
+                """,
+                (canonical_user_id, subject, predicate, value),
+            ).fetchone()
+            if duplicate:
+                conn.execute(
+                    """
+                    update fact_ledger set confidence = max(confidence, ?), updated_at = ?
+                    where id = ?
+                    """,
+                    (confidence, now, int(duplicate["id"])),
+                )
+                return
+            conn.execute(
+                """
+                insert into fact_ledger (
+                  canonical_user_id, subject, predicate, fact_key, value, status,
+                  confidence, source, valid_from, valid_to, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, 'active', ?, ?, ?, null, ?, ?)
+                """,
+                (
+                    canonical_user_id,
+                    subject,
+                    predicate,
+                    fact_key,
+                    value,
+                    confidence,
+                    source,
+                    now,
+                    now,
+                    now,
+                ),
+            )
+
+    def active_fact_lines(self, canonical_user_id: str, *, subject: str = "user", limit: int = 8) -> list[str]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select predicate, value, source
+                from fact_ledger
+                where canonical_user_id = ? and subject = ? and status = 'active'
+                order by updated_at desc, id desc limit ?
+                """,
+                (canonical_user_id, subject, limit),
+            ).fetchall()
+        return [f"- [{row['predicate']}; 来源=用户明确表达] {row['value']}" for row in rows]
+
+    def fact_history(self, canonical_user_id: str, *, limit: int = 30) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select subject, predicate, fact_key, value, status, confidence, source,
+                       valid_from, valid_to, created_at, updated_at
+                from fact_ledger where canonical_user_id = ?
+                order by id desc limit ?
+                """,
+                (canonical_user_id, limit),
+            ).fetchall()
+        return list(rows)
 
     def memories(self, canonical_user_id: str, limit: int = 12) -> list[sqlite3.Row]:
         with self.connect() as conn:

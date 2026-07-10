@@ -39,7 +39,7 @@ from companion_daemon.life_runtime import (
     runtime_prompt_line,
 )
 from companion_daemon.llm import ChatModel
-from companion_daemon.memory import extract_memories
+from companion_daemon.memory import extract_memories, is_durable_user_fact
 from companion_daemon.models import (
     CompanionReply,
     IncomingMessage,
@@ -251,6 +251,16 @@ class CompanionEngine:
                 source=f"{message.platform}:{message.message_id or ''}",
                 confidence=extracted.confidence,
             )
+            if is_durable_user_fact(extracted):
+                self.store.record_fact_observation(
+                    canonical_user_id,
+                    subject="user",
+                    predicate=extracted.kind,
+                    value=extracted.content,
+                    source=f"{message.platform}:{message.message_id or ''}",
+                    confidence=extracted.confidence,
+                    fact_key=extracted.fact_key,
+                )
         attachment_lines = summarize_attachments(message.attachments)
         if context_hint:
             attachment_lines.append(context_hint)
@@ -421,6 +431,7 @@ class CompanionEngine:
             subtext_hint=subtext.prompt_line if subtext else None,
             life_context_override=runtime_prompt_line(runtime),
             self_fact_lines=self._self_fact_lines(canonical_user_id),
+            verified_user_fact_lines=self.store.active_fact_lines(canonical_user_id),
         )
         text = sanitize_chat_text(await self.conversation_core.reply(
             message,
@@ -1090,6 +1101,8 @@ class CompanionEngine:
                 memory_rows,
                 continuity_hint=continuity_hint,
                 life_context_override=runtime_prompt_line(runtime),
+                self_fact_lines=self._self_fact_lines(canonical_user_id),
+                verified_user_fact_lines=self.store.active_fact_lines(canonical_user_id),
             )
             memories = context_package.memory_lines
             prompt_messages = reply_prompt(
@@ -1117,6 +1130,8 @@ class CompanionEngine:
                 memory_rows,
                 continuity_hint=continuity_hint,
                 life_context_override=runtime_prompt_line(runtime),
+                self_fact_lines=self._self_fact_lines(canonical_user_id),
+                verified_user_fact_lines=self.store.active_fact_lines(canonical_user_id),
             )
             memories = context_package.memory_lines
         return {
