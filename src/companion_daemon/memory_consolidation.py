@@ -114,7 +114,7 @@ async def build_self_core(
         }
     ]
     if len(relevant) < 3:
-        return SelfCore.initial()
+        return _store_minimal_self_core(store, canonical_user_id, state)
     memories_for_prompt = [
         {"kind": r["kind"], "content": r["content"]}
         for r in relevant[:30]
@@ -134,18 +134,13 @@ async def build_self_core(
         return None
     core = parse_self_core(raw)
     if not core:
-        return None
+        logger.warning("self-core returned an invalid shape for %s; using grounded fallback", canonical_user_id)
+        return _store_minimal_self_core(store, canonical_user_id, state)
     memory_text = "\n".join(item["content"] for item in memories_for_prompt)
     if _self_core_has_unsupported_specifics(core, memory_text):
         logger.warning("rejected self-core with unsupported specifics for %s", canonical_user_id)
-        return None
-    store.upsert_memory(
-        canonical_user_id,
-        kind="self_core",
-        content=core.to_storage_text(),
-        source="self_core_builder",
-        confidence=1.0,
-    )
+        return _store_minimal_self_core(store, canonical_user_id, state)
+    _store_self_core(store, canonical_user_id, core, source="self_core_builder")
     logger.info("built self-core for %s", canonical_user_id)
     return core
 
@@ -158,6 +153,46 @@ def load_self_core(store: CompanionStore, canonical_user_id: str) -> SelfCore | 
         return SelfCore.from_storage_text(str(row["content"]))
     except Exception:
         return None
+
+
+def _store_minimal_self_core(
+    store: CompanionStore,
+    canonical_user_id: str,
+    state: MoodState,
+) -> SelfCore:
+    """Persist a conservative core when the LLM summary cannot be trusted."""
+    safe_user_kinds = {"name", "life_fact", "favorite_thing", "hobby", "preference", "status"}
+    user_facts = [
+        str(row["content"])
+        for row in store.memories(canonical_user_id, limit=40)
+        if str(row["kind"]) in safe_user_kinds
+    ]
+    core = SelfCore(
+        identity="稳定身份由角色档案约束；没有新增的可验证个人经历。",
+        user_profile="；".join(user_facts[:4]) or "还没有足够的已验证用户信息。",
+        relationship=f"当前关系阶段：{state.relationship_stage}。",
+        knowledge_boundary="除已验证用户事实和已记录互动外，其余个人经历、地点与关系细节都不确定。",
+        active_threads=[],
+    )
+    _store_self_core(store, canonical_user_id, core, source="self_core_fallback")
+    logger.info("stored grounded fallback self-core for %s", canonical_user_id)
+    return core
+
+
+def _store_self_core(
+    store: CompanionStore,
+    canonical_user_id: str,
+    core: SelfCore,
+    *,
+    source: str,
+) -> None:
+    store.upsert_memory(
+        canonical_user_id,
+        kind="self_core",
+        content=core.to_storage_text(),
+        source=source,
+        confidence=1.0,
+    )
 
 
 def _last_consolidation_time(

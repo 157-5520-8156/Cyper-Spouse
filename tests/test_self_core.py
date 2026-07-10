@@ -40,6 +40,7 @@ def test_self_core_roundtrip_storage() -> None:
 def test_self_core_initial() -> None:
     core = SelfCore.initial()
     assert "沈知栀" in core.identity
+    assert "角色档案" in core.identity
     assert core.active_threads == []
 
 
@@ -78,3 +79,4 @@ def test_build_self_core_prompt_includes_memories() -> None:
     assert "我与地坛" in prompt
     assert "stranger" in prompt
     assert "calm" in prompt
+    assert "静态角色档案会在别处提供" in prompt

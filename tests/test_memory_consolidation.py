@@ -133,5 +133,23 @@ async def test_build_self_core_rejects_unsupported_specifics(tmp_path: Path) -> 
 
     core = await build_self_core(store, HallucinatedCoreModel(), "geoff", MoodState())
 
-    assert core is None
-    assert load_self_core(store, "geoff") is None
+    assert core is not None
+    assert "理工" not in core.user_profile
+    loaded = load_self_core(store, "geoff")
+    assert loaded is not None
+    assert "角色档案" in loaded.identity
+
+
+@pytest.mark.asyncio
+async def test_build_self_core_persists_a_minimal_grounded_fallback_for_sparse_memory(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.upsert_memory("geoff", kind="life_fact", content="用户在成都", source="test", confidence=0.8)
+
+    core = await build_self_core(store, FakeCompanionModel(), "geoff", MoodState())
+
+    assert core is not None
+    assert "用户在成都" in core.user_profile
+    row = next(row for row in store.memories("geoff", limit=20) if row["kind"] == "self_core")
+    assert "角色档案" in row["content"]
+    assert "理工" not in row["content"]
