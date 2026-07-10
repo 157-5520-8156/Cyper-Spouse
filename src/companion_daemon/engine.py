@@ -131,6 +131,7 @@ class CompanionEngine:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         previous_state = self.store.get_mood_state(canonical_user_id)
         recent_dicts_before = self._recent_dicts(canonical_user_id, limit=16)
+        recent_lines_before = self._format_recent_dicts(recent_dicts_before)
         pending_own_question = last_unanswered_own_question(recent_dicts_before)
         context = platform_context(previous_state, message)
         event = interpret_interaction(message, previous_state)
@@ -174,7 +175,7 @@ class CompanionEngine:
         attachment_lines = summarize_attachments(message.attachments)
         if context_hint:
             attachment_lines.append(context_hint)
-        recent_lines = self._recent_lines(canonical_user_id)
+        recent_lines = recent_lines_before
         tone_inertia = build_tone_inertia(next_state, recent_lines)
         attachment_lines.append(tone_inertia.prompt_line)
         attachment_lines.append(personality_drift_line(next_state))
@@ -598,15 +599,36 @@ class CompanionEngine:
         return decision
 
     def _recent_lines(self, canonical_user_id: str) -> list[str]:
-        lines = []
-        for row in self.store.recent_messages(canonical_user_id):
-            who = "你" if row["direction"] == "in" else "她"
-            text = str(row["text"])
-            if row["direction"] == "out":
-                text = sanitize_chat_text(text)
-            time_hint = relative_chat_time_hint(str(row["sent_at"]))
-            lines.append(f"[{row['platform']}][{time_hint}] {who}: {text}")
-        return lines
+        return self._format_recent_rows(self.store.recent_messages(canonical_user_id))
+
+    def _format_recent_rows(self, rows) -> list[str]:
+        return [
+            self._format_recent_line(
+                direction=str(row["direction"]),
+                platform=str(row["platform"]),
+                text=str(row["text"]),
+                sent_at=str(row["sent_at"]),
+            )
+            for row in rows
+        ]
+
+    def _format_recent_dicts(self, rows: list[dict[str, str]]) -> list[str]:
+        return [
+            self._format_recent_line(
+                direction=row["direction"],
+                platform=row["platform"],
+                text=row["text"],
+                sent_at=row["sent_at"],
+            )
+            for row in rows
+        ]
+
+    def _format_recent_line(self, *, direction: str, platform: str, text: str, sent_at: str) -> str:
+        who = "你" if direction == "in" else "她"
+        if direction == "out":
+            text = sanitize_chat_text(text)
+        time_hint = relative_chat_time_hint(sent_at)
+        return f"[{platform}][{time_hint}] {who}: {text}"
 
     def _recent_dicts(self, canonical_user_id: str, limit: int = 16) -> list[dict[str, str]]:
         return [

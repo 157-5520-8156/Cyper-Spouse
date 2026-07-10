@@ -81,6 +81,26 @@ async def test_handle_message_injects_human_rhythm_context(tmp_path: Path) -> No
     assert any(row["kind"] == "life_continuity" for row in store.memories("geoff"))
 
 
+@pytest.mark.asyncio
+async def test_reply_prompt_does_not_duplicate_current_user_message_in_recent_history(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.save_outgoing("geoff", "qq", "我刚从图书馆出来。")
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT)
+
+    unique_text = "单轮上下文排重测试XYZ"
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text=unique_text)
+    )
+
+    prompt_text = "\n".join(message["content"] for message in model.calls[-1])
+    recent_block = next(message["content"] for message in model.calls[-1] if message["content"].startswith("最近聊天:"))
+    assert prompt_text.count(unique_text) == 1
+    assert unique_text not in recent_block
+    assert "图书馆" in recent_block
+
+
 def test_recent_lines_sanitize_previous_bad_outgoing(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
