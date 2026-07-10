@@ -130,6 +130,8 @@ def detect_memory_candidates(text: str, *, max_candidates: int = 3) -> list[Memo
             match_text = match.group(0).strip()[:120]
             if len(match_text) < 4 or match_text in seen:
                 continue
+            if label == "Important Person" and _looks_like_pronoun_person_noise(match_text):
+                continue
             seen.add(match_text)
             candidates.append(MemoryCandidate(text=match_text, kind=kind, label=label))
             break
@@ -167,6 +169,8 @@ def _select_memory_rows(rows, *, max_lines: int) -> list:
     for index, row in enumerate(rows):
         confidence = float(row["confidence"]) if "confidence" in row.keys() else 0.7
         kind = str(row["kind"])
+        if _exclude_from_reply_memory(kind):
+            continue
         bonus = 0.12 if kind in {"name", "life_fact", "favorite_thing", "person", "life_event"} else 0.0
         if kind == "private_life_event":
             bonus = 0.06
@@ -174,3 +178,24 @@ def _select_memory_rows(rows, *, max_lines: int) -> list:
         scored.append((confidence + bonus + recency, index, row))
     scored.sort(key=lambda item: (-item[0], item[1]))
     return [row for _, _, row in scored[:max_lines]]
+
+
+def _exclude_from_reply_memory(kind: str) -> bool:
+    return kind in {
+        "life_continuity",
+        "tone_inertia",
+        "inner_subtext",
+        "proactive_response",
+        "withheld_proactive_impulse",
+        "own_question_answered",
+        "own_question_skipped",
+        "afterthought_blocked",
+        "memory_maintenance_blocked",
+        "image_request_blocked",
+        "proactive_image_blocked",
+        "consolidation_log",
+    }
+
+
+def _looks_like_pronoun_person_noise(text: str) -> bool:
+    return text.startswith(("你", "我", "他", "她", "它", "这", "那"))

@@ -135,3 +135,44 @@ def test_postprocess_falls_back_when_sanitize_removes_whole_reply() -> None:
     )
 
     assert text == "感觉突然离你具体了一点。"
+
+
+def test_postprocess_repairs_assistant_line_misattributed_to_user() -> None:
+    text = postprocess_reply_text(
+        "你倒是会装糊涂。昨晚不是你说梦到一个人声音挺好听的嘛，我还没来得及问是谁呢。",
+        recent_lines=[
+            "[qq][昨晚] 你: 梦见被人表白了吗这是",
+            "[qq][昨晚] 她: 被你猜中了。不过梦里画面有点模糊，就记得那个人说话声音还挺好听的。",
+            "[qq][今天上午] 你: 什么转移话题呀？你刚刚问我啥了吗",
+        ],
+        user_text="什么转移话题呀？你刚刚问我啥了吗",
+    )
+
+    assert "不是我说梦到一个人声音挺好听" in text
+    assert "不是你说梦到一个人声音挺好听" not in text
+
+
+def test_postprocess_softens_stale_just_now_reference() -> None:
+    text = postprocess_reply_text(
+        "你刚刚说那个梦，我还没反应过来。",
+        recent_lines=[
+            "[qq][昨晚] 你: 梦见被人表白了吗这是",
+            "[qq][昨晚] 她: 被你猜中了。",
+        ],
+        user_text="什么梦？",
+    )
+
+    assert "刚刚说" not in text
+    assert "那会儿说" in text
+
+
+def test_postprocess_removes_repeated_farewell_detail() -> None:
+    text = postprocess_reply_text(
+        "嗯，晚安。别被室友那酸味外卖勾得整晚睡不着哦～",
+        recent_lines=[
+            "[qq][刚才] 她: 嗯，困意上来了。你也早点睡吧，别被室友那酸味外卖勾得整晚睡不着。",
+        ],
+        user_text="嗯哼\n那晚安？",
+    )
+
+    assert text == "嗯，晚安。"

@@ -1,12 +1,15 @@
 import random
 
 from companion_daemon.models import CompanionReply, IncomingMessage
+from companion_daemon.models import MoodState
+from companion_daemon.reply_timing import emotion_reply_timing
 
 
 def initial_reply_delay_seconds(
     incoming: IncomingMessage,
     reply: CompanionReply,
     *,
+    state: MoodState | None = None,
     rng: random.Random | None = None,
 ) -> float:
     rng = rng or random.Random()
@@ -28,7 +31,19 @@ def initial_reply_delay_seconds(
     }.get(reply.mood, 1.4)
     typing_time = min(8.0, 0.8 + reply_len / 18)
     jitter = rng.uniform(0.75, 1.25)
-    return max(1.2, min(14.0, (read_time + think_time + typing_time) * jitter))
+    base_delay = max(1.2, min(14.0, (read_time + think_time + typing_time) * jitter))
+    if state is None:
+        return base_delay
+
+    emotional = emotion_reply_timing(state, rng=rng)
+    emotion_delay = (
+        emotional.read_delay_ms
+        + emotional.typing_lead_ms
+        + emotional.reply_delay_ms
+        + min(emotional.ghost_delay_ms, 45_000)
+    ) / 1000
+    cap = 75.0 if emotional.ghost_delay_ms else 18.0
+    return max(base_delay, min(cap, emotion_delay))
 
 
 def between_part_delay_seconds(part: str, *, rng: random.Random | None = None) -> float:

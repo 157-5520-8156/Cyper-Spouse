@@ -35,6 +35,14 @@ def test_extract_memories_includes_echotext_style_candidates() -> None:
     assert any(memory.kind == "shared_moment" and "明天" in memory.content for memory in memories)
 
 
+def test_memory_candidates_ignore_pronoun_question_noise() -> None:
+    memories = extract_memories(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你刚刚问我啥了吗")
+    )
+
+    assert not any(memory.kind == "person" for memory in memories)
+
+
 def test_memory_lines_injects_small_high_signal_subset(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     for kind, content, confidence in [
@@ -51,6 +59,22 @@ def test_memory_lines_injects_small_high_signal_subset(tmp_path: Path) -> None:
     assert len(lines) == 3
     assert any("成都" in line for line in lines)
     assert any("桂花乌龙" in line for line in lines)
+
+
+def test_memory_lines_excludes_runtime_impulses_from_reply_prompt(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    for kind, content, confidence in [
+        ("withheld_proactive_impulse", "念头=你昨天说声音好听那个梦", 0.9),
+        ("own_question_skipped", "用户跳过了她的问题：错误归因", 0.9),
+        ("tone_inertia", "last_outgoing_tone=teasing", 0.9),
+        ("life_continuity", "phase=morning_focus; activity=自习", 0.9),
+        ("life_fact", "用户人在成都", 0.7),
+    ]:
+        store.upsert_memory("geoff", kind=kind, content=content, source=content, confidence=confidence)
+
+    lines = memory_lines(store.memories("geoff", limit=10), max_lines=3)
+
+    assert lines == ["- [life_fact] 用户人在成都"]
 
 
 def test_select_character_reaction_matches_emotional_delta() -> None:

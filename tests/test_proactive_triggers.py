@@ -11,12 +11,13 @@ from companion_daemon.proactive_triggers import evaluate_proactive_trigger
 from companion_daemon.time import utc_now
 
 
-def _row(direction: str, text: str, hours_ago: float) -> dict[str, str]:
+def _row(direction: str, text: str, hours_ago: float, *, now: datetime | None = None) -> dict[str, str]:
+    anchor = now or utc_now()
     return {
         "direction": direction,
         "platform": "qq",
         "text": text,
-        "sent_at": (utc_now() - timedelta(hours=hours_ago)).isoformat(),
+        "sent_at": (anchor - timedelta(hours=hours_ago)).isoformat(),
     }
 
 
@@ -46,10 +47,10 @@ def test_proactive_trigger_respects_anger_ghost_window() -> None:
 
 
 def test_proactive_trigger_category_cooldown_blocks_similar_outreach() -> None:
-    now = utc_now()
+    now = datetime.fromisoformat("2026-07-10T12:00:00+00:00")
     trigger = evaluate_proactive_trigger(
         state=MoodState(emotion_vector={"joy": 80, "trust": 80, "anticipation": 70}),
-        recent_messages=[_row("in", "我去忙了", 3)],
+        recent_messages=[_row("in", "我去忙了", 3, now=now)],
         trigger_history={"sharing_impulse": now - timedelta(hours=1)},
         now=now,
         rng=random.Random(1),

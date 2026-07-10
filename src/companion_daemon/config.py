@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     deepseek_reply_model: str | None = Field(default=None, alias="DEEPSEEK_REPLY_MODEL")
     enable_reply_rewrite: bool = Field(default=False, alias="ENABLE_REPLY_REWRITE")
     enable_reply_decision: bool = Field(default=True, alias="ENABLE_REPLY_DECISION")
-    conversation_core: str = Field(default="sillytavern", alias="CONVERSATION_CORE")
+    conversation_core: str = Field(default="prompt", alias="CONVERSATION_CORE")
     sillytavern_base_url: str = Field(default="http://127.0.0.1:8000", alias="SILLYTAVERN_BASE_URL")
     database_path: Path = Path("data/companion.sqlite")
     character_path: Path = Path("configs/character.yaml")

@@ -7,16 +7,20 @@ Date: 2026-07-09
 Build a local-first cyber companion whose primary presence is QQ first, then WeChat. The system should prioritize companion realism over generic assistant utility:
 
 - Shared identity and memory across platforms.
-- Strong girlfriend/companion tone through SillyTavern-style character control.
+- Strong girlfriend/companion tone through daemon-owned character control inspired by SillyTavern.
 - Proactive messages driven by mood, relationship state, and recent context.
 - Sticker/image messages without relying on manually collected private meme packs.
 - Later MCP/tool use with strict permission boundaries.
 
 ## Core Decision
 
-Use SillyTavern as the companion conversation core, not as the entire platform runtime.
+Use the Companion Daemon as the companion's core runtime. SillyTavern remains an optional UI,
+prompt laboratory, and compatibility adapter, not the source of truth.
 
-SillyTavern is strong at character cards, world info/lorebooks, prompt construction, roleplay-style continuity, and LLM provider control. It is not designed as a full background IM gateway, scheduler, or cross-platform identity service. The missing runtime behavior should live in a separate Companion Daemon.
+SillyTavern is strong at character cards, world info/lorebooks, prompt experiments, roleplay UI,
+and LLM provider control. But this project needs QQ/WeChat identity, proactive scheduling,
+budget gates, tool permissions, cross-platform memory, and deterministic regression tests. Those
+must live in the daemon so 沈知栀 behaves like the same person no matter which surface is used.
 
 ## High-Level Shape
 
@@ -31,16 +35,19 @@ Companion Daemon
   - message batching
   - platform switch awareness
   - mood and relationship state
+  - character prompt and memory injection
   - proactive decision loop
   - sticker selection/generation
-  - memory bridge
+  - budget and tool permission gates
         |
         v
-SillyTavern-compatible conversation core
-  - character card
-  - lorebook/world info
-  - Smart Memory / memory extension
-  - DeepSeek-compatible LLM connection
+DeepSeek/OpenAI-compatible model APIs
+        ^
+        |
+Optional SillyTavern adapter / debug UI
+  - character and prompt experiments
+  - manual chat UI
+  - extension sandbox
         |
         v
 DeepSeek API
@@ -82,9 +89,15 @@ It owns:
 
 The daemon should be small and auditable. It should not become a second full agent framework unless there is a proven reason.
 
-### SillyTavern Core
+### Optional SillyTavern Adapter
 
-SillyTavern provides the character and prompt system. The official docs describe SillyTavern as a locally installed UI for interacting with text generation LLMs, image generation engines, and TTS, with high control over prompts and character context.
+SillyTavern no longer provides the canonical character or prompt system. The daemon owns the
+character profile, mood state, memory selection, prompt rendering, postprocessing, proactive logic,
+and platform delivery.
+
+The SillyTavern adapter can still be useful as a manual chat UI or prompt experiment surface. When
+enabled explicitly, the daemon sends recent chat, selected memories, self-core, attachment context,
+and rich mood state to the plugin, then still sanitizes and postprocesses the returned text.
 
 Relevant capabilities:
 
@@ -105,14 +118,17 @@ Sources:
 
 ### Memory
 
-Use SillyTavern memory extensions for roleplay memory where possible, but keep platform and relationship state in the Companion Daemon.
+Use daemon-owned memory as the source of truth. SillyTavern memory extensions may be used for
+experiments, but they should not create canonical facts unless those facts are imported through a
+daemon-controlled review path.
 
 Candidate memory extensions:
 
 - Smart Memory: automatic multi-tier memory for long-term facts, relationship history, session details, rolling summaries, and scene history.
 - Memory Books: structured lorebook-based memory creation.
 
-Initial recommendation: start with Smart Memory because it focuses on automatic operation and relationship/fact continuity.
+Current recommendation: keep Smart Memory/EchoText as references or sandbox tools, while the daemon
+owns long-term facts, relationship memories, self-core, and runtime state.
 
 Sources:
 
@@ -207,7 +223,8 @@ Initial:
 - Python Companion Daemon with FastAPI.
 - SQLite for local state.
 - Official QQ bot adapter first.
-- SillyTavern + DeepSeek API.
+- Companion Daemon + DeepSeek API.
+- Optional SillyTavern UI for experiments.
 - Smart Memory extension.
 
 Later:
@@ -216,4 +233,3 @@ Later:
 - Sticker generation pipeline.
 - MCP tool bridge.
 - Optional desktop companion shell if desired.
-

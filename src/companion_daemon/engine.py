@@ -1,8 +1,9 @@
 import asyncio
 import json
 import logging
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 from companion_daemon.budget import ESTIMATES, BudgetGate
 from companion_daemon.character import CharacterProfile
@@ -40,7 +41,7 @@ from companion_daemon.inner_subtext import infer_inner_subtext
 from companion_daemon.multimodal import summarize_attachments
 from companion_daemon.multimodal_analysis import AttachmentInsight, MultimodalAnalyzer
 from companion_daemon.personality_drift import apply_personality_drift, personality_drift_line
-from companion_daemon.prompts import proactive_prompt
+from companion_daemon.prompts import proactive_prompt, reply_prompt
 from companion_daemon.proactive_feedback import apply_proactive_feedback, classify_proactive_feedback
 from companion_daemon.proactive_triggers import evaluate_proactive_trigger
 from companion_daemon.proactive_waiting import apply_waiting_after_proactive
@@ -63,6 +64,8 @@ from companion_daemon.unanswered_question import (
 from companion_daemon.withheld_impulse import apply_withheld_impulse, build_withheld_impulse
 
 logger = logging.getLogger(__name__)
+
+LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 
 _DEEP_NIGHT_AFTERTHOUGHT_MOODS = {"miss_you", "worried", "affectionate", "sad", "anxious"}
 _DEEP_NIGHT_RECENT_ALLOWED_TOKENS = (
@@ -592,7 +595,8 @@ class CompanionEngine:
             text = str(row["text"])
             if row["direction"] == "out":
                 text = sanitize_chat_text(text)
-            lines.append(f"[{row['platform']}] {who}: {text}")
+            time_hint = relative_chat_time_hint(str(row["sent_at"]))
+            lines.append(f"[{row['platform']}][{time_hint}] {who}: {text}")
         return lines
 
     def _recent_dicts(self, canonical_user_id: str, limit: int = 16) -> list[dict[str, str]]:
@@ -614,6 +618,44 @@ class CompanionEngine:
     def _latest_life_continuity(self, canonical_user_id: str) -> str | None:
         row = self.store.latest_memory(canonical_user_id, kind="life_continuity")
         return str(row["content"]) if row else None
+
+    def debug_snapshot(
+        self,
+        canonical_user_id: str,
+        *,
+        preview_text: str = "",
+        platform: str = "qq",
+    ) -> dict[str, object]:
+        """Return daemon-owned context for local inspection without sending a reply."""
+        state = self.store.get_mood_state(canonical_user_id)
+        recent_lines = self._recent_lines(canonical_user_id)
+        memories = memory_lines(self.store.memories(canonical_user_id, limit=30), max_lines=8)
+        core = load_self_core(self.store, canonical_user_id)
+        self_core_block = core.to_prompt_block() if core else ""
+        prompt_messages: list[dict[str, str]] = []
+        if preview_text.strip():
+            prompt_messages = reply_prompt(
+                IncomingMessage(
+                    platform=platform,  # type: ignore[arg-type]
+                    platform_user_id=canonical_user_id,
+                    text=preview_text,
+                ),
+                state,
+                recent_lines,
+                None,
+                self.companion_system_prompt,
+                memories,
+                ["调试预览: 未执行状态更新、附件分析、生活连续性写入或真实发送。"],
+                self_core_block=self_core_block,
+            )
+        return {
+            "canonical_user_id": canonical_user_id,
+            "state": state.model_dump(mode="json"),
+            "recent": recent_lines,
+            "memories": memories,
+            "self_core": self_core_block,
+            "preview_prompt": prompt_messages,
+        }
 
     def _is_reply_to_recent_proactive(self, canonical_user_id: str, platform: str) -> bool:
         last_sent = self.store.last_proactive_delivery(canonical_user_id, platform)
@@ -725,6 +767,50 @@ def _deep_night_afterthought_allowed(state: MoodState, recent_rows: list[dict[st
         return True
     recent_text = "\n".join(row.get("text", "") for row in recent_rows[-6:])
     return any(token in recent_text for token in _DEEP_NIGHT_RECENT_ALLOWED_TOKENS)
+
+
+def relative_chat_time_hint(sent_at_iso: str, *, now: datetime | None = None) -> str:
+    """Human-scale local recency for prompt context."""
+    now_local = _to_local(now or utc_now())
+    sent_local = _to_local(_parse_datetime(sent_at_iso))
+    delta = now_local - sent_local
+    if delta.total_seconds() < 0:
+        return "刚刚"
+    minutes = delta.total_seconds() / 60
+    if minutes <= 10:
+        return "刚刚"
+    if minutes <= 60:
+        return "刚才"
+    if now_local.date() == sent_local.date():
+        if sent_local.hour < 6:
+            return "今天凌晨"
+        if sent_local.hour < 12:
+            return "今天上午"
+        if sent_local.hour < 18:
+            return "今天下午"
+        return "今天晚上"
+    if (now_local.date() - sent_local.date()).days == 1:
+        if sent_local.hour < 6:
+            return "昨晚"
+        if sent_local.hour < 12:
+            return "昨天上午"
+        if sent_local.hour < 18:
+            return "昨天下午"
+        return "昨晚"
+    return "更早"
+
+
+def _parse_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
+
+
+def _to_local(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.astimezone(LOCAL_TZ)
 
 
 def seed_user(

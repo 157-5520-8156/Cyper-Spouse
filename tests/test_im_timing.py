@@ -1,7 +1,7 @@
 import random
 
 from companion_daemon.im_timing import between_part_delay_seconds, initial_reply_delay_seconds
-from companion_daemon.models import CompanionReply, IncomingMessage
+from companion_daemon.models import CompanionReply, IncomingMessage, MoodState
 
 
 def test_initial_reply_delay_has_human_floor() -> None:
@@ -12,6 +12,26 @@ def test_initial_reply_delay_has_human_floor() -> None:
     )
 
     assert delay >= 1.2
+
+
+def test_initial_reply_delay_uses_emotion_timing_when_state_is_cold() -> None:
+    incoming = IncomingMessage(platform="qq", platform_user_id="u", text="随便你")
+    reply = CompanionReply(canonical_user_id="geoff", mood="hurt", text="嗯。")
+    warm = initial_reply_delay_seconds(
+        incoming,
+        reply,
+        state=MoodState(emotion_vector={"joy": 70, "trust": 65}),
+        rng=random.Random(1),
+    )
+    cold = initial_reply_delay_seconds(
+        incoming,
+        reply,
+        state=MoodState(emotion_vector={"anger": 90, "sadness": 70, "fear": 50}),
+        rng=random.Random(1),
+    )
+
+    assert cold > warm
+    assert cold > 10
 
 
 def test_between_part_delay_scales_with_text() -> None:

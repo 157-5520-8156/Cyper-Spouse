@@ -218,9 +218,15 @@ class QQMessageCoalescer:
         reply = await self.engine.handle_message(merged, **kwargs)
         if reply is None:
             return
+        timing_state = None
+        if self.human_timing:
+            try:
+                timing_state = self.engine.store.get_mood_state(reply.canonical_user_id)
+            except Exception:
+                logger.exception("failed to load state for reply timing")
         try:
             if self.human_timing:
-                await self.sleep(initial_reply_delay_seconds(merged, reply, rng=self.rng))
+                await self.sleep(initial_reply_delay_seconds(merged, reply, state=timing_state, rng=self.rng))
             await _send_reply_parts(
                 reply_target,
                 reply.text_parts or [reply.text],

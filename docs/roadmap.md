@@ -14,29 +14,30 @@ Deliverables:
 Exit criteria:
 
 - We know which QQ path to prototype first.
-- The project has a clear boundary between adapter, daemon, and SillyTavern core.
+- The project has a clear boundary between platform adapters, the daemon core, and optional SillyTavern tooling.
 
 Status: complete as of 2026-07-09. See `docs/current-state.md`.
 
-## Phase 1: SillyTavern + DeepSeek Companion Core
+## Phase 1: Daemon + DeepSeek Companion Core
 
-Goal: Make the character feel right before connecting her to QQ.
+Goal: Make the daemon-owned character feel right before expanding surfaces.
 
 Tasks:
 
-- Install/run SillyTavern locally.
 - Configure DeepSeek through the existing `DEEPSEEK_API_KEY` environment variable.
-- Create a first character card.
+- Create a first daemon-owned character profile.
 - Add a companion prompt policy for tone, mood, boundaries, and relationship continuity.
-- Install/test Smart Memory or another memory extension.
+- Port the useful Smart Memory/EchoText ideas into daemon-owned memory and state.
 
 Exit criteria:
 
 - A local chat session produces the desired companion tone.
 - The character can remember core facts across chats.
-- We can identify what data should stay in SillyTavern versus the daemon.
+- The daemon can explain what state, memory, and prompt context shaped a reply.
 
-Status: partially complete. SillyTavern starts locally, DeepSeek works through the daemon, and Smart-Memory/EchoText extensions are installed. Manual UI configuration inside SillyTavern is still needed for full ST-native chatting.
+Status: mostly complete. DeepSeek works through the daemon, the character profile lives in
+`configs/character.yaml`, EchoText/Smart-Memory ideas have been ported into daemon-owned state and
+memory, and SillyTavern is now optional rather than the core.
 
 ## Phase 2: Companion Daemon MVP
 

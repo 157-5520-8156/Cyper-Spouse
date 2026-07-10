@@ -276,6 +276,50 @@ async def test_coalescer_sends_reply_parts_in_order() -> None:
 
 
 @pytest.mark.asyncio
+async def test_coalescer_human_timing_reads_current_mood_state() -> None:
+    from companion_daemon.models import MoodState
+
+    class FakeStore:
+        def get_mood_state(self, canonical_user_id: str) -> MoodState:
+            assert canonical_user_id == "geoff"
+            return MoodState(emotion_vector={"anger": 90, "sadness": 70, "fear": 50})
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = FakeStore()
+
+        async def handle_message(self, incoming: IncomingMessage) -> CompanionReply:
+            return CompanionReply(canonical_user_id="geoff", mood="hurt", text="嗯。")
+
+    class FakeTarget:
+        async def reply(self, **kwargs) -> None:
+            return None
+
+    sleeps: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+
+    coalescer = QQMessageCoalescer(
+        FakeEngine(),
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+        human_timing=True,
+        sleep=fake_sleep,
+        rng=random.Random(1),
+    )
+
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="随便你"),
+        FakeTarget(),
+    )
+    await asyncio.sleep(0.01)
+
+    assert any(seconds > 10 for seconds in sleeps)
+
+
+@pytest.mark.asyncio
 async def test_coalescer_can_defer_long_story_then_reply() -> None:
     class DeferRandom(random.Random):
         def random(self) -> float:

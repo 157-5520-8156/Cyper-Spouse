@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 
@@ -25,11 +27,22 @@ async def test_sillytavern_core_calls_plugin() -> None:
 
     text = await core.reply(
         IncomingMessage(platform="qq", platform_user_id="u", text="你好"),
-        MoodState(),
-        [],
+        MoodState(
+            mood="hurt",
+            patience=22,
+            security=18,
+            emotional_charge=61,
+            boundary_level=44,
+            emotion_vector={"anger": 70},
+        ),
+        ["[qq][刚刚] 她: 你刚刚问我喜不喜欢你？"],
         None,
     )
 
     assert text == "你好。"
     assert seen["url"] == "http://st.test/api/plugins/girl-agent-core/reply"
     assert seen["csrf"] == "test-csrf"
+    payload = json.loads(seen["json"])
+    assert payload["state"]["emotional_charge"] == 61
+    assert payload["state"]["boundary_level"] == 44
+    assert payload["state"]["emotion_vector"] == {"anger": 70}

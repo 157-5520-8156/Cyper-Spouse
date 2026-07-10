@@ -1,10 +1,10 @@
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from companion_daemon.db import CompanionStore
-from companion_daemon.engine import CompanionEngine, seed_user
+from companion_daemon.engine import CompanionEngine, relative_chat_time_hint, seed_user
 from companion_daemon.image_generation import GeneratedImage
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import IncomingMessage, MoodState
@@ -93,6 +93,51 @@ def test_recent_lines_sanitize_previous_bad_outgoing(tmp_path: Path) -> None:
     recent = engine._recent_lines("geoff")
 
     assert "高中同学" not in "\n".join(recent)
+
+
+def test_recent_lines_include_local_recency_hint(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+    store.save_outgoing("geoff", "qq", "我刚从图书馆出来。")
+
+    recent = engine._recent_lines("geoff")
+
+    assert "[qq][" in recent[-1]
+    assert "] 她:" in recent[-1]
+
+
+def test_relative_chat_time_hint_uses_local_overnight_labels() -> None:
+    now = datetime(2026, 7, 10, 10, 34, tzinfo=UTC)
+
+    assert relative_chat_time_hint("2026-07-10T10:30:00+00:00", now=now) == "刚刚"
+    assert relative_chat_time_hint("2026-07-10T09:50:00+00:00", now=now) == "刚才"
+    assert relative_chat_time_hint("2026-07-09T19:40:00+00:00", now=now) == "今天凌晨"
+    assert relative_chat_time_hint("2026-07-08T19:40:00+00:00", now=now) == "昨晚"
+
+
+def test_debug_snapshot_exposes_daemon_context_and_prompt(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.save_outgoing("geoff", "qq", "我刚从图书馆出来。")
+    store.upsert_memory(
+        "geoff",
+        kind="life_fact",
+        content="用户人在成都",
+        source="test",
+        confidence=0.8,
+    )
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+
+    snapshot = engine.debug_snapshot("geoff", preview_text="你在干嘛")
+
+    assert snapshot["canonical_user_id"] == "geoff"
+    assert "state" in snapshot
+    assert any("图书馆" in line for line in snapshot["recent"])
+    assert any("成都" in line for line in snapshot["memories"])
+    prompt_text = "\n".join(message["content"] for message in snapshot["preview_prompt"])
+    assert "最近聊天" in prompt_text
+    assert "你在干嘛" in prompt_text
 
 
 @pytest.mark.asyncio

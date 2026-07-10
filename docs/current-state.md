@@ -4,6 +4,16 @@ Date: 2026-07-09
 
 ## What Runs Now
 
+### Core Runtime Decision
+
+The Companion Daemon is now the canonical runtime for 沈知栀. It owns the character profile,
+relationship state, long-term memory, self-core, prompt construction, postprocessing, proactive
+scheduling, budget gates, and QQ delivery behavior.
+
+SillyTavern is optional. It can still be used as a manual UI or prompt experiment surface, but it is
+not the source of truth for the companion. The default `CONVERSATION_CORE` is `prompt`; setting it to
+`sillytavern` explicitly enables the compatibility adapter.
+
 ### Companion Daemon
 
 The Python daemon is implemented and tested.
@@ -25,6 +35,16 @@ The real `companion-sim` command successfully used the local `DEEPSEEK_API_KEY` 
 
 This confirms the core loop can call the DeepSeek API.
 
+Debug endpoint:
+
+```bash
+curl 'http://127.0.0.1:8765/debug/geoff/context?preview_text=你在干嘛'
+```
+
+This returns the daemon-owned state, recent chat lines with local freshness tags, selected memory
+lines, self-core text, and a preview prompt. The preview is for inspection only and does not update
+state or send a message.
+
 ### HTTP Daemon
 
 Verified:
@@ -39,7 +59,7 @@ curl -s -X POST http://127.0.0.1:8765/messages \
 
 The daemon returned a real generated reply.
 
-### SillyTavern
+### Optional SillyTavern
 
 SillyTavern is checked out at:
 
@@ -61,7 +81,7 @@ It starts at:
 http://127.0.0.1:8000/
 ```
 
-Installed extensions:
+Installed extensions, kept as reference/sandbox tooling:
 
 - Smart-Memory
 - SillyTavern-EchoText
@@ -187,9 +207,9 @@ Implemented:
 - Automatic image generation is guarded by character boundary checks and the local CNY budget gate, recording blocked/deferred requests instead of silently spending.
 - Self-initiated proactive image sharing is supported as a rare state-machine outcome, separate from user-demanded selfies.
 - EchoText-inspired reaction selection can suggest lightweight reactions from emotional deltas.
-- EchoText-inspired reply timing model estimates read/reply/ghost delays from emotion vectors.
+- EchoText-inspired reply timing model estimates read/reply/ghost delays from emotion vectors and is wired into QQ's human timing layer with caps.
 - EchoText-inspired image style detection carries user-requested styles into generation prompts.
-- External context emotion bleed is capped to keep SillyTavern/MCP/multimodal context from overwhelming the core state.
+- External context emotion bleed is implemented with caps, but is not wired into the QQ main path yet; it should only be enabled when an external SillyTavern/MCP context source is explicitly passed into the engine.
 - Chengdu-local human rhythm context keeps replies from feeling like an always-on assistant and explicitly suppresses bracketed stage directions.
 - QQ WebSocket delivery now adds read/think/typing delay before the first reply and human-sized pauses between split reply parts, instead of sending 2-3 parts in one burst.
 - QQ private chat now has a conservative reply-decision layer enabled by default: pure acknowledgements can be recorded without a reply, questions/emotional/urgent messages always reply, and long story-like messages may be deferred during busy phases with a “just saw this” context hint.

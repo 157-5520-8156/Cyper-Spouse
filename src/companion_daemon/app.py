@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Header, HTTPException, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import JSONResponse
 
 from companion_daemon.config import get_settings
@@ -32,6 +32,19 @@ async def post_message(message: IncomingMessage) -> CompanionReply:
 @app.post("/proactive/{canonical_user_id}", response_model=ProactiveDecision)
 async def proactive(canonical_user_id: str) -> ProactiveDecision:
     return await engine.proactive_tick(canonical_user_id)
+
+
+@app.get("/debug/{canonical_user_id}/context")
+def debug_context(
+    canonical_user_id: str,
+    preview_text: str = Query(default=""),
+    platform: str = Query(default="qq"),
+) -> dict[str, object]:
+    return engine.debug_snapshot(
+        canonical_user_id,
+        preview_text=preview_text,
+        platform=platform,
+    )
 
 
 @app.post("/qq/webhook")

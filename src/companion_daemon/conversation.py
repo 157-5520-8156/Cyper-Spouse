@@ -130,10 +130,23 @@ class SillyTavernConversationCore:
                 "intimacy": mood_state.intimacy,
                 "trust": mood_state.trust,
                 "attachment": mood_state.attachment,
+                "patience": mood_state.patience,
+                "security": mood_state.security,
+                "curiosity": mood_state.curiosity,
+                "initiative": mood_state.initiative,
+                "emotional_charge": mood_state.emotional_charge,
+                "boundary_level": mood_state.boundary_level,
                 "relationship_status": relationship_status_line(mood_state),
                 "relationship_stage": mood_state.relationship_stage,
                 "relationship_instruction": relationship_instruction(mood_state.relationship_stage),
                 "unresolved_emotion": mood_state.unresolved_emotion,
+                "last_user_intent": mood_state.last_user_intent,
+                "last_interaction_event": mood_state.last_interaction_event,
+                "reply_style_hint": mood_state.reply_style_hint,
+                "emotion_vector": mood_state.emotion_vector,
+                "emotion_baseline": mood_state.emotion_baseline,
+                "emotion_affinity": mood_state.emotion_affinity,
+                "last_emotion_impact": mood_state.last_emotion_impact,
                 "platform_context": platform_context,
             },
         }
@@ -147,4 +160,5 @@ class SillyTavernConversationCore:
                 headers={"X-CSRF-Token": csrf_token},
             )
             response.raise_for_status()
-        return sanitize_chat_text(str(response.json().get("text", "")))
+        text = sanitize_chat_text(str(response.json().get("text", "")))
+        return postprocess_reply_text(text, recent_lines=recent_lines, user_text=message.text)
