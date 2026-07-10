@@ -1,6 +1,6 @@
 from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.emotion_core import emotion_context_line
-from companion_daemon.human_rhythm import human_rhythm_context_line, proactive_rhythm_context_line
+from companion_daemon.human_rhythm import proactive_rhythm_context_line
 from companion_daemon.proactive_triggers import proactive_context_instruction, ProactiveTrigger
 from companion_daemon.relationship import relationship_instruction
 
@@ -99,13 +99,8 @@ def reply_prompt(
     self_core_block: str | None = None,
     context_block: str | None = None,
 ) -> list[dict[str, str]]:
-    hint = state_to_hint(mood_state)
-    rhythm = human_rhythm_context_line(mood_state)
-
     state_block = (
-        "当下状态\n"
-        f"- {hint}\n"
-        f"- {rhythm}\n"
+        "回复守则\n"
         f"- {question_budget_hint(recent_lines)}\n"
         f"- 平台上下文: {platform_context or '无'}\n\n"
         "聊天方式\n"
@@ -151,10 +146,14 @@ def reply_prompt(
         messages.append({"role": "system", "content": context_block})
     messages.extend([
         {"role": "system", "content": state_block},
-        {"role": "system", "content": f"长期记忆:\n{memories}"},
         {"role": "system", "content": f"本轮附件:\n{attachments}"},
         {"role": "system", "content": f"最近聊天:\n{recent}"},
     ])
+    # The context package already contains a retrieval-selected memory budget.
+    # Keep this legacy path for direct callers and adapters that have not yet
+    # opted into the orchestrator.
+    if not context_block:
+        messages.insert(2, {"role": "system", "content": f"长期记忆:\n{memories}"})
 
     if example_pairs:
         for example in example_pairs[:4]:

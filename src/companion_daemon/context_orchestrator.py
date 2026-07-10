@@ -1,6 +1,6 @@
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from companion_daemon.human_rhythm import human_rhythm_snapshot
@@ -17,6 +17,8 @@ class ContextPackage:
     memory_lines: list[str]
     life_context: str
     emotion_context: str
+    reply_policy: str
+    continuity_hint: str
     prompt_summary: str
 
     def prompt_block(self) -> str:
@@ -30,6 +32,8 @@ class ContextPackage:
             f"- 相关长期记忆: {memories}\n"
             f"- 她自己的当前生活状态: {self.life_context}\n"
             f"- 情绪/关系影响: {self.emotion_context}\n"
+            f"- 本轮回复策略: {self.reply_policy}\n"
+            f"- 连续性约束: {self.continuity_hint}\n"
             f"- 最终 prompt 摘要: {self.prompt_summary}"
         )
 
@@ -42,18 +46,22 @@ def build_context_package(
     *,
     max_memories: int = 5,
     now: datetime | None = None,
+    continuity_hint: str | None = None,
 ) -> ContextPackage:
     user_intent = infer_user_intent(message.text, has_attachments=bool(message.attachments))
     reply_focus = choose_reply_focus(message.text, user_intent)
     forbidden = forbidden_old_topics(recent_rows)
+    current_time = now or utc_now()
     memories = select_relevant_memories(
         memory_rows,
         message.text,
         recent_rows,
         max_memories=max_memories,
+        now=current_time,
     )
-    life_context = current_life_context(state, now=now)
+    life_context = current_life_context(state, now=current_time)
     emotion_context = state_effect_summary(state)
+    reply_policy = build_reply_policy(user_intent, state)
     prompt_summary = (
         f"只回应用户当前这条里的“{reply_focus}”；"
         "历史和记忆只用于避免忘事、错认说话人和瞎编，不要逐条复盘。"
@@ -65,6 +73,8 @@ def build_context_package(
         memory_lines=memories,
         life_context=life_context,
         emotion_context=emotion_context,
+        reply_policy=reply_policy,
+        continuity_hint=continuity_hint or "保持最近的语气，不要突然大幅变调",
         prompt_summary=prompt_summary,
     )
 
@@ -122,31 +132,56 @@ def select_relevant_memories(
     *,
     max_memories: int = 5,
     char_budget: int = 700,
+    now: datetime | None = None,
 ) -> list[str]:
-    query = " ".join([message_text, *[row.get("text", "") for row in recent_rows[-3:]]])
-    query_terms = _terms(query)
-    scored: list[tuple[float, int, str]] = []
-    for index, row in enumerate(rows):
+    """Retrieve only memories that help with *this* turn.
+
+    This is intentionally a hybrid lexical retriever instead of an embedding API
+    call. It is deterministic, cheap, inspectable in the daemon panel, and keeps
+    irrelevant profile facts out of routine replies. The scoring boundary is kept
+    here so an embedding/reranker can later replace only this function.
+    """
+    current_time = now or utc_now()
+    current_terms = _terms(message_text)
+    current_terms -= _deprioritized_terms(message_text)
+    recent_terms = _terms(" ".join(row.get("text", "") for row in recent_rows[-3:]))
+    candidates = _drop_conflicting_and_expired_memories(rows, now=current_time)
+    scored: list[tuple[float, int, set[str], str]] = []
+    for index, row in candidates:
         kind = _row_get(row, "kind")
         if _exclude_from_reply_memory(kind):
             continue
         content = _row_get(row, "content")
         confidence = _row_float(row, "confidence", 0.7)
-        overlap = len(query_terms & _terms(content))
-        kind_bonus = _kind_bonus(kind)
-        recency = max(0.0, 0.22 - index * 0.025)
-        direct_bonus = 0.25 if overlap else 0.0
-        score = confidence + kind_bonus + recency + direct_bonus + min(0.3, overlap * 0.08)
-        scored.append((score, index, f"- [{kind}] {content}"))
+        memory_terms = _terms(content)
+        current_overlap = current_terms & memory_terms
+        recent_overlap = recent_terms & memory_terms
+        # Old conversation can help interpret a short acknowledgement, but it
+        # must never outweigh the text the user just sent.
+        relevance = len(current_overlap) + min(0.35, len(recent_overlap) * 0.12)
+        if relevance <= 0:
+            continue
+        recency = _recency_score(row, index, now=current_time)
+        score = (
+            relevance * 1.2
+            + confidence * 0.22
+            + _kind_bonus(kind)
+            + recency * 0.12
+        )
+        scored.append((score, index, memory_terms, f"- [{kind}] {content}"))
     scored.sort(key=lambda item: (-item[0], item[1]))
     lines: list[str] = []
+    selected_terms: list[set[str]] = []
     total = 0
-    for _, _, line in scored:
+    for _, _, memory_terms, line in scored:
         if len(lines) >= max_memories:
             break
         if total + len(line) > char_budget and lines:
             break
+        if any(_term_overlap(memory_terms, previous) >= 0.72 for previous in selected_terms):
+            continue
         lines.append(line)
+        selected_terms.append(memory_terms)
         total += len(line)
     return lines
 
@@ -154,27 +189,128 @@ def select_relevant_memories(
 def current_life_context(state: MoodState, *, now: datetime | None = None) -> str:
     rhythm = human_rhythm_snapshot(state, now or utc_now())
     return (
-        f"{rhythm.phase}，像是在{rhythm.private_activity}；"
+        f"生活节律={rhythm.phase}，像是在{rhythm.private_activity}；"
         f"注意力={rhythm.attention_mode}；回复节奏={rhythm.reply_guidance}"
     )
 
 
 def state_effect_summary(state: MoodState) -> str:
-    parts = [
-        f"心情={state.mood}",
-        f"关系={state.relationship_stage}",
-        f"亲密={state.intimacy}",
-        f"信任={state.trust}",
-    ]
+    parts = [f"关系阶段={state.relationship_stage}"]
     if state.emotional_charge >= 20:
-        parts.append("有情绪余波，别立刻装没事")
+        parts.append("情绪余波")
     if state.boundary_level >= 25:
-        parts.append("边界较高，回复要克制")
+        parts.append("边界收紧")
     if state.initiative >= 55:
-        parts.append("主动欲望偏高，可以更有分享欲")
+        parts.append("分享欲偏高")
     if state.unresolved_emotion:
-        parts.append(f"未消化情绪={state.unresolved_emotion}")
+        parts.append("有未消化的事")
     return "；".join(parts)
+
+
+def build_reply_policy(user_intent: str, state: MoodState) -> str:
+    if user_intent == "表达情绪，需要先被接住":
+        base = "先接住情绪，再回应具体事情；不急着给建议"
+    elif user_intent == "提出问题，期待回答或态度":
+        base = "先回答当前问句"
+    elif user_intent == "连续讲一件事，需要她抓重点而不是审问":
+        base = "抓住一个最重要的点回应，少总结、少追问"
+    elif user_intent == "可能在收尾、敷衍、疲惫或暂时不想展开":
+        base = "尊重低能量和收尾，不强行续话"
+    else:
+        base = "先自然接住当前这句话"
+
+    if state.emotional_charge >= 35 or state.unresolved_emotion:
+        return f"{base}；保留一点情绪，但不翻旧账、不演独白"
+    if state.boundary_level >= 35:
+        return f"{base}；语气克制，别硬拉近关系"
+    if state.initiative >= 60:
+        return f"{base}；可以多一点自己的反应，但别抢话"
+    return base
+
+
+def _drop_conflicting_and_expired_memories(
+    rows: list[Any],
+    *,
+    now: datetime,
+) -> list[tuple[int, Any]]:
+    newest_by_conflict_key: dict[str, tuple[datetime, int]] = {}
+    prepared: list[tuple[int, Any, datetime | None, str | None]] = []
+    for index, row in enumerate(rows):
+        kind = _row_get(row, "kind")
+        content = _row_get(row, "content")
+        updated_at = _row_datetime(row, "updated_at")
+        if _is_expired_ephemeral_memory(kind, content, updated_at, now):
+            continue
+        conflict_key = _memory_conflict_key(kind, content)
+        prepared.append((index, row, updated_at, conflict_key))
+        if conflict_key:
+            timestamp = updated_at or (now - timedelta(seconds=index))
+            current = newest_by_conflict_key.get(conflict_key)
+            if current is None or timestamp > current[0]:
+                newest_by_conflict_key[conflict_key] = (timestamp, index)
+
+    return [
+        (index, row)
+        for index, row, _, conflict_key in prepared
+        if not conflict_key or newest_by_conflict_key[conflict_key][1] == index
+    ]
+
+
+def _is_expired_ephemeral_memory(
+    kind: str,
+    content: str,
+    updated_at: datetime | None,
+    now: datetime,
+) -> bool:
+    if updated_at is None:
+        return False
+    age = now - updated_at
+    if kind == "schedule" and age > timedelta(hours=36):
+        return True
+    if any(token in content for token in ("今天", "今晚", "明天", "后天")) and age > timedelta(hours=36):
+        return True
+    return kind == "recent_event" and age > timedelta(days=21)
+
+
+def _memory_conflict_key(kind: str, content: str) -> str | None:
+    if kind in {"life_fact", "custom", "status"} and re.search(r"(?:住在|人在|搬到|来自|定居|在)\S{0,2}(?:成都|上海|北京|广州|深圳|杭州|南京|武汉)", content):
+        return "user_location"
+    if kind in {"name", "status"}:
+        return f"singleton:{kind}"
+    return None
+
+
+def _row_datetime(row: Any, key: str) -> datetime | None:
+    value = _row_get(row, key)
+    if not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _recency_score(row: Any, index: int, *, now: datetime) -> float:
+    updated_at = _row_datetime(row, "updated_at")
+    if updated_at is None:
+        return max(0.0, 0.18 - index * 0.02)
+    age_hours = max(0.0, (now - updated_at).total_seconds() / 3600)
+    return 1.0 / (1.0 + age_hours / 72)
+
+
+def _term_overlap(left: set[str], right: set[str]) -> float:
+    if not left or not right:
+        return 0.0
+    return len(left & right) / min(len(left), len(right))
+
+
+def _deprioritized_terms(text: str) -> set[str]:
+    """Remove a topic the user explicitly asked to set aside this turn."""
+    suppressed: set[str] = set()
+    for match in re.finditer(r"(?:先不说|不想聊|别聊|不聊)([^，。！？\n]{1,16})", text):
+        suppressed |= _terms(match.group(1))
+    return suppressed
 
 
 def _contains(text: str, tokens: list[str]) -> bool:
@@ -231,7 +367,8 @@ def _terms(text: str) -> set[str]:
         for token in re.split(r"[，。！？、\s,.!?;；:：()（）]+", normalized)
         if len(token) >= 2
     }
-    return latin_terms | cjk_terms | keywords
+    stop_terms = {"用户", "今天", "最近", "这个", "那个", "有点", "一下", "怎么", "什么", "不是", "然后", "就是"}
+    return (latin_terms | cjk_terms | keywords) - stop_terms
 
 
 def _compact_space(text: str) -> str:

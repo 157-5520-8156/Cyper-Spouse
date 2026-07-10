@@ -1,4 +1,11 @@
-from companion_daemon.dialogue_eval import evaluate_reply, format_results, ReplyEval
+from companion_daemon.dialogue_eval import ReplyEval, evaluate_reply, format_results, run_context_scenarios
+
+
+def test_context_regression_suite_passes() -> None:
+    results = run_context_scenarios()
+
+    assert results
+    assert all(not result.issues for result in results)
 
 
 def test_evaluate_reply_flags_common_ai_smells() -> None:

@@ -274,6 +274,10 @@ def evaluate_proactive_trigger(
 
     if not candidates:
         return None
+    if unresolved_question:
+        for candidate in candidates:
+            if candidate.type == "pregnant_pause":
+                return candidate
     if own_unanswered_question:
         for candidate in candidates:
             if candidate.type == "her_question_unanswered":

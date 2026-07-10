@@ -9,9 +9,10 @@ import re
 import tempfile
 
 from companion_daemon.config import get_settings
+from companion_daemon.context_orchestrator import build_context_package
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import seed_user
-from companion_daemon.models import IncomingMessage
+from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.qq_websocket import QQMessageCoalescer
 from companion_daemon.reply_decision import classify_message
 from companion_daemon.runtime import build_companion_engine
@@ -120,6 +121,29 @@ class EvalScenario:
     turns: list[str]
 
 
+@dataclass(frozen=True)
+class ContextEvalScenario:
+    """A deterministic regression case for prompt-context selection."""
+
+    name: str
+    message: str
+    memories: list[dict[str, object]]
+    expected_intent: str
+    expected_memory_terms: tuple[str, ...] = ()
+    forbidden_memory_terms: tuple[str, ...] = ()
+    state: MoodState = field(default_factory=MoodState)
+
+
+@dataclass(frozen=True)
+class ContextEval:
+    name: str
+    issues: list[ReplyIssue] = field(default_factory=list)
+
+    @property
+    def score(self) -> int:
+        return max(0, 100 - len(self.issues) * 25)
+
+
 class _EvalReplyTarget:
     def __init__(self) -> None:
         self.replies: list[str] = []
@@ -155,6 +179,38 @@ SCENARIOS = [
     EvalScenario(
         "context_should_follow_current_turn_not_old_question",
         ["我明天考试，毛概", "你等下还想继续背吗", "先不说那个，我今天心里有点闷"],
+    ),
+]
+
+
+CONTEXT_SCENARIOS = [
+    ContextEvalScenario(
+        "exam_retrieval_does_not_pad_profile",
+        message="毛概背得我头都大了",
+        memories=[
+            {"kind": "life_fact", "content": "用户人在成都", "confidence": 0.95},
+            {"kind": "favorite_thing", "content": "用户喜欢桂花乌龙", "confidence": 0.9},
+            {"kind": "recent_event", "content": "用户最近在准备毛概考试", "confidence": 0.72},
+        ],
+        expected_intent="普通私聊推进，期待自然接话",
+        expected_memory_terms=("毛概",),
+        forbidden_memory_terms=("成都", "桂花乌龙"),
+    ),
+    ContextEvalScenario(
+        "emotion_overrides_stale_question",
+        message="先不说考试了，我今天心里有点闷",
+        memories=[
+            {"kind": "recent_event", "content": "用户最近在准备毛概考试", "confidence": 0.8},
+        ],
+        expected_intent="表达情绪，需要先被接住",
+        forbidden_memory_terms=("毛概",),
+    ),
+    ContextEvalScenario(
+        "unresolved_mood_becomes_policy_not_monologue",
+        message="你怎么啦",
+        memories=[],
+        expected_intent="提出问题，期待回答或态度",
+        state=MoodState(mood="sulking", emotional_charge=45, unresolved_emotion="刚才的话有点刺人"),
     ),
 ]
 
@@ -211,6 +267,36 @@ def evaluate_reply(text: str, *, user_text: str = "", recent_assistant_questions
     if line_count > 3:
         issues.append(ReplyIssue("too_many_lines", f"{line_count} lines feels like a composed answer"))
     return ReplyEval(cleaned, issues)
+
+
+def run_context_scenarios() -> list[ContextEval]:
+    """Check context selection without model calls, cost, or nondeterminism."""
+    results: list[ContextEval] = []
+    for scenario in CONTEXT_SCENARIOS:
+        package = build_context_package(
+            IncomingMessage(platform="qq", platform_user_id="eval-user", text=scenario.message),
+            scenario.state,
+            [],
+            scenario.memories,
+        )
+        memory_text = "\n".join(package.memory_lines)
+        prompt_text = package.prompt_block()
+        issues: list[ReplyIssue] = []
+        if package.user_intent != scenario.expected_intent:
+            issues.append(ReplyIssue("wrong_intent", package.user_intent))
+        for term in scenario.expected_memory_terms:
+            if term not in memory_text:
+                issues.append(ReplyIssue("missing_memory", term))
+        for term in scenario.forbidden_memory_terms:
+            if term in memory_text:
+                issues.append(ReplyIssue("irrelevant_memory", term))
+        if scenario.name == "unresolved_mood_becomes_policy_not_monologue":
+            if "保留一点情绪" not in package.reply_policy:
+                issues.append(ReplyIssue("missing_state_policy", package.reply_policy))
+            if "小别扭" in prompt_text:
+                issues.append(ReplyIssue("raw_state_monologue", prompt_text))
+        results.append(ContextEval(scenario.name, issues))
+    return results
 
 
 def _is_meaningful_user_text(text: str) -> bool:
@@ -337,11 +423,23 @@ def format_results(results: list[tuple[str, str, ReplyEval]]) -> str:
     return "\n".join(lines).strip()
 
 
+def format_context_results(results: list[ContextEval]) -> str:
+    return "\n".join(
+        f"[{result.name}] score={result.score} issues="
+        f"{', '.join(issue.code for issue in result.issues) or 'ok'}"
+        for result in results
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Evaluate companion replies for human IM feel.")
     parser.add_argument("--live", action="store_true", help="Use configured DeepSeek model.")
     parser.add_argument("--max-cases", type=int, default=None)
+    parser.add_argument("--context", action="store_true", help="Run deterministic context-selection regressions.")
     args = parser.parse_args()
+    if args.context:
+        print(format_context_results(run_context_scenarios()))
+        return
     results = asyncio.run(run_scenarios(live=args.live, max_cases=args.max_cases))
     print(format_results(results))
 

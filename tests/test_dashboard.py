@@ -46,7 +46,8 @@ def test_debug_state_and_memory_controls(tmp_path: Path, monkeypatch) -> None:
     ).json()
     assert add_response == {"ok": True}
     context = client.get("/debug/geoff/context?preview_text=你好").json()
-    assert any("桂花乌龙" in line for line in context["memories"])
+    assert not any("桂花乌龙" in line for line in context["memories"])
+    assert any("桂花乌龙" in row["content"] for row in context["available_memories"])
 
     delete_response = client.delete(
         "/debug/geoff/memories",

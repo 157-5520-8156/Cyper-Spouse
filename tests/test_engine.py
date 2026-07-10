@@ -79,7 +79,7 @@ async def test_handle_message_injects_human_rhythm_context(tmp_path: Path) -> No
     assert "生活节律" in prompt_text
     assert "上下文编排" in prompt_text
     assert "当前用户意图" in prompt_text
-    assert "微信打字" in prompt_text
+    assert "像手机私聊" in prompt_text
     assert any(row["kind"] == "life_continuity" for row in store.memories("geoff"))
 
 
@@ -157,7 +157,7 @@ def test_debug_snapshot_exposes_daemon_context_and_prompt(tmp_path: Path) -> Non
     assert snapshot["canonical_user_id"] == "geoff"
     assert "state" in snapshot
     assert any("图书馆" in line for line in snapshot["recent"])
-    assert any("成都" in line for line in snapshot["memories"])
+    assert not any("成都" in line for line in snapshot["memories"])
     assert "context_package" in snapshot
     prompt_text = "\n".join(message["content"] for message in snapshot["preview_prompt"])
     assert "最近聊天" in prompt_text
@@ -192,7 +192,8 @@ async def test_handle_message_relaxes_after_warm_proactive_response(tmp_path: Pa
     assert state.emotional_charge < 18
     assert any(row["kind"] == "proactive_response" for row in store.memories("geoff"))
     prompt_text = "\n".join(message["content"] for message in model.calls[-1])
-    assert "主动反馈" in prompt_text
+    assert "主动反馈" not in prompt_text
+    assert "本轮回复策略" in prompt_text
 
 
 @pytest.mark.asyncio
@@ -211,7 +212,8 @@ async def test_handle_message_notices_skipped_own_question(tmp_path: Path) -> No
     assert state.security < 45
     assert any(row["kind"] == "own_question_skipped" for row in store.memories("geoff"))
     prompt_text = "\n".join(message["content"] for message in model.calls[-1])
-    assert "没有回答她刚刚问的问题" in prompt_text
+    assert "没有回答她刚刚问的问题" not in prompt_text
+    assert "保留一点情绪" in prompt_text
 
 
 @pytest.mark.asyncio

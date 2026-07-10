@@ -31,6 +31,22 @@ def test_reply_prompt_includes_question_budget_and_safety_boundaries() -> None:
     assert "超过一小时或隔夜的事不要说'刚刚'" in prompt_text
 
 
+def test_context_orchestrated_prompt_does_not_duplicate_memory_or_raw_mood_monologue() -> None:
+    messages = reply_prompt(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我有点烦"),
+        MoodState(mood="sulking", unresolved_emotion="刚才的话有点刺人"),
+        [],
+        None,
+        "你是沈知栀。",
+        memory_lines=["- [life_fact] 用户人在成都"],
+        context_block="上下文编排:\n- 相关长期记忆: 无高相关长期记忆",
+    )
+    prompt_text = "\n".join(message["content"] for message in messages)
+
+    assert "长期记忆:\n- [life_fact] 用户人在成都" not in prompt_text
+    assert "你有点小别扭" not in prompt_text
+
+
 def test_state_hint_normalizes_inner_punctuation() -> None:
     hint = state_to_hint(MoodState(unresolved_emotion="她刚才有话想发给你，但忍住了，所以心里还留着一点尾巴。"))
 

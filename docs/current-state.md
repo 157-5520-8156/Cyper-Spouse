@@ -25,6 +25,7 @@ uv run pytest
 uv run ruff check .
 uv run companion-sim --fake "我刚刚在忙，现在回来了"
 uv run companion-sim "我刚刚在忙，现在回来了"
+uv run companion-eval-dialogue --context
 ```
 
 The real `companion-sim` command successfully used the local `DEEPSEEK_API_KEY` environment variable and produced:
@@ -44,6 +45,11 @@ curl 'http://127.0.0.1:8765/debug/geoff/context?preview_text=你在干嘛'
 This returns the daemon-owned state, recent chat lines with local freshness tags, the selected
 context package, selected memory lines, self-core text, and a preview prompt. The preview is for
 inspection only and does not update state or send a message.
+
+The reply context path now has a deterministic regression suite. It verifies that unrelated profile
+facts are not padded into a reply, explicitly sidelined topics do not leak back through retrieval,
+temporary schedules expire, conflicting location facts choose the newest version, and unresolved
+emotion becomes a compact reply policy rather than public-facing inner monologue.
 
 Local dashboard:
 

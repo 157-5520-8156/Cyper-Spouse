@@ -96,11 +96,22 @@ It owns:
 
 The daemon should be small and auditable. It should not become a second full agent framework unless there is a proven reason.
 
-Before every live reply, the daemon now runs a context orchestrator. This is the boundary between
-raw state and model prompt: it classifies the current user intent, chooses the reply focus, lists
+Before every live reply, the daemon runs a context orchestrator. This is the boundary between raw
+state and model prompt: it classifies the current user intent, chooses the reply focus, lists
 stale-context mistakes to avoid, selects relevant long-term memories, summarizes the companion's
-current life state and emotion/relationship effect, and emits one concise prompt summary. This keeps
-memory retrieval and personality state from turning into an unstructured wall of prompt rules.
+current life state and emotion/relationship effect, and emits one concise prompt summary. Runtime
+state is converted into a compact reply policy rather than a first-person emotional monologue.
+
+Memory retrieval is deterministic and budgeted: it considers up to 200 recent memory records, filters
+runtime traces, expired schedules, and older conflicting singleton facts, then ranks by current-turn
+topic overlap, weak recent-context overlap, reliability, type, and recency. It deliberately refuses
+to inject unrelated profile facts merely to make the reply look familiar. This is a local-first hybrid
+retriever boundary; a semantic reranker can later replace the scoring layer without changing prompts
+or storage.
+
+Regression coverage is split in two: `companion-eval-dialogue` checks generated IM style, while
+`companion-eval-dialogue --context` checks deterministic intent, memory, stale-topic, and state-policy
+selection without an LLM call.
 
 ### Optional SillyTavern Adapter
 

@@ -42,7 +42,7 @@ from companion_daemon.mood import (
 from companion_daemon.inner_subtext import infer_inner_subtext
 from companion_daemon.multimodal import summarize_attachments
 from companion_daemon.multimodal_analysis import AttachmentInsight, MultimodalAnalyzer
-from companion_daemon.personality_drift import apply_personality_drift, personality_drift_line
+from companion_daemon.personality_drift import apply_personality_drift
 from companion_daemon.prompts import proactive_prompt, reply_prompt
 from companion_daemon.proactive_feedback import apply_proactive_feedback, classify_proactive_feedback
 from companion_daemon.proactive_triggers import evaluate_proactive_trigger
@@ -179,13 +179,10 @@ class CompanionEngine:
             attachment_lines.append(context_hint)
         recent_lines = recent_lines_before
         tone_inertia = build_tone_inertia(next_state, recent_lines)
-        attachment_lines.append(tone_inertia.prompt_line)
-        attachment_lines.append(personality_drift_line(next_state))
         life_continuity = build_life_continuity(
             next_state,
             previous_content=self._latest_life_continuity(canonical_user_id),
         )
-        attachment_lines.append(life_continuity.prompt_line)
         self.store.upsert_memory(
             canonical_user_id,
             kind="life_continuity",
@@ -194,7 +191,6 @@ class CompanionEngine:
             confidence=0.72,
         )
         if key_event:
-            attachment_lines.append(key_event.prompt_line)
             self.store.upsert_memory(
                 canonical_user_id,
                 kind="key_relationship_event",
@@ -204,7 +200,6 @@ class CompanionEngine:
             )
         subtext = infer_inner_subtext(next_state)
         if subtext:
-            attachment_lines.append(subtext.prompt_line)
             self.store.upsert_memory(
                 canonical_user_id,
                 kind="inner_subtext",
@@ -213,7 +208,6 @@ class CompanionEngine:
                 confidence=0.74,
             )
         if proactive_feedback:
-            attachment_lines.append(proactive_feedback.prompt_line)
             self.store.upsert_memory(
                 canonical_user_id,
                 kind="proactive_response",
@@ -222,7 +216,6 @@ class CompanionEngine:
                 confidence=0.82,
             )
         if question_response:
-            attachment_lines.append(question_response.prompt_line)
             self.store.upsert_memory(
                 canonical_user_id,
                 kind=f"own_question_{question_response.kind}",
@@ -338,7 +331,8 @@ class CompanionEngine:
             message,
             next_state,
             recent_dicts_before,
-            self.store.memories(canonical_user_id, limit=40),
+            self.store.memories(canonical_user_id, limit=200),
+            continuity_hint=tone_inertia.memory,
         )
         text = await self.conversation_core.reply(
             message,
@@ -670,7 +664,8 @@ class CompanionEngine:
         state = self.store.get_mood_state(canonical_user_id)
         recent_rows = self._recent_dicts(canonical_user_id, limit=16)
         recent_lines = self._format_recent_dicts(recent_rows)
-        memory_rows = self.store.memories(canonical_user_id, limit=40)
+        memory_rows = self.store.memories(canonical_user_id, limit=200)
+        continuity_hint = build_tone_inertia(state, recent_lines).memory
         memories = []
         core = load_self_core(self.store, canonical_user_id)
         self_core_block = core.to_prompt_block() if core else ""
@@ -686,6 +681,7 @@ class CompanionEngine:
                 state,
                 recent_rows,
                 memory_rows,
+                continuity_hint=continuity_hint,
             )
             memories = context_package.memory_lines
             prompt_messages = reply_prompt(
@@ -711,6 +707,7 @@ class CompanionEngine:
                 state,
                 recent_rows,
                 memory_rows,
+                continuity_hint=continuity_hint,
             )
             memories = context_package.memory_lines
         return {
@@ -718,6 +715,15 @@ class CompanionEngine:
             "state": state.model_dump(mode="json"),
             "recent": recent_lines,
             "memories": memories,
+            "available_memories": [
+                {
+                    "kind": str(row["kind"]),
+                    "content": str(row["content"]),
+                    "confidence": float(row["confidence"]),
+                    "updated_at": str(row["updated_at"]),
+                }
+                for row in memory_rows
+            ],
             "self_core": self_core_block,
             "context_package": asdict(context_package),
             "preview_prompt": prompt_messages,
