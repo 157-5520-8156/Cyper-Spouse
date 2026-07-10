@@ -145,13 +145,18 @@ class QQMessageCoalescer:
                     )
                     mood_state = self.engine.store.get_mood_state(canonical_user_id)
                     has_unread = mood_state.has_unread
+                    recent_context_open = _recent_context_open(
+                        self.engine.store.recent_messages(canonical_user_id, limit=6)
+                    )
                 except Exception:
                     logger.exception("failed to load reply decision state")
+                    recent_context_open = False
                 action = decide_reply(
                     merged_text,
                     state=mood_state,
                     has_pending_reply=key in self._deferred,
                     has_unread=has_unread,
+                    recent_context_open=recent_context_open,
                     rng=self.rng,
                 )
                 if action.action == ReplyAction.SKIP:
@@ -404,6 +409,27 @@ class CompanionQQClient(botpy.Client):
 
 def _clean_content(content: str | None) -> str:
     return (content or "").strip()
+
+
+def _recent_context_open(rows) -> bool:
+    recent_text = "\n".join(str(row["text"]) for row in rows[-4:] if row["direction"] == "in")
+    return any(
+        token in recent_text
+        for token in (
+            "考试",
+            "毛概",
+            "复习",
+            "背",
+            "累",
+            "闷",
+            "难过",
+            "老师",
+            "下雨",
+            "伞",
+            "离谱",
+            "不知道怎么说",
+        )
+    )
 
 
 def _reply_msg_seq() -> int:

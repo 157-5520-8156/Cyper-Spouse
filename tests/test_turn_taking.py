@@ -42,6 +42,39 @@ def test_waits_much_longer_for_longform_opener() -> None:
     assert decision.reason == "longform_opener_waiting_for_user"
 
 
+def test_waits_when_user_is_thinking_or_hesitating() -> None:
+    policy = TurnTakingPolicy(short_wait_seconds=2.0, long_wait_seconds=8.0)
+
+    decision = policy.decide(
+        TurnInput(
+            pending_count=1,
+            latest_text="我想想，等我组织一下语言",
+            merged_text="我想想，等我组织一下语言",
+        )
+    )
+
+    assert decision.state == TurnState.COLLECTING
+    assert decision.timing == ReplyTiming.LONG_WAIT
+    assert decision.wait_seconds == 8.0
+    assert decision.reason == "user_thinking_or_hesitating"
+
+
+def test_waits_on_affective_pause_instead_of_pressing() -> None:
+    policy = TurnTakingPolicy(short_wait_seconds=2.0, long_wait_seconds=8.0)
+
+    decision = policy.decide(
+        TurnInput(
+            pending_count=1,
+            latest_text="啊这",
+            merged_text="啊这",
+        )
+    )
+
+    assert decision.state == TurnState.COLLECTING
+    assert decision.timing == ReplyTiming.LONG_WAIT
+    assert decision.reason == "affective_pause_waiting_for_next_turn"
+
+
 def test_several_messages_become_ready_when_not_open_ended() -> None:
     policy = TurnTakingPolicy(short_wait_seconds=2.0, long_wait_seconds=5.0)
 

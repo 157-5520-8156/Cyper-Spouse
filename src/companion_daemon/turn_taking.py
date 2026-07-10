@@ -62,6 +62,22 @@ class TurnTakingPolicy:
                 "explicit_stop_or_urgent",
             )
 
+        if _looks_like_user_thinking_or_hesitating(latest):
+            return TurnDecision(
+                TurnState.COLLECTING,
+                ReplyTiming.LONG_WAIT,
+                self.long_wait_seconds,
+                "user_thinking_or_hesitating",
+            )
+
+        if _looks_like_affective_pause(latest):
+            return TurnDecision(
+                TurnState.COLLECTING,
+                ReplyTiming.LONG_WAIT,
+                self.long_wait_seconds,
+                "affective_pause_waiting_for_next_turn",
+            )
+
         if turn.pending_count == 1 and _looks_like_longform_opener(latest):
             return TurnDecision(
                 TurnState.COLLECTING,
@@ -174,6 +190,45 @@ def _looks_like_longform_opener(text: str) -> bool:
     if any(token in stripped for token in opener_tokens):
         return True
     return stripped.endswith(("我跟你说", "我想说", "说来话长", "有点离谱"))
+
+
+def _looks_like_user_thinking_or_hesitating(text: str) -> bool:
+    stripped = text.strip()
+    thinking_tokens = (
+        "我想想",
+        "让我想想",
+        "等下",
+        "等一下",
+        "等等",
+        "我组织一下语言",
+        "让我组织一下语言",
+        "我不知道怎么说",
+        "不知道怎么说",
+        "不知道该不该说",
+        "我有点不知道怎么说",
+        "先别回",
+        "你等我一下",
+    )
+    return any(token in stripped for token in thinking_tokens)
+
+
+def _looks_like_affective_pause(text: str) -> bool:
+    stripped = text.strip()
+    pause_tokens = (
+        "额",
+        "呃",
+        "啊这",
+        "……",
+        "...",
+        "有点无语",
+        "无语了",
+        "我真服了",
+        "算了",
+        "没事",
+        "不说了",
+        "懒得说了",
+    )
+    return stripped in pause_tokens or any(stripped.endswith(token) for token in pause_tokens)
 
 
 def _ends_in_open_continuation(text: str) -> bool:

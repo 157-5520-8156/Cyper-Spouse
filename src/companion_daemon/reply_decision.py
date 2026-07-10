@@ -21,9 +21,24 @@ class ReplyDecision:
     mark_unread: bool = False
 
 
-_ACK_PATTERNS = {
+_MINIMAL_RESPONSE_PATTERNS = {
     "嗯", "嗯嗯", "好的", "好", "哦", "噢", "哈哈", "哈哈哈", "行", "对",
     "是的", "收到", "ok", "OK", "嗯哼", "嗯嗯嗯", "好滴", "好嘞",
+}
+_FAREWELL_PATTERNS = {
+    "晚安", "安", "睡了", "我睡了", "先睡了", "睡觉了", "拜拜", "拜", "先这样",
+    "回头聊", "明天聊", "早点睡", "你也早点睡",
+}
+_WITHDRAWAL_PATTERNS = {
+    "算了", "没事", "没啥", "不用了", "随便", "都行", "行吧", "好吧",
+    "不说了", "懒得说了", "当我没说",
+}
+_THINKING_PATTERNS = {
+    "我想想", "让我想想", "等下", "等一下", "等等", "我组织一下语言",
+    "我不知道怎么说", "不知道怎么说", "我有点不知道怎么说",
+}
+_REACTION_PAUSE_PATTERNS = {
+    "额", "呃", "呃呃", "啊这", "……", "...", "有点无语", "无语了", "我真服了",
 }
 _QUESTION_HINTS = (
     "怎么", "为什么", "什么时候", "哪", "哪个", "是不是", "能不能",
@@ -40,6 +55,9 @@ _URGENT_HINTS = (
 )
 LOW_ENERGY_ACK_DEFER_RANGE = (6, 18)
 OPEN_THREAD_ACK_DEFER_RANGE = (3, 14)
+USER_THINKING_DEFER_RANGE = (4, 12)
+WITHDRAWAL_DEFER_RANGE = (8, 25)
+FAREWELL_AFTERGLOW_DEFER_RANGE = (4, 20)
 
 
 def classify_message(text: str) -> str:
@@ -52,11 +70,23 @@ def classify_message(text: str) -> str:
         if hint in stripped:
             return "urgent"
 
-    if stripped in _ACK_PATTERNS:
-        return "ack"
+    if stripped in _MINIMAL_RESPONSE_PATTERNS:
+        return "minimal_response"
+
+    if _matches_token_family(stripped, _FAREWELL_PATTERNS):
+        return "farewell"
+
+    if _matches_token_family(stripped, _THINKING_PATTERNS):
+        return "thinking"
+
+    if _matches_token_family(stripped, _WITHDRAWAL_PATTERNS):
+        return "withdrawal"
+
+    if _matches_token_family(stripped, _REACTION_PAUSE_PATTERNS):
+        return "reaction_pause"
 
     if len(stripped) <= 4 and stripped.endswith(("。", "！", ".", "!")):
-        return "ack"
+        return "minimal_response"
 
     for hint in _QUESTION_HINTS:
         if hint in stripped:
@@ -98,6 +128,7 @@ def decide_reply(
     phase: str | None = None,
     has_pending_reply: bool = False,
     has_unread: bool = False,
+    recent_context_open: bool = False,
     rng: random.Random | None = None,
 ) -> ReplyDecision:
     """Decide whether to reply now, defer, or skip.
@@ -142,24 +173,18 @@ def decide_reply(
         busy_prob = max(0.05, min(0.75, busy_prob))
     is_busy = rng.random() < busy_prob
 
-    if msg_type == "ack":
+    if msg_type in {"minimal_response", "farewell", "thinking", "withdrawal", "reaction_pause"}:
         if has_pending_reply or has_unread:
-            return ReplyDecision(ReplyAction.REPLY_NOW, reason="ack_after_pending")
-        if state and _ack_may_be_low_energy_emotion(state):
-            return ReplyDecision(
-                ReplyAction.DEFER,
-                defer_minutes=rng.uniform(*LOW_ENERGY_ACK_DEFER_RANGE),
-                reason="low_energy_ack_needs_space",
-                mark_unread=True,
-            )
-        if state and _ack_may_leave_open_thread(state, rng):
-            return ReplyDecision(
-                ReplyAction.DEFER,
-                defer_minutes=rng.uniform(*OPEN_THREAD_ACK_DEFER_RANGE),
-                reason="ack_leaves_open_thread",
-                mark_unread=False,
-            )
-        return ReplyDecision(ReplyAction.SKIP, reason="pure_acknowledgment", mark_unread=False)
+            return ReplyDecision(ReplyAction.REPLY_NOW, reason=f"{msg_type}_after_pending")
+        token_decision = _decide_response_token(
+            msg_type,
+            state=state,
+            recent_context_open=recent_context_open,
+            rng=rng,
+        )
+        if token_decision:
+            return token_decision
+        return ReplyDecision(ReplyAction.SKIP, reason=f"pure_{msg_type}", mark_unread=False)
 
     if msg_type == "empty":
         return ReplyDecision(ReplyAction.SKIP, reason="empty_message", mark_unread=False)
@@ -180,9 +205,69 @@ def decide_reply(
     return ReplyDecision(ReplyAction.REPLY_NOW, reason="default_reply")
 
 
+def _decide_response_token(
+    msg_type: str,
+    *,
+    state: MoodState | None,
+    recent_context_open: bool,
+    rng: random.Random,
+) -> ReplyDecision | None:
+    if msg_type in {"thinking", "reaction_pause"}:
+        return ReplyDecision(
+            ReplyAction.DEFER,
+            defer_minutes=rng.uniform(*USER_THINKING_DEFER_RANGE),
+            reason=f"{msg_type}_wait_for_user",
+            mark_unread=True,
+        )
+
+    if msg_type == "withdrawal":
+        return ReplyDecision(
+            ReplyAction.DEFER,
+            defer_minutes=rng.uniform(*WITHDRAWAL_DEFER_RANGE),
+            reason="withdrawal_needs_space",
+            mark_unread=True,
+        )
+
+    if msg_type in {"minimal_response", "farewell"}:
+        if recent_context_open and msg_type == "minimal_response":
+            return ReplyDecision(
+                ReplyAction.DEFER,
+                defer_minutes=rng.uniform(*OPEN_THREAD_ACK_DEFER_RANGE),
+                reason="minimal_response_context_open",
+                mark_unread=False,
+            )
+        if state and _response_token_may_be_low_energy_emotion(state):
+            return ReplyDecision(
+                ReplyAction.DEFER,
+                defer_minutes=rng.uniform(*LOW_ENERGY_ACK_DEFER_RANGE),
+                reason=f"{msg_type}_low_energy_needs_space",
+                mark_unread=True,
+            )
+        if state and msg_type == "farewell" and _farewell_may_leave_afterglow(state, rng):
+            return ReplyDecision(
+                ReplyAction.DEFER,
+                defer_minutes=rng.uniform(*FAREWELL_AFTERGLOW_DEFER_RANGE),
+                reason="farewell_afterglow",
+                mark_unread=False,
+            )
+        if state and _response_token_may_leave_open_thread(state, rng):
+            return ReplyDecision(
+                ReplyAction.DEFER,
+                defer_minutes=rng.uniform(*OPEN_THREAD_ACK_DEFER_RANGE),
+                reason=f"{msg_type}_leaves_open_thread",
+                mark_unread=False,
+            )
+    return None
+
+
 def is_urgent_interrupt(text: str) -> bool:
     """Check if a message should immediately fire any pending deferred reply."""
     return classify_message(text) == "urgent"
+
+
+def _matches_token_family(text: str, patterns: set[str]) -> bool:
+    stripped = text.strip("。.!！~～ ")
+    return stripped in patterns
 
 
 def _busy_probability(phase: str) -> float:
@@ -211,7 +296,7 @@ def _defer_minutes_for_phase(phase: str, rng: random.Random) -> float:
     return rng.uniform(low, high)
 
 
-def _ack_may_be_low_energy_emotion(state: MoodState) -> bool:
+def _response_token_may_be_low_energy_emotion(state: MoodState) -> bool:
     if state.unresolved_emotion:
         return True
     if state.mood in {"hurt", "guarded", "sulking", "worried"}:
@@ -219,7 +304,7 @@ def _ack_may_be_low_energy_emotion(state: MoodState) -> bool:
     return state.emotional_charge >= 45 and state.security <= 40
 
 
-def _ack_may_leave_open_thread(state: MoodState, rng: random.Random) -> bool:
+def _response_token_may_leave_open_thread(state: MoodState, rng: random.Random) -> bool:
     chance = 0.08
     if state.relationship_stage in {"close_friend", "ambiguous", "lover"}:
         chance += 0.12
@@ -230,3 +315,16 @@ def _ack_may_leave_open_thread(state: MoodState, rng: random.Random) -> bool:
     if state.mood in {"sleepy", "guarded"}:
         chance -= 0.08
     return rng.random() < max(0.0, min(0.35, chance))
+
+
+def _farewell_may_leave_afterglow(state: MoodState, rng: random.Random) -> bool:
+    chance = 0.04
+    if state.relationship_stage in {"ambiguous", "lover"}:
+        chance += 0.12
+    elif state.relationship_stage == "close_friend":
+        chance += 0.06
+    if state.mood in {"miss_you", "affectionate"}:
+        chance += 0.10
+    if state.mood in {"sleepy", "hurt", "guarded"}:
+        chance -= 0.06
+    return rng.random() < max(0.0, min(0.28, chance))

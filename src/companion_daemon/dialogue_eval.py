@@ -72,6 +72,9 @@ _QUESTION_NAG_RE = re.compile(r"(?:我刚|刚才|刚刚)问(?:你)?的(?:问题)
 _UNSUPPORTED_OUTCOME_RE = re.compile(
     r"(?:至少)?没被(?:老师)?(?:点到名|点名|抓到迟到)|"
     r"(?:雨算|不算|也不算)?白淋(?:雨)?|"
+    r"(?:不算)?白跑|"
+    r"一起迟到|"
+    r"有点亏|"
     r"淋着雨去上课了|"
     r"(?:是)?雨停了.{0,24}(?:老师才到|才到)|"
     r"白等"
@@ -296,7 +299,8 @@ async def run_scenarios(*, live: bool = False, max_cases: int | None = None) -> 
                             await task
                     reply_text = "\n".join(target.replies[before:]).strip()
                     if not reply_text:
-                        evaluated = _evaluate_no_reply(text)
+                        is_deferred = f"c2c:{platform_user_id}" in coalescer._deferred
+                        evaluated = _evaluate_no_reply(text, is_deferred=is_deferred)
                         results.append((scenario.name, text, evaluated))
                         recent_questions = 0
                         continue
@@ -310,8 +314,10 @@ async def run_scenarios(*, live: bool = False, max_cases: int | None = None) -> 
             settings.database_path = original_db
 
 
-def _evaluate_no_reply(user_text: str) -> ReplyEval:
-    if classify_message(user_text) == "ack":
+def _evaluate_no_reply(user_text: str, *, is_deferred: bool = False) -> ReplyEval:
+    if is_deferred:
+        return ReplyEval("<deferred>", [])
+    if classify_message(user_text) in {"minimal_response", "farewell"}:
         return ReplyEval("<no reply>", [])
     return ReplyEval("<no reply>", [ReplyIssue("missed_reply", "meaningful user message received no reply")])
 

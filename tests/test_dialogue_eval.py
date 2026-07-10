@@ -133,11 +133,13 @@ def test_evaluate_reply_flags_unsupported_outcome_assumptions() -> None:
     rain = evaluate_reply("淋着雨去上课了。", user_text="早上起来就发现雨下很大，然后我伞还找不到")
     rain_stopped = evaluate_reply("是雨停了老师才到，那种事后的滑稽感。", user_text="结果赶到教室发现老师也迟到了")
     waiting = evaluate_reply("不过淋了雨还白等，有点亏。", user_text="结果赶到教室发现老师也迟到了")
+    white_run = evaluate_reply("那你这趟也不算白跑，至少老师也跟你一起迟到了。", user_text="结果赶到教室发现老师也迟到了")
 
     assert "unsupported_outcome_assumption" in {issue.code for issue in result.issues}
     assert "unsupported_outcome_assumption" in {issue.code for issue in rain.issues}
     assert "unsupported_outcome_assumption" in {issue.code for issue in rain_stopped.issues}
     assert "unsupported_outcome_assumption" in {issue.code for issue in waiting.issues}
+    assert "unsupported_outcome_assumption" in {issue.code for issue in white_run.issues}
 
 
 def test_evaluate_reply_allows_short_ack_for_short_ack_user_message() -> None:

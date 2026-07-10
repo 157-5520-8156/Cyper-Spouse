@@ -8,7 +8,11 @@ def test_classifies_core_reply_timing_messages() -> None:
     assert classify_message("在吗") == "urgent"
     assert classify_message("你今天怎么样？") == "question"
     assert classify_message("我今天好累") == "emotional"
-    assert classify_message("嗯嗯") == "ack"
+    assert classify_message("嗯嗯") == "minimal_response"
+    assert classify_message("晚安") == "farewell"
+    assert classify_message("我想想") == "thinking"
+    assert classify_message("算了") == "withdrawal"
+    assert classify_message("啊这") == "reaction_pause"
     assert classify_message("我刚刚想了很久，" * 8) == "story"
 
 
@@ -26,7 +30,7 @@ def test_ack_can_be_deferred_when_it_looks_low_energy_in_context() -> None:
 
     assert decision.action == ReplyAction.DEFER
     assert decision.mark_unread is True
-    assert decision.reason == "low_energy_ack_needs_space"
+    assert decision.reason == "minimal_response_low_energy_needs_space"
     assert decision.defer_minutes is not None
 
 
@@ -41,12 +45,48 @@ def test_ack_can_leave_open_thread_without_marking_unread() -> None:
 
     assert decision.action == ReplyAction.DEFER
     assert decision.mark_unread is False
-    assert decision.reason == "ack_leaves_open_thread"
+    assert decision.reason == "minimal_response_leaves_open_thread"
     assert decision.defer_minutes is not None
+
+
+def test_minimal_response_after_open_context_defers_without_marking_unread() -> None:
+    decision = decide_reply("嗯", recent_context_open=True, rng=random.Random(1))
+
+    assert decision.action == ReplyAction.DEFER
+    assert decision.mark_unread is False
+    assert decision.reason == "minimal_response_context_open"
+
+
+def test_farewell_can_have_afterglow_without_marking_unread() -> None:
+    state = MoodState(
+        mood="miss_you",
+        relationship_stage="lover",
+    )
+
+    decision = decide_reply("晚安", state=state, rng=random.Random(4))
+
+    assert decision.action == ReplyAction.DEFER
+    assert decision.mark_unread is False
+    assert decision.reason == "farewell_afterglow"
+
+
+def test_withdrawal_and_thinking_tokens_defer_without_immediate_pressure() -> None:
+    withdrawal = decide_reply("算了", rng=random.Random(1))
+    thinking = decide_reply("我想想", rng=random.Random(1))
+    pause = decide_reply("啊这", rng=random.Random(1))
+
+    assert withdrawal.action == ReplyAction.DEFER
+    assert withdrawal.mark_unread is True
+    assert withdrawal.reason == "withdrawal_needs_space"
+    assert thinking.action == ReplyAction.DEFER
+    assert thinking.reason == "thinking_wait_for_user"
+    assert pause.action == ReplyAction.DEFER
+    assert pause.reason == "reaction_pause_wait_for_user"
 
 
 def test_unread_or_pending_message_makes_ack_replyable() -> None:
     assert decide_reply("嗯嗯", has_unread=True).action == ReplyAction.REPLY_NOW
+    assert decide_reply("晚安", has_unread=True).action == ReplyAction.REPLY_NOW
     assert decide_reply("嗯嗯", has_pending_reply=True).action == ReplyAction.REPLY_NOW
     assert decide_reply("嗯嗯", state=MoodState(has_unread=True)).action == ReplyAction.REPLY_NOW
 

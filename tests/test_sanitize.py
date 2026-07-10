@@ -26,6 +26,7 @@ def test_sanitize_removes_acquaintance_crutch_variants() -> None:
     assert sanitize_chat_text("毛概确实要背好多啊，不过我室友说画了重点会好背一点。") == "毛概要背好多啊。"
     assert sanitize_chat_text("成都理工啊，我好像有个高中同学在那。") == "成都理工啊。"
     assert sanitize_chat_text("我一个高中同学在那儿读过，说晚上特别热闹。") == ""
+    assert sanitize_chat_text("我之前看一个朋友发过那边的照片，红砖楼配旧火车，挺有感觉的。") == ""
     assert sanitize_chat_text("我明天也有一门考试，刚背完知识点，准备睡了。") == ""
     assert sanitize_chat_text("毛概真的好难背啊，我去年考的时候也是熬夜翻来覆去地背。") == "毛概真的好难背啊。"
     assert sanitize_chat_text("毛概难背……我上学期也被折磨过。") == "毛概难背……"
@@ -41,6 +42,8 @@ def test_sanitize_removes_acquaintance_crutch_variants() -> None:
     assert sanitize_chat_text("淋着雨去上课了。") == ""
     assert sanitize_chat_text("是雨停了老师才到，那种事后的滑稽感。") == ""
     assert sanitize_chat_text("不过淋了雨还白等，有点亏。") == ""
+    assert sanitize_chat_text("那你这趟也不算白跑，至少老师也跟你一起迟到了。") == ""
+    assert sanitize_chat_text("噗，那你这趟淋雨淋得有点亏啊，反而有点荒唐了。") == ""
 
 
 def test_sanitize_repairs_chengdu_location_confusion() -> None:
