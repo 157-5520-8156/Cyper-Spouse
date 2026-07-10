@@ -60,10 +60,12 @@ WITHDRAWAL_DEFER_RANGE = (8, 25)
 FAREWELL_AFTERGLOW_DEFER_RANGE = (4, 20)
 
 
-def classify_message(text: str) -> str:
+def classify_message(text: str, *, has_attachments: bool = False) -> str:
     """Classify a user message for reply decision purposes."""
     stripped = text.strip()
     if not stripped:
+        if has_attachments:
+            return "nonverbal_share"
         return "empty"
 
     for hint in _URGENT_HINTS:
@@ -129,6 +131,7 @@ def decide_reply(
     has_pending_reply: bool = False,
     has_unread: bool = False,
     recent_context_open: bool = False,
+    has_attachments: bool = False,
     rng: random.Random | None = None,
 ) -> ReplyDecision:
     """Decide whether to reply now, defer, or skip.
@@ -149,7 +152,7 @@ def decide_reply(
         Random source for reproducibility.
     """
     rng = rng or random.Random()
-    msg_type = classify_message(text)
+    msg_type = classify_message(text, has_attachments=has_attachments)
     if state:
         has_unread = has_unread or state.has_unread
 
@@ -161,6 +164,9 @@ def decide_reply(
 
     if msg_type == "emotional":
         return ReplyDecision(ReplyAction.REPLY_NOW, reason="emotional_needs_response")
+
+    if msg_type == "nonverbal_share":
+        return ReplyDecision(ReplyAction.REPLY_NOW, reason="attachment_needs_response")
 
     resolved_phase = phase or current_phase()
     busy_prob = _busy_probability(resolved_phase)

@@ -207,6 +207,7 @@ class QQMessageCoalescer:
                     has_pending_reply=key in self._deferred,
                     has_unread=has_unread,
                     recent_context_open=recent_context_open,
+                    has_attachments=bool(merged.attachments),
                     rng=self.rng,
                 )
                 if action.action == ReplyAction.SKIP:

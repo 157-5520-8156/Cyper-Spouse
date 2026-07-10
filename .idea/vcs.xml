@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="VcsDirectoryMappings">
+    <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/external/SillyTavern" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/external/SillyTavern/data/default-user/extensions/SillyTavern-EchoText" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/external/SillyTavern/data/default-user/extensions/Smart-Memory" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/external/SillyTavern/plugins/SillyTavern-EchoText-Proactive" vcs="Git" />
+  </component>
+</project>
