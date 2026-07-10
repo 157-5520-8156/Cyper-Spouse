@@ -4,6 +4,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from companion_daemon.human_rhythm import human_rhythm_snapshot
+from companion_daemon.impression import impression_summary
 from companion_daemon.memory import _exclude_from_reply_memory
 from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.time import utc_now
@@ -17,8 +18,10 @@ class ContextPackage:
     memory_lines: list[str]
     life_context: str
     emotion_context: str
+    impression_context: str
     reply_policy: str
     continuity_hint: str
+    subtext_hint: str
     prompt_summary: str
 
     def prompt_block(self) -> str:
@@ -32,8 +35,10 @@ class ContextPackage:
             f"- 相关长期记忆: {memories}\n"
             f"- 她自己的当前生活状态: {self.life_context}\n"
             f"- 情绪/关系影响: {self.emotion_context}\n"
+            f"- 她对用户的当前印象: {self.impression_context}\n"
             f"- 本轮回复策略: {self.reply_policy}\n"
             f"- 连续性约束: {self.continuity_hint}\n"
+            f"- 内在倾向: {self.subtext_hint}\n"
             f"- 最终 prompt 摘要: {self.prompt_summary}"
         )
 
@@ -47,6 +52,7 @@ def build_context_package(
     max_memories: int = 5,
     now: datetime | None = None,
     continuity_hint: str | None = None,
+    subtext_hint: str | None = None,
 ) -> ContextPackage:
     user_intent = infer_user_intent(message.text, has_attachments=bool(message.attachments))
     reply_focus = choose_reply_focus(message.text, user_intent)
@@ -61,6 +67,7 @@ def build_context_package(
     )
     life_context = current_life_context(state, now=current_time)
     emotion_context = state_effect_summary(state)
+    impression_context = impression_summary(state)
     reply_policy = build_reply_policy(user_intent, state)
     prompt_summary = (
         f"只回应用户当前这条里的“{reply_focus}”；"
@@ -73,8 +80,10 @@ def build_context_package(
         memory_lines=memories,
         life_context=life_context,
         emotion_context=emotion_context,
+        impression_context=impression_context,
         reply_policy=reply_policy,
         continuity_hint=continuity_hint or "保持最近的语气，不要突然大幅变调",
+        subtext_hint=subtext_hint or "无额外潜台词，别强行演情绪",
         prompt_summary=prompt_summary,
     )
 
@@ -208,6 +217,20 @@ def state_effect_summary(state: MoodState) -> str:
 
 
 def build_reply_policy(user_intent: str, state: MoodState) -> str:
+    event_policy = {
+        "boundary_violation": "明确表示不舒服，短而坚定；不要讨好、不要立刻原谅",
+        "control_pressure": "清楚拒绝被命令，语气平静但有边界",
+        "premature_intimacy": "轻轻挡回过早亲密，强调慢慢来",
+        "repair_attempt": "承认听见道歉，但保留一点观察，不立刻翻篇",
+    }.get(state.last_interaction_event)
+    if event_policy:
+        return event_policy
+
+    if state.perceived_respect < 35:
+        return "保持距离和边界，不要讨好；只回应当前必要内容"
+    if state.perceived_responsiveness < 35:
+        return "别追问或索取回应，语气自然收住"
+
     if user_intent == "表达情绪，需要先被接住":
         base = "先接住情绪，再回应具体事情；不急着给建议"
     elif user_intent == "提出问题，期待回答或态度":

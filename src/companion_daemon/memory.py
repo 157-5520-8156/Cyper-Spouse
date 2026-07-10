@@ -151,35 +151,6 @@ def memory_from_attachment(attachment: MessageAttachment) -> ExtractedMemory | N
     return None
 
 
-def memory_lines(rows, *, max_lines: int = 3, char_budget: int = 600) -> list[str]:
-    selected = _select_memory_rows(rows, max_lines=max_lines)
-    lines: list[str] = []
-    total = 0
-    for row in selected:
-        line = f"- [{row['kind']}] {row['content']}"
-        if total + len(line) > char_budget and lines:
-            break
-        lines.append(line)
-        total += len(line)
-    return lines
-
-
-def _select_memory_rows(rows, *, max_lines: int) -> list:
-    scored = []
-    for index, row in enumerate(rows):
-        confidence = float(row["confidence"]) if "confidence" in row.keys() else 0.7
-        kind = str(row["kind"])
-        if _exclude_from_reply_memory(kind):
-            continue
-        bonus = 0.12 if kind in {"name", "life_fact", "favorite_thing", "person", "life_event"} else 0.0
-        if kind == "private_life_event":
-            bonus = 0.06
-        recency = max(0.0, 0.2 - index * 0.03)
-        scored.append((confidence + bonus + recency, index, row))
-    scored.sort(key=lambda item: (-item[0], item[1]))
-    return [row for _, _, row in scored[:max_lines]]
-
-
 def _exclude_from_reply_memory(kind: str) -> bool:
     return kind in {
         "life_continuity",
@@ -194,6 +165,7 @@ def _exclude_from_reply_memory(kind: str) -> bool:
         "image_request_blocked",
         "proactive_image_blocked",
         "consolidation_log",
+        "interaction_pattern",
     }
 
 

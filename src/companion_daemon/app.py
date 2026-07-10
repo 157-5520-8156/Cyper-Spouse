@@ -131,7 +131,9 @@ async def qq_webhook(
 
     incoming = incoming_message_from_payload(payload)
     if incoming:
-        await engine.handle_message(incoming)
+        # Callback acknowledgement is not a QQ delivery receipt. Keep any reply
+        # in the outbox until a transport adapter confirms it was sent.
+        await engine.handle_message(incoming, defer_delivery=True)
 
     return JSONResponse(ack_response())
 

@@ -174,6 +174,37 @@ def test_context_package_uses_compact_behavioral_policy_instead_of_state_monolog
     assert "情绪余波" in package.prompt_block()
 
 
+def test_context_package_turns_a_boundary_violation_into_current_reply_behavior() -> None:
+    package = build_context_package(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你算什么，闭嘴"),
+        MoodState(
+            mood="hurt",
+            last_interaction_event="boundary_violation",
+            reply_style_hint="短、冷静、有边界；不要讨好，不要撒娇。",
+        ),
+        [],
+        [],
+    )
+
+    assert "明确表示不舒服" in package.reply_policy
+    assert "不要讨好" in package.reply_policy
+
+
+def test_context_package_exposes_continuity_and_subtext_as_compact_constraints() -> None:
+    package = build_context_package(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我回来了"),
+        MoodState(mood="sulking", security=35),
+        [],
+        [],
+        continuity_hint="从 afternoon_classes 转到 evening_unwind；刚刚语气偏克制。",
+        subtext_hint="想被认真对待，但嘴上会硬一点。",
+    )
+
+    block = package.prompt_block()
+    assert "afternoon_classes 转到 evening_unwind" in block
+    assert "想被认真对待" in block
+
+
 @pytest.mark.asyncio
 async def test_live_prompt_context_focuses_current_turn_in_multi_turn_eval(tmp_path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")

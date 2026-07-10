@@ -33,6 +33,46 @@ async def test_handle_message_updates_mood_and_replies(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_deferred_reply_only_enters_history_after_delivery_confirmation(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我先忙一会儿"),
+        defer_delivery=True,
+    )
+
+    assert reply.delivery_id is not None
+    assert store.outbox_message(reply.delivery_id)["status"] == "planned"
+    assert not any(row["direction"] == "out" for row in store.recent_messages("geoff"))
+
+    engine.fail_reply_delivery(reply, "network failed")
+
+    assert store.outbox_message(reply.delivery_id)["status"] == "failed"
+    assert not any(row["direction"] == "out" for row in store.recent_messages("geoff"))
+
+
+@pytest.mark.asyncio
+async def test_rudeness_updates_persistent_impression_and_current_reply_policy(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT)
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你算什么，闭嘴")
+    )
+
+    state = store.get_mood_state("geoff")
+    prompt_text = "\n".join(message["content"] for message in model.calls[-1])
+    assert state.perceived_respect < 50
+    assert state.mood == "hurt"
+    assert "明确表示不舒服" in prompt_text
+    assert "最近感到不被尊重" in prompt_text
+
+
+@pytest.mark.asyncio
 async def test_skip_reply_can_avoid_unread_for_pure_ack(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
@@ -269,14 +309,25 @@ async def test_proactive_tick_records_decision(tmp_path: Path) -> None:
     await engine.handle_message(
         IncomingMessage(platform="qq", platform_user_id="geoff", text="我先忙一会儿")
     )
+    outgoing_before = sum(
+        row["direction"] == "out" for row in store.recent_messages("geoff", limit=20)
+    )
     decision = await engine.proactive_tick("geoff")
 
     assert decision.should_send is True
     assert decision.platform == "qq"
     assert decision.message
+    assert decision.delivery_id is not None
     state = store.get_mood_state("geoff")
-    assert state.initiative < 60
+    assert store.outbox_message(decision.delivery_id)["status"] == "planned"
+    assert sum(row["direction"] == "out" for row in store.recent_messages("geoff", limit=20)) == outgoing_before
+
+    engine.confirm_proactive_delivery(decision)
+
+    state = store.get_mood_state("geoff")
+    assert state.initiative < 61
     assert state.emotional_charge < 15
+    assert store.outbox_message(decision.delivery_id)["status"] == "delivered"
 
 
 @pytest.mark.asyncio

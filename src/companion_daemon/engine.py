@@ -23,6 +23,7 @@ from companion_daemon.image_agency import decide_image_agency, image_agency_prom
 from companion_daemon.image_generation import OpenAIImageGenerator, life_image_prompt
 from companion_daemon.image_prompt_builder import ChatImageMessage, build_image_prompt
 from companion_daemon.image_requests import detect_image_request
+from companion_daemon.impression import apply_user_impression
 from companion_daemon.life_continuity import build_life_continuity
 from companion_daemon.llm import ChatModel
 from companion_daemon.memory import extract_memories
@@ -129,6 +130,7 @@ class CompanionEngine:
         skip_reply: bool = False,
         mark_unread: bool = True,
         context_hint: str | None = None,
+        defer_delivery: bool = False,
     ) -> CompanionReply | None:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         previous_state = self.store.get_mood_state(canonical_user_id)
@@ -146,8 +148,19 @@ class CompanionEngine:
         if self._is_reply_to_recent_proactive(canonical_user_id, message.platform):
             proactive_feedback = classify_proactive_feedback(message.text)
             next_state = apply_proactive_feedback(next_state, proactive_feedback)
+            feedback_event = {
+                "warm": "warmth_received",
+                "rejected": "boundary_violation",
+                "thin_or_busy": "availability_drop",
+            }.get(proactive_feedback.kind, "ordinary_message")
+            next_state = apply_user_impression(next_state, event_kind=feedback_event)
         question_response = classify_response_to_own_question(message.text, pending_own_question)
         next_state = apply_question_response(next_state, question_response)
+        next_state = apply_user_impression(
+            next_state,
+            event_kind=event.kind,
+            question_response=question_response.kind if question_response else None,
+        )
 
         self.store.save_incoming(canonical_user_id, message)
         self.store.record_interaction_event(
@@ -332,7 +345,8 @@ class CompanionEngine:
             next_state,
             recent_dicts_before,
             self.store.memories(canonical_user_id, limit=200),
-            continuity_hint=tone_inertia.memory,
+            continuity_hint=f"{life_continuity.prompt_line} {tone_inertia.memory}",
+            subtext_hint=subtext.prompt_line if subtext else None,
         )
         text = await self.conversation_core.reply(
             message,
@@ -344,21 +358,7 @@ class CompanionEngine:
             self_core_block=self_core_block,
             context_block=context_package.prompt_block(),
         )
-        self.store.save_outgoing(canonical_user_id, message.platform, text)
-        expressed_state = apply_expression_after_reply(
-            next_state,
-            was_proactive=False,
-            sent_image=bool(generated_image_path),
-        )
-        text_parts = split_reply_text(text, expressed_state)
-        self.store.save_mood_state(canonical_user_id, expressed_state)
-        self.store.upsert_memory(
-            canonical_user_id,
-            kind="tone_inertia",
-            content=f"last_outgoing_tone={classify_outgoing_tone(text, expressed_state)}",
-            source=f"{message.platform}:outgoing",
-            confidence=0.65,
-        )
+        text_parts = split_reply_text(text, next_state)
         suggested_reaction = select_character_reaction(message.text, next_state)
         sticker = choose_reply_sticker(
             self.stickers,
@@ -368,10 +368,10 @@ class CompanionEngine:
         )
         if generated_image_path:
             sticker = None
-        asyncio.create_task(self._maybe_consolidate(canonical_user_id, expressed_state))
-        return CompanionReply(
+        asyncio.create_task(self._maybe_consolidate(canonical_user_id, next_state))
+        reply = CompanionReply(
             canonical_user_id=canonical_user_id,
-            mood=expressed_state.mood,
+            mood=next_state.mood,
             text=text,
             text_parts=text_parts,
             platform_context=context,
@@ -380,7 +380,41 @@ class CompanionEngine:
             suggested_reaction=(
                 suggested_reaction.reaction_id if suggested_reaction and suggested_reaction.probability >= 0.25 else None
             ),
+            delivery_id=self.store.queue_outgoing(
+                canonical_user_id,
+                message.platform,
+                text,
+                kind="reply",
+            ),
         )
+        if not defer_delivery:
+            self.confirm_reply_delivery(reply)
+        return reply
+
+    def confirm_reply_delivery(self, reply: CompanionReply) -> None:
+        if reply.delivery_id is None:
+            return
+        delivered = self.store.mark_outgoing_delivered(reply.delivery_id)
+        if not delivered or delivered["status"] != "planned":
+            return
+        state = self.store.get_mood_state(reply.canonical_user_id)
+        expressed = apply_expression_after_reply(
+            state,
+            was_proactive=False,
+            sent_image=bool(reply.image_path),
+        )
+        self.store.save_mood_state(reply.canonical_user_id, expressed)
+        self.store.upsert_memory(
+            reply.canonical_user_id,
+            kind="tone_inertia",
+            content=f"last_outgoing_tone={classify_outgoing_tone(reply.text, expressed)}",
+            source=f"{delivered['platform']}:outgoing",
+            confidence=0.65,
+        )
+
+    def fail_reply_delivery(self, reply: CompanionReply, reason: str) -> None:
+        if reply.delivery_id is not None:
+            self.store.mark_outgoing_failed(reply.delivery_id, reason)
 
     async def _maybe_consolidate(self, canonical_user_id: str, state: MoodState) -> None:
         try:
@@ -456,12 +490,17 @@ class CompanionEngine:
         text = sanitize_chat_text(raw)
         if not text or len(text) > 60:
             return None
-        self.store.save_outgoing(canonical_user_id, "qq", text)
         if self.budget_gate:
             self.budget_gate.record(estimate, note=f"qq_afterthought:{mode}")
-        expressed = apply_expression_after_reply(state, was_proactive=True)
-        self.store.save_mood_state(canonical_user_id, expressed)
         return text
+
+    def confirm_afterthought_delivery(self, canonical_user_id: str, platform: str, text: str) -> None:
+        self.store.save_outgoing(canonical_user_id, platform, text)
+        state = self.store.get_mood_state(canonical_user_id)
+        self.store.save_mood_state(
+            canonical_user_id,
+            apply_expression_after_reply(state, was_proactive=True),
+        )
 
 
     async def _maybe_generate_requested_image(
@@ -590,16 +629,37 @@ class CompanionEngine:
             decision.trigger_type,
             decision.cooldown_minutes,
         )
-        if decision.should_send and decision.platform and decision.message:
-            self.store.save_outgoing(canonical_user_id, decision.platform, decision.message)
-        if decision.should_send:
-            expressed_state = apply_expression_after_reply(
-                state,
-                was_proactive=True,
-                sent_image=bool(decision.image_path),
+        if decision.should_send and decision.platform:
+            decision = decision.model_copy(
+                update={
+                    "delivery_id": self.store.queue_outgoing(
+                        canonical_user_id,
+                        decision.platform,
+                        decision.message or "",
+                        kind="proactive",
+                    )
+                }
             )
-            self.store.save_mood_state(canonical_user_id, expressed_state)
         return decision
+
+    def confirm_proactive_delivery(self, decision: ProactiveDecision) -> None:
+        if decision.delivery_id is None:
+            return
+        delivered = self.store.mark_outgoing_delivered(decision.delivery_id)
+        if not delivered or delivered["status"] != "planned":
+            return
+        self.store.record_proactive_delivery(decision.canonical_user_id, str(delivered["platform"]))
+        state = self.store.get_mood_state(decision.canonical_user_id)
+        expressed = apply_expression_after_reply(
+            state,
+            was_proactive=True,
+            sent_image=bool(decision.image_path),
+        )
+        self.store.save_mood_state(decision.canonical_user_id, expressed)
+
+    def fail_proactive_delivery(self, decision: ProactiveDecision, reason: str) -> None:
+        if decision.delivery_id is not None:
+            self.store.mark_outgoing_failed(decision.delivery_id, reason)
 
     def _recent_lines(self, canonical_user_id: str) -> list[str]:
         return self._format_recent_rows(self.store.recent_messages(canonical_user_id))

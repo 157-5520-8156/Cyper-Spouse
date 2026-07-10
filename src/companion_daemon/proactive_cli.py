@@ -42,26 +42,31 @@ async def run(user_id: str, *, send: bool, sandbox: bool) -> None:
         settings.qq_bot_secret,
         api_base_url=api_base_url,
     )
-    if decision.image_path:
-        await client.send_c2c_local_image(
-            openid,
-            Path(decision.image_path),
-            content=decision.message,
-            is_wakeup=True,
-        )
-    elif decision.sticker_path:
-        await client.send_c2c_local_image(
-            openid,
-            Path(decision.sticker_path),
-            content=decision.message,
-            is_wakeup=True,
-        )
-    elif decision.message:
-        await client.send_c2c_text(openid, decision.message, is_wakeup=True)
-    else:
-        print("not sent: no text or sticker payload")
-        return
-    engine.store.record_proactive_delivery(user_id, "qq")
+    try:
+        if decision.image_path:
+            await client.send_c2c_local_image(
+                openid,
+                Path(decision.image_path),
+                content=decision.message,
+                is_wakeup=True,
+            )
+        elif decision.sticker_path:
+            await client.send_c2c_local_image(
+                openid,
+                Path(decision.sticker_path),
+                content=decision.message,
+                is_wakeup=True,
+            )
+        elif decision.message:
+            await client.send_c2c_text(openid, decision.message, is_wakeup=True)
+        else:
+            print("not sent: no text or sticker payload")
+            engine.fail_proactive_delivery(decision, "empty proactive payload")
+            return
+    except Exception as exc:
+        engine.fail_proactive_delivery(decision, str(exc))
+        raise
+    engine.confirm_proactive_delivery(decision)
     print("sent: QQ proactive wakeup message")
 
 

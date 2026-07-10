@@ -52,6 +52,7 @@ class CompanionReply(BaseModel):
     sticker_path: str | None = None
     image_path: str | None = None
     suggested_reaction: str | None = None
+    delivery_id: int | None = None
 
 
 class ProactiveDecision(BaseModel):
@@ -66,6 +67,7 @@ class ProactiveDecision(BaseModel):
     image_path: str | None = None
     trigger_type: str | None = None
     cooldown_minutes: int = 30
+    delivery_id: int | None = None
 
 
 class MoodState(BaseModel):
@@ -79,6 +81,9 @@ class MoodState(BaseModel):
     initiative: int = 20
     emotional_charge: int = 0
     boundary_level: int = 0
+    perceived_respect: int = 50
+    perceived_reliability: int = 50
+    perceived_responsiveness: int = 50
     relationship_stage: RelationshipStage = "stranger"
     unresolved_emotion: str | None = None
     last_user_intent: str | None = None

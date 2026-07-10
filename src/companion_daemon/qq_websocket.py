@@ -265,7 +265,13 @@ class QQMessageCoalescer:
         kwargs: dict[str, object] = {}
         if context_hint:
             kwargs["context_hint"] = context_hint
-        reply = await self.engine.handle_message(merged, **kwargs)
+        kwargs["defer_delivery"] = True
+        try:
+            reply = await self.engine.handle_message(merged, **kwargs)
+        except TypeError:
+            # Lightweight test/dummy engines may not expose delivery staging.
+            kwargs.pop("defer_delivery", None)
+            reply = await self.engine.handle_message(merged, **kwargs)
         if reply is None:
             return
         timing_state = None
@@ -292,9 +298,13 @@ class QQMessageCoalescer:
             )
         except Exception:
             logger.exception("failed to send QQ reply")
+            if hasattr(self.engine, "fail_reply_delivery"):
+                self.engine.fail_reply_delivery(reply, "QQ text delivery failed")
             return
         finally:
             self._active_sends.pop(key, None)
+        if hasattr(self.engine, "confirm_reply_delivery"):
+            self.engine.confirm_reply_delivery(reply)
         if self.on_sticker and reply.sticker_path:
             try:
                 await self.on_sticker(merged, reply)
@@ -357,6 +367,8 @@ class QQMessageCoalescer:
             logger.info("sending afterthought for %s mode=%s", key, plan.mode)
             await self.sleep(self.rng.uniform(1.5, 4.0))
             await reply_target.reply(content=text, msg_seq=_reply_msg_seq())
+            if hasattr(self.engine, "confirm_afterthought_delivery"):
+                self.engine.confirm_afterthought_delivery(canonical_user_id, merged.platform, text)
         except asyncio.CancelledError:
             return
         except Exception:

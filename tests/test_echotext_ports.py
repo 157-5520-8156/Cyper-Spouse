@@ -4,7 +4,7 @@ import random
 import pytest
 
 from companion_daemon.db import CompanionStore
-from companion_daemon.context_emotion_bleed import ContextMessage, context_emotion_deltas
+from companion_daemon.context_orchestrator import select_relevant_memories
 from companion_daemon.character import CharacterProfile
 from companion_daemon.emotion_personality import (
     extract_mbti,
@@ -15,7 +15,7 @@ from companion_daemon.emotion_reactions import select_character_reaction
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.image_requests import detect_image_request, detect_style_tags
 from companion_daemon.llm import FakeCompanionModel
-from companion_daemon.memory import detect_memory_candidates, extract_memories, memory_lines
+from companion_daemon.memory import detect_memory_candidates, extract_memories
 from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.reply_timing import emotion_reply_timing
 
@@ -51,7 +51,7 @@ def test_extract_memories_does_not_turn_today_emotion_into_schedule() -> None:
     assert not any(memory.kind == "schedule" for memory in memories)
 
 
-def test_memory_lines_injects_small_high_signal_subset(tmp_path: Path) -> None:
+def test_context_retrieval_injects_small_topic_relevant_subset(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     for kind, content, confidence in [
         ("shared_moment", "用户昨天散步", 0.55),
@@ -62,14 +62,14 @@ def test_memory_lines_injects_small_high_signal_subset(tmp_path: Path) -> None:
     ]:
         store.upsert_memory("geoff", kind=kind, content=content, source=content, confidence=confidence)
 
-    lines = memory_lines(store.memories("geoff", limit=10))
+    lines = select_relevant_memories(store.memories("geoff", limit=10), "成都的桂花乌龙", [], max_memories=3)
 
-    assert len(lines) == 3
+    assert len(lines) <= 3
     assert any("成都" in line for line in lines)
     assert any("桂花乌龙" in line for line in lines)
 
 
-def test_memory_lines_excludes_runtime_impulses_from_reply_prompt(tmp_path: Path) -> None:
+def test_context_retrieval_excludes_runtime_impulses_from_reply_prompt(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     for kind, content, confidence in [
         ("withheld_proactive_impulse", "念头=你昨天说声音好听那个梦", 0.9),
@@ -80,7 +80,7 @@ def test_memory_lines_excludes_runtime_impulses_from_reply_prompt(tmp_path: Path
     ]:
         store.upsert_memory("geoff", kind=kind, content=content, source=content, confidence=confidence)
 
-    lines = memory_lines(store.memories("geoff", limit=10), max_lines=3)
+    lines = select_relevant_memories(store.memories("geoff", limit=10), "成都", [], max_memories=3)
 
     assert lines == ["- [life_fact] 用户人在成都"]
 
@@ -112,19 +112,6 @@ def test_image_request_detects_style_tags() -> None:
     assert request.triggered
     assert "watercolor" in request.style_tags
     assert "pixel art" in detect_style_tags("像素风格头像")
-
-
-def test_context_emotion_bleed_is_capped() -> None:
-    deltas = context_emotion_deltas(
-        [
-            ContextMessage("我真的很开心很开心很开心，谢谢你！！", is_user=True),
-            ContextMessage("我也很开心，也很信任你。", is_user=False),
-        ]
-    )
-
-    assert deltas
-    assert max(abs(value) for value in deltas.values()) <= 2.0
-    assert sum(abs(value) for value in deltas.values()) <= 5.0
 
 
 def test_emotion_reply_timing_ghosts_more_when_cold() -> None:

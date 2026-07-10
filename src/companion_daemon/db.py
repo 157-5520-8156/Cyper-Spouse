@@ -57,6 +57,19 @@ class CompanionStore:
                   sent_at text not null
                 );
 
+                create table if not exists outbox_messages (
+                  id integer primary key autoincrement,
+                  canonical_user_id text not null references users(id),
+                  platform text not null,
+                  text text not null,
+                  kind text not null,
+                  status text not null,
+                  created_at text not null,
+                  delivered_at text,
+                  failed_at text,
+                  failure_reason text
+                );
+
                 create table if not exists mood_state (
                   canonical_user_id text primary key references users(id),
                   mood text not null,
@@ -69,6 +82,9 @@ class CompanionStore:
                   initiative integer not null default 20,
                   emotional_charge integer not null default 0,
                   boundary_level integer not null default 0,
+                  perceived_respect integer not null default 50,
+                  perceived_reliability integer not null default 50,
+                  perceived_responsiveness integer not null default 50,
                   relationship_stage text not null default 'stranger',
                   unresolved_emotion text,
                   last_user_intent text,
@@ -161,6 +177,9 @@ class CompanionStore:
             self._ensure_column(conn, "mood_state", "initiative", "integer not null default 20")
             self._ensure_column(conn, "mood_state", "emotional_charge", "integer not null default 0")
             self._ensure_column(conn, "mood_state", "boundary_level", "integer not null default 0")
+            self._ensure_column(conn, "mood_state", "perceived_respect", "integer not null default 50")
+            self._ensure_column(conn, "mood_state", "perceived_reliability", "integer not null default 50")
+            self._ensure_column(conn, "mood_state", "perceived_responsiveness", "integer not null default 50")
             self._ensure_column(conn, "mood_state", "last_user_intent", "text")
             self._ensure_column(conn, "mood_state", "last_interaction_event", "text")
             self._ensure_column(conn, "mood_state", "reply_style_hint", "text")
@@ -262,6 +281,71 @@ class CompanionStore:
                 ),
             )
 
+    def queue_outgoing(
+        self,
+        canonical_user_id: str,
+        platform: Platform,
+        text: str,
+        *,
+        kind: str,
+    ) -> int:
+        now = utc_now().isoformat()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                insert into outbox_messages (
+                  canonical_user_id, platform, text, kind, status, created_at
+                ) values (?, ?, ?, ?, 'planned', ?)
+                """,
+                (canonical_user_id, platform, text, kind, now),
+            )
+            return int(cursor.lastrowid)
+
+    def mark_outgoing_delivered(self, delivery_id: int) -> sqlite3.Row | None:
+        now = utc_now().isoformat()
+        with self.connect() as conn:
+            row = conn.execute(
+                "select canonical_user_id, platform, text, kind, status from outbox_messages where id = ?",
+                (delivery_id,),
+            ).fetchone()
+            if not row or row["status"] != "planned":
+                return row
+            conn.execute(
+                "update outbox_messages set status = 'delivered', delivered_at = ? where id = ?",
+                (now, delivery_id),
+            )
+            conn.execute(
+                """
+                insert into messages (
+                  canonical_user_id, platform, platform_user_id, channel_id, message_id,
+                  direction, text, attachments_json, sent_at
+                ) values (?, ?, '', null, null, 'out', ?, '[]', ?)
+                """,
+                (row["canonical_user_id"], row["platform"], row["text"], now),
+            )
+            return row
+
+    def mark_outgoing_failed(self, delivery_id: int, reason: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update outbox_messages
+                set status = 'failed', failed_at = ?, failure_reason = ?
+                where id = ? and status = 'planned'
+                """,
+                (utc_now().isoformat(), reason[:500], delivery_id),
+            )
+
+    def outbox_message(self, delivery_id: int) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                select canonical_user_id, platform, text, kind, status, delivered_at, failed_at, failure_reason
+                from outbox_messages where id = ?
+                """,
+                (delivery_id,),
+            ).fetchone()
+
     def save_outgoing(self, canonical_user_id: str, platform: Platform, text: str) -> None:
         with self.connect() as conn:
             conn.execute(
@@ -279,7 +363,9 @@ class CompanionStore:
                 """
                 select
                   mood, intimacy, trust, attachment, patience, security, curiosity,
-                  initiative, emotional_charge, boundary_level, relationship_stage,
+                  initiative, emotional_charge, boundary_level,
+                  perceived_respect, perceived_reliability, perceived_responsiveness,
+                  relationship_stage,
                   unresolved_emotion, last_user_intent, last_interaction_event,
                   reply_style_hint, emotion_vector_json, emotion_baseline_json,
                   emotion_affinity_json, last_emotion_impact_json, last_emotion_source,
@@ -302,6 +388,9 @@ class CompanionStore:
             initiative=row["initiative"],
             emotional_charge=row["emotional_charge"],
             boundary_level=row["boundary_level"],
+            perceived_respect=row["perceived_respect"],
+            perceived_reliability=row["perceived_reliability"],
+            perceived_responsiveness=row["perceived_responsiveness"],
             relationship_stage=row["relationship_stage"],
             unresolved_emotion=row["unresolved_emotion"],
             last_user_intent=row["last_user_intent"],
@@ -332,11 +421,12 @@ class CompanionStore:
                 insert or replace into mood_state (
                   canonical_user_id, mood, intimacy, trust, attachment,
                   patience, security, curiosity, initiative, emotional_charge,
-                  boundary_level, relationship_stage, unresolved_emotion,
+                  boundary_level, perceived_respect, perceived_reliability, perceived_responsiveness,
+                  relationship_stage, unresolved_emotion,
                   last_user_intent, last_interaction_event, reply_style_hint,
                   emotion_vector_json, emotion_baseline_json, emotion_affinity_json,
                   last_emotion_impact_json, last_emotion_source, last_platform, has_unread, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     canonical_user_id,
@@ -350,6 +440,9 @@ class CompanionStore:
                     state.initiative,
                     state.emotional_charge,
                     state.boundary_level,
+                    state.perceived_respect,
+                    state.perceived_reliability,
+                    state.perceived_responsiveness,
                     state.relationship_stage,
                     state.unresolved_emotion,
                     state.last_user_intent,
