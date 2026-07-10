@@ -265,9 +265,13 @@ def decide_phone_attention(
     urgent = message_type in {"urgent", "emotional", "nonverbal_share"}
     notifications = runtime.notification_count + 1
     user_is_asking = message_type == "question"
+    carrying_unread = state.has_unread or (
+        runtime.notification_count > 0 and runtime.phone_attention in {"notified", "glanced"}
+    )
     emotionally_withdrawing = state.mood in {"hurt", "guarded"} or state.boundary_level >= 45
     should_read = (
         urgent
+        or carrying_unread
         or notifications >= 2
         or (user_is_asking and runtime.interruptible and runtime.attention_demand <= 65)
         or (runtime.interruptible and runtime.attention_demand <= 45 and not emotionally_withdrawing)
@@ -286,7 +290,7 @@ def decide_phone_attention(
         return PhoneDecision(True, None, "notification_read_now")
 
     minutes_to_end = max(1.0, (runtime.ends_at - now).total_seconds() / 60)
-    max_wait = 8.0 if runtime.interruptible else 22.0
+    max_wait = 5.0 if runtime.activity_kind == "quiet" else 8.0 if runtime.interruptible else 22.0
     if user_is_asking:
         max_wait = min(max_wait, 11.0)
     if emotionally_withdrawing:

@@ -63,6 +63,46 @@ async def test_normal_reply_runs_the_shared_output_safety_cleanup(tmp_path: Path
 
 
 @pytest.mark.asyncio
+async def test_reply_drops_ungrounded_past_self_history_before_delivery(tmp_path: Path) -> None:
+    class PastHistoryModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return "没有呢，小时候养过几条金鱼，最后都……你懂的。后来就只敢养植物了。不过 B 站吸猫倒是真的很快乐。"
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, PastHistoryModel(), TEST_PROMPT)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你养过别的宠物吗"),
+    )
+
+    assert reply is not None
+    assert "金鱼" not in reply.text
+    assert "后来就只敢养植物" not in reply.text
+    assert "B 站吸猫" in reply.text
+
+
+@pytest.mark.asyncio
+async def test_reply_does_not_attribute_her_pet_to_the_user(tmp_path: Path) -> None:
+    class RoleLeakModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return "你这战绩也太丰富了，金鱼乌龟仙人掌全军覆没。"
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, RoleLeakModel(), TEST_PROMPT)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我养死过乌龟和仙人掌"),
+    )
+
+    assert reply is not None
+    assert "金鱼" not in reply.text
+    assert "乌龟" in reply.text
+    assert "仙人掌" in reply.text
+
+
+@pytest.mark.asyncio
 async def test_deferred_reply_only_enters_history_after_delivery_confirmation(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)

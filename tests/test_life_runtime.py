@@ -330,6 +330,69 @@ def test_high_focus_question_can_wait_but_emotional_message_breaks_through(tmp_p
     assert vulnerable.read_now is True
 
 
+def test_existing_unread_message_wakes_her_for_the_next_ordinary_message(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 18, 0, tzinfo=UTC)
+    store.save_life_runtime(
+        "geoff",
+        LifeRuntimeState(
+            activity="夜里半醒，没一直盯着聊天框",
+            activity_kind="quiet",
+            base_attention_demand=66,
+            attention_demand=66,
+            interruptible=True,
+            started_at=now - timedelta(minutes=10),
+            ends_at=now + timedelta(minutes=40),
+            phone_attention="away",
+            notification_count=0,
+            updated_at=now,
+        ),
+    )
+
+    decision = decide_phone_attention(
+        store,
+        "geoff",
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我还养死过仙人掌"),
+        MoodState(has_unread=True),
+        now=now,
+    )
+
+    assert decision.read_now is True
+
+
+def test_quiet_unread_delay_is_bounded_to_five_minutes(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 18, 0, tzinfo=UTC)
+    store.save_life_runtime(
+        "geoff",
+        LifeRuntimeState(
+            activity="夜里半醒，没一直盯着聊天框",
+            activity_kind="quiet",
+            base_attention_demand=66,
+            attention_demand=66,
+            interruptible=True,
+            started_at=now - timedelta(minutes=10),
+            ends_at=now + timedelta(minutes=40),
+            phone_attention="away",
+            updated_at=now,
+        ),
+    )
+
+    decision = decide_phone_attention(
+        store,
+        "geoff",
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我今晚在 B 站看了好多猫视频"),
+        MoodState(),
+        now=now,
+    )
+
+    assert decision.read_now is False
+    assert decision.defer_minutes is not None
+    assert decision.defer_minutes <= 5
+
+
 def test_sleeping_runtime_blocks_unprompted_outreach() -> None:
     runtime = LifeRuntimeState(activity="已经睡着", activity_kind="sleep", attention_demand=92, interruptible=False)
 

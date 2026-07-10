@@ -67,6 +67,10 @@ from companion_daemon.repair_curve import apply_repair_curve, serious_repair_key
 from companion_daemon.reply_segments import split_reply_text
 from companion_daemon.reply_stickers import choose_reply_sticker
 from companion_daemon.sanitize import sanitize_chat_text
+from companion_daemon.self_history import (
+    redact_unattributed_user_pet_entities,
+    redact_ungrounded_past_self_history,
+)
 from companion_daemon.social_followups import (
     create_contradiction_followup,
     detect_mild_contradiction,
@@ -421,16 +425,26 @@ class CompanionEngine:
             subtext_hint=subtext.prompt_line if subtext else None,
             life_context_override=runtime_prompt_line(runtime),
         )
+        raw_text = await self.conversation_core.reply(
+            message,
+            next_state,
+            recent_lines,
+            context,
+            context_package.memory_lines,
+            attachment_lines,
+            self_core_block=self_core_block,
+            context_block=context_package.prompt_block(),
+        )
+        user_history = "\n".join(
+            row["text"] for row in recent_dicts_before if row["direction"] == "in"
+        )
         text = sanitize_chat_text(
-            await self.conversation_core.reply(
-                message,
-                next_state,
-                recent_lines,
-                context,
-                context_package.memory_lines,
-                attachment_lines,
-                self_core_block=self_core_block,
-                context_block=context_package.prompt_block(),
+            redact_unattributed_user_pet_entities(
+                redact_ungrounded_past_self_history(
+                    raw_text,
+                    f"{self.companion_system_prompt}\n{self_core_block or ''}",
+                ),
+                f"{user_history}\n{message.text}",
             )
         )
         text_parts = split_reply_text(text, next_state)
@@ -976,31 +990,43 @@ class CompanionEngine:
         return self._format_recent_rows(self.store.recent_messages(canonical_user_id))
 
     def _format_recent_rows(self, rows) -> list[str]:
+        user_history = "\n".join(str(row["text"]) for row in rows if row["direction"] == "in")
         return [
             self._format_recent_line(
                 direction=str(row["direction"]),
                 platform=str(row["platform"]),
-                text=str(row["text"]),
+                text=self._safe_recent_text(str(row["direction"]), str(row["text"]), user_history),
                 sent_at=str(row["sent_at"]),
             )
             for row in rows
         ]
 
     def _format_recent_dicts(self, rows: list[dict[str, str]]) -> list[str]:
+        user_history = "\n".join(row["text"] for row in rows if row["direction"] == "in")
         return [
             self._format_recent_line(
                 direction=row["direction"],
                 platform=row["platform"],
-                text=row["text"],
+                text=self._safe_recent_text(row["direction"], row["text"], user_history),
                 sent_at=row["sent_at"],
             )
             for row in rows
         ]
 
+    def _safe_recent_text(self, direction: str, text: str, user_history: str) -> str:
+        if direction != "out":
+            return text
+        return redact_unattributed_user_pet_entities(
+            redact_ungrounded_past_self_history(text, self.companion_system_prompt),
+            user_history,
+        )
+
     def _format_recent_line(self, *, direction: str, platform: str, text: str, sent_at: str) -> str:
         who = "你" if direction == "in" else "她"
         if direction == "out":
-            text = sanitize_chat_text(text)
+            text = sanitize_chat_text(
+                redact_ungrounded_past_self_history(text, self.companion_system_prompt)
+            )
         time_hint = relative_chat_time_hint(sent_at)
         return f"[{platform}][{time_hint}] {who}: {text}"
 
