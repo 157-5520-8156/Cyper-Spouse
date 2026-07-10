@@ -28,7 +28,7 @@ def extract_memories(message: IncomingMessage) -> list[ExtractedMemory]:
         ("preference", r"我(?:喜欢|爱)([^，。！？\n]{1,32})"),
         ("dislike", r"我(?:不喜欢|讨厌)([^，。！？\n]{1,32})"),
         ("status", r"我是([^，。！？\n]{1,24})"),
-        ("schedule", r"我(?:明天|后天|今晚|今天|周末)([^，。！？\n]{1,40})"),
+        ("schedule", r"我(?:明天|后天|今晚|今天|周末)(?:要|准备|打算|得|需要|计划)([^，。！？\n]{1,40})"),
     ]
     for kind, pattern in patterns:
         for match in re.finditer(pattern, text):

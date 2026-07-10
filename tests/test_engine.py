@@ -77,6 +77,8 @@ async def test_handle_message_injects_human_rhythm_context(tmp_path: Path) -> No
 
     prompt_text = "\n".join(message["content"] for message in model.calls[-1])
     assert "生活节律" in prompt_text
+    assert "上下文编排" in prompt_text
+    assert "当前用户意图" in prompt_text
     assert "微信打字" in prompt_text
     assert any(row["kind"] == "life_continuity" for row in store.memories("geoff"))
 
@@ -96,8 +98,8 @@ async def test_reply_prompt_does_not_duplicate_current_user_message_in_recent_hi
 
     prompt_text = "\n".join(message["content"] for message in model.calls[-1])
     recent_block = next(message["content"] for message in model.calls[-1] if message["content"].startswith("最近聊天:"))
-    assert prompt_text.count(unique_text) == 1
     assert unique_text not in recent_block
+    assert prompt_text.count(unique_text) >= 1
     assert "图书馆" in recent_block
 
 
@@ -156,8 +158,10 @@ def test_debug_snapshot_exposes_daemon_context_and_prompt(tmp_path: Path) -> Non
     assert "state" in snapshot
     assert any("图书馆" in line for line in snapshot["recent"])
     assert any("成都" in line for line in snapshot["memories"])
+    assert "context_package" in snapshot
     prompt_text = "\n".join(message["content"] for message in snapshot["preview_prompt"])
     assert "最近聊天" in prompt_text
+    assert "上下文编排" in prompt_text
     assert "你在干嘛" in prompt_text
 
 

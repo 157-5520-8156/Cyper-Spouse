@@ -152,6 +152,10 @@ SCENARIOS = [
         "emotional_message_should_be_met_not_solved",
         ["我今天有点累，也不是身体累，就是心里闷闷的"],
     ),
+    EvalScenario(
+        "context_should_follow_current_turn_not_old_question",
+        ["我明天考试，毛概", "你等下还想继续背吗", "先不说那个，我今天心里有点闷"],
+    ),
 ]
 
 

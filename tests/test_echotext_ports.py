@@ -43,6 +43,14 @@ def test_memory_candidates_ignore_pronoun_question_noise() -> None:
     assert not any(memory.kind == "person" for memory in memories)
 
 
+def test_extract_memories_does_not_turn_today_emotion_into_schedule() -> None:
+    memories = extract_memories(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我今天心里有点闷")
+    )
+
+    assert not any(memory.kind == "schedule" for memory in memories)
+
+
 def test_memory_lines_injects_small_high_signal_subset(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     for kind, content, confidence in [

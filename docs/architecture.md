@@ -96,6 +96,12 @@ It owns:
 
 The daemon should be small and auditable. It should not become a second full agent framework unless there is a proven reason.
 
+Before every live reply, the daemon now runs a context orchestrator. This is the boundary between
+raw state and model prompt: it classifies the current user intent, chooses the reply focus, lists
+stale-context mistakes to avoid, selects relevant long-term memories, summarizes the companion's
+current life state and emotion/relationship effect, and emits one concise prompt summary. This keeps
+memory retrieval and personality state from turning into an unstructured wall of prompt rules.
+
 ### Optional SillyTavern Adapter
 
 SillyTavern no longer provides the canonical character or prompt system. The daemon owns the
@@ -103,8 +109,9 @@ character profile, mood state, memory selection, prompt rendering, postprocessin
 and platform delivery.
 
 The SillyTavern adapter can still be useful as a manual chat UI or prompt experiment surface. When
-enabled explicitly, the daemon sends recent chat, selected memories, self-core, attachment context,
-and rich mood state to the plugin, then still sanitizes and postprocesses the returned text.
+enabled explicitly, the daemon sends recent chat, the context package, selected memories, self-core,
+attachment context, and rich mood state to the plugin, then still sanitizes and postprocesses the
+returned text.
 
 Relevant capabilities:
 

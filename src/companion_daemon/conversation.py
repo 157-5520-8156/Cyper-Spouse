@@ -20,6 +20,7 @@ class ConversationCore(Protocol):
         memory_lines: list[str] | None = None,
         attachment_lines: list[str] | None = None,
         self_core_block: str | None = None,
+        context_block: str | None = None,
     ) -> str:
         """Return the companion's reply."""
 
@@ -56,6 +57,7 @@ class PromptedConversationCore:
         memory_lines: list[str] | None = None,
         attachment_lines: list[str] | None = None,
         self_core_block: str | None = None,
+        context_block: str | None = None,
     ) -> str:
         text = await self.model.complete(
             reply_prompt(
@@ -68,6 +70,7 @@ class PromptedConversationCore:
                 attachment_lines,
                 example_pairs=self.example_messages,
                 self_core_block=self_core_block,
+                context_block=context_block,
             ),
             temperature=0.75,
         )
@@ -117,6 +120,7 @@ class SillyTavernConversationCore:
         memory_lines: list[str] | None = None,
         attachment_lines: list[str] | None = None,
         self_core_block: str | None = None,
+        context_block: str | None = None,
     ) -> str:
         payload = {
             "systemPrompt": self.companion_system_prompt,
@@ -125,6 +129,7 @@ class SillyTavernConversationCore:
             "memories": memory_lines or [],
             "attachments": attachment_lines or [],
             "selfCore": self_core_block or "",
+            "contextPackage": context_block or "",
             "state": {
                 "mood": mood_state.mood,
                 "intimacy": mood_state.intimacy,

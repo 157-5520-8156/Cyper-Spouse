@@ -1,6 +1,7 @@
 import asyncio
 import json
 import logging
+from dataclasses import asdict
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -8,6 +9,7 @@ from zoneinfo import ZoneInfo
 from companion_daemon.budget import ESTIMATES, BudgetGate
 from companion_daemon.character import CharacterProfile
 from companion_daemon.conversation import ConversationCore, PromptedConversationCore
+from companion_daemon.context_orchestrator import build_context_package
 from companion_daemon.db import CompanionStore
 from companion_daemon.emotion_state import interpret_interaction
 from companion_daemon.emotion_reactions import select_character_reaction
@@ -23,7 +25,7 @@ from companion_daemon.image_prompt_builder import ChatImageMessage, build_image_
 from companion_daemon.image_requests import detect_image_request
 from companion_daemon.life_continuity import build_life_continuity
 from companion_daemon.llm import ChatModel
-from companion_daemon.memory import extract_memories, memory_lines
+from companion_daemon.memory import extract_memories
 from companion_daemon.models import (
     CompanionReply,
     IncomingMessage,
@@ -332,14 +334,21 @@ class CompanionEngine:
         core = load_self_core(self.store, canonical_user_id)
         self_core_block = core.to_prompt_block() if core else None
 
+        context_package = build_context_package(
+            message,
+            next_state,
+            recent_dicts_before,
+            self.store.memories(canonical_user_id, limit=40),
+        )
         text = await self.conversation_core.reply(
             message,
             next_state,
             recent_lines,
             context,
-            memory_lines(self.store.memories(canonical_user_id)),
+            context_package.memory_lines,
             attachment_lines,
             self_core_block=self_core_block,
+            context_block=context_package.prompt_block(),
         )
         self.store.save_outgoing(canonical_user_id, message.platform, text)
         expressed_state = apply_expression_after_reply(
@@ -659,32 +668,58 @@ class CompanionEngine:
     ) -> dict[str, object]:
         """Return daemon-owned context for local inspection without sending a reply."""
         state = self.store.get_mood_state(canonical_user_id)
-        recent_lines = self._recent_lines(canonical_user_id)
-        memories = memory_lines(self.store.memories(canonical_user_id, limit=30), max_lines=8)
+        recent_rows = self._recent_dicts(canonical_user_id, limit=16)
+        recent_lines = self._format_recent_dicts(recent_rows)
+        memory_rows = self.store.memories(canonical_user_id, limit=40)
+        memories = []
         core = load_self_core(self.store, canonical_user_id)
         self_core_block = core.to_prompt_block() if core else ""
         prompt_messages: list[dict[str, str]] = []
         if preview_text.strip():
+            preview_message = IncomingMessage(
+                platform=platform,  # type: ignore[arg-type]
+                platform_user_id=canonical_user_id,
+                text=preview_text,
+            )
+            context_package = build_context_package(
+                preview_message,
+                state,
+                recent_rows,
+                memory_rows,
+            )
+            memories = context_package.memory_lines
             prompt_messages = reply_prompt(
-                IncomingMessage(
-                    platform=platform,  # type: ignore[arg-type]
-                    platform_user_id=canonical_user_id,
-                    text=preview_text,
-                ),
+                preview_message,
                 state,
                 recent_lines,
                 None,
                 self.companion_system_prompt,
                 memories,
-                ["调试预览: 未执行状态更新、附件分析、生活连续性写入或真实发送。"],
+                [
+                    "调试预览: 未执行状态更新、附件分析、生活连续性写入或真实发送。",
+                ],
                 self_core_block=self_core_block,
+                context_block=context_package.prompt_block(),
             )
+        else:
+            context_package = build_context_package(
+                IncomingMessage(
+                    platform=platform,  # type: ignore[arg-type]
+                    platform_user_id=canonical_user_id,
+                    text="",
+                ),
+                state,
+                recent_rows,
+                memory_rows,
+            )
+            memories = context_package.memory_lines
         return {
             "canonical_user_id": canonical_user_id,
             "state": state.model_dump(mode="json"),
             "recent": recent_lines,
             "memories": memories,
             "self_core": self_core_block,
+            "context_package": asdict(context_package),
             "preview_prompt": prompt_messages,
         }
 

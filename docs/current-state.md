@@ -41,9 +41,9 @@ Debug endpoint:
 curl 'http://127.0.0.1:8765/debug/geoff/context?preview_text=你在干嘛'
 ```
 
-This returns the daemon-owned state, recent chat lines with local freshness tags, selected memory
-lines, self-core text, and a preview prompt. The preview is for inspection only and does not update
-state or send a message.
+This returns the daemon-owned state, recent chat lines with local freshness tags, the selected
+context package, selected memory lines, self-core text, and a preview prompt. The preview is for
+inspection only and does not update state or send a message.
 
 Local dashboard:
 
@@ -219,7 +219,11 @@ Implemented:
 - Recent emotion impact can create a `mood_follow_up` proactive candidate when the state shift is strong enough.
 - A short `open_thread_afterthought` trigger handles the “this turn has not fully ended” case: if she sent the last message 9-90 minutes ago and the mood is safe, she may add one small thought without re-asking the user.
 - EchoText-inspired memory highlight detection extracts life facts, favorites, hobbies, important people, recent events, and shared moments.
-- Memory injection now selects a small high-signal subset instead of always injecting every recent memory.
+- Context orchestration now builds a per-turn context package before model calls: current user
+  intent, reply focus, forbidden stale-topic mistakes, relevant long-term memories, current life
+  state, emotion/relationship impact, and a final prompt summary.
+- Memory injection is selected through the context orchestrator instead of blindly injecting recent
+  memories; runtime impulses are excluded and topic-overlapping memories are preferred.
 - Near-duplicate memory entries are merged instead of stored as separate facts.
 - EchoText-inspired image request detection recognizes direct selfie/image requests and affirmative responses to recent image offers.
 - EchoText-inspired image prompt building classifies character/object/creative image requests and carries visual identity/context into stable generation prompts.
