@@ -10,10 +10,35 @@ class ChatModel(Protocol):
 
 
 class DeepSeekChatModel:
-    def __init__(self, api_key: str, base_url: str, model: str):
+    def __init__(
+        self,
+        api_key: str,
+        base_url: str,
+        model: str,
+        *,
+        thinking_enabled: bool = True,
+        reasoning_effort: str = "high",
+    ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.model = model
+        self.thinking_enabled = thinking_enabled
+        self.reasoning_effort = reasoning_effort
+
+    def request_payload(self, messages: list[dict[str, str]], *, temperature: float) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "model": self.model,
+            "messages": messages,
+        }
+        if self.thinking_enabled:
+            # DeepSeek V4 ignores temperature in thinking mode. Leaving it out
+            # makes the mode choice explicit and avoids false tuning knobs.
+            payload["thinking"] = {"type": "enabled"}
+            payload["reasoning_effort"] = self.reasoning_effort
+        else:
+            payload["thinking"] = {"type": "disabled"}
+            payload["temperature"] = temperature
+        return payload
 
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         async with httpx.AsyncClient(timeout=45, trust_env=False) as client:
@@ -23,11 +48,7 @@ class DeepSeekChatModel:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": temperature,
-                },
+                json=self.request_payload(messages, temperature=temperature),
             )
             response.raise_for_status()
         payload = response.json()

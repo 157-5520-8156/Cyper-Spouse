@@ -27,6 +27,8 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
             model=settings.deepseek_model,
+            thinking_enabled=settings.deepseek_thinking_enabled,
+            reasoning_effort=settings.deepseek_reasoning_effort,
         )
     else:
         model = FakeCompanionModel()
@@ -77,6 +79,8 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
             model=settings.deepseek_reply_model or settings.deepseek_model,
+            thinking_enabled=settings.deepseek_thinking_enabled,
+            reasoning_effort=settings.deepseek_reasoning_effort,
         )
     return CompanionEngine(
         store,

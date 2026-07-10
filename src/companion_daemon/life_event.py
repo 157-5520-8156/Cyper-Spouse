@@ -131,7 +131,13 @@ async def run(
     unshared_events = engine.store.unshared_private_life_events(user_id, limit=1)
     selected_event = unshared_events[0] if unshared_events else None
     model = (
-        DeepSeekChatModel(settings.deepseek_api_key, settings.deepseek_base_url, settings.deepseek_model)
+        DeepSeekChatModel(
+            settings.deepseek_api_key,
+            settings.deepseek_base_url,
+            settings.deepseek_model,
+            thinking_enabled=settings.deepseek_thinking_enabled,
+            reasoning_effort=settings.deepseek_reasoning_effort,
+        )
         if settings.deepseek_api_key
         else FakeCompanionModel()
     )

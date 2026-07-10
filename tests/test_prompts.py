@@ -30,6 +30,7 @@ def test_reply_prompt_includes_question_budget_and_safety_boundaries() -> None:
     assert "'你:'只代表用户" in prompt_text
     assert "超过一小时或隔夜的事不要说'刚刚'" in prompt_text
     assert "可验证的个人事实必须有明确来源与归属" in prompt_text
+    assert "生活状态卡只允许引用其中明确写出的事实" in prompt_text
 
 
 def test_context_orchestrated_prompt_does_not_duplicate_memory_or_raw_mood_monologue() -> None:

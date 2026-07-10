@@ -7,6 +7,7 @@ from companion_daemon.db import CompanionStore
 from companion_daemon.engine import (
     CompanionEngine,
     _afterthought_repeats_recent,
+    afterthought_prompt,
     relative_chat_time_hint,
     seed_user,
 )
@@ -30,6 +31,16 @@ def test_afterthought_rejects_rephrased_repeat() -> None:
     )
 
 
+def test_afterthought_prompt_keeps_speaker_ownership_and_does_not_invent_a_reply() -> None:
+    prompt = afterthought_prompt(
+        "quick_continue",
+        ["[qq][刚刚] 你: 你是不是在跟别人聊天", "[qq][刚刚] 她: 没有啊，我刚在发呆。"],
+    )
+
+    assert "不能假装用户在这之后又说了一句" in prompt
+    assert "我信你" in prompt
+
+
 @pytest.mark.asyncio
 async def test_handle_message_updates_mood_and_replies(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
@@ -43,6 +54,24 @@ async def test_handle_message_updates_mood_and_replies(tmp_path: Path) -> None:
     assert reply.canonical_user_id == "geoff"
     assert reply.mood == "miss_you"
     assert "我在呢" in reply.text
+
+
+@pytest.mark.asyncio
+async def test_character_examples_are_not_replayed_as_fake_chat_history(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    model = FakeCompanionModel()
+    engine = CompanionEngine(
+        store,
+        model,
+        load_character("configs/character.yaml").system_prompt(),
+        character_profile=load_character("configs/character.yaml"),
+    )
+
+    await engine.handle_message(IncomingMessage(platform="qq", platform_user_id="geoff", text="你好"))
+
+    prompt = model.calls[-1]
+    assert not any(message["role"] == "user" and message["content"] == "你叫什么？" for message in prompt)
 
 
 def test_engine_wakes_for_the_next_message_after_persisting_an_unread_state(tmp_path: Path) -> None:

@@ -55,7 +55,10 @@ class CharacterProfile(BaseModel):
             parts.append("第一次见面时的开场参考:\n" + self.first_message.strip())
         if self.example_messages:
             example_lines = []
-            for example in self.example_messages:
+            # Keep a few style anchors, not a second biography. Concrete
+            # examples are especially easy for smaller models to reuse as if
+            # they were facts about the current moment.
+            for example in self.example_messages[:4]:
                 if "user" in example and "assistant" in example:
                     example_lines.append(f"用户: {example['user']}\n沈知栀: {example['assistant']}")
             if example_lines:

@@ -12,3 +12,5 @@ def test_daemon_prompt_core_is_default_without_env() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.conversation_core == "prompt"
+    assert settings.deepseek_model == "deepseek-v4-pro"
+    assert settings.deepseek_thinking_enabled is True

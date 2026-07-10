@@ -11,3 +11,5 @@ def test_character_profile_includes_rich_persona() -> None:
     assert "成都" in prompt
     assert "城市漫游兴趣群" in prompt
     assert "纯粹的私聊文字" in prompt
+    assert "刚从图书馆出来" not in prompt
+    assert "我刚刚在看一段课件" not in prompt

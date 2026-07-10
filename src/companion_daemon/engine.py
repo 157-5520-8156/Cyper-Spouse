@@ -133,12 +133,12 @@ class CompanionEngine:
         self.budget_gate = budget_gate
         self.visual_identity_path = visual_identity_path
         self.image_output_dir = image_output_dir
+        # Character-card examples are style references already included in the
+        # system prompt. Replaying them as fake chat history duplicates tokens
+        # and makes concrete example details look like reusable live facts.
         self.conversation_core = conversation_core or PromptedConversationCore(
             model,
             companion_system_prompt,
-            example_messages=(
-                character_profile.example_messages if character_profile else None
-            ),
             rewrite_model=rewrite_model,
         )
 
@@ -1300,6 +1300,10 @@ def afterthought_prompt(mode: str, recent_lines: list[str]) -> str:
     return (
         f"{instruction}\n"
         "你是在 QQ/微信私聊里打字。只输出消息内容，不加解释，不写动作旁白。\n"
+        "最近聊天中，'你:'只代表用户，'她:'只代表知栀。你只能续写知栀已经发出的意思，"
+        "不能假装用户在这之后又说了一句，更不能替用户补一句再回答它。\n"
+        "不得反转、接受、否认或评价一个用户尚未说出的立场；例如不能凭空写'我信你'、'那好吧'、"
+        "'你想多了'。没有真正的补充就返回空字符串。\n"
         "最多 45 个字；优先陈述，不要连续追问。不得换词复述她上一条已经说过的事实或结论。\n\n"
         f"最近聊天：\n{chr(10).join(recent_lines)}\n"
     )

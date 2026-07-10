@@ -81,6 +81,8 @@ def test_afterthought_plans_favor_open_story_and_respect_goodbyes() -> None:
     )
     assert [plan.mode for plan in plans] == ["quick_continue", "topic_drift", "silence_react"]
     assert _afterthought_plans("晚安啦", FixedRandom()) == []
+    assert _afterthought_plans("？", FixedRandom()) == []
+    assert _afterthought_plans("你是不是在跟别人聊天", FixedRandom()) == []
 
 
 @pytest.mark.asyncio
@@ -134,7 +136,11 @@ async def test_afterthought_uses_original_reply_time_and_sends_at_most_once() ->
 
     coalescer._schedule_afterthought(
         "c2c:user",
-        IncomingMessage(platform="qq", platform_user_id="user", text="刚才那事"),
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="user",
+            text="我今天遇到一件挺奇怪的事，后来越想越不对劲，到现在还不知道要不要当回事。",
+        ),
         target,
         reply_sent_at,
     )
@@ -219,7 +225,11 @@ async def test_afterthought_uses_outbox_delivery_confirmation() -> None:
 
     coalescer._schedule_afterthought(
         "c2c:user",
-        IncomingMessage(platform="qq", platform_user_id="user", text="刚才那事"),
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="user",
+            text="我今天遇到一件挺奇怪的事，后来越想越不对劲，到现在还不知道要不要当回事。",
+        ),
         target,
         datetime(2026, 7, 10, 1, 2, 3, tzinfo=timezone.utc),
     )

@@ -494,16 +494,13 @@ def _afterthought_plans(text: str, rng: random.Random) -> list[AfterthoughtPlan]
         return []
     if message_type in {"story", "emotional", "nonverbal_share"} or len(text.strip()) >= 35:
         return [
-            AfterthoughtPlan("quick_continue", rng.uniform(7, 20), 0.62),
-            AfterthoughtPlan("topic_drift", rng.uniform(55, 150), 0.36),
-            AfterthoughtPlan("silence_react", rng.uniform(210, 540), 0.20),
+            AfterthoughtPlan("quick_continue", rng.uniform(12, 30), 0.26),
+            AfterthoughtPlan("topic_drift", rng.uniform(75, 180), 0.14),
+            AfterthoughtPlan("silence_react", rng.uniform(240, 600), 0.08),
         ]
-    if message_type == "minimal_response":
-        return [AfterthoughtPlan("silence_react", rng.uniform(240, 600), 0.24)]
-    return [
-        AfterthoughtPlan("quick_continue", rng.uniform(8, 24), 0.34),
-        AfterthoughtPlan("topic_drift", rng.uniform(70, 180), 0.22),
-    ]
+    # A normal short turn has already received its answer. Scheduling an extra
+    # message here makes it too easy for her to appear to answer herself.
+    return []
 
 
 class CompanionQQClient(botpy.Client):
