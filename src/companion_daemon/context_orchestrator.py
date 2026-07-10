@@ -17,6 +17,7 @@ class ContextPackage:
     reply_focus: str
     forbidden_old_topics: list[str]
     memory_lines: list[str]
+    self_fact_lines: list[str]
     life_context: str
     emotion_context: str
     impression_context: str
@@ -27,13 +28,17 @@ class ContextPackage:
 
     def prompt_block(self) -> str:
         forbidden = "；".join(self.forbidden_old_topics) if self.forbidden_old_topics else "无"
-        memories = "；".join(self.memory_lines) if self.memory_lines else "无高相关长期记忆"
+        user_facts = "；".join(self.memory_lines) if self.memory_lines else "无高相关用户长期记忆"
+        self_facts = "；".join(self.self_fact_lines) if self.self_fact_lines else "无额外已发生自我事实"
         return (
             "上下文编排:\n"
             f"- 当前用户意图: {self.user_intent}\n"
             f"- 本轮接话焦点: {self.reply_focus}\n"
             f"- 禁止误用的旧话: {forbidden}\n"
-            f"- 相关长期记忆: {memories}\n"
+            f"- 可用用户事实: {user_facts}\n"
+            f"- 可用知栀事实: {self_facts}\n"
+            "- 事实归属: 当前用户消息和可用用户事实只能归给用户；可用知栀事实只能归给知栀。"
+            "最近聊天仅用于理解话题与语气，不是新增事实来源；没有凭据就保持不确定，不要补写。\n"
             f"- 她自己的当前生活状态: {self.life_context}\n"
             f"- 情绪/关系影响: {self.emotion_context}\n"
             f"- 她对用户的当前印象: {self.impression_context}\n"
@@ -55,6 +60,7 @@ def build_context_package(
     continuity_hint: str | None = None,
     subtext_hint: str | None = None,
     life_context_override: str | None = None,
+    self_fact_lines: list[str] | None = None,
 ) -> ContextPackage:
     user_intent = infer_user_intent(message.text, has_attachments=bool(message.attachments))
     reply_focus = choose_reply_focus(message.text, user_intent)
@@ -80,6 +86,7 @@ def build_context_package(
         reply_focus=reply_focus,
         forbidden_old_topics=forbidden,
         memory_lines=memories,
+        self_fact_lines=self_fact_lines or [],
         life_context=life_context,
         emotion_context=emotion_context,
         impression_context=impression_context,

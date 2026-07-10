@@ -150,7 +150,9 @@ def test_context_package_contains_required_sections() -> None:
     assert "当前用户意图" in block
     assert "本轮接话焦点" in block
     assert "禁止误用的旧话" in block
-    assert "相关长期记忆" in block
+    assert "可用用户事实" in block
+    assert "可用知栀事实" in block
+    assert "事实归属" in block
     assert "她自己的当前生活状态" in block
     assert "情绪/关系影响" in block
     assert "最终 prompt 摘要" in block

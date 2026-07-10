@@ -67,10 +67,6 @@ from companion_daemon.repair_curve import apply_repair_curve, serious_repair_key
 from companion_daemon.reply_segments import split_reply_text
 from companion_daemon.reply_stickers import choose_reply_sticker
 from companion_daemon.sanitize import sanitize_chat_text
-from companion_daemon.self_history import (
-    redact_unattributed_user_pet_entities,
-    redact_ungrounded_past_self_history,
-)
 from companion_daemon.social_followups import (
     create_contradiction_followup,
     detect_mild_contradiction,
@@ -424,8 +420,9 @@ class CompanionEngine:
             continuity_hint=f"{life_continuity.prompt_line} {tone_inertia.memory}",
             subtext_hint=subtext.prompt_line if subtext else None,
             life_context_override=runtime_prompt_line(runtime),
+            self_fact_lines=self._self_fact_lines(canonical_user_id),
         )
-        raw_text = await self.conversation_core.reply(
+        text = sanitize_chat_text(await self.conversation_core.reply(
             message,
             next_state,
             recent_lines,
@@ -434,19 +431,7 @@ class CompanionEngine:
             attachment_lines,
             self_core_block=self_core_block,
             context_block=context_package.prompt_block(),
-        )
-        user_history = "\n".join(
-            row["text"] for row in recent_dicts_before if row["direction"] == "in"
-        )
-        text = sanitize_chat_text(
-            redact_unattributed_user_pet_entities(
-                redact_ungrounded_past_self_history(
-                    raw_text,
-                    f"{self.companion_system_prompt}\n{self_core_block or ''}",
-                ),
-                f"{user_history}\n{message.text}",
-            )
-        )
+        ))
         text_parts = split_reply_text(text, next_state)
         suggested_reaction = select_character_reaction(message.text, next_state)
         sticker = choose_reply_sticker(
@@ -990,43 +975,31 @@ class CompanionEngine:
         return self._format_recent_rows(self.store.recent_messages(canonical_user_id))
 
     def _format_recent_rows(self, rows) -> list[str]:
-        user_history = "\n".join(str(row["text"]) for row in rows if row["direction"] == "in")
         return [
             self._format_recent_line(
                 direction=str(row["direction"]),
                 platform=str(row["platform"]),
-                text=self._safe_recent_text(str(row["direction"]), str(row["text"]), user_history),
+                text=str(row["text"]),
                 sent_at=str(row["sent_at"]),
             )
             for row in rows
         ]
 
     def _format_recent_dicts(self, rows: list[dict[str, str]]) -> list[str]:
-        user_history = "\n".join(row["text"] for row in rows if row["direction"] == "in")
         return [
             self._format_recent_line(
                 direction=row["direction"],
                 platform=row["platform"],
-                text=self._safe_recent_text(row["direction"], row["text"], user_history),
+                text=row["text"],
                 sent_at=row["sent_at"],
             )
             for row in rows
         ]
 
-    def _safe_recent_text(self, direction: str, text: str, user_history: str) -> str:
-        if direction != "out":
-            return text
-        return redact_unattributed_user_pet_entities(
-            redact_ungrounded_past_self_history(text, self.companion_system_prompt),
-            user_history,
-        )
-
     def _format_recent_line(self, *, direction: str, platform: str, text: str, sent_at: str) -> str:
         who = "你" if direction == "in" else "她"
         if direction == "out":
-            text = sanitize_chat_text(
-                redact_ungrounded_past_self_history(text, self.companion_system_prompt)
-            )
+            text = sanitize_chat_text(text)
         time_hint = relative_chat_time_hint(sent_at)
         return f"[{platform}][{time_hint}] {who}: {text}"
 
@@ -1056,6 +1029,23 @@ class CompanionEngine:
         if temperament:
             block = f"{block}\n{temperament}" if block else temperament
         return block
+
+    def _self_fact_lines(self, canonical_user_id: str) -> list[str]:
+        """Return the small, source-owned ledger for claims about 知栀 herself."""
+        facts: list[str] = []
+        if self.character_profile:
+            for key, value in self.character_profile.identity.items():
+                facts.append(f"角色档案/{key}: {value}")
+            if self.character_profile.background:
+                facts.append(f"角色档案/成长背景: {self.character_profile.background.strip()}")
+            facts.extend(
+                f"角色档案/日常: {item}" for item in self.character_profile.daily_life[:3]
+            )
+        for event in self.store.recent_life_events(canonical_user_id, limit=6):
+            if event["kind"] != "private_life_event" or event["status"] != "completed":
+                continue
+            facts.append(f"已发生生活事件: {event['content']}")
+        return facts[:12]
 
     def _latest_life_continuity(self, canonical_user_id: str) -> str | None:
         row = self.store.latest_memory(canonical_user_id, kind="life_continuity")

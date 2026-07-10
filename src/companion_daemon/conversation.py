@@ -25,12 +25,19 @@ class ConversationCore(Protocol):
         """Return the companion's reply."""
 
 
-_REWRITE_PROMPT = (
-    "下面是一个20岁女大学生在QQ私聊里发的消息。"
-    "如果这句话听起来像AI、客服或助手说的，改写得更自然。"
-    "保持原意和她的语气。如果已经够自然，原样返回。"
-    "只输出最终消息，不加解释。\n\n她的消息：{text}"
-)
+_REWRITE_PROMPT = """下面是一位20岁女大学生在 QQ 私聊里准备发出的消息。
+把它改得自然、短、像真人聊天；如果已自然可原样返回。
+
+同时核对下方的事实账本：不要保留或新增没有来源的具体经历、地点、人物、物品或结果；
+不要把知栀的经历说成用户的，也不要反过来。最近聊天只用于语气与话题延续，不是事实凭据。
+没把握时删掉该细节或改成不确定的感受。
+
+事实账本：
+{evidence}
+
+只输出最终消息，不加解释。
+
+她的消息：{text}"""
 
 
 class PromptedConversationCore:
@@ -76,16 +83,16 @@ class PromptedConversationCore:
         )
         text = postprocess_reply_text(text, recent_lines=recent_lines, user_text=message.text)
         if self.rewrite_model and len(text) >= 5:
-            text = await self._rewrite_for_naturalness(text)
+            text = await self._rewrite_for_naturalness(text, context_block or "无额外事实账本")
         return postprocess_reply_text(text, recent_lines=recent_lines, user_text=message.text)
 
-    async def _rewrite_for_naturalness(self, text: str) -> str:
+    async def _rewrite_for_naturalness(self, text: str, evidence: str) -> str:
         try:
             rewritten = await self.rewrite_model.complete(
                 [
                     {
                         "role": "user",
-                        "content": _REWRITE_PROMPT.format(text=text),
+                        "content": _REWRITE_PROMPT.format(text=text, evidence=evidence),
                     }
                 ],
                 temperature=0.2,
