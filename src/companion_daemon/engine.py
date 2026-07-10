@@ -297,6 +297,18 @@ class CompanionEngine:
                     confidence=insight.confidence,
                 )
             attachment_lines.append(f"分析: {insight.summary}")
+            if insight.kind == "image" and _user_claims_image_is_self(message.text):
+                self.store.upsert_memory(
+                    canonical_user_id,
+                    kind="user_visual_anchor",
+                    content=(
+                        "用户明确说这张图是自己/自拍；可见线索："
+                        f"{insight.summary}"
+                    ),
+                    source=source,
+                    confidence=min(0.88, max(0.62, insight.confidence)),
+                )
+                attachment_lines.append("视觉身份: 用户明确说这张图是自己；以后只能作为弱线索，不要凭图擅自认人。")
             next_state = update_mood_for_attachment_insight(next_state, insight)
 
         next_state = advance_relationship(
@@ -394,6 +406,8 @@ class CompanionEngine:
         self,
         canonical_user_id: str,
         reply_sent_at: datetime,
+        *,
+        mode: str = "quick_continue",
     ) -> str | None:
         """Generate a short follow-up message after a reply, if conditions are right.
 
@@ -426,12 +440,7 @@ class CompanionEngine:
                 )
                 return None
         recent_lines = self._recent_lines(canonical_user_id)
-        prompt = (
-            "你刚刚和用户聊完，过了一小会儿又想到一个跟刚才话题相关的小想法。\n"
-            "发一条很短的消息，像随手补一句。不要再问问题。不要太刻意。\n"
-            "只输出消息内容，不加解释。\n\n"
-            f"最近聊天：\n{chr(10).join(recent_lines[-6:])}\n"
-        )
+        prompt = afterthought_prompt(mode, recent_lines[-8:])
         try:
             raw = await self.model.complete(
                 [{"role": "user", "content": prompt}],
@@ -445,7 +454,7 @@ class CompanionEngine:
             return None
         self.store.save_outgoing(canonical_user_id, "qq", text)
         if self.budget_gate:
-            self.budget_gate.record(estimate, note="qq_afterthought")
+            self.budget_gate.record(estimate, note=f"qq_afterthought:{mode}")
         expressed = apply_expression_after_reply(state, was_proactive=True)
         self.store.save_mood_state(canonical_user_id, expressed)
         return text
@@ -767,6 +776,51 @@ def _deep_night_afterthought_allowed(state: MoodState, recent_rows: list[dict[st
         return True
     recent_text = "\n".join(row.get("text", "") for row in recent_rows[-6:])
     return any(token in recent_text for token in _DEEP_NIGHT_RECENT_ALLOWED_TOKENS)
+
+
+def _user_claims_image_is_self(text: str) -> bool:
+    compact = text.replace(" ", "")
+    return any(
+        token in compact
+        for token in (
+            "这是我",
+            "是我",
+            "我的照片",
+            "我照片",
+            "我的自拍",
+            "我自拍",
+            "自拍",
+            "本人",
+            "我本人",
+        )
+    )
+
+
+def afterthought_prompt(mode: str, recent_lines: list[str]) -> str:
+    instructions = {
+        "quick_continue": (
+            "你刚发完上一条，几秒后发现自己还有半句没说完。"
+            "补一句很短的自然延续，可以是解释、补充、轻轻改口或顺手接话。"
+            "不要重复上一条，不要问新问题。"
+        ),
+        "topic_drift": (
+            "过了一小会儿，刚才的话题在脑子里拐了个小弯。"
+            "发一条像真人碎碎念的短消息，可以继续刚才话题、补一个小感受、或突然想到旁枝。"
+            "不要像总结，不要像客服，不要强行提问。"
+        ),
+        "silence_react": (
+            "你发完后用户暂时没有回。你注意到了这个空白，但不要控诉或催。"
+            "可以轻轻疑惑一下、自己收住、转成一句小念头，或假装刚才那句只是随口补充。"
+            "只发一条短消息。"
+        ),
+    }
+    instruction = instructions.get(mode, instructions["quick_continue"])
+    return (
+        f"{instruction}\n"
+        "你是在 QQ/微信私聊里打字。只输出消息内容，不加解释，不写动作旁白。\n"
+        "最多 45 个字；优先陈述，不要连续追问。\n\n"
+        f"最近聊天：\n{chr(10).join(recent_lines)}\n"
+    )
 
 
 def relative_chat_time_hint(sent_at_iso: str, *, now: datetime | None = None) -> str:

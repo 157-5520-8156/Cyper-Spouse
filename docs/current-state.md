@@ -167,12 +167,20 @@ Implemented:
 - Provider-agnostic `MultimodalAnalyzer` interface.
 - OpenAI-compatible image understanding and speech transcription provider.
 - Local CNY budget gate for vision, transcription, and image generation.
+- OpenAI vision summaries now classify image type, including stickers/memes, screenshots, photos,
+  selfies, objects, and scenery, then inject a short visible-content summary into the prompt.
+- If the user explicitly says an image is them or a selfie, the daemon stores a weak
+  `user_visual_anchor` memory. It is treated as a hint only; the model is told not to identify a
+  person from an image unless the user provides that context.
 
 Current limits:
 
 - DeepSeek's commonly documented API path is text-oriented, so true image understanding and voice transcription are intentionally provider-pluggable rather than hardcoded.
 - OpenAI multimodal calls require `OPENAI_API_KEY` and can be disabled with `MULTIMODAL_PROVIDER=metadata`.
 - Usage records are local estimates for throttling, not official billing data.
+- Face identity is not implemented as biometric recognition. The current strategy is consent-based
+  visual anchoring plus cautious prompt context, so it can remember what the user told it without
+  pretending it can reliably recognize people.
 
 ### Character Profile
 
@@ -223,6 +231,9 @@ Implemented:
 - External context emotion bleed is implemented with caps, but is not wired into the QQ main path yet; it should only be enabled when an external SillyTavern/MCP context source is explicitly passed into the engine.
 - Chengdu-local human rhythm context keeps replies from feeling like an always-on assistant and explicitly suppresses bracketed stage directions.
 - QQ WebSocket delivery now adds read/think/typing delay before the first reply and human-sized pauses between split reply parts, instead of sending 2-3 parts in one burst.
+- After QQ sends a normal reply, it may schedule several short human-like follow-up opportunities:
+  a quick continuation, a delayed topic drift, and a soft reaction to silence. Any new user message
+  cancels the pending follow-ups so she does not talk over the user.
 - If the user speaks during the gap between split reply parts, QQ delivery now classifies the
   insertion. Backchannels such as "嗯嗯/对/哈哈" are recorded without interrupting; new questions,
   corrections, emotional messages, or substantive inserted text stop the remaining parts and start a

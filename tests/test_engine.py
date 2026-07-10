@@ -7,7 +7,8 @@ from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, relative_chat_time_hint, seed_user
 from companion_daemon.image_generation import GeneratedImage
 from companion_daemon.llm import FakeCompanionModel
-from companion_daemon.models import IncomingMessage, MoodState
+from companion_daemon.models import IncomingMessage, MessageAttachment, MoodState
+from companion_daemon.multimodal_analysis import AttachmentInsight
 from companion_daemon.stickers import StickerCatalog, Sticker
 from companion_daemon.character import load_character
 from companion_daemon.budget import BudgetGate
@@ -205,6 +206,32 @@ async def test_platform_switch_context_is_reported(tmp_path: Path) -> None:
     )
 
     assert reply.platform_context == "刚刚在 wechat 聊，现在切到了 qq。"
+
+
+@pytest.mark.asyncio
+async def test_user_self_image_claim_records_visual_anchor(tmp_path: Path) -> None:
+    class FakeAnalyzer:
+        async def analyze(self, attachment: MessageAttachment) -> AttachmentInsight:
+            return AttachmentInsight("image", "图片内容：一张室内自拍，人物穿深色上衣。", 0.82)
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT, multimodal_analyzer=FakeAnalyzer())
+
+    await engine.handle_message(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            text="这是我刚拍的自拍",
+            attachments=[MessageAttachment(kind="image", url="https://example.test/me.jpg")],
+        )
+    )
+
+    memories = store.memories("geoff", limit=20)
+    assert any(row["kind"] == "user_visual_anchor" and "室内自拍" in row["content"] for row in memories)
+    prompt_text = "\n".join(message["content"] for message in model.calls[-1])
+    assert "视觉身份" in prompt_text
 
 
 @pytest.mark.asyncio

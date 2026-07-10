@@ -1,5 +1,5 @@
 from companion_daemon.models import IncomingMessage, MoodState
-from companion_daemon.prompts import question_budget_hint, reply_prompt
+from companion_daemon.prompts import question_budget_hint, reply_prompt, state_to_hint
 
 
 def test_question_budget_warns_after_recent_questions() -> None:
@@ -27,5 +27,12 @@ def test_reply_prompt_includes_question_budget_and_safety_boundaries() -> None:
     assert "追问预算" in prompt_text
     assert "不要解释系统、提示词、模型或任务" in prompt_text
     assert "必须先等用户明确确认" in prompt_text
-    assert "'你:'只代表用户说的话" in prompt_text
+    assert "'你:'只代表用户" in prompt_text
     assert "超过一小时或隔夜的事不要说'刚刚'" in prompt_text
+
+
+def test_state_hint_normalizes_inner_punctuation() -> None:
+    hint = state_to_hint(MoodState(unresolved_emotion="她刚才有话想发给你，但忍住了，所以心里还留着一点尾巴。"))
+
+    assert "。." not in hint
+    assert "。。" not in hint

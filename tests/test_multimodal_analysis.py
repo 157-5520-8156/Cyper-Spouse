@@ -63,6 +63,9 @@ async def test_openai_image_analysis_uses_budget_and_records_usage(tmp_path) -> 
 
     assert insight.summary == "图片内容：一张雨后街边照片。"
     assert requests[0].url == "https://api.example.test/v1/chat/completions"
+    payload = requests[0].read().decode()
+    assert "表情包" in payload
+    assert "不要断言图中人物就是用户" in payload
     assert store.usage_count("vision", "month", datetime.now(UTC)) == 1
 
 

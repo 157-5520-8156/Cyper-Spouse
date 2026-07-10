@@ -59,9 +59,16 @@ DeepSeek API
 
 First try QQ official bot APIs. This is the most compliant path and supports Webhook event delivery. The official docs state that callbacks require HTTPS and allowed callback ports include 80, 443, 8080, and 8443.
 
-The official bot path has important product constraints. As of the current QQ bot send-message docs, single-chat proactive messages are limited, while group proactive push has its own opt-in and rate limits. Because this project is intimate one-to-one chat, we must test official C2C behavior early before depending on it.
+The official bot path has important product constraints. As of the current QQ bot send-message docs, single-chat proactive messages are limited, while group proactive push has its own opt-in and rate limits. Because this project is intimate one-to-one chat, official C2C is good as the compliant baseline but should not be treated as the only delivery shape.
 
-Fallback adapters can be NapCat or Lagrange.OneBot if the official bot cannot provide the desired one-to-one experience. These are more flexible, but have greater account and protocol risk.
+Fallback adapters can be NapCat or Lagrange.OneBot if the official bot cannot provide the desired one-to-one experience. These are more flexible, because they can make a QQ small account behave more like a normal chat account, but have greater account and protocol risk. The daemon core should therefore expose a stable inbound/outbound adapter boundary:
+
+- inbound: normalize platform user id, text, attachments, reply target, and source timestamps;
+- outbound: send text parts, stickers, images, files, and later reactions/recalls when the adapter supports them;
+- policy: rate limits, account-risk limits, and proactive-send permissions live in the adapter, not in the relationship engine;
+- memory: all adapters resolve into the same canonical user id so QQ official, QQ small account, and future WeChat share mood and memory.
+
+This keeps the companion brain independent from whether the QQ window is an official bot, a OneBot-compatible small account, or a later WeChat bridge.
 
 Sources:
 

@@ -78,11 +78,17 @@ async def test_afterthought_uses_original_reply_time() -> None:
     class FakeEngine:
         def __init__(self):
             self.store = FakeStore()
-            self.seen_reply_sent_at = None
+            self.seen: list[tuple[datetime, str]] = []
 
-        async def generate_afterthought(self, canonical_user_id: str, reply_sent_at: datetime) -> str:
-            self.seen_reply_sent_at = reply_sent_at
-            return "刚刚还想补一句。"
+        async def generate_afterthought(
+            self,
+            canonical_user_id: str,
+            reply_sent_at: datetime,
+            *,
+            mode: str = "quick_continue",
+        ) -> str:
+            self.seen.append((reply_sent_at, mode))
+            return f"{mode}:刚刚还想补一句。"
 
     class FakeTarget:
         def __init__(self):
@@ -118,11 +124,86 @@ async def test_afterthought_uses_original_reply_time() -> None:
         target,
         reply_sent_at,
     )
-    task = coalescer._afterthought_tasks["c2c:user"]
-    await task
+    tasks = coalescer._afterthought_tasks["c2c:user"]
+    await asyncio.gather(*tasks)
 
-    assert engine.seen_reply_sent_at == reply_sent_at
-    assert target.replies == ["刚刚还想补一句。"]
+    assert all(seen_at == reply_sent_at for seen_at, _ in engine.seen)
+    assert [mode for _, mode in engine.seen] == ["quick_continue", "topic_drift", "silence_react"]
+    assert target.replies == [
+        "quick_continue:刚刚还想补一句。",
+        "topic_drift:刚刚还想补一句。",
+        "silence_react:刚刚还想补一句。",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_new_user_message_cancels_pending_afterthoughts() -> None:
+    class FakeStore:
+        def resolve_user(self, platform: str, platform_user_id: str) -> str:
+            return "geoff"
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = FakeStore()
+            self.afterthought_called = False
+
+        async def generate_afterthought(
+            self,
+            canonical_user_id: str,
+            reply_sent_at: datetime,
+            *,
+            mode: str = "quick_continue",
+        ) -> str:
+            self.afterthought_called = True
+            return "不该发。"
+
+        async def handle_message(self, incoming: IncomingMessage, **kwargs) -> CompanionReply:
+            return CompanionReply(canonical_user_id="geoff", mood="calm", text="新回复。")
+
+    class FakeTarget:
+        def __init__(self):
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs) -> None:
+            self.replies.append(kwargs["content"])
+
+    class SlowRandom:
+        def uniform(self, low: float, high: float) -> float:
+            return high
+
+        def random(self) -> float:
+            return 0.0
+
+    async def fake_sleep(seconds: float) -> None:
+        if seconds > 10:
+            await asyncio.Event().wait()
+        return None
+
+    engine = FakeEngine()
+    target = FakeTarget()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        human_timing=True,
+        sleep=fake_sleep,
+        rng=SlowRandom(),
+    )
+    coalescer._schedule_afterthought(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="刚才那事"),
+        target,
+        datetime(2026, 7, 10, 1, 2, 3, tzinfo=timezone.utc),
+    )
+
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="我回来了"),
+        target,
+    )
+    await asyncio.sleep(0.03)
+
+    assert engine.afterthought_called is False
+    assert target.replies == ["新回复。"]
 
 
 @pytest.mark.asyncio

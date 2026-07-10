@@ -63,6 +63,13 @@ class ActiveSend:
     cancel_before_next_part: bool = False
 
 
+@dataclass(frozen=True)
+class AfterthoughtPlan:
+    mode: str
+    delay_seconds: float
+    probability: float
+
+
 class QQMessageCoalescer:
     def __init__(
         self,
@@ -92,7 +99,7 @@ class QQMessageCoalescer:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._deferred: dict[str, DeferredReply] = {}
         self._deferred_tasks: dict[str, asyncio.Task[None]] = {}
-        self._afterthought_tasks: dict[str, asyncio.Task[None]] = {}
+        self._afterthought_tasks: dict[str, list[asyncio.Task[None]]] = {}
         self._active_sends: dict[str, ActiveSend] = {}
 
     async def add(self, key: str, incoming: IncomingMessage, reply_target: ReplyTarget) -> None:
@@ -262,7 +269,11 @@ class QQMessageCoalescer:
         if reply is None:
             return
         timing_state = None
-        if self.human_timing and hasattr(self.engine, "store"):
+        if (
+            self.human_timing
+            and hasattr(self.engine, "store")
+            and hasattr(self.engine.store, "get_mood_state")
+        ):
             try:
                 timing_state = self.engine.store.get_mood_state(reply.canonical_user_id)
             except Exception:
@@ -307,30 +318,43 @@ class QQMessageCoalescer:
     ) -> None:
         if not self.human_timing:
             return
-        delay = self.rng.uniform(30, 120)
-        self._afterthought_tasks[key] = asyncio.create_task(
-            self._fire_afterthought(key, delay, merged, reply_target, reply_sent_at)
-        )
+        plans = [
+            AfterthoughtPlan("quick_continue", self.rng.uniform(6, 18), 0.45),
+            AfterthoughtPlan("topic_drift", self.rng.uniform(35, 120), 0.28),
+            AfterthoughtPlan("silence_react", self.rng.uniform(150, 420), 0.18),
+        ]
+        tasks: list[asyncio.Task[None]] = []
+        for plan in plans:
+            if self.rng.random() <= plan.probability:
+                tasks.append(
+                    asyncio.create_task(
+                        self._fire_afterthought(key, plan, merged, reply_target, reply_sent_at)
+                    )
+                )
+        if tasks:
+            self._afterthought_tasks[key] = tasks
 
     async def _fire_afterthought(
         self,
         key: str,
-        delay: float,
+        plan: AfterthoughtPlan,
         merged: IncomingMessage,
         reply_target: ReplyTarget,
         reply_sent_at: datetime,
     ) -> None:
         try:
-            await self.sleep(delay)
-            if self.rng.random() > 0.35:
-                return
+            await self.sleep(plan.delay_seconds)
             canonical_user_id = self.engine.store.resolve_user(
                 merged.platform, merged.platform_user_id
             )
-            text = await self.engine.generate_afterthought(canonical_user_id, reply_sent_at)
+            text = await self.engine.generate_afterthought(
+                canonical_user_id,
+                reply_sent_at,
+                mode=plan.mode,
+            )
             if not text:
                 return
-            logger.info("sending afterthought for %s", key)
+            logger.info("sending afterthought for %s mode=%s", key, plan.mode)
             await self.sleep(self.rng.uniform(1.5, 4.0))
             await reply_target.reply(content=text, msg_seq=_reply_msg_seq())
         except asyncio.CancelledError:
@@ -339,9 +363,10 @@ class QQMessageCoalescer:
             logger.exception("afterthought failed")
 
     def _cancel_afterthought(self, key: str) -> None:
-        task = self._afterthought_tasks.pop(key, None)
-        if task and not task.done():
-            task.cancel()
+        tasks = self._afterthought_tasks.pop(key, [])
+        for task in tasks:
+            if not task.done():
+                task.cancel()
 
 
 class CompanionQQClient(botpy.Client):
