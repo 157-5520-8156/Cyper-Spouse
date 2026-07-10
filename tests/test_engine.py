@@ -74,6 +74,24 @@ async def test_character_examples_are_not_replayed_as_fake_chat_history(tmp_path
     assert not any(message["role"] == "user" and message["content"] == "你叫什么？" for message in prompt)
 
 
+def test_self_fact_ledger_uses_canonical_facts_not_freeform_background(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    character = load_character("configs/character.yaml")
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        character.system_prompt(),
+        character_profile=character,
+    )
+
+    facts = engine._self_fact_lines("geoff")
+
+    assert any("没有可验证的宠物饲养经历" in fact for fact in facts)
+    assert not any("成长背景" in fact for fact in facts)
+    assert not any("书店门口" in fact for fact in facts)
+
+
 def test_engine_wakes_for_the_next_message_after_persisting_an_unread_state(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)

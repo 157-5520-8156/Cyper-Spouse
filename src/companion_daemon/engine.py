@@ -1034,13 +1034,13 @@ class CompanionEngine:
         """Return the small, source-owned ledger for claims about 知栀 herself."""
         facts: list[str] = []
         if self.character_profile:
-            for key, value in self.character_profile.identity.items():
+            identity_keys = ("full_name", "english_name", "age", "hometown", "current_city", "school", "major", "year")
+            for key in identity_keys:
+                value = self.character_profile.identity.get(key)
+                if value is None:
+                    continue
                 facts.append(f"角色档案/{key}: {value}")
-            if self.character_profile.background:
-                facts.append(f"角色档案/成长背景: {self.character_profile.background.strip()}")
-            facts.extend(
-                f"角色档案/日常: {item}" for item in self.character_profile.daily_life[:3]
-            )
+            facts.extend(f"角色事实账本: {item}" for item in self.character_profile.canonical_facts)
         for event in self.store.recent_life_events(canonical_user_id, limit=6):
             if event["kind"] != "private_life_event" or event["status"] != "completed":
                 continue

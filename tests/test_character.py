@@ -13,3 +13,5 @@ def test_character_profile_includes_rich_persona() -> None:
     assert "纯粹的私聊文字" in prompt
     assert "刚从图书馆出来" not in prompt
     assert "我刚刚在看一段课件" not in prompt
+    assert "角色事实账本" in prompt
+    assert "没有可验证的宠物饲养经历" in prompt

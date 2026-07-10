@@ -14,6 +14,7 @@ class CharacterProfile(BaseModel):
     background: str | None = None
     origin_story: str | None = None
     daily_life: list[str] = Field(default_factory=list)
+    canonical_facts: list[str] = Field(default_factory=list)
     personality: str | None = None
     values: list[str] = Field(default_factory=list)
     speech: str | None = None
@@ -39,6 +40,11 @@ class CharacterProfile(BaseModel):
             parts.append("相识故事:\n" + self.origin_story.strip())
         if self.daily_life:
             parts.append("日常生活:\n" + "\n".join(f"- {item}" for item in self.daily_life))
+        if self.canonical_facts:
+            parts.append(
+                "角色事实账本（用于可验证的自我事实；背景和日常只是气质参考，不能据此补写新经历）：\n"
+                + "\n".join(f"- {item}" for item in self.canonical_facts)
+            )
         if self.personality:
             parts.append("性格:\n" + self.personality.strip())
         if self.values:
