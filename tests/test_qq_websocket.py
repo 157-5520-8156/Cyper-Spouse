@@ -86,7 +86,7 @@ def test_afterthought_plans_favor_open_story_and_respect_goodbyes() -> None:
 
 
 @pytest.mark.asyncio
-async def test_afterthought_uses_original_reply_time_and_sends_at_most_once() -> None:
+async def test_afterthought_episode_uses_original_reply_time_and_stays_bounded() -> None:
     class FakeStore:
         def resolve_user(self, platform: str, platform_user_id: str) -> str:
             return "geoff"
@@ -148,8 +148,11 @@ async def test_afterthought_uses_original_reply_time_and_sends_at_most_once() ->
     await asyncio.gather(*tasks)
 
     assert all(seen_at == reply_sent_at for seen_at, _ in engine.seen)
-    assert [mode for _, mode in engine.seen] == ["quick_continue"]
-    assert target.replies == ["quick_continue:刚刚还想补一句。"]
+    assert [mode for _, mode in engine.seen] == ["quick_continue", "topic_drift"]
+    assert target.replies == [
+        "quick_continue:刚刚还想补一句。",
+        "topic_drift:刚刚还想补一句。",
+    ]
 
 
 @pytest.mark.asyncio
@@ -235,6 +238,8 @@ async def test_afterthought_uses_outbox_delivery_confirmation() -> None:
     )
     await asyncio.gather(*coalescer._afterthought_tasks["c2c:user"])
 
+    # The second stage was eligible, but it paraphrased the first exactly and
+    # was withheld before it could become agent self-talk.
     assert target.replies == ["补一句。"]
     assert engine.queued == [("geoff", "qq", "补一句。")]
     assert engine.confirmed == [("geoff", "qq", "补一句。", 42)]

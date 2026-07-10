@@ -7,7 +7,7 @@ from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine
 from companion_daemon.engine import seed_user
 from companion_daemon.llm import FakeCompanionModel
-from companion_daemon.models import IncomingMessage
+from companion_daemon.models import CompanionReply, IncomingMessage
 import companion_daemon.proactive_scheduler as scheduler_module
 
 
@@ -207,3 +207,58 @@ async def test_scheduler_recovers_overdue_deferred_reply_once(tmp_path: Path, mo
     assert recovered == 1
     assert FakeDelivery.sent == ["刚刚是不是忙完了？我在呢。"]
     assert store.claim_due_social_tasks(kind="reply_later", now=now + timedelta(hours=1)) == []
+
+
+@pytest.mark.asyncio
+async def test_recovered_split_reply_keeps_a_turn_taking_gap(tmp_path: Path, monkeypatch) -> None:
+    """Restart recovery must not turn a multi-bubble reply into one burst."""
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.map_account("qq", "2759284998", "geoff")
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。")
+    now = datetime(2026, 7, 10, 2, 10, tzinfo=UTC)
+    store.create_social_task(
+        "geoff",
+        kind="reply_later",
+        platform="qq",
+        platform_user_id="2759284998",
+        payload=IncomingMessage(platform="qq", platform_user_id="2759284998", text="我还在想这件事").model_dump(mode="json"),
+        reason="unread_during_study",
+        due_at=now - timedelta(minutes=3),
+        expires_at=now + timedelta(hours=1),
+    )
+
+    class FakeDelivery:
+        sent: list[str] = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def send_text(self, recipient_id: str, text: str) -> None:
+            self.sent.append(text)
+
+    async def split_reply(message: IncomingMessage, **kwargs) -> CompanionReply:
+        return CompanionReply(
+            canonical_user_id="geoff",
+            mood="calm",
+            text="第一句。第二句。",
+            text_parts=["第一句。", "第二句。"],
+        )
+
+    pauses: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        pauses.append(seconds)
+
+    monkeypatch.setattr(engine, "handle_message", split_reply)
+    monkeypatch.setattr(scheduler_module, "QQDelivery", FakeDelivery)
+    monkeypatch.setattr(scheduler_module, "get_settings", lambda: object())
+    monkeypatch.setattr(scheduler_module.asyncio, "sleep", fake_sleep)
+
+    recovered = await scheduler_module.recover_overdue_deferred_replies(
+        engine, send=True, sandbox=False, now=now
+    )
+
+    assert recovered == 1
+    assert FakeDelivery.sent == ["第一句。", "第二句。"]
+    assert pauses and pauses[0] >= 1.8

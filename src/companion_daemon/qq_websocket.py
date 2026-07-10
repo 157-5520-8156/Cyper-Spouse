@@ -412,18 +412,62 @@ class QQMessageCoalescer:
             # participate in the optional afterthought feature.
             pass
         plans = _afterthought_plans(merged.text, self.rng)
-        eligible = [plan for plan in plans if self.rng.random() <= plan.probability]
-        if not eligible:
+        selected: list[AfterthoughtPlan] = []
+        for plan in plans:
+            if self.rng.random() <= plan.probability:
+                selected.append(plan)
+            # A small thread can breathe twice, but never turns into the agent
+            # replying to itself for the rest of the evening.
+            if len(selected) == 2:
+                break
+        if not selected:
             logger.info("no afterthought planned for %s", key)
             return
-        # One reply may invite a small second thought, never a burst of them.
-        selected = eligible[min(len(eligible) - 1, int(self.rng.random() * len(eligible)))]
         self._afterthought_tasks[key] = [
             asyncio.create_task(
-                self._fire_afterthought(key, selected, merged, reply_target, reply_sent_at)
+                self._fire_afterthought_episode(
+                    key, selected, merged, reply_target, reply_sent_at
+                )
             )
         ]
-        logger.info("scheduled afterthought for %s mode=%s in %.1fs", key, selected.mode, selected.delay_seconds)
+        logger.info(
+            "scheduled afterthought episode for %s modes=%s",
+            key,
+            ",".join(plan.mode for plan in selected),
+        )
+
+    async def _fire_afterthought_episode(
+        self,
+        key: str,
+        plans: list[AfterthoughtPlan],
+        merged: IncomingMessage,
+        reply_target: ReplyTarget,
+        reply_sent_at: datetime,
+    ) -> None:
+        """Run a bounded, cancellable continuation episode.
+
+        Each later thought is contingent on the earlier one actually being sent.
+        Any new user turn cancels this task, so a continuation cannot race a
+        resumed conversation or a platform switch.
+        """
+        elapsed = 0.0
+        sent_texts: list[str] = []
+        for plan in plans:
+            sent = await self._fire_afterthought(
+                key,
+                plan,
+                merged,
+                reply_target,
+                reply_sent_at,
+                delay_seconds=max(0.0, plan.delay_seconds - elapsed),
+                avoid_texts=sent_texts,
+            )
+            # If a generation was withheld, there is no conversational thread
+            # to extend.  Cancellation is also represented by task completion.
+            if not sent or key not in self._afterthought_tasks:
+                return
+            sent_texts.append(sent)
+            elapsed = plan.delay_seconds
 
     async def _fire_afterthought(
         self,
@@ -432,9 +476,12 @@ class QQMessageCoalescer:
         merged: IncomingMessage,
         reply_target: ReplyTarget,
         reply_sent_at: datetime,
-    ) -> None:
+        *,
+        delay_seconds: float | None = None,
+        avoid_texts: list[str] | None = None,
+    ) -> str | None:
         try:
-            await self.sleep(plan.delay_seconds)
+            await self.sleep(plan.delay_seconds if delay_seconds is None else delay_seconds)
             canonical_user_id = self.engine.store.resolve_user(
                 merged.platform, merged.platform_user_id
             )
@@ -445,7 +492,11 @@ class QQMessageCoalescer:
             )
             if not text:
                 logger.info("afterthought withheld for %s mode=%s", key, plan.mode)
-                return
+                self._afterthought_tasks.pop(key, None)
+                return None
+            if any(_afterthought_texts_overlap(text, earlier) for earlier in avoid_texts or []):
+                logger.info("afterthought withheld for %s because it repeats this episode", key)
+                return None
             logger.info("sending afterthought for %s mode=%s", key, plan.mode)
             await self.sleep(self.rng.uniform(1.5, 4.0))
             delivery_id = None
@@ -463,8 +514,9 @@ class QQMessageCoalescer:
                     text,
                     delivery_id=delivery_id,
                 )
+            return text
         except asyncio.CancelledError:
-            return
+            return None
         except Exception:
             logger.exception("afterthought failed")
             if "delivery_id" in locals() and hasattr(
@@ -475,6 +527,7 @@ class QQMessageCoalescer:
                     delivery_id,
                     "QQ afterthought delivery failed",
                 )
+            return None
 
     def _cancel_afterthought(self, key: str) -> None:
         tasks = self._afterthought_tasks.pop(key, [])
@@ -483,6 +536,18 @@ class QQMessageCoalescer:
                 task.cancel()
         if tasks:
             logger.info("cancelled pending afterthought for %s due to new user activity", key)
+
+
+def _afterthought_texts_overlap(candidate: str, earlier: str) -> bool:
+    """Keep one continuation episode from paraphrasing itself."""
+
+    def normalize(text: str) -> str:
+        return re.sub(r"[\s，。！？!?、~～]+", "", text).lower()
+
+    left, right = normalize(candidate), normalize(earlier)
+    if not left or not right:
+        return False
+    return left in right or right in left or len(set(left) & set(right)) / max(len(set(left)), 1) >= 0.82
 
 
 def _afterthought_plans(text: str, rng: random.Random) -> list[AfterthoughtPlan]:

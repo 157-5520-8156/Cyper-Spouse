@@ -47,5 +47,11 @@ def initial_reply_delay_seconds(
 
 
 def between_part_delay_seconds(part: str, *, rng: random.Random | None = None) -> float:
+    """Return the visible pause before a follow-up bubble.
+
+    This is deliberately longer than a network retry interval: the gap is an
+    interaction window in which the other person can acknowledge, redirect, or
+    take the floor.  The QQ adapters use that window for interruption handling.
+    """
     rng = rng or random.Random()
-    return max(0.9, min(4.2, (0.8 + len(part) / 16) * rng.uniform(0.8, 1.25)))
+    return max(1.8, min(7.2, (1.35 + len(part) / 13) * rng.uniform(0.82, 1.28)))

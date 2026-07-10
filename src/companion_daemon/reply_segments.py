@@ -7,7 +7,10 @@ def split_reply_text(text: str, state: MoodState) -> list[str]:
     cleaned = text.strip()
     if not cleaned:
         return []
-    if len(cleaned) <= 28 or state.mood in {"hurt", "guarded"}:
+    # A two-sentence mobile reply should leave a real turn-taking window.  Keep
+    # terse or boundary-setting replies whole; splitting those would feel like
+    # an unwanted insistence on continuing.
+    if len(cleaned) <= 20 or state.mood in {"hurt", "guarded"}:
         return [cleaned]
     parts = _sentence_parts(cleaned)
     if len(parts) <= 1:

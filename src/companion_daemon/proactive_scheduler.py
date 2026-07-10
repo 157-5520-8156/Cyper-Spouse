@@ -9,6 +9,7 @@ import random
 from companion_daemon.config import get_settings
 from companion_daemon.life_event import run as run_life_event
 from companion_daemon.models import IncomingMessage
+from companion_daemon.im_timing import between_part_delay_seconds
 from companion_daemon.proactive_cli import run as run_once
 from companion_daemon.qq_delivery import QQDelivery
 from companion_daemon.relationship import life_event_probability, proactive_cooldown_minutes
@@ -135,7 +136,14 @@ async def recover_overdue_deferred_replies(
             if reply is None:
                 engine.complete_deferred_reply_task(task_id)
                 continue
-            for part in reply.text_parts or [reply.text]:
+            parts = reply.text_parts or [reply.text]
+            for index, part in enumerate(parts):
+                if index:
+                    # A recovered deferred reply has no live coalescer, but it
+                    # still needs the same interruption-sized gaps as normal QQ
+                    # delivery.  Sending it as a burst made restart recovery
+                    # visibly unlike every other path.
+                    await asyncio.sleep(between_part_delay_seconds(part))
                 await delivery.send_text(str(row["platform_user_id"]), part)
             engine.confirm_reply_delivery(reply)
             engine.complete_deferred_reply_task(task_id)
