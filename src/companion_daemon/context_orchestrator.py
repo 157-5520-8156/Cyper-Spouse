@@ -101,6 +101,8 @@ def infer_user_intent(text: str, *, has_attachments: bool = False) -> str:
     stripped = text.strip()
     if has_attachments and len(stripped) < 6:
         return "发来附件，期待她看见并自然反应"
+    if _is_reply_timing_complaint(stripped):
+        return "对她断续回复感到不舒服，需要先承认这次失联感"
     if _contains(stripped, ["难受", "崩溃", "烦", "累", "闷", "委屈", "emo", "不开心", "想哭"]):
         return "表达情绪，需要先被接住"
     if _contains(stripped, ["在吗", "睡了吗", "忙吗", "人呢"]):
@@ -122,6 +124,8 @@ def choose_reply_focus(text: str, user_intent: str) -> str:
         return user_intent
     if user_intent == "表达情绪，需要先被接住":
         return "先回应他的情绪，再轻轻接住具体事情"
+    if user_intent == "对她断续回复感到不舒服，需要先承认这次失联感":
+        return "先承认让他等到了，再回应他此刻真正问的事"
     if user_intent == "提出问题，期待回答或态度":
         return _first_question_clause(stripped)
     if user_intent == "连续讲一件事，需要她抓重点而不是审问":
@@ -245,6 +249,12 @@ def build_reply_policy(user_intent: str, state: MoodState) -> str:
     if state.perceived_responsiveness < 35:
         return "别追问或索取回应，语气自然收住"
 
+    if user_intent == "对她断续回复感到不舒服，需要先承认这次失联感":
+        return (
+            "先承认回应断掉让他不舒服；解释只能使用当前生活状态里的已知情况，"
+            "没有记录就直接道歉，不编临时动作当借口，也别轻飘飘许诺以后绝不会这样"
+        )
+
     if user_intent == "表达情绪，需要先被接住":
         base = "先接住情绪，再回应具体事情；不急着给建议"
     elif user_intent == "提出问题，期待回答或态度":
@@ -263,6 +273,13 @@ def build_reply_policy(user_intent: str, state: MoodState) -> str:
     if state.initiative >= 60:
         return f"{base}；可以多一点自己的反应，但别抢话"
     return base
+
+
+def _is_reply_timing_complaint(text: str) -> bool:
+    """Recognize a relationship-repair act rather than one exact phrase."""
+    rhythm_cues = ["不回", "没回", "消失", "不见", "说话说到一半", "晾着", "爱回不回", "已读不回"]
+    discomfort_cues = ["生气", "不高兴", "烦", "不爽", "难受", "怎么", "老是", "又"]
+    return _contains(text, rhythm_cues) and _contains(text, discomfort_cues)
 
 
 def _drop_conflicting_and_expired_memories(

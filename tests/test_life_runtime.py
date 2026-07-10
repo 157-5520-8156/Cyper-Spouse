@@ -231,6 +231,46 @@ def test_busy_activity_leaves_ordinary_message_unread_then_second_message_wakes_
     assert store.get_life_runtime("geoff").phone_attention == "reading"
 
 
+def test_recent_unread_deferral_prevents_repeated_silent_rounds(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 2, 0, tzinfo=UTC)
+    store.save_life_runtime(
+        "geoff",
+        LifeRuntimeState(
+            activity="正在上课，手机放在包里",
+            activity_kind="class",
+            attention_demand=88,
+            interruptible=False,
+            started_at=now - timedelta(minutes=10),
+            ends_at=now + timedelta(minutes=35),
+            phone_attention="away",
+            updated_at=now,
+        ),
+    )
+    store.create_social_task(
+        "geoff",
+        kind="reply_later",
+        platform="qq",
+        platform_user_id="geoff",
+        payload={"text": "上一条"},
+        reason="unread_during_class",
+        due_at=now + timedelta(minutes=4),
+        expires_at=now + timedelta(hours=1),
+    )
+
+    decision = decide_phone_attention(
+        store,
+        "geoff",
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我继续说"),
+        MoodState(),
+        now=now + timedelta(minutes=2),
+    )
+
+    assert decision.read_now is True
+    assert decision.reason == "notification_read_now"
+
+
 def test_existing_runtime_gets_a_future_plan_after_restart(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)

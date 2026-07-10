@@ -929,6 +929,31 @@ class CompanionStore:
             ).fetchall()
         return list(reversed(rows))
 
+    def has_recent_unread_deferral(
+        self,
+        canonical_user_id: str,
+        *,
+        since: datetime,
+    ) -> bool:
+        """Return whether this conversation was deliberately left unread recently.
+
+        Cancelled tasks count: a later message can merge into an existing task,
+        but that should not repeatedly recreate the same missed-notification beat.
+        """
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select 1 from social_tasks
+                where canonical_user_id = ?
+                  and kind = 'reply_later'
+                  and reason like 'unread_during_%'
+                  and created_at >= ?
+                limit 1
+                """,
+                (canonical_user_id, since.astimezone(UTC).isoformat()),
+            ).fetchone()
+        return row is not None
+
     def next_due_social_task(
         self,
         canonical_user_id: str,

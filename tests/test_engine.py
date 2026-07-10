@@ -18,6 +18,7 @@ from companion_daemon.stickers import StickerCatalog, Sticker
 from companion_daemon.character import load_character
 from companion_daemon.budget import BudgetGate
 from companion_daemon.time import utc_now
+from companion_daemon.models import LifeRuntimeState
 
 TEST_PROMPT = "你是凛，用户的赛博女友。"
 
@@ -42,6 +43,36 @@ async def test_handle_message_updates_mood_and_replies(tmp_path: Path) -> None:
     assert reply.canonical_user_id == "geoff"
     assert reply.mood == "miss_you"
     assert "我在呢" in reply.text
+
+
+def test_engine_wakes_for_the_next_message_after_persisting_an_unread_state(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    now = utc_now()
+    store.save_life_runtime(
+        "geoff",
+        LifeRuntimeState(
+            activity="正在上课，手机放在包里",
+            activity_kind="class",
+            attention_demand=88,
+            interruptible=False,
+            started_at=now - timedelta(minutes=10),
+            ends_at=now + timedelta(minutes=35),
+            phone_attention="away",
+            updated_at=now,
+        ),
+    )
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+    first = engine.phone_attention_decision(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我到啦")
+    )
+    second = engine.phone_attention_decision(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我再说一句")
+    )
+
+    assert first.read_now is False
+    assert store.get_mood_state("geoff").has_unread is True
+    assert second.read_now is True
 
 
 @pytest.mark.asyncio

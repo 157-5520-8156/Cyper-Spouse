@@ -18,6 +18,23 @@ def test_infer_user_intent_identifies_emotional_message() -> None:
     assert infer_user_intent("今天真的好累，有点不开心") == "表达情绪，需要先被接住"
 
 
+def test_reply_timing_complaint_gets_a_repair_policy_without_an_invented_excuse() -> None:
+    package = build_context_package(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            text="你怎么老是说话说到一半就消失啊，我要生气了",
+        ),
+        MoodState(),
+        [],
+        [],
+    )
+
+    assert package.user_intent == "对她断续回复感到不舒服，需要先承认这次失联感"
+    assert "先承认" in package.reply_policy
+    assert "不编临时动作" in package.reply_policy
+
+
 def test_select_relevant_memories_prioritizes_current_topic() -> None:
     class Row(dict):
         def keys(self):

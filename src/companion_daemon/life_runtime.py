@@ -268,10 +268,17 @@ def decide_phone_attention(
     carrying_unread = state.has_unread or (
         runtime.notification_count > 0 and runtime.phone_attention in {"notified", "glanced"}
     )
+    # One missed notification can feel ordinary. Repeating it through an active
+    # chat feels like the daemon is stuck, especially after task coalescing.
+    recently_left_unread = store.has_recent_unread_deferral(
+        canonical_user_id,
+        since=now - timedelta(minutes=20),
+    )
     emotionally_withdrawing = state.mood in {"hurt", "guarded"} or state.boundary_level >= 45
     should_read = (
         urgent
         or carrying_unread
+        or recently_left_unread
         or notifications >= 2
         or (user_is_asking and runtime.interruptible and runtime.attention_demand <= 65)
         or (runtime.interruptible and runtime.attention_demand <= 45 and not emotionally_withdrawing)
