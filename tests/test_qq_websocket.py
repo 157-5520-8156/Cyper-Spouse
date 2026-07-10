@@ -10,6 +10,7 @@ from companion_daemon.qq_websocket import (
     QQMessageCoalescer,
     _attachments_from_botpy,
     _clean_content,
+    classify_mid_reply_interruption,
     _send_reply_parts,
 )
 from companion_daemon.turn_taking import TurnTakingPolicy
@@ -59,6 +60,13 @@ def test_duplicate_detection_falls_back_to_text_without_message_id() -> None:
 
     assert client._is_duplicate(None, "user", "哈哈") is False
     assert client._is_duplicate(None, "user", "哈哈") is True
+
+
+def test_classifies_mid_reply_interruption() -> None:
+    assert classify_mid_reply_interruption("嗯嗯") == "backchannel"
+    assert classify_mid_reply_interruption("对对对") == "backchannel"
+    assert classify_mid_reply_interruption("等下我不是这个意思") == "takeover"
+    assert classify_mid_reply_interruption("那你觉得我应该怎么办？") == "takeover"
 
 
 @pytest.mark.asyncio
@@ -273,6 +281,120 @@ async def test_coalescer_sends_reply_parts_in_order() -> None:
     await asyncio.sleep(1.0)
 
     assert target.replies == ["我在。", "刚刚想到你。"]
+
+
+@pytest.mark.asyncio
+async def test_backchannel_during_split_reply_does_not_interrupt() -> None:
+    class FakeEngine:
+        def __init__(self):
+            self.recorded_without_reply: list[str] = []
+
+        async def handle_message(self, incoming: IncomingMessage, **kwargs) -> CompanionReply | None:
+            if kwargs.get("skip_reply"):
+                self.recorded_without_reply.append(incoming.text)
+                return None
+            return CompanionReply(
+                canonical_user_id="geoff",
+                mood="happy",
+                text="第一句。第二句。",
+                text_parts=["第一句。", "第二句。"],
+            )
+
+    class FakeTarget:
+        def __init__(self):
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs) -> None:
+            self.replies.append(kwargs["content"])
+
+    engine = FakeEngine()
+    target = FakeTarget()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+        human_timing=True,
+        rng=random.Random(1),
+    )
+    inserted = False
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal inserted
+        if target.replies == ["第一句。"] and not inserted:
+            inserted = True
+            await coalescer.add(
+                "c2c:user",
+                IncomingMessage(platform="qq", platform_user_id="user", text="嗯嗯"),
+                target,
+            )
+
+    coalescer.sleep = fake_sleep
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="你继续说"),
+        target,
+    )
+    await asyncio.sleep(0.03)
+
+    assert target.replies == ["第一句。", "第二句。"]
+    assert engine.recorded_without_reply == ["嗯嗯"]
+
+
+@pytest.mark.asyncio
+async def test_takeover_during_split_reply_stops_remaining_parts_and_replies_again() -> None:
+    class FakeEngine:
+        def __init__(self):
+            self.seen_texts: list[str] = []
+
+        async def handle_message(self, incoming: IncomingMessage, **kwargs) -> CompanionReply:
+            self.seen_texts.append(incoming.text)
+            if len(self.seen_texts) == 1:
+                return CompanionReply(
+                    canonical_user_id="geoff",
+                    mood="happy",
+                    text="第一句。第二句。第三句。",
+                    text_parts=["第一句。", "第二句。", "第三句。"],
+                )
+            return CompanionReply(canonical_user_id="geoff", mood="calm", text="哦，那我换个说法。")
+
+    class FakeTarget:
+        def __init__(self):
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs) -> None:
+            self.replies.append(kwargs["content"])
+
+    engine = FakeEngine()
+    target = FakeTarget()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+        human_timing=True,
+        rng=random.Random(1),
+    )
+    inserted = False
+
+    async def fake_sleep(seconds: float) -> None:
+        nonlocal inserted
+        if target.replies == ["第一句。"] and not inserted:
+            inserted = True
+            await coalescer.add(
+                "c2c:user",
+                IncomingMessage(platform="qq", platform_user_id="user", text="等下我不是这个意思"),
+                target,
+            )
+
+    coalescer.sleep = fake_sleep
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="你继续说"),
+        target,
+    )
+    await asyncio.sleep(0.05)
+
+    assert engine.seen_texts == ["你继续说", "等下我不是这个意思"]
+    assert target.replies == ["第一句。", "哦，那我换个说法。"]
 
 
 @pytest.mark.asyncio

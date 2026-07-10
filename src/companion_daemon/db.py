@@ -625,6 +625,17 @@ class CompanionStore:
                 (canonical_user_id, kind, source),
             ).fetchone()
 
+    def delete_memory(self, canonical_user_id: str, *, kind: str, content: str) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                delete from memories
+                where canonical_user_id = ? and kind = ? and content = ?
+                """,
+                (canonical_user_id, kind, content),
+            )
+            return cursor.rowcount
+
     def canonical_users(self) -> list[str]:
         with self.connect() as conn:
             rows = conn.execute("select id from users order by id").fetchall()

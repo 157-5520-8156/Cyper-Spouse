@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Header, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel, Field
 
 from companion_daemon.config import get_settings
 from companion_daemon.models import CompanionReply, IncomingMessage, ProactiveDecision
@@ -17,9 +18,25 @@ app = FastAPI(title="Girl Agent Companion Daemon")
 engine = build_companion_engine()
 
 
+class StatePatch(BaseModel):
+    updates: dict[str, object] = Field(default_factory=dict)
+
+
+class MemoryPatch(BaseModel):
+    kind: str
+    content: str
+    confidence: float = 0.7
+    source: str = "dashboard"
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
+
+
+@app.get("/dashboard", response_class=HTMLResponse)
+def dashboard() -> str:
+    return DASHBOARD_HTML
 
 
 @app.post("/messages", response_model=CompanionReply)
@@ -45,6 +62,45 @@ def debug_context(
         preview_text=preview_text,
         platform=platform,
     )
+
+
+@app.get("/debug/users")
+def debug_users() -> dict[str, list[str]]:
+    return {"users": engine.store.canonical_users()}
+
+
+@app.post("/debug/{canonical_user_id}/state")
+def debug_update_state(canonical_user_id: str, patch: StatePatch) -> dict[str, object]:
+    current = engine.store.get_mood_state(canonical_user_id)
+    allowed = set(type(current).model_fields)
+    updates = {key: value for key, value in patch.updates.items() if key in allowed}
+    if not updates:
+        return {"state": current.model_dump(mode="json"), "updated": []}
+    updated = current.model_copy(update=updates)
+    engine.store.save_mood_state(canonical_user_id, updated)
+    return {"state": updated.model_dump(mode="json"), "updated": sorted(updates)}
+
+
+@app.post("/debug/{canonical_user_id}/memories")
+def debug_upsert_memory(canonical_user_id: str, patch: MemoryPatch) -> dict[str, object]:
+    engine.store.upsert_memory(
+        canonical_user_id,
+        kind=patch.kind,
+        content=patch.content,
+        source=patch.source,
+        confidence=patch.confidence,
+    )
+    return {"ok": True}
+
+
+@app.delete("/debug/{canonical_user_id}/memories")
+def debug_delete_memory(
+    canonical_user_id: str,
+    kind: str = Query(...),
+    content: str = Query(...),
+) -> dict[str, object]:
+    deleted = engine.store.delete_memory(canonical_user_id, kind=kind, content=content)
+    return {"deleted": deleted}
 
 
 @app.post("/qq/webhook")
@@ -84,4 +140,154 @@ def main() -> None:
     import uvicorn
 
     settings = get_settings()
-    uvicorn.run("companion_daemon.app:app", host=settings.host, port=settings.port, reload=True)
+    uvicorn.run("companion_daemon.app:app", host=settings.host, port=settings.port, reload=False)
+
+
+DASHBOARD_HTML = """<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>沈知栀 Daemon 面板</title>
+  <style>
+    :root { color-scheme: light dark; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #f4f1ea; color: #202124; }
+    header { padding: 18px 22px; background: #263238; color: white; display: flex; gap: 16px; align-items: center; }
+    header h1 { font-size: 20px; margin: 0; font-weight: 650; }
+    main { padding: 18px; display: grid; grid-template-columns: 340px 1fr; gap: 16px; }
+    section, aside { background: #fffaf0; border: 1px solid #d8d0c1; border-radius: 8px; padding: 14px; }
+    h2 { font-size: 15px; margin: 0 0 10px; }
+    label { display: block; font-size: 12px; color: #5f6368; margin-top: 10px; }
+    input, select, textarea, button { font: inherit; }
+    input, select, textarea { width: 100%; box-sizing: border-box; border: 1px solid #c9c1b2; border-radius: 6px; padding: 7px; background: white; color: #202124; }
+    textarea { min-height: 84px; resize: vertical; }
+    button { border: 0; border-radius: 6px; padding: 8px 11px; background: #2f6f73; color: white; cursor: pointer; }
+    button.secondary { background: #6d6258; }
+    .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .card { background: white; border: 1px solid #ded6c8; border-radius: 8px; padding: 12px; min-height: 120px; overflow: auto; }
+    pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; }
+    .list { display: flex; flex-direction: column; gap: 8px; }
+    .item { border: 1px solid #ded6c8; border-radius: 6px; padding: 8px; background: white; }
+    .muted { color: #6f6a60; font-size: 12px; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } .cards { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>沈知栀 Daemon 面板</h1>
+    <span class="muted">daemon 是本体，面板只调状态和上下文</span>
+  </header>
+  <main>
+    <aside>
+      <h2>控制</h2>
+      <label>用户</label>
+      <select id="user"></select>
+      <label>Prompt 预览输入</label>
+      <textarea id="preview">你在干嘛</textarea>
+      <div class="toolbar" style="margin-top:10px">
+        <button onclick="loadContext()">刷新</button>
+        <button class="secondary" onclick="runProactive()">主动 tick</button>
+      </div>
+      <h2 style="margin-top:18px">状态调节</h2>
+      <div id="stateForm" class="grid"></div>
+      <button style="margin-top:10px" onclick="saveState()">保存状态</button>
+      <h2 style="margin-top:18px">新增记忆</h2>
+      <label>kind</label><input id="memoryKind" value="note" />
+      <label>content</label><textarea id="memoryContent"></textarea>
+      <label>confidence</label><input id="memoryConfidence" type="number" min="0" max="1" step="0.05" value="0.7" />
+      <button style="margin-top:10px" onclick="addMemory()">加入/更新记忆</button>
+    </aside>
+    <section>
+      <div class="cards">
+        <div class="card"><h2>当前状态</h2><pre id="state"></pre></div>
+        <div class="card"><h2>最近聊天</h2><div id="recent" class="list"></div></div>
+        <div class="card"><h2>注入记忆</h2><div id="memories" class="list"></div></div>
+      </div>
+      <section style="margin-top:12px">
+        <h2>Prompt 预览</h2>
+        <pre id="prompt"></pre>
+      </section>
+      <section style="margin-top:12px">
+        <h2>操作结果</h2>
+        <pre id="result"></pre>
+      </section>
+    </section>
+  </main>
+  <script>
+    const numericFields = ["intimacy","trust","attachment","patience","security","curiosity","initiative","emotional_charge","boundary_level"];
+    let snapshot = null;
+    async function init() {
+      const users = await fetch("/debug/users").then(r => r.json());
+      const select = document.getElementById("user");
+      select.innerHTML = users.users.map(u => `<option>${u}</option>`).join("");
+      if (!select.value) select.innerHTML = "<option>geoff</option>";
+      await loadContext();
+    }
+    async function loadContext() {
+      const user = document.getElementById("user").value || "geoff";
+      const preview = encodeURIComponent(document.getElementById("preview").value);
+      snapshot = await fetch(`/debug/${user}/context?preview_text=${preview}`).then(r => r.json());
+      render();
+    }
+    function render() {
+      document.getElementById("state").textContent = JSON.stringify(snapshot.state, null, 2);
+      document.getElementById("recent").innerHTML = snapshot.recent.map(x => `<div class="item">${escapeHtml(x)}</div>`).join("");
+      document.getElementById("memories").innerHTML = snapshot.memories.map(x => `<div class="item">${escapeHtml(x)}<br><button class="secondary" onclick="deleteMemoryFromLine(this)">删除</button></div>`).join("");
+      document.getElementById("prompt").textContent = snapshot.preview_prompt.map(m => `[${m.role}]\\n${m.content}`).join("\\n\\n---\\n\\n");
+      const form = document.getElementById("stateForm");
+      form.innerHTML = [
+        `<label>mood<input data-state="mood" value="${snapshot.state.mood}"></label>`,
+        `<label>relationship_stage<input data-state="relationship_stage" value="${snapshot.state.relationship_stage}"></label>`,
+        ...numericFields.map(k => `<label>${k}<input data-state="${k}" type="number" min="0" max="100" value="${snapshot.state[k]}"></label>`),
+        `<label style="grid-column:1/-1">unresolved_emotion<textarea data-state="unresolved_emotion">${snapshot.state.unresolved_emotion || ""}</textarea></label>`
+      ].join("");
+    }
+    async function saveState() {
+      const updates = {};
+      document.querySelectorAll("[data-state]").forEach(el => {
+        const key = el.dataset.state;
+        updates[key] = numericFields.includes(key) ? Number(el.value) : (el.value || null);
+      });
+      const user = document.getElementById("user").value || "geoff";
+      const res = await fetch(`/debug/${user}/state`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify({updates})}).then(r => r.json());
+      document.getElementById("result").textContent = JSON.stringify(res, null, 2);
+      await loadContext();
+    }
+    async function addMemory() {
+      const user = document.getElementById("user").value || "geoff";
+      const payload = {kind: memoryKind.value, content: memoryContent.value, confidence: Number(memoryConfidence.value), source: "dashboard"};
+      const res = await fetch(`/debug/${user}/memories`, {method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)}).then(r => r.json());
+      document.getElementById("result").textContent = JSON.stringify(res, null, 2);
+      await loadContext();
+    }
+    async function deleteMemoryFromLine(button) {
+      const text = button.parentElement.firstChild.textContent;
+      const match = text.match(/^- \\[([^\\]]+)\\] (.*)$/);
+      if (!match) return;
+      const user = document.getElementById("user").value || "geoff";
+      const url = `/debug/${user}/memories?kind=${encodeURIComponent(match[1])}&content=${encodeURIComponent(match[2])}`;
+      const res = await fetch(url, {method:"DELETE"}).then(r => r.json());
+      document.getElementById("result").textContent = JSON.stringify(res, null, 2);
+      await loadContext();
+    }
+    async function runProactive() {
+      const user = document.getElementById("user").value || "geoff";
+      const res = await fetch(`/proactive/${user}`, {method:"POST"}).then(r => r.json());
+      document.getElementById("result").textContent = JSON.stringify(res, null, 2);
+      await loadContext();
+    }
+    function escapeHtml(text) {
+      return String(text).replace(/[&<>"']/g, c => {
+        if (c === "&") return "&amp;";
+        if (c === "<") return "&lt;";
+        if (c === ">") return "&gt;";
+        if (c === '"') return "&quot;";
+        return "&#39;";
+      });
+    }
+    init();
+  </script>
+</body>
+</html>"""

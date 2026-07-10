@@ -45,6 +45,17 @@ This returns the daemon-owned state, recent chat lines with local freshness tags
 lines, self-core text, and a preview prompt. The preview is for inspection only and does not update
 state or send a message.
 
+Local dashboard:
+
+```bash
+uv run companion-daemon
+open http://127.0.0.1:8765/dashboard
+```
+
+The dashboard can inspect the daemon context, preview the prompt, tune mood/relationship numbers,
+add or delete selected memories, and run one proactive tick. It is intentionally daemon-native rather
+than SillyTavern-native, so the canonical state stays in SQLite.
+
 ### HTTP Daemon
 
 Verified:
@@ -212,6 +223,10 @@ Implemented:
 - External context emotion bleed is implemented with caps, but is not wired into the QQ main path yet; it should only be enabled when an external SillyTavern/MCP context source is explicitly passed into the engine.
 - Chengdu-local human rhythm context keeps replies from feeling like an always-on assistant and explicitly suppresses bracketed stage directions.
 - QQ WebSocket delivery now adds read/think/typing delay before the first reply and human-sized pauses between split reply parts, instead of sending 2-3 parts in one burst.
+- If the user speaks during the gap between split reply parts, QQ delivery now classifies the
+  insertion. Backchannels such as "嗯嗯/对/哈哈" are recorded without interrupting; new questions,
+  corrections, emotional messages, or substantive inserted text stop the remaining parts and start a
+  new turn.
 - QQ private chat now has a conservative reply-decision layer enabled by default: pure acknowledgements can be recorded without a reply, questions/emotional/urgent messages always reply, and long story-like messages may be deferred during busy phases with a “just saw this” context hint.
 - Normal replies include a question-budget hint based on recent outgoing messages, so if she has already asked several questions recently the next reply is steered toward statements, reactions, or small self-disclosure instead of another follow-up question.
 - Sticker selection maps newer moods such as `hurt`, `guarded`, `curious`, and `affectionate` to available visual assets.

@@ -7,6 +7,7 @@ from datetime import datetime
 import logging
 from pathlib import Path
 import random
+import re
 import time
 
 import botpy
@@ -22,6 +23,7 @@ from companion_daemon.qq_client import QQOfficialClient
 from companion_daemon.reply_decision import (
     ReplyAction,
     ReplyDecision,
+    classify_message,
     decide_reply,
     is_urgent_interrupt,
 )
@@ -54,6 +56,13 @@ class DeferredReply:
     reply_target: ReplyTarget
 
 
+@dataclass
+class ActiveSend:
+    incoming: IncomingMessage
+    reply_target: ReplyTarget
+    cancel_before_next_part: bool = False
+
+
 class QQMessageCoalescer:
     def __init__(
         self,
@@ -84,9 +93,14 @@ class QQMessageCoalescer:
         self._deferred: dict[str, DeferredReply] = {}
         self._deferred_tasks: dict[str, asyncio.Task[None]] = {}
         self._afterthought_tasks: dict[str, asyncio.Task[None]] = {}
+        self._active_sends: dict[str, ActiveSend] = {}
 
     async def add(self, key: str, incoming: IncomingMessage, reply_target: ReplyTarget) -> None:
         self._cancel_afterthought(key)
+        if key in self._active_sends:
+            handled = await self._handle_mid_reply_interruption(key, incoming, reply_target)
+            if handled:
+                return
         if key in self._deferred:
             self._cancel_deferred(key)
             deferred = self._deferred.pop(key, None)
@@ -110,6 +124,35 @@ class QQMessageCoalescer:
         if existing and not existing.done():
             existing.cancel()
         self._tasks[key] = asyncio.create_task(self._flush_later(key, decision.wait_seconds))
+
+    async def _handle_mid_reply_interruption(
+        self,
+        key: str,
+        incoming: IncomingMessage,
+        reply_target: ReplyTarget,
+    ) -> bool:
+        active = self._active_sends[key]
+        decision = classify_mid_reply_interruption(incoming.text)
+        if decision == "backchannel":
+            await self._record_without_reply(incoming, mark_unread=False)
+            logger.info("kept sending after backchannel interruption for %s", key)
+            return True
+        if decision == "takeover":
+            active.cancel_before_next_part = True
+            self._pending[key].append(QueuedQQMessage(incoming=incoming, reply_target=reply_target))
+            existing = self._tasks.get(key)
+            if existing and not existing.done():
+                existing.cancel()
+            self._tasks[key] = asyncio.create_task(self._flush_later(key, self.delay_seconds))
+            logger.info("stopping remaining reply parts after user takeover for %s", key)
+            return True
+        return False
+
+    async def _record_without_reply(self, incoming: IncomingMessage, *, mark_unread: bool) -> None:
+        try:
+            await self.engine.handle_message(incoming, skip_reply=True, mark_unread=mark_unread)
+        except TypeError:
+            await self.engine.handle_message(incoming)
 
     def _decision_for(self, key: str):
         queued = self._pending[key]
@@ -219,7 +262,7 @@ class QQMessageCoalescer:
         if reply is None:
             return
         timing_state = None
-        if self.human_timing:
+        if self.human_timing and hasattr(self.engine, "store"):
             try:
                 timing_state = self.engine.store.get_mood_state(reply.canonical_user_id)
             except Exception:
@@ -227,16 +270,20 @@ class QQMessageCoalescer:
         try:
             if self.human_timing:
                 await self.sleep(initial_reply_delay_seconds(merged, reply, state=timing_state, rng=self.rng))
+            self._active_sends[key] = ActiveSend(incoming=merged, reply_target=reply_target)
             await _send_reply_parts(
                 reply_target,
                 reply.text_parts or [reply.text],
                 sleep=self.sleep,
                 rng=self.rng,
                 human_timing=self.human_timing,
+                should_continue=lambda: not self._active_sends.get(key, ActiveSend(merged, reply_target)).cancel_before_next_part,
             )
         except Exception:
             logger.exception("failed to send QQ reply")
             return
+        finally:
+            self._active_sends.pop(key, None)
         if self.on_sticker and reply.sticker_path:
             try:
                 await self.on_sticker(merged, reply)
@@ -449,13 +496,40 @@ async def _send_reply_parts(
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     rng: random.Random | None = None,
     human_timing: bool = True,
+    should_continue: Callable[[], bool] | None = None,
 ) -> None:
     rng = rng or random.Random()
     for index, part in enumerate(parts):
+        if should_continue and not should_continue():
+            return
         if index:
             delay = between_part_delay_seconds(part, rng=rng) if human_timing else min(1.8, 0.45 + len(part) / 45)
             await sleep(delay)
+            if should_continue and not should_continue():
+                return
         await reply_target.reply(content=part, msg_seq=_reply_msg_seq())
+
+
+def classify_mid_reply_interruption(text: str) -> str:
+    stripped = re.sub(r"\s+", "", text.strip())
+    if not stripped:
+        return "ignore_empty"
+    if any(token in stripped for token in ("等下", "等等", "打断一下", "不是这个意思", "我不是说", "先别", "你等会")):
+        return "takeover"
+    if _looks_like_backchannel(stripped):
+        return "backchannel"
+    msg_type = classify_message(text)
+    if msg_type in {"urgent", "question", "emotional", "story", "thinking", "withdrawal"}:
+        return "takeover"
+    if len(stripped) >= 10:
+        return "takeover"
+    return "backchannel"
+
+
+def _looks_like_backchannel(text: str) -> bool:
+    if re.fullmatch(r"(嗯+|哦+|噢+|喔+|啊+|哈+|哈哈+|对+|是+|确实|真的|草|笑死|好+|行+|可以+)[。！!～~]*", text):
+        return True
+    return text in {"对吧", "是吧", "懂了", "原来如此", "有道理"}
 
 
 def _attachments_from_botpy(raw_attachments) -> list[MessageAttachment]:
