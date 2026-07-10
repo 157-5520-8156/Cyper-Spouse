@@ -4,7 +4,12 @@ from pathlib import Path
 import pytest
 
 from companion_daemon.db import CompanionStore
-from companion_daemon.engine import CompanionEngine, relative_chat_time_hint, seed_user
+from companion_daemon.engine import (
+    CompanionEngine,
+    _afterthought_repeats_recent,
+    relative_chat_time_hint,
+    seed_user,
+)
 from companion_daemon.image_generation import GeneratedImage
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import IncomingMessage, MessageAttachment, MoodState
@@ -15,6 +20,13 @@ from companion_daemon.budget import BudgetGate
 from companion_daemon.time import utc_now
 
 TEST_PROMPT = "你是凛，用户的赛博女友。"
+
+
+def test_afterthought_rejects_rephrased_repeat() -> None:
+    assert _afterthought_repeats_recent(
+        "哦对，刚才那句是复习间隙顺手敲的。",
+        ["[qq][刚刚] 她: 哦对，你刚说要考试来着。那我不打扰你啦，好好考。"],
+    )
 
 
 @pytest.mark.asyncio
@@ -30,6 +42,24 @@ async def test_handle_message_updates_mood_and_replies(tmp_path: Path) -> None:
     assert reply.canonical_user_id == "geoff"
     assert reply.mood == "miss_you"
     assert "我在呢" in reply.text
+
+
+@pytest.mark.asyncio
+async def test_normal_reply_runs_the_shared_output_safety_cleanup(tmp_path: Path) -> None:
+    class LocationConfusedModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return "（手机震了一下）成都这边食堂倒没这么卷。"
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, LocationConfusedModel(), TEST_PROMPT)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你们那边食堂怎么样")
+    )
+
+    assert reply is not None
+    assert reply.text == "上海这边食堂倒没这么卷。"
 
 
 @pytest.mark.asyncio
@@ -51,6 +81,144 @@ async def test_deferred_reply_only_enters_history_after_delivery_confirmation(tm
 
     assert store.outbox_message(reply.delivery_id)["status"] == "failed"
     assert not any(row["direction"] == "out" for row in store.recent_messages("geoff"))
+
+
+@pytest.mark.asyncio
+async def test_failed_deferred_reply_creates_reconsider_task_without_writing_history(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+    original = IncomingMessage(platform="qq", platform_user_id="geoff", text="你刚刚还没回我那个")
+    task_id = engine.create_deferred_reply_task(original, defer_minutes=5, reason="unread_during_study")
+
+    reply = await engine.handle_message(original, defer_delivery=True, context_hint="刚才因为在忙，隔了一会儿才回来。")
+    engine.fail_reply_delivery(reply, "network failed", source_task_id=task_id)
+
+    tasks = store.recent_social_tasks("geoff")
+    assert store.outbox_message(reply.delivery_id)["status"] == "failed"
+    assert not any(row["direction"] == "out" for row in store.recent_messages("geoff"))
+    assert any(task["id"] == task_id and task["kind"] == "reply_later" and task["status"] == "cancelled" for task in tasks)
+    retry = [task for task in tasks if task["kind"] == "reply_reconsider"]
+    assert retry and retry[0]["status"] == "pending"
+
+
+@pytest.mark.asyncio
+async def test_serious_apology_uses_single_repair_curve_and_still_records_key_event(
+    tmp_path: Path,
+) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(
+        store,
+        initial_state=MoodState(
+            mood="hurt",
+            trust=30,
+            security=30,
+            emotional_charge=30,
+            patience=40,
+        ),
+    )
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT)
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我认真道歉，以后我会注意")
+    )
+
+    state = store.get_mood_state("geoff")
+    assert state.mood == "calm"
+    assert state.security > 30
+    assert state.patience > 40
+    assert state.emotional_charge < 30
+    assert state.last_interaction_event == "repair_attempt"
+    assert any(
+        row["kind"] == "key_relationship_event" and "认真修复" in row["content"]
+        for row in store.memories("geoff")
+    )
+    prompt_text = "\n".join(message["content"] for message in model.calls[-1])
+    assert "关键事件" in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_key_relationship_event_reaches_the_reply_prompt(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT)
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你还记得那天说的桂花乌龙吗")
+    )
+
+    prompt_text = "\n".join(message["content"] for message in model.calls[-1])
+    assert "关键事件" in prompt_text
+    assert any(row["kind"] == "key_relationship_event" for row in store.memories("geoff"))
+
+
+def test_failed_proactive_delivery_creates_reconsider_task(tmp_path: Path) -> None:
+    from companion_daemon.models import ProactiveDecision
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+    decision = ProactiveDecision(
+        canonical_user_id="geoff",
+        private_thought="想跟他说一句",
+        should_send=True,
+        platform="qq",
+        message_type="text",
+        message="刚路过操场，突然想到你。",
+        delivery_id=store.queue_outgoing("geoff", "qq", "刚路过操场，突然想到你。", kind="proactive"),
+    )
+
+    engine.fail_proactive_delivery(decision, "network down")
+
+    assert store.outbox_message(decision.delivery_id)["status"] == "failed"
+    tasks = store.recent_social_tasks("geoff")
+    reconsider = [task for task in tasks if task["kind"] == "reply_reconsider"]
+    assert reconsider and reconsider[0]["status"] == "pending"
+    assert "主动消息" in reconsider[0]["reason"]
+    assert not any(row["direction"] == "out" for row in store.recent_messages("geoff"))
+
+
+def test_refresh_waiting_state_advances_waiting_psychology(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+    # A proactive delivery four hours ago with no incoming reply since.
+    with store.connect() as conn:
+        conn.execute(
+            "insert into proactive_delivery (canonical_user_id, platform, sent_at) values (?, ?, ?)",
+            ("geoff", "qq", (utc_now() - timedelta(hours=4)).isoformat()),
+        )
+
+    state = engine.refresh_waiting_state("geoff")
+
+    assert state.unresolved_emotion == "主动消息没等到回应，她会从期待变成有点收住。"
+    assert store.get_mood_state("geoff").unresolved_emotion == state.unresolved_emotion
+
+
+def test_debug_snapshot_includes_social_task_visibility(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+    store.create_social_task(
+        "geoff",
+        kind="reply_later",
+        platform="qq",
+        platform_user_id="2759284998",
+        payload={"text": "稍后回"},
+        reason="unread_during_class",
+        due_at=utc_now(),
+        expires_at=utc_now() + timedelta(hours=1),
+    )
+
+    snapshot = engine.debug_snapshot("geoff")
+
+    assert snapshot["recent_social_tasks"][0]["reason"] == "unread_during_class"
+    assert snapshot["dashboard"]["active_task_count"] == 1
+    assert snapshot["dashboard"]["next_plan"]
+    assert snapshot["dashboard"]["scene"]["location"]
+    assert snapshot["dashboard"]["scene"]["action"]
 
 
 @pytest.mark.asyncio
@@ -234,6 +402,53 @@ async def test_handle_message_relaxes_after_warm_proactive_response(tmp_path: Pa
     prompt_text = "\n".join(message["content"] for message in model.calls[-1])
     assert "主动反馈" not in prompt_text
     assert "本轮回复策略" in prompt_text
+
+
+@pytest.mark.asyncio
+async def test_life_share_response_uses_the_same_feedback_loop_as_proactive_message(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store, initial_state=MoodState(mood="miss_you", security=35, initiative=45))
+    store.record_proactive_delivery("geoff", "qq:life_event")
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="哈哈，听起来也太离谱了")
+    )
+
+    state = store.get_mood_state("geoff")
+    assert state.security > 35
+    assert state.perceived_responsiveness > 50
+    assert any(row["kind"] == "proactive_response" for row in store.memories("geoff"))
+
+
+def test_confirm_life_event_delivery_feeds_back_into_life_runtime(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store, initial_state=MoodState(initiative=45, emotional_charge=12))
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+
+    engine.confirm_life_event_delivery("geoff")
+
+    state = store.get_mood_state("geoff")
+    assert store.last_initiated_delivery("geoff", "qq")
+    assert state.initiative < 45
+    assert store.get_life_runtime("geoff") is not None
+
+
+@pytest.mark.asyncio
+async def test_user_event_can_change_current_life_context(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT)
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我现在真的好难受")
+    )
+
+    runtime = store.get_life_runtime("geoff")
+    prompt_text = "\n".join(message["content"] for message in model.calls[-1])
+    assert runtime.user_event_effect
+    assert "用户事件余波" in prompt_text
 
 
 @pytest.mark.asyncio

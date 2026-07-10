@@ -58,6 +58,7 @@ async def test_life_event_prompt_sets_grounded_fiction_rules() -> None:
     assert "不要邀请用户立刻去她身边" in system_prompt
     assert "生活连续性账本" in system_prompt
     assert "spontaneous_recall" in system_prompt
+    assert "已发生的私有事件" in system_prompt
 
 
 @pytest.mark.asyncio
@@ -74,21 +75,24 @@ async def test_life_event_send_records_outgoing_and_memory(tmp_path: Path, monke
         def __init__(self, model):
             self.model = model
 
-        async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str) -> LifeEvent:
+        async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str, life_context: str | None = None, lived_event: str | None = None) -> LifeEvent:
             return LifeEvent(topic="午饭", messages=["刚刚吃了南瓜。", "有点甜。"], memory_mode="spontaneous_recall")
 
-    class FakeQQClient:
+    class FakeDelivery:
         sent: list[str] = []
 
         def __init__(self, *args, **kwargs):
             return None
 
-        async def send_c2c_text(self, openid: str, message: str, *, is_wakeup: bool) -> None:
+        def proactive_recipient_id(self) -> None:
+            return None
+
+        async def send_text(self, openid: str, message: str) -> None:
             self.sent.append(message)
 
     monkeypatch.setattr(life_event_module, "build_companion_engine", lambda: FakeEngine())
     monkeypatch.setattr(life_event_module, "LifeEventGenerator", FakeGenerator)
-    monkeypatch.setattr(life_event_module, "QQOfficialClient", FakeQQClient)
+    monkeypatch.setattr(life_event_module, "QQDelivery", FakeDelivery)
     monkeypatch.setattr(
         life_event_module,
         "get_settings",
@@ -111,14 +115,22 @@ async def test_life_event_send_records_outgoing_and_memory(tmp_path: Path, monke
     sent = await run(user_id="geoff", send=True, sandbox=True, generate_image=False, image_kind="life")
 
     assert sent is True
-    assert FakeQQClient.sent == ["刚刚吃了南瓜。", "有点甜。"]
+    assert FakeDelivery.sent == ["刚刚吃了南瓜。", "有点甜。"]
     assert [row["text"] for row in store.recent_messages("geoff", limit=2)] == ["刚刚吃了南瓜。", "有点甜。"]
+    assert store.outbox_message(1)["kind"] == "life_event"
+    assert store.outbox_message(1)["status"] == "delivered"
+    assert store.outbox_message(2)["status"] == "delivered"
     memories = store.memories("geoff", limit=10)
     assert any(row["kind"] == "private_life_event" and "午饭" in row["content"] for row in memories)
     assert any(row["kind"] == "life_event" and "午饭" in row["content"] for row in memories)
+    assert any(
+        row["kind"] == "private_life_event" and row["status"] == "completed"
+        for row in store.recent_life_events("geoff", limit=10)
+    )
     private = store.memory_by_source("geoff", kind="private_life_event", source="life_event:spontaneous_recall")
     assert private is not None
     assert private["confidence"] == pytest.approx(0.68)
+    assert store.unshared_private_life_events("geoff") == []
     assert store.usage_count("life_event", "month", datetime.now(UTC)) == 1
 
 
@@ -138,19 +150,22 @@ async def test_life_event_text_send_failure_does_not_record_lived_memory(
         def __init__(self, model):
             self.model = model
 
-        async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str) -> LifeEvent:
+        async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str, life_context: str | None = None, lived_event: str | None = None) -> LifeEvent:
             return LifeEvent(topic="午饭", messages=["刚刚吃了南瓜。", "有点甜。"])
 
-    class FailingQQClient:
+    class FailingDelivery:
         def __init__(self, *args, **kwargs):
             return None
 
-        async def send_c2c_text(self, openid: str, message: str, *, is_wakeup: bool) -> None:
+        def proactive_recipient_id(self) -> None:
+            return None
+
+        async def send_text(self, openid: str, message: str) -> None:
             raise RuntimeError("qq 400")
 
     monkeypatch.setattr(life_event_module, "build_companion_engine", lambda: FakeEngine())
     monkeypatch.setattr(life_event_module, "LifeEventGenerator", FakeGenerator)
-    monkeypatch.setattr(life_event_module, "QQOfficialClient", FailingQQClient)
+    monkeypatch.setattr(life_event_module, "QQDelivery", FailingDelivery)
     monkeypatch.setattr(
         life_event_module,
         "get_settings",
@@ -175,10 +190,83 @@ async def test_life_event_text_send_failure_does_not_record_lived_memory(
     assert sent is False
     memories = store.memories("geoff", limit=10)
     assert any(row["kind"] == "private_life_event" and "午饭" in row["content"] for row in memories)
+    assert any(
+        row["kind"] == "private_life_event" and row["status"] == "completed"
+        for row in store.recent_life_events("geoff", limit=10)
+    )
     assert not any(row["kind"] == "life_event" for row in memories)
     assert any(row["kind"] == "life_event_send_failed" and "午饭" in row["content"] for row in memories)
+    assert any("午饭" in row["content"] for row in store.unshared_private_life_events("geoff"))
     assert store.last_proactive_delivery("geoff", "qq:life_event") is None
     assert store.recent_messages("geoff", limit=5) == []
+    assert store.outbox_message(1)["kind"] == "life_event"
+    assert store.outbox_message(1)["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_life_event_partial_send_still_counts_as_shared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.map_account("qq", "openid", "geoff")
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = store
+
+    class FakeGenerator:
+        def __init__(self, model):
+            self.model = model
+
+        async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str, life_context: str | None = None, lived_event: str | None = None) -> LifeEvent:
+            return LifeEvent(topic="午饭", messages=["刚刚吃了南瓜。", "有点甜。"])
+
+    class PartialDelivery:
+        def __init__(self, *args, **kwargs):
+            return None
+
+        def proactive_recipient_id(self) -> None:
+            return None
+
+        async def send_text(self, openid: str, message: str) -> None:
+            if message == "有点甜。":
+                raise RuntimeError("qq 400")
+
+    monkeypatch.setattr(life_event_module, "build_companion_engine", lambda: FakeEngine())
+    monkeypatch.setattr(life_event_module, "LifeEventGenerator", FakeGenerator)
+    monkeypatch.setattr(life_event_module, "QQDelivery", PartialDelivery)
+    monkeypatch.setattr(
+        life_event_module,
+        "get_settings",
+        lambda: SimpleNamespace(
+            deepseek_api_key=None,
+            deepseek_base_url="https://api.deepseek.com",
+            deepseek_model="deepseek-chat",
+            monthly_budget_cny=80,
+            daily_budget_cny=3,
+            soft_daily_budget_cny=2,
+            monthly_image_limit=20,
+            monthly_vision_limit=120,
+            monthly_audio_limit=60,
+            openai_api_key=None,
+            qq_bot_app_id="app",
+            qq_bot_secret="secret",
+        ),
+    )
+
+    sent = await run(user_id="geoff", send=True, sandbox=True, generate_image=False, image_kind="life")
+
+    assert sent is False
+    # The first message reached the user, so the event may not be re-shared later.
+    assert store.unshared_private_life_events("geoff") == []
+    assert store.last_proactive_delivery("geoff", "qq:life_event") is not None
+    assert store.outbox_message(1)["status"] == "delivered"
+    assert store.outbox_message(2)["status"] == "failed"
+    memories = store.memories("geoff", limit=10)
+    shared = [row for row in memories if row["kind"] == "life_event"]
+    assert shared and "刚刚吃了南瓜。" in shared[0]["content"]
+    assert "有点甜。" not in shared[0]["content"]
 
 
 @pytest.mark.asyncio
@@ -194,7 +282,7 @@ async def test_life_event_dry_run_does_not_record_private_life(tmp_path: Path, m
         def __init__(self, model):
             self.model = model
 
-        async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str) -> LifeEvent:
+        async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str, life_context: str | None = None, lived_event: str | None = None) -> LifeEvent:
             return LifeEvent(topic="午饭", messages=["刚刚吃了南瓜。"])
 
     monkeypatch.setattr(life_event_module, "build_companion_engine", lambda: FakeEngine())
@@ -240,7 +328,7 @@ async def test_life_event_respects_budget_before_generation(tmp_path: Path, monk
         def __init__(self, model):
             self.model = model
 
-        async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str) -> LifeEvent:
+        async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str, life_context: str | None = None, lived_event: str | None = None) -> LifeEvent:
             type(self).called = True
             return LifeEvent(topic="午饭", messages=["刚刚吃了南瓜。"])
 

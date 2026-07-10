@@ -5,9 +5,16 @@ from companion_daemon.multimodal_analysis import AttachmentInsight
 from companion_daemon.time import utc_now
 
 
-def update_mood_for_message(previous: MoodState, message: IncomingMessage) -> MoodState:
+def update_mood_for_message(
+    previous: MoodState,
+    message: IncomingMessage,
+    *,
+    event=None,
+) -> MoodState:
     text = message.text
-    event = interpret_interaction(message, previous)
+    # Callers that already interpreted the interaction pass it in so the same
+    # message is not classified twice per turn.
+    event = event or interpret_interaction(message, previous)
     state = transition_emotional_state(previous, event)
 
     if any(token in text for token in ["想你", "抱抱", "喜欢你"]):

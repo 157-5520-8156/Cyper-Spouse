@@ -54,6 +54,149 @@ def test_next_sleep_seconds_adds_scheduler_jitter() -> None:
 
 
 @pytest.mark.asyncio
+async def test_scheduler_honors_last_decision_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import datetime, timedelta
+
+    class FakeStore:
+        def canonical_users(self) -> list[str]:
+            return ["geoff"]
+
+        def get_mood_state(self, user_id: str) -> MoodState:
+            return MoodState(relationship_stage="friend", mood="calm")
+
+        def last_proactive_delivery(self, user_id: str, channel: str) -> None:
+            return None
+
+        def last_proactive_event(self, user_id: str) -> dict:
+            return {
+                "should_send": 0,
+                "cooldown_minutes": 120,
+                "created_at": (datetime.now().astimezone() - timedelta(minutes=10)).isoformat(),
+            }
+
+        def next_due_social_task(self, user_id: str, *, kinds, now) -> None:
+            return None
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = FakeStore()
+
+    calls: list[str] = []
+
+    async def fake_run_once(user_id: str, *, send: bool, sandbox: bool) -> None:
+        calls.append(user_id)
+
+    monkeypatch.setattr(proactive_scheduler, "build_companion_engine", lambda: FakeEngine())
+    monkeypatch.setattr(proactive_scheduler, "get_settings", lambda: SimpleNamespace(proactive_min_cooldown_minutes=30))
+    monkeypatch.setattr(proactive_scheduler, "run_once", fake_run_once)
+
+    await scheduler_loop(
+        send=True,
+        sandbox=True,
+        once=True,
+        life_events=False,
+        generate_life_images=False,
+        life_image_kind="life",
+    )
+
+    assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_due_social_task_overrides_decision_cooldown(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import datetime, timedelta
+
+    class FakeStore:
+        def canonical_users(self) -> list[str]:
+            return ["geoff"]
+
+        def get_mood_state(self, user_id: str) -> MoodState:
+            return MoodState(relationship_stage="friend", mood="calm")
+
+        def last_proactive_delivery(self, user_id: str, channel: str) -> None:
+            return None
+
+        def last_proactive_event(self, user_id: str) -> dict:
+            return {
+                "should_send": 0,
+                "cooldown_minutes": 120,
+                "created_at": (datetime.now().astimezone() - timedelta(minutes=10)).isoformat(),
+            }
+
+        def next_due_social_task(self, user_id: str, *, kinds, now) -> dict:
+            return {"id": 7, "kind": "comfort_followup"}
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = FakeStore()
+
+    calls: list[str] = []
+
+    async def fake_run_once(user_id: str, *, send: bool, sandbox: bool) -> None:
+        calls.append(user_id)
+
+    monkeypatch.setattr(proactive_scheduler, "build_companion_engine", lambda: FakeEngine())
+    monkeypatch.setattr(proactive_scheduler, "get_settings", lambda: SimpleNamespace(proactive_min_cooldown_minutes=30))
+    monkeypatch.setattr(proactive_scheduler, "run_once", fake_run_once)
+
+    await scheduler_loop(
+        send=True,
+        sandbox=True,
+        once=True,
+        life_events=False,
+        generate_life_images=False,
+        life_image_kind="life",
+    )
+
+    assert calls == ["geoff"]
+
+
+@pytest.mark.asyncio
+async def test_scheduler_refreshes_waiting_state_even_when_cooldown_skips(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeStore:
+        def canonical_users(self) -> list[str]:
+            return ["geoff"]
+
+        def get_mood_state(self, user_id: str) -> MoodState:
+            return MoodState(relationship_stage="friend", mood="calm")
+
+        def last_proactive_delivery(self, user_id: str, channel: str) -> str:
+            # A very recent delivery keeps the proactive cooldown active.
+            from datetime import datetime
+
+            return datetime.now().astimezone().isoformat()
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = FakeStore()
+            self.refreshed: list[str] = []
+
+        def refresh_waiting_state(self, user_id: str) -> MoodState:
+            self.refreshed.append(user_id)
+            return self.store.get_mood_state(user_id)
+
+    engine = FakeEngine()
+
+    async def fake_run_once(user_id: str, *, send: bool, sandbox: bool) -> None:
+        raise AssertionError("cooldown should have skipped the proactive decision")
+
+    monkeypatch.setattr(proactive_scheduler, "build_companion_engine", lambda: engine)
+    monkeypatch.setattr(proactive_scheduler, "get_settings", lambda: SimpleNamespace(proactive_min_cooldown_minutes=30))
+    monkeypatch.setattr(proactive_scheduler, "run_once", fake_run_once)
+
+    await scheduler_loop(
+        send=True,
+        sandbox=True,
+        once=True,
+        life_events=False,
+        generate_life_images=False,
+        life_image_kind="life",
+    )
+
+    assert engine.refreshed == ["geoff"]
+
+
+@pytest.mark.asyncio
 async def test_scheduler_survives_life_event_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeStore:
         def canonical_users(self) -> list[str]:

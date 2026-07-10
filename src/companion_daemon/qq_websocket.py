@@ -38,6 +38,12 @@ DEFERRED_CONTEXT_HINT = (
     "可以自然地带一点“刚在忙”或“刚看到”的感觉，但不要每次都解释，也不要道歉。"
 )
 
+GHOST_CONTEXT_HINT = (
+    "回复时机提示: 她刚才看到了这条消息，但当时心情不好，故意没有马上回。"
+    "现在过了一会儿才决定接话，语气可以延续那份情绪的余温，"
+    "不要假装刚看到，也不要突然热情。"
+)
+
 
 class ReplyTarget:
     async def reply(self, **kwargs) -> object:
@@ -54,6 +60,7 @@ class QueuedQQMessage:
 class DeferredReply:
     merged: IncomingMessage
     reply_target: ReplyTarget
+    task_id: int | None = None
 
 
 @dataclass
@@ -80,6 +87,7 @@ class QQMessageCoalescer:
         on_reply: Callable[[CompanionReply], Awaitable[None]] | None = None,
         on_sticker: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None = None,
         on_image: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None = None,
+        on_reaction: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None = None,
         human_timing: bool = False,
         enable_reply_decision: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -91,6 +99,7 @@ class QQMessageCoalescer:
         self.on_reply = on_reply
         self.on_sticker = on_sticker
         self.on_image = on_image
+        self.on_reaction = on_reaction
         self.human_timing = human_timing
         self.enable_reply_decision = enable_reply_decision
         self.sleep = sleep
@@ -186,6 +195,31 @@ class QQMessageCoalescer:
                 update={"text": merged_text, "attachments": attachments}
             )
 
+            if hasattr(self.engine, "phone_attention_decision"):
+                attention = self.engine.phone_attention_decision(merged)
+                if not attention.read_now and attention.defer_minutes:
+                    task_id = self._persist_deferred_reply(merged, attention.defer_minutes, attention.reason)
+                    self._deferred[key] = DeferredReply(merged=merged, reply_target=last.reply_target, task_id=task_id)
+                    self._deferred_tasks[key] = asyncio.create_task(
+                        self._fire_deferred_after(
+                            key,
+                            attention.defer_minutes,
+                            ReplyDecision(
+                                ReplyAction.DEFER,
+                                defer_minutes=attention.defer_minutes,
+                                reason=attention.reason,
+                                mark_unread=True,
+                            ),
+                        )
+                    )
+                    logger.info(
+                        "left message unread for %s by %.1f min (%s)",
+                        key,
+                        attention.defer_minutes,
+                        attention.reason,
+                    )
+                    return
+
             if self.enable_reply_decision:
                 has_unread = False
                 mood_state = None
@@ -216,7 +250,10 @@ class QQMessageCoalescer:
                     )
                     return
                 if action.action == ReplyAction.DEFER and action.defer_minutes:
-                    self._deferred[key] = DeferredReply(merged=merged, reply_target=last.reply_target)
+                    # At this point phone attention already said "read now", so this
+                    # is the read-but-sidetracked case rather than an unread defer.
+                    task_id = self._persist_read_later(merged, action.defer_minutes, action.reason)
+                    self._deferred[key] = DeferredReply(merged=merged, reply_target=last.reply_target, task_id=task_id)
                     self._deferred_tasks[key] = asyncio.create_task(
                         self._fire_deferred_after(key, action.defer_minutes, action)
                     )
@@ -244,9 +281,14 @@ class QQMessageCoalescer:
             if not deferred:
                 return
             logger.info("firing deferred reply for %s", key)
-            await self._generate_and_send(
-                deferred.merged, deferred.reply_target, key=key, context_hint=DEFERRED_CONTEXT_HINT
+            context_hint = (
+                GHOST_CONTEXT_HINT if decision.reason == "emotional_ghost" else DEFERRED_CONTEXT_HINT
             )
+            delivered = await self._generate_and_send(
+                deferred.merged, deferred.reply_target, key=key, context_hint=context_hint
+            )
+            if delivered and hasattr(self.engine, "complete_deferred_reply_task"):
+                self.engine.complete_deferred_reply_task(deferred.task_id)
         except asyncio.CancelledError:
             return
 
@@ -254,6 +296,27 @@ class QQMessageCoalescer:
         task = self._deferred_tasks.pop(key, None)
         if task and not task.done():
             task.cancel()
+        deferred = self._deferred.get(key)
+        if deferred and hasattr(self.engine, "cancel_deferred_reply_task"):
+            self.engine.cancel_deferred_reply_task(deferred.task_id)
+
+    def _persist_deferred_reply(self, message: IncomingMessage, minutes: float, reason: str) -> int | None:
+        if not hasattr(self.engine, "create_deferred_reply_task"):
+            return None
+        try:
+            return self.engine.create_deferred_reply_task(message, defer_minutes=minutes, reason=reason)
+        except Exception:
+            logger.exception("failed to persist deferred reply; keeping in-memory fallback")
+            return None
+
+    def _persist_read_later(self, message: IncomingMessage, minutes: float, reason: str) -> int | None:
+        if not hasattr(self.engine, "create_read_later_task"):
+            return self._persist_deferred_reply(message, minutes, reason)
+        try:
+            return self.engine.create_read_later_task(message, defer_minutes=minutes, reason=reason)
+        except Exception:
+            logger.exception("failed to persist read-later task; keeping in-memory fallback")
+            return None
 
     async def _generate_and_send(
         self,
@@ -262,7 +325,9 @@ class QQMessageCoalescer:
         *,
         key: str = "",
         context_hint: str | None = None,
-    ) -> None:
+    ) -> bool:
+        if hasattr(self.engine, "mark_phone_read_for_message"):
+            self.engine.mark_phone_read_for_message(merged)
         kwargs: dict[str, object] = {}
         if context_hint:
             kwargs["context_hint"] = context_hint
@@ -274,7 +339,13 @@ class QQMessageCoalescer:
             kwargs.pop("defer_delivery", None)
             reply = await self.engine.handle_message(merged, **kwargs)
         if reply is None:
-            return
+            return False
+        if self.on_reaction and reply.suggested_reaction:
+            # She reacts to the message as she reads it, before typing a reply.
+            try:
+                await self.on_reaction(merged, reply)
+            except Exception:
+                logger.exception("failed to send QQ emoji reaction")
         timing_state = None
         if (
             self.human_timing
@@ -301,7 +372,7 @@ class QQMessageCoalescer:
             logger.exception("failed to send QQ reply")
             if hasattr(self.engine, "fail_reply_delivery"):
                 self.engine.fail_reply_delivery(reply, "QQ text delivery failed")
-            return
+            return False
         finally:
             self._active_sends.pop(key, None)
         if hasattr(self.engine, "confirm_reply_delivery"):
@@ -319,6 +390,7 @@ class QQMessageCoalescer:
         if self.on_reply:
             await self.on_reply(reply)
         self._schedule_afterthought(key, merged, reply_target, utc_now())
+        return True
 
     def _schedule_afterthought(
         self,
@@ -329,13 +401,20 @@ class QQMessageCoalescer:
     ) -> None:
         if not self.human_timing:
             return
-        plans = [
-            AfterthoughtPlan("quick_continue", self.rng.uniform(6, 18), 0.45),
-            AfterthoughtPlan("topic_drift", self.rng.uniform(35, 120), 0.28),
-            AfterthoughtPlan("silence_react", self.rng.uniform(150, 420), 0.18),
-        ]
+        try:
+            canonical_user_id = self.engine.store.resolve_user(merged.platform, merged.platform_user_id)
+            state = self.engine.store.get_mood_state(canonical_user_id)
+            if state.mood in {"hurt", "guarded"} or state.boundary_level >= 20:
+                logger.info("did not schedule afterthought for %s because she is keeping a boundary", key)
+                return
+        except (AttributeError, KeyError):
+            # Lightweight test doubles and adapters without a mood store do not
+            # participate in the optional afterthought feature.
+            pass
+        plans = _afterthought_plans(merged.text, self.rng)
         eligible = [plan for plan in plans if self.rng.random() <= plan.probability]
         if not eligible:
+            logger.info("no afterthought planned for %s", key)
             return
         # One reply may invite a small second thought, never a burst of them.
         selected = eligible[min(len(eligible) - 1, int(self.rng.random() * len(eligible)))]
@@ -344,6 +423,7 @@ class QQMessageCoalescer:
                 self._fire_afterthought(key, selected, merged, reply_target, reply_sent_at)
             )
         ]
+        logger.info("scheduled afterthought for %s mode=%s in %.1fs", key, selected.mode, selected.delay_seconds)
 
     async def _fire_afterthought(
         self,
@@ -364,22 +444,66 @@ class QQMessageCoalescer:
                 mode=plan.mode,
             )
             if not text:
+                logger.info("afterthought withheld for %s mode=%s", key, plan.mode)
                 return
             logger.info("sending afterthought for %s mode=%s", key, plan.mode)
             await self.sleep(self.rng.uniform(1.5, 4.0))
+            delivery_id = None
+            if hasattr(self.engine, "queue_afterthought_delivery"):
+                delivery_id = self.engine.queue_afterthought_delivery(
+                    canonical_user_id,
+                    merged.platform,
+                    text,
+                )
             await reply_target.reply(content=text, msg_seq=_reply_msg_seq())
             if hasattr(self.engine, "confirm_afterthought_delivery"):
-                self.engine.confirm_afterthought_delivery(canonical_user_id, merged.platform, text)
+                self.engine.confirm_afterthought_delivery(
+                    canonical_user_id,
+                    merged.platform,
+                    text,
+                    delivery_id=delivery_id,
+                )
         except asyncio.CancelledError:
             return
         except Exception:
             logger.exception("afterthought failed")
+            if "delivery_id" in locals() and hasattr(
+                self.engine,
+                "fail_afterthought_delivery",
+            ):
+                self.engine.fail_afterthought_delivery(
+                    delivery_id,
+                    "QQ afterthought delivery failed",
+                )
 
     def _cancel_afterthought(self, key: str) -> None:
         tasks = self._afterthought_tasks.pop(key, [])
         for task in tasks:
             if not task.done():
                 task.cancel()
+        if tasks:
+            logger.info("cancelled pending afterthought for %s due to new user activity", key)
+
+
+def _afterthought_plans(text: str, rng: random.Random) -> list[AfterthoughtPlan]:
+    """Create restrained continuation opportunities from the user's actual turn."""
+    message_type = classify_message(text)
+    compact = re.sub(r"\s+", "", text)
+    explicit_farewell = any(token in compact for token in ("晚安", "睡了", "先睡", "拜拜", "回头聊", "明天聊"))
+    if message_type in {"urgent", "farewell", "withdrawal", "thinking", "reaction_pause"} or explicit_farewell:
+        return []
+    if message_type in {"story", "emotional", "nonverbal_share"} or len(text.strip()) >= 35:
+        return [
+            AfterthoughtPlan("quick_continue", rng.uniform(7, 20), 0.62),
+            AfterthoughtPlan("topic_drift", rng.uniform(55, 150), 0.36),
+            AfterthoughtPlan("silence_react", rng.uniform(210, 540), 0.20),
+        ]
+    if message_type == "minimal_response":
+        return [AfterthoughtPlan("silence_react", rng.uniform(240, 600), 0.24)]
+    return [
+        AfterthoughtPlan("quick_continue", rng.uniform(8, 24), 0.34),
+        AfterthoughtPlan("topic_drift", rng.uniform(70, 180), 0.22),
+    ]
 
 
 class CompanionQQClient(botpy.Client):
@@ -409,20 +533,24 @@ class CompanionQQClient(botpy.Client):
 
     def _is_duplicate(self, message_id: str | None, user_id: str, text: str) -> bool:
         import time as _time
+
         now = _time.time()
+        text_key = f"{user_id}:{text[:80]}"
+        recent = self._recent_text_keys.get(text_key, 0)
+        # QQ can redeliver one user turn with a new event id after a reconnect.
+        # Only use this narrow content window when there *is* an id, so a human
+        # consciously sending the same short text a few seconds later still works.
+        text_window = 1.5 if message_id else 5.0
+        if now - recent < text_window:
+            logger.info("skipped near-simultaneous duplicate message: user=%s", user_id)
+            return True
         if message_id:
             mid = str(message_id)
             if mid in self._seen_message_ids:
                 logger.info("skipped duplicate message by id: %s", mid)
                 return True
             self._seen_message_ids.add(mid)
-        else:
-            text_key = f"{user_id}:{text[:80]}"
-            recent = self._recent_text_keys.get(text_key, 0)
-            if now - recent < 5.0:
-                logger.info("skipped duplicate message by text: user=%s", user_id)
-                return True
-            self._recent_text_keys[text_key] = now
+        self._recent_text_keys[text_key] = now
         if len(self._recent_text_keys) > 200:
             cutoff = now - 10.0
             self._recent_text_keys = {k: v for k, v in self._recent_text_keys.items() if v > cutoff}

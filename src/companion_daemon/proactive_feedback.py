@@ -6,36 +6,22 @@ from companion_daemon.models import MoodState
 
 @dataclass(frozen=True)
 class ProactiveFeedback:
+    """The prompt never names this feedback; it reaches the model only through
+    the state changes applied below and the stored memory."""
+
     kind: str
-    prompt_line: str
     memory_content: str
 
 
 def classify_proactive_feedback(text: str) -> ProactiveFeedback:
     stripped = text.strip()
     if _has_any(stripped, [r"滚", r"别烦", r"烦不烦", r"闭嘴", r"不用你"]):
-        return ProactiveFeedback(
-            "rejected",
-            "主动反馈: 用户刚回应她的主动消息，但语气拒斥；她会受挫并收回去，不要继续贴近。",
-            "主动找用户后被拒斥，之后会更克制。",
-        )
+        return ProactiveFeedback("rejected", "主动找用户后被拒斥，之后会更克制。")
     if _has_any(stripped, [r"哈哈", r"嘿嘿", r"我在", r"来了", r"刚忙完", r"抱歉", r"对不起", r"谢谢", r"想你"]):
-        return ProactiveFeedback(
-            "warm",
-            "主动反馈: 用户温和地回应了她的主动消息；她会明显放松，不需要继续试探。",
-            "主动找用户后得到温和回应，安全感上升。",
-        )
+        return ProactiveFeedback("warm", "主动找用户后得到温和回应，安全感上升。")
     if _has_any(stripped, [r"等下", r"一会儿", r"忙", r"晚点", r"先不说", r"哦$", r"嗯$"]):
-        return ProactiveFeedback(
-            "thin_or_busy",
-            "主动反馈: 用户回应了她的主动消息，但比较短或在忙；她会松一口气，又有点收住。",
-            "主动找用户后得到短回应，知道对方在忙但会稍微收住。",
-        )
-    return ProactiveFeedback(
-        "answered",
-        "主动反馈: 用户回应了她的主动消息；她会放松一点，但继续观察对方的语气。",
-        "主动找用户后得到回应，紧张感下降。",
-    )
+        return ProactiveFeedback("thin_or_busy", "主动找用户后得到短回应，知道对方在忙但会稍微收住。")
+    return ProactiveFeedback("answered", "主动找用户后得到回应，紧张感下降。")
 
 
 def apply_proactive_feedback(state: MoodState, feedback: ProactiveFeedback) -> MoodState:

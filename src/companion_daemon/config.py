@@ -1,7 +1,7 @@
 from functools import lru_cache
 from pathlib import Path
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -15,8 +15,35 @@ class Settings(BaseSettings):
     enable_reply_rewrite: bool = Field(default=False, alias="ENABLE_REPLY_REWRITE")
     enable_reply_decision: bool = Field(default=True, alias="ENABLE_REPLY_DECISION")
     qq_adapter: str = Field(default="official", alias="QQ_ADAPTER")
-    snowluma_api_url: str = Field(default="http://127.0.0.1:5700", alias="SNOWLUMA_API_URL")
-    snowluma_access_token: str | None = Field(default=None, alias="SNOWLUMA_ACCESS_TOKEN")
+    napcat_api_url: str = Field(
+        default="http://127.0.0.1:3000",
+        validation_alias=AliasChoices("NAPCAT_API_URL"),
+    )
+    napcat_access_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("NAPCAT_ACCESS_TOKEN"),
+    )
+    napcat_allow_group_messages: bool = Field(default=False, alias="NAPCAT_ALLOW_GROUP_MESSAGES")
+    napcat_allowed_private_user_ids: str = Field(
+        default="",
+        alias="NAPCAT_ALLOWED_PRIVATE_USER_IDS",
+    )
+    napcat_proactive_user_id: str | None = Field(
+        default=None,
+        alias="NAPCAT_PROACTIVE_USER_ID",
+    )
+    napcat_accept_unauthenticated_local_events: bool = Field(
+        default=True,
+        alias="NAPCAT_ACCEPT_UNAUTHENTICATED_LOCAL_EVENTS",
+    )
+    onebot_api_url: str = Field(
+        default="http://127.0.0.1:5700",
+        validation_alias=AliasChoices("ONEBOT_API_URL", "SNOWLUMA_API_URL"),
+    )
+    onebot_access_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("ONEBOT_ACCESS_TOKEN", "SNOWLUMA_ACCESS_TOKEN"),
+    )
     conversation_core: str = Field(default="prompt", alias="CONVERSATION_CORE")
     sillytavern_base_url: str = Field(default="http://127.0.0.1:8000", alias="SILLYTAVERN_BASE_URL")
     database_path: Path = Path("data/companion.sqlite")

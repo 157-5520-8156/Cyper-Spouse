@@ -23,16 +23,23 @@ from companion_daemon.reply_timing import emotion_reply_timing
 def test_memory_candidates_detect_life_fact_and_favorite() -> None:
     candidates = detect_memory_candidates("我人在成都，最近特别喜欢桂花乌龙。")
 
-    assert any(candidate.kind == "custom" and "成都" in candidate.text for candidate in candidates)
+    # Storage kind now matches the retrieval bonus kind so life facts rank properly.
+    assert any(candidate.kind == "life_fact" and "成都" in candidate.text for candidate in candidates)
     assert any(candidate.kind == "favorite_thing" and "桂花乌龙" in candidate.text for candidate in candidates)
 
 
 def test_extract_memories_includes_echotext_style_candidates() -> None:
-    memories = extract_memories(
+    plan = extract_memories(
         IncomingMessage(platform="qq", platform_user_id="geoff", text="我明天准备去玉林路那边走走")
     )
+    past = extract_memories(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我今天去了玉林路那家新开的咖啡店")
+    )
 
-    assert any(memory.kind == "shared_moment" and "明天" in memory.content for memory in memories)
+    # Future plans belong to the ephemeral schedule kind; past events keep the
+    # recent_event kind so their 21-day expiry actually applies.
+    assert any(memory.kind == "schedule" and "玉林路" in memory.content for memory in plan)
+    assert any(memory.kind == "recent_event" for memory in past)
 
 
 def test_memory_candidates_ignore_pronoun_question_noise() -> None:

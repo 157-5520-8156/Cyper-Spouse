@@ -1,6 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
 from companion_daemon.inner_subtext import infer_inner_subtext
+from companion_daemon.impression import apply_repeated_interaction_drift
 from companion_daemon.models import MoodState
 from companion_daemon.proactive_waiting import apply_waiting_after_proactive
 from companion_daemon.relationship import key_event_bonus, stage_for_scores
@@ -52,6 +53,16 @@ def test_waiting_after_proactive_changes_once_per_stage() -> None:
     assert second == first
 
 
+def test_waiting_after_proactive_lowers_responsiveness_after_a_long_silence() -> None:
+    last_sent = (datetime.now(UTC) - timedelta(hours=5)).isoformat()
+    state = MoodState(perceived_responsiveness=55, security=45)
+
+    waited = apply_waiting_after_proactive(state, last_sent_iso=last_sent, incoming_since=0)
+
+    assert waited.perceived_responsiveness < state.perceived_responsiveness
+    assert waited.security < state.security
+
+
 def test_tone_inertia_preserves_recent_reserve() -> None:
     inertia = build_tone_inertia(
         MoodState(mood="guarded"),
@@ -59,7 +70,19 @@ def test_tone_inertia_preserves_recent_reserve() -> None:
     )
 
     assert inertia.label == "reserved"
-    assert "不要突然热情" in inertia.prompt_line
+    assert "不要突然热情" in inertia.memory
+
+
+def test_tone_inertia_reads_back_last_delivered_tone() -> None:
+    # Mood already recovered to calm, but her last delivered line was reserved:
+    # the persisted delivery-time label must keep the next line from flipping warm.
+    inertia = build_tone_inertia(
+        MoodState(mood="calm"),
+        ["[qq] 她: 我知道了。"],
+        last_outgoing_tone="reserved",
+    )
+
+    assert inertia.label == "reserved"
 
 
 def test_inner_subtext_can_represent_proud_hurt() -> None:
@@ -129,3 +152,33 @@ def test_location_answer_counts_as_answer_to_school_question() -> None:
 
     assert answered
     assert answered.kind == "answered"
+
+
+def test_repeated_interactions_change_affinity_but_one_event_does_not() -> None:
+    one_bad = apply_repeated_interaction_drift(
+        MoodState(),
+        [{"event_kind": "boundary_violation"}],
+    )
+    repeated_bad = apply_repeated_interaction_drift(
+        MoodState(),
+        [
+            {"event_kind": "boundary_violation"},
+            {"event_kind": "control_pressure"},
+            {"event_kind": "boundary_violation"},
+        ],
+    )
+    repeated_warm = apply_repeated_interaction_drift(
+        MoodState(),
+        [
+            {"event_kind": "warmth_received"},
+            {"event_kind": "repair_attempt"},
+            {"event_kind": "return_after_gap"},
+        ],
+    )
+
+    assert one_bad.emotion_affinity == {}
+    assert repeated_bad.emotion_affinity["anger"] > 0
+    assert repeated_bad.emotion_baseline["anger"] > 8
+    assert repeated_bad.emotion_affinity["disgust"] > 0
+    assert repeated_warm.emotion_affinity["trust"] > 0
+    assert repeated_warm.emotion_baseline["trust"] > 20

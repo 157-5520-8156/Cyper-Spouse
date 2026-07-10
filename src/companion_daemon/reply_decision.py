@@ -4,6 +4,7 @@ from enum import StrEnum
 from zoneinfo import ZoneInfo
 
 from companion_daemon.models import MoodState
+from companion_daemon.reply_timing import emotional_ghost_minutes
 from companion_daemon.time import utc_now
 
 
@@ -55,7 +56,7 @@ _URGENT_HINTS = (
 )
 LOW_ENERGY_ACK_DEFER_RANGE = (6, 18)
 OPEN_THREAD_ACK_DEFER_RANGE = (3, 14)
-USER_THINKING_DEFER_RANGE = (4, 12)
+USER_THINKING_DEFER_RANGE = (5, 12)
 WITHDRAWAL_DEFER_RANGE = (8, 25)
 FAREWELL_AFTERGLOW_DEFER_RANGE = (4, 20)
 
@@ -158,6 +159,20 @@ def decide_reply(
 
     if msg_type == "urgent":
         return ReplyDecision(ReplyAction.REPLY_NOW, reason="urgent_interrupt")
+
+    if state is not None and not has_pending_reply:
+        # True read-but-not-reply: she saw it (phone attention already said
+        # "read now"), but she is upset enough to leave it on read for a while.
+        # mark_unread stays False so the silence reads as deliberate, and the
+        # persisted read-later task guarantees she eventually picks it back up.
+        ghost_minutes = emotional_ghost_minutes(state, rng=rng)
+        if ghost_minutes is not None and rng.random() < 0.6:
+            return ReplyDecision(
+                ReplyAction.DEFER,
+                defer_minutes=ghost_minutes,
+                reason="emotional_ghost",
+                mark_unread=False,
+            )
 
     if msg_type == "question":
         return ReplyDecision(ReplyAction.REPLY_NOW, reason="question_needs_answer")
@@ -294,7 +309,7 @@ def _defer_minutes_for_phase(phase: str, rng: random.Random) -> float:
         "morning_focus": (15, 45),
         "lunch_break": (5, 15),
         "afternoon_classes": (15, 45),
-        "evening_unwind": (3, 12),
+        "evening_unwind": (5, 12),
         "late_evening": (3, 10),
         "deep_night": (5, 20),
     }

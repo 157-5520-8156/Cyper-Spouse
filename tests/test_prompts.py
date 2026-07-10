@@ -1,5 +1,5 @@
 from companion_daemon.models import IncomingMessage, MoodState
-from companion_daemon.prompts import question_budget_hint, reply_prompt, state_to_hint
+from companion_daemon.prompts import proactive_prompt, question_budget_hint, reply_prompt, state_to_hint
 
 
 def test_question_budget_warns_after_recent_questions() -> None:
@@ -52,3 +52,12 @@ def test_state_hint_normalizes_inner_punctuation() -> None:
 
     assert "。." not in hint
     assert "。。" not in hint
+
+
+def test_proactive_prompt_keeps_shanghai_and_chengdu_perspectives_distinct() -> None:
+    messages = proactive_prompt(MoodState(), [], "你是沈知栀。")
+
+    prompt_text = "\n".join(message["content"] for message in messages)
+
+    assert "你是沈知栀，在上海读华东师范大学；用户在成都" in prompt_text
+    assert "绝不能把成都当作你的所在地" in prompt_text

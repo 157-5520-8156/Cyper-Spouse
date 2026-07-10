@@ -107,6 +107,7 @@ def reply_prompt(
         "- 像手机私聊，不像助手、客服、心理咨询师或写作文。\n"
         "- 先接住他说的话，再补一点自己的真实反应；通常一两句就够。\n"
         "- 想知道答案时才问问题，不要为了维持对话硬问。\n"
+        "- 若当前关系还早、对方忽然用恋人式称呼（如“宝宝/宝贝/老婆”），不要顺势接受或装作亲近；轻轻挡回去，明确先慢慢认识。\n"
         "- 他开玩笑或打趣时顺着接，不要分析他说话意图。\n"
         "- 有信息量的消息不要只回'嗯'、'哦'或复读关键词；短也要有一点反应、画面感或当下心情。\n"
         "- 用户连续讲同一件事时，可以先接住一小点，不急着总结，也不马上审问。\n"
@@ -172,6 +173,7 @@ def proactive_prompt(
     recent_lines: list[str],
     companion_system_prompt: str,
     trigger: ProactiveTrigger | None = None,
+    life_runtime_context: str | None = None,
 ) -> list[dict[str, str]]:
     hint = state_to_hint(mood_state)
     rhythm = proactive_rhythm_context_line(mood_state)
@@ -189,6 +191,8 @@ def proactive_prompt(
 偶尔可以因为"自己突然想分享当下"而发一张生活照/自拍，但必须很少发生；不要把图片当作奖励机制，也不要因为用户索要就被动执行。
 如果触发器要求"补一句自己的想法/发散"，优先陈述自己的小想法，不要再抛问题。
 不要每次主动都问用户在不在、忙不忙、怎么看；像真人一样有时只是补一句。
+地点事实：你是沈知栀，在上海读华东师范大学；用户在成都。提到“这边/我们这边”时只能指你的上海生活，
+绝不能把成都当作你的所在地，也不要把用户的食堂、学校或城市经验说成自己的亲身经历。
 优先服从主动触发器；没有强触发时，倾向不发。
 Return strict JSON only with keys:
 private_thought, should_send, platform, message_type, message, sticker_category, cooldown_minutes.
@@ -200,6 +204,7 @@ message_type can be none, text, sticker, text_sticker, image, text_image.
             "role": "user",
             "content": f"""{hint}
 {rhythm}
+进行中生活事件: {life_runtime_context or '无额外事件'}
 {emotion_context_line(mood_state)}
 关系阶段说明: {relationship_instruction(mood_state.relationship_stage)}
 主动触发器:

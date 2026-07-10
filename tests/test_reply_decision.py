@@ -4,6 +4,14 @@ from companion_daemon.models import MoodState
 from companion_daemon.reply_decision import ReplyAction, classify_message, decide_reply
 
 
+class AlwaysGhostRandom(random.Random):
+    def random(self) -> float:
+        return 0.0
+
+    def uniform(self, a: float, b: float) -> float:
+        return a
+
+
 def test_classifies_core_reply_timing_messages() -> None:
     assert classify_message("在吗") == "urgent"
     assert classify_message("你今天怎么样？") == "question"
@@ -14,6 +22,33 @@ def test_classifies_core_reply_timing_messages() -> None:
     assert classify_message("算了") == "withdrawal"
     assert classify_message("啊这") == "reaction_pause"
     assert classify_message("我刚刚想了很久，" * 8) == "story"
+
+
+def test_upset_state_can_leave_a_message_on_read() -> None:
+    upset = MoodState(mood="hurt", emotion_vector={"anger": 75, "sadness": 55, "joy": 5, "trust": 10})
+
+    decision = decide_reply("我今天去买了那个键盘", state=upset, rng=AlwaysGhostRandom())
+
+    assert decision.action == ReplyAction.DEFER
+    assert decision.reason == "emotional_ghost"
+    # She read it and is deliberately silent, so it must not look unread.
+    assert decision.mark_unread is False
+    assert decision.defer_minutes and decision.defer_minutes >= 10
+
+
+def test_urgent_message_breaks_through_the_ghost_window() -> None:
+    upset = MoodState(mood="hurt", emotion_vector={"anger": 75, "sadness": 55, "joy": 5, "trust": 10})
+
+    decision = decide_reply("在吗？怎么不回我", state=upset, rng=random.Random(1))
+
+    assert decision.action == ReplyAction.REPLY_NOW
+    assert decision.reason == "urgent_interrupt"
+
+
+def test_calm_state_never_ghosts() -> None:
+    from companion_daemon.reply_timing import emotional_ghost_minutes
+
+    assert emotional_ghost_minutes(MoodState(), rng=random.Random(1)) is None
 
 
 def test_ack_can_be_skipped_without_marking_unread() -> None:

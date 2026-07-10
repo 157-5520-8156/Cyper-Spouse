@@ -2,10 +2,10 @@ import json
 import sqlite3
 from collections.abc import Iterable
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from companion_daemon.models import IncomingMessage, MoodState, Platform
+from companion_daemon.models import IncomingMessage, LifeRuntimeState, MoodState, Platform
 from companion_daemon.time import utc_now
 
 
@@ -162,6 +162,81 @@ class CompanionStore:
                   status text not null,
                   created_at text not null
                 );
+
+                create table if not exists life_runtime (
+                  canonical_user_id text primary key references users(id),
+                  activity text not null,
+                  activity_kind text not null,
+                  base_attention_demand integer not null,
+                  attention_demand integer not null,
+                  interruptible integer not null,
+                  started_at text not null,
+                  ends_at text not null,
+                  phone_attention text not null,
+                  notification_count integer not null default 0,
+                  last_notification_at text,
+                  last_read_at text,
+                  user_event_effect text,
+                  user_event_effect_until text,
+                  user_event_attention_delta integer not null default 0,
+                  state_effect text,
+                  updated_at text not null
+                );
+
+                create table if not exists life_runtime_events (
+                  id integer primary key autoincrement,
+                  canonical_user_id text not null references users(id),
+                  kind text not null,
+                  content text not null,
+                  started_at text not null,
+                  ends_at text not null,
+                  status text not null,
+                  source text not null,
+                  shared_at text,
+                  created_at text not null
+                );
+
+                create table if not exists life_day_plans (
+                  canonical_user_id text not null references users(id),
+                  local_date text not null,
+                  generated_at text not null,
+                  primary key (canonical_user_id, local_date)
+                );
+
+                create table if not exists life_day_plan_items (
+                  id integer primary key autoincrement,
+                  canonical_user_id text not null references users(id),
+                  local_date text not null,
+                  slot text not null,
+                  kind text not null,
+                  activity text not null,
+                  attention_demand integer not null,
+                  interruptible integer not null,
+                  starts_at text not null,
+                  ends_at text not null,
+                  status text not null default 'planned',
+                  adjustment_note text,
+                  created_at text not null,
+                  unique (canonical_user_id, local_date, slot)
+                );
+
+                create table if not exists social_tasks (
+                  id integer primary key autoincrement,
+                  canonical_user_id text not null references users(id),
+                  kind text not null,
+                  status text not null,
+                  platform text not null,
+                  platform_user_id text not null,
+                  payload_json text not null,
+                  reason text not null,
+                  due_at text not null,
+                  expires_at text not null,
+                  claimed_at text,
+                  resolved_at text,
+                  created_at text not null
+                );
+                create index if not exists idx_social_tasks_due
+                  on social_tasks (kind, status, due_at);
                 """
             )
             self._ensure_column(conn, "messages", "attachments_json", "text not null default '[]'")
@@ -190,6 +265,15 @@ class CompanionStore:
             self._ensure_column(conn, "mood_state", "last_emotion_source", "text")
             self._ensure_column(conn, "mood_state", "has_unread", "integer not null default 0")
             self._ensure_column(conn, "proactive_events", "trigger_type", "text")
+            self._ensure_column(conn, "life_runtime", "user_event_effect", "text")
+            self._ensure_column(conn, "life_runtime", "user_event_effect_until", "text")
+            self._ensure_column(conn, "life_runtime", "base_attention_demand", "integer")
+            self._ensure_column(conn, "life_runtime", "user_event_attention_delta", "integer not null default 0")
+            self._ensure_column(conn, "life_runtime", "state_effect", "text")
+            self._ensure_column(conn, "life_runtime_events", "shared_at", "text")
+            conn.execute(
+                "update life_runtime set base_attention_demand = attention_demand where base_attention_demand is null"
+            )
 
     def _ensure_column(
         self,
@@ -259,6 +343,40 @@ class CompanionStore:
                 """,
                 (platform, platform_user_id, canonical_user_id, now),
             )
+
+    def primary_platform_user_id(self, canonical_user_id: str, *, platform: Platform = "qq") -> str:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select platform_user_id from platform_accounts
+                where canonical_user_id = ? and platform = ?
+                order by created_at asc limit 1
+                """,
+                (canonical_user_id, platform),
+            ).fetchone()
+        return str(row["platform_user_id"]) if row else canonical_user_id
+
+    def has_active_social_task(self, canonical_user_id: str, *, kind: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select 1 from social_tasks
+                where canonical_user_id = ? and kind = ? and status in ('pending', 'claimed')
+                limit 1
+                """,
+                (canonical_user_id, kind),
+            ).fetchone()
+        return row is not None
+
+    def social_task_payload(self, task_id: int) -> dict[str, object]:
+        with self.connect() as conn:
+            row = conn.execute(
+                "select payload_json from social_tasks where id = ?",
+                (task_id,),
+            ).fetchone()
+        if not row or not row["payload_json"]:
+            return {}
+        return json.loads(str(row["payload_json"]))
 
     def save_incoming(self, canonical_user_id: str, message: IncomingMessage) -> None:
         with self.connect() as conn:
@@ -459,6 +577,398 @@ class CompanionStore:
                 ),
             )
 
+    def get_life_runtime(self, canonical_user_id: str) -> LifeRuntimeState | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select activity, activity_kind, base_attention_demand, attention_demand, interruptible, started_at, ends_at,
+                       phone_attention, notification_count, last_notification_at, last_read_at,
+                       user_event_effect, user_event_effect_until, user_event_attention_delta, state_effect, updated_at
+                from life_runtime where canonical_user_id = ?
+                """,
+                (canonical_user_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return LifeRuntimeState(
+            activity=row["activity"],
+            activity_kind=row["activity_kind"],
+            base_attention_demand=row["base_attention_demand"],
+            attention_demand=row["attention_demand"],
+            interruptible=bool(row["interruptible"]),
+            started_at=datetime.fromisoformat(row["started_at"]),
+            ends_at=datetime.fromisoformat(row["ends_at"]),
+            phone_attention=row["phone_attention"],
+            notification_count=row["notification_count"],
+            last_notification_at=(datetime.fromisoformat(row["last_notification_at"]) if row["last_notification_at"] else None),
+            last_read_at=datetime.fromisoformat(row["last_read_at"]) if row["last_read_at"] else None,
+            user_event_effect=row["user_event_effect"],
+            user_event_effect_until=(datetime.fromisoformat(row["user_event_effect_until"]) if row["user_event_effect_until"] else None),
+            user_event_attention_delta=row["user_event_attention_delta"],
+            state_effect=row["state_effect"],
+            updated_at=datetime.fromisoformat(row["updated_at"]),
+        )
+
+    def save_life_runtime(self, canonical_user_id: str, runtime: LifeRuntimeState) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                insert or replace into life_runtime (
+                  canonical_user_id, activity, activity_kind, base_attention_demand, attention_demand, interruptible,
+                  started_at, ends_at, phone_attention, notification_count, last_notification_at,
+                  last_read_at, user_event_effect, user_event_effect_until, user_event_attention_delta, state_effect, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    canonical_user_id, runtime.activity, runtime.activity_kind, runtime.base_attention_demand, runtime.attention_demand,
+                    runtime.interruptible, runtime.started_at.isoformat(), runtime.ends_at.isoformat(),
+                    runtime.phone_attention, runtime.notification_count,
+                    runtime.last_notification_at.isoformat() if runtime.last_notification_at else None,
+                    runtime.last_read_at.isoformat() if runtime.last_read_at else None,
+                    runtime.user_event_effect,
+                    runtime.user_event_effect_until.isoformat() if runtime.user_event_effect_until else None,
+                    runtime.user_event_attention_delta,
+                    runtime.state_effect,
+                    runtime.updated_at.isoformat(),
+                ),
+            )
+
+    def record_life_event(
+        self,
+        canonical_user_id: str,
+        *,
+        kind: str,
+        content: str,
+        started_at: datetime,
+        ends_at: datetime,
+        status: str,
+        source: str,
+        shared_at: datetime | None = None,
+    ) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                insert into life_runtime_events (
+                  canonical_user_id, kind, content, started_at, ends_at, status, source, shared_at, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    canonical_user_id, kind, content, started_at.isoformat(), ends_at.isoformat(), status,
+                    source, shared_at.isoformat() if shared_at else None, utc_now().isoformat(),
+                ),
+            )
+        return int(cursor.lastrowid)
+
+    def complete_active_life_events(self, canonical_user_id: str, *, completed_at: datetime) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update life_runtime_events
+                set status = 'completed', ends_at = ?
+                where canonical_user_id = ? and status = 'active'
+                """,
+                (completed_at.isoformat(), canonical_user_id),
+            )
+
+    def recent_life_events(self, canonical_user_id: str, limit: int = 8) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select id, kind, content, started_at, ends_at, status, source, shared_at
+                from life_runtime_events where canonical_user_id = ?
+                order by id desc limit ?
+                """,
+                (canonical_user_id, limit),
+            ).fetchall()
+        return list(reversed(rows))
+
+    def upcoming_life_plan_items(self, canonical_user_id: str, *, now: datetime, limit: int = 5) -> list[sqlite3.Row]:
+        now = now.astimezone(UTC)
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select slot, kind, activity, attention_demand, interruptible, starts_at, ends_at, status, adjustment_note
+                from life_day_plan_items
+                where canonical_user_id = ? and ends_at > ?
+                order by starts_at asc limit ?
+                """,
+                (canonical_user_id, now.isoformat(), limit),
+            ).fetchall()
+        return list(rows)
+
+    def unshared_private_life_events(self, canonical_user_id: str, limit: int = 4) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select id, kind, content, started_at, ends_at, status, source
+                from life_runtime_events
+                where canonical_user_id = ? and kind = 'private_life_event'
+                  and status = 'completed' and shared_at is null
+                order by id desc limit ?
+                """,
+                (canonical_user_id, limit),
+            ).fetchall()
+        return list(rows)
+
+    def mark_life_event_shared(self, event_id: int, *, shared_at: datetime | None = None) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "update life_runtime_events set shared_at = ? where id = ? and shared_at is null",
+                ((shared_at or utc_now()).isoformat(), event_id),
+            )
+
+    def life_event_by_source(self, canonical_user_id: str, source: str) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                select id, kind, content, started_at, ends_at, status, source, shared_at
+                from life_runtime_events where canonical_user_id = ? and source = ?
+                order by id desc limit 1
+                """,
+                (canonical_user_id, source),
+            ).fetchone()
+
+    def has_life_day_plan(self, canonical_user_id: str, local_date: str) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "select 1 from life_day_plans where canonical_user_id = ? and local_date = ?",
+                (canonical_user_id, local_date),
+            ).fetchone()
+        return row is not None
+
+    def save_life_day_plan(self, canonical_user_id: str, local_date: str, items: list[dict[str, object]]) -> None:
+        """Persist a private schedule. Planned entries are not lived facts."""
+        with self.connect() as conn:
+            conn.execute(
+                "insert or ignore into life_day_plans (canonical_user_id, local_date, generated_at) values (?, ?, ?)",
+                (canonical_user_id, local_date, utc_now().isoformat()),
+            )
+            conn.executemany(
+                """
+                insert or ignore into life_day_plan_items (
+                  canonical_user_id, local_date, slot, kind, activity, attention_demand,
+                  interruptible, starts_at, ends_at, status, adjustment_note, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', null, ?)
+                """,
+                [
+                    (
+                        canonical_user_id, local_date, item["slot"], item["kind"], item["activity"],
+                        item["attention_demand"], int(bool(item["interruptible"])), item["starts_at"],
+                        item["ends_at"], utc_now().isoformat(),
+                    )
+                    for item in items
+                ],
+            )
+
+    def life_day_plan_item_at(self, canonical_user_id: str, now: datetime) -> sqlite3.Row | None:
+        now = now.astimezone(UTC)
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select id, slot, kind, activity, attention_demand, interruptible, starts_at, ends_at, status, adjustment_note
+                from life_day_plan_items
+                where canonical_user_id = ? and starts_at <= ? and ends_at > ?
+                order by starts_at desc limit 1
+                """,
+                (canonical_user_id, now.isoformat(), now.isoformat()),
+            ).fetchone()
+        return row
+
+    def update_life_day_plan_status(self, canonical_user_id: str, *, before: datetime, status: str) -> None:
+        before = before.astimezone(UTC)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update life_day_plan_items set status = ?
+                where canonical_user_id = ? and ends_at <= ? and status in ('planned', 'active')
+                """,
+                (status, canonical_user_id, before.isoformat()),
+            )
+
+    def activate_life_day_plan_item(self, item_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute("update life_day_plan_items set status = 'active' where id = ?", (item_id,))
+
+    def adjust_next_life_day_plan_item(
+        self,
+        canonical_user_id: str,
+        *,
+        now: datetime,
+        activity: str,
+        note: str,
+        attention_delta: int = 0,
+    ) -> None:
+        """A salient interaction may nudge one future activity, never rewrite history."""
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select id, attention_demand from life_day_plan_items
+                where canonical_user_id = ? and starts_at > ? and status = 'planned'
+                order by starts_at asc limit 1
+                """,
+                (canonical_user_id, now.isoformat()),
+            ).fetchone()
+            if row:
+                conn.execute(
+                    """
+                    update life_day_plan_items
+                    set activity = ?, adjustment_note = ?, attention_demand = ?
+                    where id = ?
+                    """,
+                    (activity, note, max(0, min(100, row["attention_demand"] + attention_delta)), row["id"]),
+                )
+
+    def create_social_task(
+        self,
+        canonical_user_id: str,
+        *,
+        kind: str,
+        platform: Platform,
+        platform_user_id: str,
+        payload: dict[str, object],
+        reason: str,
+        due_at: datetime,
+        expires_at: datetime,
+    ) -> int:
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                insert into social_tasks (
+                  canonical_user_id, kind, status, platform, platform_user_id, payload_json,
+                  reason, due_at, expires_at, claimed_at, resolved_at, created_at
+                ) values (?, ?, 'pending', ?, ?, ?, ?, ?, ?, null, null, ?)
+                """,
+                (
+                    canonical_user_id, kind, platform, platform_user_id,
+                    json.dumps(payload, ensure_ascii=False), reason, due_at.astimezone(UTC).isoformat(),
+                    expires_at.astimezone(UTC).isoformat(), utc_now().isoformat(),
+                ),
+            )
+        return int(cursor.lastrowid)
+
+    def cancel_social_task(self, task_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update social_tasks set status = 'cancelled', resolved_at = ?
+                where id = ? and status in ('pending', 'claimed')
+                """,
+                (utc_now().isoformat(), task_id),
+            )
+
+    def resolve_social_task(self, task_id: int) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update social_tasks set status = 'resolved', resolved_at = ?
+                where id = ? and status in ('pending', 'claimed')
+                """,
+                (utc_now().isoformat(), task_id),
+            )
+
+    def cancel_active_social_tasks(self, canonical_user_id: str, *, kind: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update social_tasks set status = 'cancelled', resolved_at = ?
+                where canonical_user_id = ? and kind = ? and status in ('pending', 'claimed')
+                """,
+                (utc_now().isoformat(), canonical_user_id, kind),
+            )
+
+    def claim_due_social_tasks(self, *, kind: str, now: datetime, limit: int = 8) -> list[sqlite3.Row]:
+        """Claim due work; stale claims are retried after a daemon crash."""
+        now = now.astimezone(UTC)
+        stale_before = now - timedelta(minutes=10)
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update social_tasks set status = 'expired', resolved_at = ?
+                where kind = ? and status in ('pending', 'claimed') and expires_at <= ?
+                """,
+                (now.isoformat(), kind, now.isoformat()),
+            )
+            ids = [
+                row["id"]
+                for row in conn.execute(
+                    """
+                    select id from social_tasks
+                    where kind = ? and due_at <= ? and expires_at > ?
+                      and (status = 'pending' or (status = 'claimed' and claimed_at <= ?))
+                    order by due_at asc limit ?
+                    """,
+                    (kind, now.isoformat(), now.isoformat(), stale_before.isoformat(), limit),
+                ).fetchall()
+            ]
+            if not ids:
+                return []
+            placeholders = ",".join("?" for _ in ids)
+            conn.execute(
+                f"update social_tasks set status = 'claimed', claimed_at = ? where id in ({placeholders})",
+                (now.isoformat(), *ids),
+            )
+            rows = conn.execute(
+                f"""
+                select id, canonical_user_id, kind, platform, platform_user_id, payload_json, reason,
+                       due_at, expires_at, status, claimed_at, created_at
+                from social_tasks where id in ({placeholders}) order by due_at asc
+                """,
+                ids,
+            ).fetchall()
+        return list(rows)
+
+    def recent_social_tasks(self, canonical_user_id: str, limit: int = 8) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select id, kind, status, reason, due_at, expires_at, claimed_at, resolved_at, created_at
+                from social_tasks where canonical_user_id = ?
+                order by id desc limit ?
+                """,
+                (canonical_user_id, limit),
+            ).fetchall()
+        return list(reversed(rows))
+
+    def next_due_social_task(
+        self,
+        canonical_user_id: str,
+        *,
+        kinds: tuple[str, ...],
+        now: datetime,
+    ) -> sqlite3.Row | None:
+        if not kinds:
+            return None
+        now = now.astimezone(UTC)
+        placeholders = ",".join("?" for _ in kinds)
+        with self.connect() as conn:
+            conn.execute(
+                f"""
+                update social_tasks set status = 'expired', resolved_at = ?
+                where canonical_user_id = ? and kind in ({placeholders})
+                  and status = 'pending' and expires_at <= ?
+                """,
+                (now.isoformat(), canonical_user_id, *kinds, now.isoformat()),
+            )
+            return conn.execute(
+                f"""
+                select id, canonical_user_id, kind, status, reason, due_at, expires_at, created_at, payload_json
+                from social_tasks where canonical_user_id = ? and kind in ({placeholders})
+                  and status = 'pending' and due_at <= ? and expires_at > ?
+                order by due_at asc limit 1
+                """,
+                (canonical_user_id, *kinds, now.isoformat(), now.isoformat()),
+            ).fetchone()
+
+    def defer_social_task(self, task_id: int, *, due_at: datetime) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update social_tasks set due_at = ?
+                where id = ? and status = 'pending'
+                """,
+                (due_at.astimezone(UTC).isoformat(), task_id),
+            )
+
     def record_interaction_event(
         self,
         canonical_user_id: str,
@@ -574,6 +1084,21 @@ class CompanionStore:
                 (canonical_user_id, direction, since_iso),
             ).fetchone()
         return int(row["count"])
+
+    def last_proactive_event(self, canonical_user_id: str) -> sqlite3.Row | None:
+        """Return the newest proactive decision, sent or withheld."""
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select should_send, cooldown_minutes, created_at
+                from proactive_events
+                where canonical_user_id = ?
+                order by id desc
+                limit 1
+                """,
+                (canonical_user_id,),
+            ).fetchone()
+        return row
 
     def recent_proactive_trigger_history(
         self,
@@ -745,6 +1270,20 @@ class CompanionStore:
                 limit 1
                 """,
                 (canonical_user_id, platform),
+            ).fetchone()
+        return str(row["sent_at"]) if row else None
+
+    def last_initiated_delivery(self, canonical_user_id: str, platform: str) -> str | None:
+        """Return the newest direct proactive or life-share delivery for a platform."""
+        channels = (platform, f"{platform}:life_event")
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select sent_at from proactive_delivery
+                where canonical_user_id = ? and platform in (?, ?)
+                order by sent_at desc limit 1
+                """,
+                (canonical_user_id, *channels),
             ).fetchone()
         return str(row["sent_at"]) if row else None
 

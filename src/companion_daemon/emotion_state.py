@@ -6,6 +6,7 @@ from companion_daemon.emotion_core import (
     emotion_deltas_for_event,
 )
 from companion_daemon.models import IncomingMessage, MoodState
+from companion_daemon.repair_curve import is_repair_message
 from companion_daemon.time import utc_now
 
 
@@ -37,7 +38,7 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
             "感到被控制，不舒服，但不需要吵起来。",
             "礼貌但坚定，说明自己不喜欢被命令。",
         )
-    if _has_any(text, ["老婆", "宝贝", "亲爱的", "爱你", "做我女朋友"]) and previous.relationship_stage in {
+    if _has_any(text, ["老婆", "宝贝", "宝宝", "亲爱的", "爱你", "做我女朋友"]) and previous.relationship_stage in {
         "stranger",
         "acquaintance",
     }:
@@ -48,7 +49,7 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
             "对过早亲昵称呼有点退缩，觉得关系还没到那里。",
             "轻轻挡回去，可以带一点玩笑，但明确慢慢来。",
         )
-    if _has_any(text, ["抱歉", "对不起", "刚才我不该", "我说重了"]):
+    if is_repair_message(text):
         return InteractionEvent(
             "repair_attempt",
             3,
@@ -64,7 +65,7 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
             "被认真对待了，心里放松一点。",
             "自然柔和一点，可以露出小小开心。",
         )
-    if _has_any(text, ["我难受", "崩溃", "好累", "撑不住", "失眠", "焦虑"]):
+    if _has_any(text, ["难受", "崩溃", "好累", "撑不住", "失眠", "焦虑", "委屈", "想哭", "好烦"]):
         return InteractionEvent(
             "user_vulnerable",
             3,

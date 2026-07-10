@@ -1,0 +1,44 @@
+import json
+from types import SimpleNamespace
+
+import httpx
+import pytest
+
+import companion_daemon.onebot_adapter as onebot_adapter
+from companion_daemon.qq_delivery import QQDelivery
+
+
+@pytest.mark.asyncio
+async def test_napcat_delivery_sends_background_text_to_configured_qq(monkeypatch: pytest.MonkeyPatch) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"status": "ok"})
+
+    original_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return original_client(*args, **kwargs)
+
+    monkeypatch.setattr(onebot_adapter.httpx, "AsyncClient", fake_client)
+    settings = SimpleNamespace(
+        qq_adapter="napcat",
+        napcat_api_url="http://127.0.0.1:3000",
+        napcat_access_token="token",
+        napcat_proactive_user_id="2759284998",
+        qq_bot_app_id=None,
+        qq_bot_secret=None,
+    )
+
+    delivery = QQDelivery(settings)
+    assert delivery.proactive_recipient_id() == "2759284998"
+    await delivery.send_text("2759284998", "隔一会儿想补一句。")
+
+    assert requests[0].url.path == "/send_private_msg"
+    assert requests[0].headers["Authorization"] == "Bearer token"
+    assert json.loads(requests[0].content) == {
+        "message": "隔一会儿想补一句。",
+        "user_id": 2759284998,
+    }

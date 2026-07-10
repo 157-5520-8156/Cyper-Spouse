@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from companion_daemon.emotion_core import emotion_snapshot
 from companion_daemon.human_rhythm import human_rhythm_snapshot
 from companion_daemon.impression import impression_summary
 from companion_daemon.memory import _exclude_from_reply_memory
@@ -53,6 +54,7 @@ def build_context_package(
     now: datetime | None = None,
     continuity_hint: str | None = None,
     subtext_hint: str | None = None,
+    life_context_override: str | None = None,
 ) -> ContextPackage:
     user_intent = infer_user_intent(message.text, has_attachments=bool(message.attachments))
     reply_focus = choose_reply_focus(message.text, user_intent)
@@ -65,7 +67,7 @@ def build_context_package(
         max_memories=max_memories,
         now=current_time,
     )
-    life_context = current_life_context(state, now=current_time)
+    life_context = life_context_override or current_life_context(state, now=current_time)
     emotion_context = state_effect_summary(state)
     impression_context = impression_summary(state)
     reply_policy = build_reply_policy(user_intent, state)
@@ -92,10 +94,10 @@ def infer_user_intent(text: str, *, has_attachments: bool = False) -> str:
     stripped = text.strip()
     if has_attachments and len(stripped) < 6:
         return "发来附件，期待她看见并自然反应"
-    if _contains(stripped, ["在吗", "睡了吗", "忙吗", "人呢"]):
-        return "试探她是否在线或想重新打开聊天"
     if _contains(stripped, ["难受", "崩溃", "烦", "累", "闷", "委屈", "emo", "不开心", "想哭"]):
         return "表达情绪，需要先被接住"
+    if _contains(stripped, ["在吗", "睡了吗", "忙吗", "人呢"]):
+        return "试探她是否在线或想重新打开聊天"
     if _contains(stripped, ["哈哈", "笑死", "乐", "草", "绷不住"]):
         return "开玩笑或分享轻松反应"
     if _looks_like_question(stripped):
@@ -213,6 +215,11 @@ def state_effect_summary(state: MoodState) -> str:
         parts.append("分享欲偏高")
     if state.unresolved_emotion:
         parts.append("有未消化的事")
+    # Carry the Plutchik vector into ordinary replies as behavioral guidance,
+    # never as raw numbers; proactive prompts already do this separately.
+    snapshot = emotion_snapshot(state)
+    if snapshot.value >= 25:
+        parts.append(snapshot.guidance.removeprefix("情绪指导: ").removesuffix(" 不要直接报出这些内部数值。"))
     return "；".join(parts)
 
 
@@ -371,9 +378,11 @@ def _has_unanswered_assistant_question(recent_rows: list[dict[str, str]]) -> boo
 
 
 def _kind_bonus(kind: str) -> float:
-    if kind in {"name", "life_fact", "favorite_thing", "person", "self_core"}:
+    # "custom" is the legacy storage kind for life facts written before the
+    # extraction/retrieval kinds were unified; keep rewarding old rows.
+    if kind in {"name", "life_fact", "custom", "favorite_thing", "person", "self_core"}:
         return 0.18
-    if kind in {"shared_moment", "recent_event", "user_visual_anchor"}:
+    if kind in {"shared_moment", "recent_event", "hobby", "user_visual_anchor"}:
         return 0.12
     if kind in {"image_insight", "audio_insight", "file_insight"}:
         return 0.08

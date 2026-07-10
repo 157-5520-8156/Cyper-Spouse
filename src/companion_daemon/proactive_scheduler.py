@@ -1,18 +1,31 @@
 import argparse
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 import hashlib
+import json
 import logging
 import random
 
 from companion_daemon.config import get_settings
 from companion_daemon.life_event import run as run_life_event
+from companion_daemon.models import IncomingMessage
 from companion_daemon.proactive_cli import run as run_once
+from companion_daemon.qq_delivery import QQDelivery
 from companion_daemon.relationship import life_event_probability, proactive_cooldown_minutes
 from companion_daemon.runtime import build_companion_engine
+from companion_daemon.life_runtime import maybe_apply_planned_life_result, synchronize_life_runtime
+
+# The model may voice how long she wants to hold back, but the daemon caps how
+# much of that wish it honors so a bad decision cannot silence her for a day.
+MAX_MODEL_COOLDOWN_MINUTES = 240
 
 
 logger = logging.getLogger(__name__)
+
+DEFERRED_RECOVERY_CONTEXT_HINT = (
+    "回复时机提示: 这条消息在她忙完后才重新看到。"
+    "自然接住即可，不要解释系统或承诺过的等待。"
+)
 
 
 def _minutes_since(iso_timestamp: str | None) -> float | None:
@@ -44,9 +57,103 @@ def _next_sleep_seconds(base_seconds: float, rng: random.Random | None = None) -
     return max(30.0, base_seconds * rng.uniform(0.65, 1.35))
 
 
+def _has_due_social_task(store, user_id: str) -> bool:
+    if not hasattr(store, "next_due_social_task"):
+        return False
+    task = store.next_due_social_task(
+        user_id,
+        kinds=(
+            "comfort_followup",
+            "promise_followup",
+            "reply_reconsider",
+            "life_share_followup",
+            "contradiction_followup",
+        ),
+        now=datetime.now().astimezone(),
+    )
+    return task is not None
+
+
+def _model_cooldown_block(store, user_id: str) -> tuple[float, int] | None:
+    """Honor the cooldown the last proactive decision asked for, within a cap.
+
+    Applies to withheld decisions too: "我现在不想发，过两小时再看" should stop
+    the scheduler from re-asking the model every pass.
+    """
+    if not hasattr(store, "last_proactive_event"):
+        return None
+    last_event = store.last_proactive_event(user_id)
+    if last_event is None:
+        return None
+    requested = min(int(last_event["cooldown_minutes"] or 0), MAX_MODEL_COOLDOWN_MINUTES)
+    if requested <= 0:
+        return None
+    elapsed = _minutes_since(str(last_event["created_at"]))
+    if elapsed is not None and elapsed < requested:
+        return elapsed, requested
+    return None
+
+
 def _stable_ratio(*parts: str) -> float:
     digest = hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
     return int(digest[:12], 16) / float(0xFFFFFFFFFFFF)
+
+
+async def recover_overdue_deferred_replies(
+    engine,
+    *,
+    send: bool,
+    sandbox: bool,
+    now: datetime | None = None,
+) -> int:
+    """Recover delayed replies after an adapter restart.
+
+    The two-minute grace period leaves the live coalescer's precise timer as the
+    normal path. Recovery only handles work that demonstrably outlived that timer.
+    A failed recovery is closed after its failed outbox record is retained: replaying
+    the same incoming turn would otherwise create duplicate conversation history.
+    """
+    if not send or not hasattr(engine.store, "claim_due_social_tasks"):
+        return 0
+    now = now or datetime.now().astimezone()
+    overdue = now - timedelta(minutes=2)
+    rows = engine.store.claim_due_social_tasks(kind="reply_later", now=overdue)
+    if not rows:
+        return 0
+    delivery = QQDelivery(get_settings(), sandbox=sandbox)
+    recovered = 0
+    for row in rows:
+        task_id = int(row["id"])
+        reply = None
+        try:
+            message = IncomingMessage.model_validate(json.loads(row["payload_json"]))
+            reply = await engine.handle_message(
+                message,
+                context_hint=DEFERRED_RECOVERY_CONTEXT_HINT,
+                defer_delivery=True,
+            )
+            if reply is None:
+                engine.complete_deferred_reply_task(task_id)
+                continue
+            for part in reply.text_parts or [reply.text]:
+                await delivery.send_text(str(row["platform_user_id"]), part)
+            engine.confirm_reply_delivery(reply)
+            engine.complete_deferred_reply_task(task_id)
+            recovered += 1
+            logger.info("recovered overdue deferred reply task %s", task_id)
+        except Exception:
+            logger.exception("failed to recover deferred reply task %s", task_id)
+            if reply is not None:
+                engine.fail_reply_delivery(
+                    reply,
+                    "deferred reply recovery delivery failed",
+                    source_task_id=task_id,
+                )
+            else:
+                # No outbox was created, so there is nothing to reconsider. Close
+                # the stale task to avoid replaying the same incoming turn forever.
+                engine.complete_deferred_reply_task(task_id)
+    return recovered
 
 
 async def scheduler_loop(
@@ -61,9 +168,20 @@ async def scheduler_loop(
     settings = get_settings()
     while True:
         engine = build_companion_engine()
+        await recover_overdue_deferred_replies(engine, send=send, sandbox=sandbox)
         users = engine.store.canonical_users() or ["geoff"]
         for user_id in users:
-            state = engine.store.get_mood_state(user_id)
+            # Time keeps flowing through her waiting psychology even when the
+            # cooldown below skips the actual proactive decision.
+            if hasattr(engine, "refresh_waiting_state"):
+                state = engine.refresh_waiting_state(user_id)
+            else:
+                state = engine.store.get_mood_state(user_id)
+            if hasattr(engine.store, "get_life_runtime"):
+                synchronize_life_runtime(engine.store, user_id, state)
+                applied = maybe_apply_planned_life_result(engine.store, user_id, state)
+                if applied and applied.user_event_effect:
+                    print(f"life result for {user_id}: {applied.user_event_effect}", flush=True)
             base_cooldown_minutes = proactive_cooldown_minutes(
                 state,
                 settings.proactive_min_cooldown_minutes,
@@ -76,10 +194,20 @@ async def scheduler_loop(
                 last_sent=last_sent,
             )
             elapsed = _minutes_since(last_sent)
+            model_block = _model_cooldown_block(engine.store, user_id)
+            if model_block is not None and _has_due_social_task(engine.store, user_id):
+                # A due social commitment (comfort/promise/reconsider) outranks the
+                # model's own wish to stay quiet; the tick will pick it up as trigger.
+                model_block = None
             if elapsed is not None and elapsed < cooldown_minutes:
                 print(
                     f"skip {user_id}: proactive cooldown {elapsed:.1f}m/{cooldown_minutes}m "
                     f"(base {base_cooldown_minutes}m)",
+                    flush=True,
+                )
+            elif model_block is not None:
+                print(
+                    f"skip {user_id}: decision cooldown {model_block[0]:.1f}m/{model_block[1]}m",
                     flush=True,
                 )
             else:

@@ -1,4 +1,8 @@
-from companion_daemon.snowluma_adapter import OneBotReplyTarget, parse_onebot_event
+from companion_daemon.onebot_adapter import (
+    OneBotReplyTarget,
+    event_token_is_valid,
+    parse_onebot_event,
+)
 
 
 def test_parse_private_text_message() -> None:
@@ -130,3 +134,11 @@ def test_onebot_reply_target_fields() -> None:
     assert target.api_url == "http://127.0.0.1:5700"
     assert target.user_id == 123456
     assert target.group_id is None
+
+
+def test_event_token_accepts_bearer_or_legacy_signature() -> None:
+    assert event_token_is_valid("secret", authorization="Bearer secret", x_signature=None)
+    assert event_token_is_valid("secret", authorization="secret", x_signature=None)
+    assert event_token_is_valid("secret", authorization="Token secret", x_signature=None)
+    assert event_token_is_valid("secret", authorization=None, x_signature="secret")
+    assert not event_token_is_valid("secret", authorization="Bearer wrong", x_signature=None)

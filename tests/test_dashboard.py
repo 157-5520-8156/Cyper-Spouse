@@ -14,7 +14,14 @@ def test_dashboard_serves_local_control_panel() -> None:
     response = client.get("/dashboard")
 
     assert response.status_code == 200
-    assert "沈知栀 Daemon 面板" in response.text
+    assert "知栀的小屋" in response.text
+    assert "为什么是这个动作" in response.text
+    assert 'id="roomCanvas"' in response.text
+    assert "pathfind" in response.text
+    assert "applyScene" in response.text
+    assert "zhizhi-room-isometric-v2.png" in response.text
+    assert "zhizhi-sprite-sheet-v2.png" in response.text
+    assert "routeGraph" in response.text
     assert "/debug/users" in response.text
 
 

@@ -1,9 +1,14 @@
+from pathlib import Path
+
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from companion_daemon.config import get_settings
+from companion_daemon.dashboard_ui import DASHBOARD_HTML
 from companion_daemon.models import CompanionReply, IncomingMessage, ProactiveDecision
+from companion_daemon.life_runtime import synchronize_life_runtime
 from companion_daemon.qq_official import (
     QQ_CALLBACK_VALIDATION_OP,
     ack_response,
@@ -15,6 +20,7 @@ from companion_daemon.runtime import build_companion_engine
 
 
 app = FastAPI(title="Girl Agent Companion Daemon")
+app.mount("/assets", StaticFiles(directory=Path(__file__).resolve().parents[2] / "assets"), name="assets")
 engine = build_companion_engine()
 
 
@@ -78,6 +84,7 @@ def debug_update_state(canonical_user_id: str, patch: StatePatch) -> dict[str, o
         return {"state": current.model_dump(mode="json"), "updated": []}
     updated = current.model_copy(update=updates)
     engine.store.save_mood_state(canonical_user_id, updated)
+    synchronize_life_runtime(engine.store, canonical_user_id, updated)
     return {"state": updated.model_dump(mode="json"), "updated": sorted(updates)}
 
 
@@ -131,9 +138,11 @@ async def qq_webhook(
 
     incoming = incoming_message_from_payload(payload)
     if incoming:
-        # Callback acknowledgement is not a QQ delivery receipt. Keep any reply
-        # in the outbox until a transport adapter confirms it was sent.
-        await engine.handle_message(incoming, defer_delivery=True)
+        # This webhook has no outbound transport, so generating a reply here
+        # would only leave an undeliverable outbox row and waste a model call.
+        # Record the message and update her state; a transport adapter
+        # (WebSocket/OneBot) owns actual reply generation and delivery.
+        await engine.handle_message(incoming, skip_reply=True, mark_unread=True)
 
     return JSONResponse(ack_response())
 
@@ -145,7 +154,7 @@ def main() -> None:
     uvicorn.run("companion_daemon.app:app", host=settings.host, port=settings.port, reload=False)
 
 
-DASHBOARD_HTML = """<!doctype html>
+LEGACY_DASHBOARD_HTML = """<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
@@ -167,7 +176,7 @@ DASHBOARD_HTML = """<!doctype html>
     button.secondary { background: #6d6258; }
     .grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
     .toolbar { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-    .cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+    .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
     .card { background: white; border: 1px solid #ded6c8; border-radius: 8px; padding: 12px; min-height: 120px; overflow: auto; }
     pre { white-space: pre-wrap; word-break: break-word; margin: 0; font-size: 12px; }
     .list { display: flex; flex-direction: column; gap: 8px; }
@@ -204,6 +213,8 @@ DASHBOARD_HTML = """<!doctype html>
     <section>
       <div class="cards">
         <div class="card"><h2>当前状态</h2><pre id="state"></pre></div>
+        <div class="card"><h2>生活运行时</h2><pre id="lifeRuntime"></pre></div>
+        <div class="card"><h2>社交事务</h2><pre id="socialTasks"></pre></div>
         <div class="card"><h2>最近聊天</h2><div id="recent" class="list"></div></div>
         <div class="card"><h2>注入记忆</h2><div id="memories" class="list"></div></div>
       </div>
@@ -235,6 +246,8 @@ DASHBOARD_HTML = """<!doctype html>
     }
     function render() {
       document.getElementById("state").textContent = JSON.stringify(snapshot.state, null, 2);
+      document.getElementById("lifeRuntime").textContent = JSON.stringify(snapshot.life_runtime, null, 2);
+      document.getElementById("socialTasks").textContent = JSON.stringify(snapshot.recent_social_tasks, null, 2);
       document.getElementById("recent").innerHTML = snapshot.recent.map(x => `<div class="item">${escapeHtml(x)}</div>`).join("");
       document.getElementById("memories").innerHTML = snapshot.memories.map(x => `<div class="item">${escapeHtml(x)}<br><button class="secondary" onclick="deleteMemoryFromLine(this)">删除</button></div>`).join("");
       document.getElementById("prompt").textContent = snapshot.preview_prompt.map(m => `[${m.role}]\\n${m.content}`).join("\\n\\n---\\n\\n");

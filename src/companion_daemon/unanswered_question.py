@@ -13,8 +13,10 @@ class PendingQuestion:
 
 @dataclass(frozen=True)
 class QuestionResponse:
+    """Reaches the model through state changes and the reply policy's
+    forbidden-topics list, never as a literal prompt label."""
+
     kind: str
-    prompt_line: str
     memory: str
 
 
@@ -92,22 +94,10 @@ def classify_response_to_own_question(
     if not text:
         return None
     if _looks_like_meta_response(text):
-        return QuestionResponse(
-            "meta",
-            "问题反馈: 用户没有直接回答她的问题，而是在回应她的语气；她会知道自己刚才有点别扭，不要把这当成冷漠逃避。",
-            f"用户回应了她的语气而不是问题：{question.text[:80]}",
-        )
+        return QuestionResponse("meta", f"用户回应了她的语气而不是问题：{question.text[:80]}")
     if _looks_like_answer(text, question.text):
-        return QuestionResponse(
-            "answered",
-            "问题反馈: 用户回答了她刚刚问的问题；她会松一口气，可以自然接住答案。",
-            f"用户回答了她的问题：{question.text[:80]}",
-        )
-    return QuestionResponse(
-        "skipped",
-        "问题反馈: 用户回应了她，但没有回答她刚刚问的问题；她会有一点困惑或小尴尬，不要继续连环追问。",
-        f"用户跳过了她的问题：{question.text[:80]}",
-    )
+        return QuestionResponse("answered", f"用户回答了她的问题：{question.text[:80]}")
+    return QuestionResponse("skipped", f"用户跳过了她的问题：{question.text[:80]}")
 
 
 def apply_question_response(state: MoodState, response: QuestionResponse | None) -> MoodState:

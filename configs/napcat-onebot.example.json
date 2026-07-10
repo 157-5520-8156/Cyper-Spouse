@@ -1,0 +1,32 @@
+{
+  "network": {
+    "httpServers": [
+      {
+        "name": "girl-agent-api",
+        "enable": true,
+        "host": "127.0.0.1",
+        "port": 3000,
+        "enableCors": false,
+        "enableWebsocket": false,
+        "messagePostFormat": "array",
+        "token": "REPLACE_WITH_A_LONG_LOCAL_SECRET",
+        "debug": false
+      }
+    ],
+    "httpClients": [
+      {
+        "name": "girl-agent-events",
+        "enable": true,
+        "url": "http://127.0.0.1:8787/onebot/event",
+        "messagePostFormat": "array",
+        "reportSelfMessage": false,
+        "token": "REPLACE_WITH_THE_SAME_LONG_LOCAL_SECRET",
+        "debug": false
+      }
+    ],
+    "httpSseServers": [],
+    "websocketServers": [],
+    "websocketClients": [],
+    "plugins": []
+  }
+}

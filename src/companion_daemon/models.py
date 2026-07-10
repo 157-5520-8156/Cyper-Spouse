@@ -7,6 +7,7 @@ from companion_daemon.time import utc_now
 
 Platform = Literal["qq", "wechat", "simulator"]
 AttachmentKind = Literal["image", "audio", "video", "file", "unknown"]
+PhoneAttention = Literal["away", "notified", "glanced", "reading", "typing", "do_not_disturb"]
 RelationshipStage = Literal["stranger", "acquaintance", "friend", "close_friend", "ambiguous", "lover"]
 Mood = Literal[
     "calm",
@@ -68,6 +69,7 @@ class ProactiveDecision(BaseModel):
     trigger_type: str | None = None
     cooldown_minutes: int = 30
     delivery_id: int | None = None
+    social_task_id: int | None = None
 
 
 class MoodState(BaseModel):
@@ -96,4 +98,25 @@ class MoodState(BaseModel):
     last_emotion_source: str | None = None
     last_platform: Platform | None = None
     has_unread: bool = False
+    updated_at: datetime = Field(default_factory=utc_now)
+
+
+class LifeRuntimeState(BaseModel):
+    """Private, advancing life context; never shown verbatim to the user."""
+
+    activity: str = "在自己的日常里"
+    activity_kind: str = "between"
+    base_attention_demand: int = 35
+    attention_demand: int = 35
+    interruptible: bool = True
+    started_at: datetime = Field(default_factory=utc_now)
+    ends_at: datetime = Field(default_factory=utc_now)
+    phone_attention: PhoneAttention = "away"
+    notification_count: int = 0
+    last_notification_at: datetime | None = None
+    last_read_at: datetime | None = None
+    user_event_effect: str | None = None
+    user_event_effect_until: datetime | None = None
+    user_event_attention_delta: int = 0
+    state_effect: str | None = None
     updated_at: datetime = Field(default_factory=utc_now)

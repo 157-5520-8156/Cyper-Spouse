@@ -38,6 +38,34 @@ def test_apology_repairs_but_does_not_reset_everything() -> None:
     assert state.unresolved_emotion
 
 
+def test_serious_apology_without_sorry_still_enters_repair_attempt() -> None:
+    event = interpret_interaction(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我认真道歉，以后我会注意"),
+        MoodState(mood="hurt"),
+    )
+
+    assert event.kind == "repair_attempt"
+
+
+def test_natural_vulnerable_wording_is_not_misclassified_as_small_talk() -> None:
+    event = interpret_interaction(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我现在真的好难受"),
+        MoodState(),
+    )
+
+    assert event.kind == "user_vulnerable"
+
+
+def test_baby_address_is_premature_intimacy_before_the_relationship_is_close() -> None:
+    event = interpret_interaction(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="宝宝你在吗"),
+        MoodState(relationship_stage="acquaintance"),
+    )
+
+    assert event.kind == "premature_intimacy"
+    assert "慢慢来" in event.reply_style_hint
+
+
 def test_boundary_state_reduces_proactive_behavior() -> None:
     calm = MoodState(relationship_stage="friend", intimacy=40, trust=50, initiative=40)
     hurt = calm.model_copy(update={"mood": "hurt", "boundary_level": 20, "emotional_charge": 60})

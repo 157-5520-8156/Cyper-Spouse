@@ -18,12 +18,6 @@ def detect_key_relationship_event(message: IncomingMessage) -> KeyRelationshipEv
             "用户记得她的小事，这比普通聊天更能增加安全感。",
             "关键事件: 用户记得她的小事；沈知栀会觉得被认真对待，可以更放松一点。",
         )
-    if any(token in text for token in ["认真道歉", "我想好好解释", "刚才我确实不该", "以后我会注意"]):
-        return KeyRelationshipEvent(
-            "serious_repair",
-            "用户做了认真修复，不只是随口道歉。",
-            "关键事件: 用户认真修复关系；她可以明显缓和，但仍保留一点观察。",
-        )
     if any(token in text for token in ["刚才在忙", "刚刚在忙", "刚才没回", "不是故意不回", "手机没看到"]):
         return KeyRelationshipEvent(
             "explained_absence",
@@ -43,18 +37,6 @@ def apply_key_relationship_event(state: MoodState, event: KeyRelationshipEvent |
                 "intimacy": _clamp(state.intimacy + 3),
                 "security": _clamp(state.security + 5),
                 "emotional_charge": _clamp(state.emotional_charge - 4),
-            }
-        )
-    if event.kind == "serious_repair":
-        return state.model_copy(
-            update={
-                "mood": "calm" if state.mood in {"hurt", "guarded", "sulking"} else state.mood,
-                "trust": _clamp(state.trust + 5),
-                "patience": _clamp(state.patience + 8),
-                "security": _clamp(state.security + 6),
-                "boundary_level": _clamp(state.boundary_level - 2),
-                "emotional_charge": _clamp(state.emotional_charge - 16),
-                "unresolved_emotion": "用户认真解释过，她缓和很多，但还会看后续行动。",
             }
         )
     if event.kind == "explained_absence":

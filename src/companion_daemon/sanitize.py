@@ -68,7 +68,20 @@ def sanitize_chat_text(text: str) -> str:
         stripped = re.sub(r"\s{2,}", " ", stripped).strip()
         if stripped:
             cleaned_lines.append(_soften_assistantese(stripped))
-    return _limit_questions(_repair_flattened_questions("\n".join(cleaned_lines).strip()))
+    return enforce_character_location(_limit_questions(_repair_flattened_questions("\n".join(cleaned_lines).strip())))
+
+
+def enforce_character_location(text: str) -> str:
+    """Correct only unambiguous first-person Chengdu claims from the character."""
+    replacements = (
+        ("成都这边", "上海这边"),
+        ("我们成都", "我们上海"),
+        ("我在成都", "我在上海"),
+        ("我也是成都", "我也是上海"),
+    )
+    for wrong, correct in replacements:
+        text = text.replace(wrong, correct)
+    return text
 
 
 def _looks_like_pure_stage_direction(text: str) -> bool:

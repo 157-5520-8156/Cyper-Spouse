@@ -8,9 +8,11 @@ import re
 from companion_daemon.budget import ESTIMATES, BudgetGate
 from companion_daemon.config import get_settings
 from companion_daemon.image_generation import OpenAIImageGenerator, life_image_prompt
+from companion_daemon.life_runtime import advance_life_runtime, runtime_prompt_line
 from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel
-from companion_daemon.qq_client import QQOfficialClient
+from companion_daemon.qq_delivery import QQDelivery
 from companion_daemon.relationship import relationship_instruction, relationship_status_line
+from companion_daemon.social_followups import cancel_life_share_followup_for_event
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.stickers import load_stickers
 
@@ -31,7 +33,15 @@ class LifeEventGenerator:
     def __init__(self, model):
         self.model = model
 
-    async def generate(self, *, mood: str, relationship_stage: str, relationship_status: str) -> LifeEvent:
+    async def generate(
+        self,
+        *,
+        mood: str,
+        relationship_stage: str,
+        relationship_status: str,
+        life_context: str | None = None,
+        lived_event: str | None = None,
+    ) -> LifeEvent:
         prompt = [
             {
                 "role": "system",
@@ -47,6 +57,7 @@ class LifeEventGenerator:
                     "spontaneous_recall 表示刚突然想起的微小生活碎片，比如午饭吃到怪东西、路上听见一句话。"
                     "输出严格 JSON: topic, messages, sticker_category, memory_mode。"
                     "sticker_category 可选 happy, sulk, miss_you, jealous_soft, angry_soft, sleepy, comfort, teasing。"
+                    "若给出已发生的私有事件，只能围绕它自然地分享或联想，不能添加与该事件矛盾的新事实。"
                 ),
             },
             {
@@ -54,7 +65,10 @@ class LifeEventGenerator:
                 "content": (
                     f"当前心情: {mood}\n"
                     f"{relationship_status}\n"
-                    f"关系阶段说明: {relationship_instruction(relationship_stage)}"
+                    f"关系阶段说明: {relationship_instruction(relationship_stage)}\n"
+                    f"已经发生的当前生活上下文: {life_context or '无'}\n"
+                    f"优先分享的已发生私有事件: {lived_event or '无；可生成一件当前活动中刚发生的微小事件'}\n"
+                    "只能从这段上下文自然延伸，不能忽略当前时间凭空写另一段日程。"
                 ),
             },
         ]
@@ -113,6 +127,9 @@ async def run(
     settings = get_settings()
     engine = build_companion_engine()
     state = engine.store.get_mood_state(user_id)
+    runtime = advance_life_runtime(engine.store, user_id, state)
+    unshared_events = engine.store.unshared_private_life_events(user_id, limit=1)
+    selected_event = unshared_events[0] if unshared_events else None
     model = (
         DeepSeekChatModel(settings.deepseek_api_key, settings.deepseek_base_url, settings.deepseek_model)
         if settings.deepseek_api_key
@@ -136,15 +153,30 @@ async def run(
         mood=state.mood,
         relationship_stage=state.relationship_stage,
         relationship_status=relationship_status_line(state),
+        life_context=runtime_prompt_line(runtime),
+        lived_event=str(selected_event["content"]) if selected_event else None,
     )
     budget_gate.record(event_estimate, note=f"life_event:{event.topic[:40]}")
-    if send:
+    generated_event_id: int | None = None
+    if send and selected_event is None:
+        occurred_at = runtime.updated_at
         engine.store.upsert_memory(
             user_id,
             kind="private_life_event",
             content=_life_event_memory_content(event),
             source=_private_life_event_source(event),
             confidence=_private_life_event_confidence(event),
+        )
+        # This is an internal occurrence ledger, not a message. It is written before
+        # delivery so a failed share remains a private experience rather than a lie.
+        generated_event_id = engine.store.record_life_event(
+            user_id,
+            kind="private_life_event",
+            content=_life_event_memory_content(event),
+            started_at=occurred_at,
+            ends_at=occurred_at,
+            status="completed",
+            source=_private_life_event_source(event),
         )
     print(f"topic: {event.topic}")
     for index, message in enumerate(event.messages, start=1):
@@ -179,22 +211,21 @@ async def run(
     if not send:
         return False
 
-    openid = engine.store.platform_user_id(user_id, "qq")
-    if not openid:
-        print("not sent: no QQ account mapping")
+    delivery = QQDelivery(settings, sandbox=sandbox)
+    recipient_id = delivery.proactive_recipient_id() or engine.store.platform_user_id(user_id, "qq")
+    if not recipient_id:
+        print("not sent: no outbound QQ recipient configured")
         return False
-    if not settings.qq_bot_app_id or not settings.qq_bot_secret:
-        print("not sent: QQ credentials missing")
-        return False
-
-    api_base_url = "https://sandbox.api.sgroup.qq.com" if sandbox else "https://api.sgroup.qq.com"
-    client = QQOfficialClient(settings.qq_bot_app_id, settings.qq_bot_secret, api_base_url=api_base_url)
+    shared_event_id = int(selected_event["id"]) if selected_event is not None else generated_event_id
+    delivered_messages: list[str] = []
     for message in event.messages:
+        delivery_id = engine.store.queue_outgoing(user_id, "qq", message, kind="life_event")
         try:
-            await client.send_c2c_text(openid, message, is_wakeup=True)
+            await delivery.send_text(recipient_id, message)
         except Exception as exc:
             logger.exception("life event text send failed")
             print(f"life event not fully sent: {exc}")
+            engine.store.mark_outgoing_failed(delivery_id, str(exc))
             engine.store.upsert_memory(
                 user_id,
                 kind="life_event_send_failed",
@@ -202,12 +233,23 @@ async def run(
                 source="life_event",
                 confidence=0.2,
             )
+            if delivered_messages:
+                # She already said part of it out loud, so the event counts as
+                # shared: without this she would re-share the same story later.
+                _record_shared_life_event(
+                    engine,
+                    user_id,
+                    event,
+                    shared_event_id,
+                    delivered_messages,
+                )
             return False
-        engine.store.save_outgoing(user_id, "qq", message)
+        engine.store.mark_outgoing_delivered(delivery_id)
+        delivered_messages.append(message)
 
     if generated_path:
         try:
-            await client.send_c2c_local_image(openid, generated_path, is_wakeup=True)
+            await delivery.send_image(recipient_id, generated_path)
             print(f"sent generated image: {generated_path}")
         except Exception as exc:
             logger.exception("life event image send failed")
@@ -218,20 +260,37 @@ async def run(
         sticker = next((item for item in catalog.stickers if item.category == event.sticker_category), None)
         if sticker:
             try:
-                await client.send_c2c_local_image(openid, Path(sticker.path), is_wakeup=True)
+                await delivery.send_image(recipient_id, Path(sticker.path))
                 print(f"sent sticker: {sticker.path}")
             except Exception as exc:
                 logger.exception("life event sticker send failed")
                 print(f"sticker not sent: {exc}")
-    engine.store.record_proactive_delivery(user_id, "qq:life_event")
+    _record_shared_life_event(engine, user_id, event, shared_event_id, event.messages)
+    return True
+
+
+def _record_shared_life_event(
+    engine,
+    user_id: str,
+    event: LifeEvent,
+    shared_event_id: int | None,
+    delivered_messages: list[str],
+) -> None:
+    """Close the sharing loop over whatever actually reached the user."""
+    if hasattr(engine, "confirm_life_event_delivery"):
+        engine.confirm_life_event_delivery(user_id)
+    else:
+        engine.store.record_proactive_delivery(user_id, "qq:life_event")
+    if shared_event_id is not None:
+        engine.store.mark_life_event_shared(shared_event_id)
+        cancel_life_share_followup_for_event(engine.store, user_id, shared_event_id)
     engine.store.upsert_memory(
         user_id,
         kind="life_event",
-        content=_life_event_memory_content(event),
-        source="life_event",
+        content=f"{event.topic}: {' / '.join(delivered_messages)}",
+        source=f"life_event:shared:{shared_event_id}" if shared_event_id else "life_event",
         confidence=0.82,
     )
-    return True
 
 
 def main() -> None:

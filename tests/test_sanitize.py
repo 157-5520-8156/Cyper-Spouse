@@ -48,6 +48,8 @@ def test_sanitize_removes_acquaintance_crutch_variants() -> None:
 
 def test_sanitize_repairs_chengdu_location_confusion() -> None:
     assert sanitize_chat_text("啊，原来你也在成都呀！") == "啊，原来你在成都呀！"
+    assert sanitize_chat_text("成都这边食堂倒没这么卷。") == "上海这边食堂倒没这么卷。"
+    assert sanitize_chat_text("我在成都读书，刚下课。") == "我在上海读书，刚下课。"
 
 
 def test_sanitize_removes_explicit_unsupported_memory_claims() -> None:

@@ -51,6 +51,22 @@ uv run companion-qq-ws --sandbox
 
 This is the currently working QQ route. Webhook was blocked by QQ's domain filing requirement during local development.
 
+Run the QQ small-account route through NapCat (OneBot v11):
+
+```bash
+scripts/run_napcat_adapter.sh
+```
+
+It uses local loopback only and is an alternative to the official adapter. See
+[`docs/napcat-setup.md`](docs/napcat-setup.md) for the NapCat WebUI configuration,
+health checks, and Antify direct-routing rule.
+
+The generic OneBot route remains separately selectable:
+
+```bash
+scripts/run_onebot_adapter.sh
+```
+
 By default, QQ messages from the same user are batched for a short moment before replying, so rapid short messages are handled as one turn. Override with:
 
 ```bash

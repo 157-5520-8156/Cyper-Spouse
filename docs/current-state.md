@@ -235,10 +235,10 @@ Implemented:
 - EchoText-inspired image prompt building classifies character/object/creative image requests and carries visual identity/context into stable generation prompts.
 - Automatic image generation is guarded by character boundary checks and the local CNY budget gate, recording blocked/deferred requests instead of silently spending.
 - Self-initiated proactive image sharing is supported as a rare state-machine outcome, separate from user-demanded selfies.
-- EchoText-inspired reaction selection can suggest lightweight reactions from emotional deltas.
-- EchoText-inspired reply timing model estimates read/reply/ghost delays from emotion vectors and is wired into QQ's human timing layer with caps.
+- EchoText-inspired reaction selection suggests lightweight reactions from emotional deltas; on the NapCat/OneBot channel these become real QQ emoji reactions (`set_msg_emoji_like`) applied to the user's message before she starts typing the reply.
+- EchoText-inspired reply timing model estimates read/reply/ghost delays from emotion vectors. High volatility can trigger a true read-but-not-reply gap (`emotional_ghost` persisted as `reply_later` with `mark_unread=False`); short pre-reply pauses still come from `ghost_delay_ms` in the human timing layer.
 - EchoText-inspired image style detection carries user-requested styles into generation prompts.
-- External context emotion bleed is implemented with caps, but is not wired into the QQ main path yet; it should only be enabled when an external SillyTavern/MCP context source is explicitly passed into the engine.
+- The experimental external-context emotion bleed module has been removed: it never had a real event source in the QQ main path. If an external SillyTavern/MCP context source is added later, it should be reimplemented behind an explicit event adapter with end-to-end tests.
 - Chengdu-local human rhythm context keeps replies from feeling like an always-on assistant and explicitly suppresses bracketed stage directions.
 - QQ WebSocket delivery now adds read/think/typing delay before the first reply and human-sized pauses between split reply parts, instead of sending 2-3 parts in one burst.
 - After QQ sends a normal reply, it may schedule several short human-like follow-up opportunities:

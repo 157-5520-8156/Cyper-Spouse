@@ -156,6 +156,27 @@ def test_context_package_contains_required_sections() -> None:
     assert "最终 prompt 摘要" in block
 
 
+def test_context_package_carries_plutchik_guidance_without_raw_numbers() -> None:
+    angry = build_context_package(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="嗯"),
+        MoodState(mood="hurt", emotion_vector={"anger": 70, "trust": 10}),
+        [],
+        [],
+    )
+    calm = build_context_package(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="嗯"),
+        MoodState(mood="calm"),
+        [],
+        [],
+    )
+
+    # The dominant emotion changes behavioral guidance in the reply context,
+    # but internal vector numbers must never leak into the prompt verbatim.
+    assert angry.emotion_context != calm.emotion_context
+    assert "70" not in angry.emotion_context
+    assert "生气" in angry.emotion_context or "不耐烦" in angry.emotion_context
+
+
 def test_context_package_uses_compact_behavioral_policy_instead_of_state_monologue() -> None:
     package = build_context_package(
         IncomingMessage(platform="qq", platform_user_id="geoff", text="你怎么啦"),
@@ -203,6 +224,37 @@ def test_context_package_exposes_continuity_and_subtext_as_compact_constraints()
     block = package.prompt_block()
     assert "afternoon_classes 转到 evening_unwind" in block
     assert "想被认真对待" in block
+
+
+def test_same_input_gets_different_context_under_different_state_and_life() -> None:
+    message = IncomingMessage(platform="qq", platform_user_id="geoff", text="你在吗，我今天好累")
+
+    warm = build_context_package(
+        message,
+        MoodState(mood="worried", relationship_stage="friend", perceived_respect=65),
+        [],
+        [],
+        life_context_override="生活节律/进行中事件：窝在沙发上看点东西；手机状态=正在看消息。",
+    )
+    guarded = build_context_package(
+        message,
+        MoodState(
+            mood="guarded",
+            relationship_stage="acquaintance",
+            perceived_respect=25,
+            boundary_level=50,
+            last_interaction_event="boundary_violation",
+        ),
+        [],
+        [],
+        life_context_override="生活节律/进行中事件：上课或自习，手机调成了静音放在旁边；手机状态=刚瞄到通知。",
+    )
+
+    assert warm.user_intent == guarded.user_intent
+    assert warm.life_context != guarded.life_context
+    assert warm.reply_policy != guarded.reply_policy
+    assert "先接住情绪" in warm.reply_policy
+    assert "明确表示不舒服" in guarded.reply_policy
 
 
 @pytest.mark.asyncio

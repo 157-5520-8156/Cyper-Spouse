@@ -4,6 +4,27 @@ from companion_daemon.emotion_core import text_emotion_deltas
 from companion_daemon.models import MoodState
 
 
+# OneBot/NapCat `set_msg_emoji_like` accepts unicode code points in decimal as
+# emoji ids (e.g. 128077 = thumbs-up). Keep the map here so the abstract
+# reaction ids stay adapter-agnostic while QQ gets a concrete emoji.
+QQ_EMOJI_IDS = {
+    "heart": "10084",   # 红心
+    "haha": "128514",   # 笑哭
+    "wow": "128558",    # 惊讶
+    "sad": "128546",    # 流泪
+    "fire": "128293",   # 火
+    "like": "128077",   # 赞
+    "star": "11088",    # 星星
+    "bolt": "9889",     # 闪电
+}
+
+
+def qq_emoji_id(reaction_id: str | None) -> str | None:
+    if not reaction_id:
+        return None
+    return QQ_EMOJI_IDS.get(reaction_id)
+
+
 REACTION_EMOTION_MAP = {
     "heart": {"love": 2.5, "joy": 1.2, "trust": 1.0, "sadness": -0.8, "disgust": -0.6},
     "haha": {"joy": 2.1, "surprise": 0.9, "sadness": -1.0},

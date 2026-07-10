@@ -3,7 +3,7 @@ import asyncio
 from pathlib import Path
 
 from companion_daemon.config import get_settings
-from companion_daemon.qq_client import QQOfficialClient
+from companion_daemon.qq_delivery import QQDelivery
 from companion_daemon.runtime import build_companion_engine
 
 
@@ -26,39 +26,19 @@ async def run(user_id: str, *, send: bool, sandbox: bool) -> None:
         print("not sent: decision did not produce a QQ message")
         return
 
-    openid = engine.store.platform_user_id(user_id, "qq")
-    if not openid:
-        print("not sent: no QQ account mapping for this user")
-        return
-
     settings = get_settings()
-    if not settings.qq_bot_app_id or not settings.qq_bot_secret:
-        print("not sent: QQ_BOT_APP_ID and QQ_BOT_SECRET are required")
+    delivery = QQDelivery(settings, sandbox=sandbox)
+    recipient_id = delivery.proactive_recipient_id() or engine.store.platform_user_id(user_id, "qq")
+    if not recipient_id:
+        print("not sent: no outbound QQ recipient configured for this user")
         return
-
-    api_base_url = "https://sandbox.api.sgroup.qq.com" if sandbox else "https://api.sgroup.qq.com"
-    client = QQOfficialClient(
-        settings.qq_bot_app_id,
-        settings.qq_bot_secret,
-        api_base_url=api_base_url,
-    )
     try:
         if decision.image_path:
-            await client.send_c2c_local_image(
-                openid,
-                Path(decision.image_path),
-                content=decision.message,
-                is_wakeup=True,
-            )
+            await delivery.send_image(recipient_id, Path(decision.image_path), content=decision.message)
         elif decision.sticker_path:
-            await client.send_c2c_local_image(
-                openid,
-                Path(decision.sticker_path),
-                content=decision.message,
-                is_wakeup=True,
-            )
+            await delivery.send_image(recipient_id, Path(decision.sticker_path), content=decision.message)
         elif decision.message:
-            await client.send_c2c_text(openid, decision.message, is_wakeup=True)
+            await delivery.send_text(recipient_id, decision.message)
         else:
             print("not sent: no text or sticker payload")
             engine.fail_proactive_delivery(decision, "empty proactive payload")

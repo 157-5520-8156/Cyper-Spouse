@@ -4,12 +4,13 @@ import random
 
 import pytest
 
-from companion_daemon.models import CompanionReply, IncomingMessage, MessageAttachment
+from companion_daemon.models import CompanionReply, IncomingMessage, MessageAttachment, MoodState
 from companion_daemon.qq_websocket import (
     CompanionQQClient,
     QQMessageCoalescer,
     _attachments_from_botpy,
     _clean_content,
+    _afterthought_plans,
     classify_mid_reply_interruption,
     _send_reply_parts,
 )
@@ -43,13 +44,13 @@ def test_attachments_from_botpy() -> None:
     assert attachments[0].url == "https://example.test/photo.png"
 
 
-def test_duplicate_detection_prefers_platform_message_id() -> None:
+def test_duplicate_detection_drops_near_simultaneous_same_text_even_with_distinct_ids() -> None:
     client = object.__new__(CompanionQQClient)
     client._seen_message_ids = set()
     client._recent_text_keys = {}
 
     assert client._is_duplicate("msg-1", "user", "哈哈") is False
-    assert client._is_duplicate("msg-2", "user", "哈哈") is False
+    assert client._is_duplicate("msg-2", "user", "哈哈") is True
     assert client._is_duplicate("msg-2", "user", "哈哈") is True
 
 
@@ -67,6 +68,19 @@ def test_classifies_mid_reply_interruption() -> None:
     assert classify_mid_reply_interruption("对对对") == "backchannel"
     assert classify_mid_reply_interruption("等下我不是这个意思") == "takeover"
     assert classify_mid_reply_interruption("那你觉得我应该怎么办？") == "takeover"
+
+
+def test_afterthought_plans_favor_open_story_and_respect_goodbyes() -> None:
+    class FixedRandom:
+        def uniform(self, low: float, high: float) -> float:
+            return low
+
+    plans = _afterthought_plans(
+        "我今天其实遇到一件挺奇怪的事，后来越想越不对劲。事情不大，但我到现在还不知道要不要把它当回事。",
+        FixedRandom(),
+    )
+    assert [plan.mode for plan in plans] == ["quick_continue", "topic_drift", "silence_react"]
+    assert _afterthought_plans("晚安啦", FixedRandom()) == []
 
 
 @pytest.mark.asyncio
@@ -130,6 +144,91 @@ async def test_afterthought_uses_original_reply_time_and_sends_at_most_once() ->
     assert all(seen_at == reply_sent_at for seen_at, _ in engine.seen)
     assert [mode for _, mode in engine.seen] == ["quick_continue"]
     assert target.replies == ["quick_continue:刚刚还想补一句。"]
+
+
+@pytest.mark.asyncio
+async def test_afterthought_uses_outbox_delivery_confirmation() -> None:
+    class FakeStore:
+        def resolve_user(self, platform: str, platform_user_id: str) -> str:
+            return "geoff"
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = FakeStore()
+            self.queued: list[tuple[str, str, str]] = []
+            self.confirmed: list[tuple[str, str, str, int | None]] = []
+            self.failed: list[tuple[int | None, str]] = []
+
+        async def generate_afterthought(
+            self,
+            canonical_user_id: str,
+            reply_sent_at: datetime,
+            *,
+            mode: str = "quick_continue",
+        ) -> str:
+            return "补一句。"
+
+        def queue_afterthought_delivery(
+            self,
+            canonical_user_id: str,
+            platform: str,
+            text: str,
+        ) -> int:
+            self.queued.append((canonical_user_id, platform, text))
+            return 42
+
+        def confirm_afterthought_delivery(
+            self,
+            canonical_user_id: str,
+            platform: str,
+            text: str,
+            *,
+            delivery_id: int | None = None,
+        ) -> None:
+            self.confirmed.append((canonical_user_id, platform, text, delivery_id))
+
+        def fail_afterthought_delivery(self, delivery_id: int | None, reason: str) -> None:
+            self.failed.append((delivery_id, reason))
+
+    class FakeTarget:
+        def __init__(self):
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs) -> None:
+            self.replies.append(kwargs["content"])
+
+    class AlwaysSendRandom:
+        def uniform(self, low: float, high: float) -> float:
+            return low
+
+        def random(self) -> float:
+            return 0.0
+
+    async def fake_sleep(seconds: float) -> None:
+        return None
+
+    engine = FakeEngine()
+    target = FakeTarget()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        human_timing=True,
+        sleep=fake_sleep,
+        rng=AlwaysSendRandom(),
+    )
+
+    coalescer._schedule_afterthought(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="刚才那事"),
+        target,
+        datetime(2026, 7, 10, 1, 2, 3, tzinfo=timezone.utc),
+    )
+    await asyncio.gather(*coalescer._afterthought_tasks["c2c:user"])
+
+    assert target.replies == ["补一句。"]
+    assert engine.queued == [("geoff", "qq", "补一句。")]
+    assert engine.confirmed == [("geoff", "qq", "补一句。", 42)]
+    assert engine.failed == []
 
 
 @pytest.mark.asyncio
@@ -323,6 +422,43 @@ async def test_coalescer_sends_sticker_after_text_reply() -> None:
 
     assert target.replies == ["好呀"]
     assert sent == [("user", "assets/stickers/rin-happy.png")]
+
+
+@pytest.mark.asyncio
+async def test_coalescer_fires_emoji_reaction_before_reply_text() -> None:
+    order: list[str] = []
+
+    class FakeEngine:
+        async def handle_message(self, incoming: IncomingMessage, **kwargs) -> CompanionReply:
+            return CompanionReply(
+                canonical_user_id="geoff",
+                mood="happy",
+                text="哈哈哈被你笑到",
+                suggested_reaction="haha",
+            )
+
+    class FakeTarget:
+        async def reply(self, **kwargs) -> None:
+            order.append("text")
+
+    async def send_reaction(incoming: IncomingMessage, reply: CompanionReply) -> None:
+        order.append(f"reaction:{reply.suggested_reaction}:{incoming.message_id}")
+
+    coalescer = QQMessageCoalescer(
+        FakeEngine(),
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+        on_reaction=send_reaction,
+    )
+
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="超好笑的事", message_id="777"),
+        FakeTarget(),
+    )
+    await asyncio.sleep(0.03)
+
+    assert order == ["reaction:haha:777", "text"]
 
 
 @pytest.mark.asyncio
@@ -536,6 +672,9 @@ async def test_coalescer_can_defer_long_story_then_reply() -> None:
 
             return MoodState()
 
+        def recent_messages(self, canonical_user_id: str, limit: int = 6):
+            return []
+
     class FakeEngine:
         def __init__(self):
             self.store = FakeStore()
@@ -570,17 +709,166 @@ async def test_coalescer_can_defer_long_story_then_reply() -> None:
         rng=DeferRandom(),
     )
 
+    opener = "我跟你说"
     await coalescer.add(
         "c2c:user",
-        IncomingMessage(platform="qq", platform_user_id="user", text="我刚刚想了很久，" * 8),
+        IncomingMessage(platform="qq", platform_user_id="user", text=opener),
         target,
     )
     await asyncio.sleep(0.01)
 
-    assert engine.seen_texts == ["我刚刚想了很久，" * 8]
-    assert engine.context_hints[0]
+    assert engine.seen_texts == [opener]
+    assert engine.context_hints == [None]
     assert target.replies == ["刚看到。"]
     assert any(seconds >= 300 for seconds in sleeps)
+
+
+def test_qq_emoji_id_maps_known_reactions() -> None:
+    from companion_daemon.emotion_reactions import qq_emoji_id
+
+    assert qq_emoji_id("haha") == "128514"
+    assert qq_emoji_id("heart") == "10084"
+    assert qq_emoji_id(None) is None
+    assert qq_emoji_id("unknown") is None
+
+
+@pytest.mark.asyncio
+async def test_reply_decision_defer_persists_a_read_later_task() -> None:
+    class DeferRandom(random.Random):
+        def random(self) -> float:
+            return 0.0
+
+        def uniform(self, a: float, b: float) -> float:
+            return a
+
+    class FakeStore:
+        def resolve_user(self, platform: str, platform_user_id: str) -> str:
+            return "geoff"
+
+        def get_mood_state(self, canonical_user_id: str):
+            from companion_daemon.models import MoodState
+
+            return MoodState()
+
+        def recent_messages(self, canonical_user_id: str, limit: int = 6):
+            return []
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = FakeStore()
+            self.read_later_reasons: list[str] = []
+            self.deferred_reasons: list[str] = []
+
+        def create_read_later_task(self, message: IncomingMessage, *, defer_minutes: float, reason: str) -> int:
+            self.read_later_reasons.append(reason)
+            return 11
+
+        def create_deferred_reply_task(self, message: IncomingMessage, *, defer_minutes: float, reason: str) -> int:
+            self.deferred_reasons.append(reason)
+            return 12
+
+        async def handle_message(self, incoming: IncomingMessage, **kwargs) -> CompanionReply:
+            return CompanionReply(canonical_user_id="geoff", mood="calm", text="刚看到。")
+
+    class FakeTarget:
+        async def reply(self, **kwargs) -> None:
+            return None
+
+    async def fake_sleep(seconds: float) -> None:
+        return None
+
+    engine = FakeEngine()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+        enable_reply_decision=True,
+        sleep=fake_sleep,
+        rng=DeferRandom(),
+    )
+
+    long_story = (
+        "今天在食堂排队的时候，前面有个人点了三份一样的菜，然后又全部退掉重新点了一遍，"
+        "我就这样看着队伍慢慢变长，最后干脆换了一个窗口，结果那边的阿姨手更慢。"
+    )
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text=long_story),
+        FakeTarget(),
+    )
+    await asyncio.sleep(0.01)
+
+    # The reply-decision defer happens after she already read the message, so it
+    # must persist through the read-but-sidetracked entrance, not an unread defer.
+    assert engine.read_later_reasons
+    assert engine.deferred_reasons == []
+
+
+@pytest.mark.asyncio
+async def test_upset_state_ghosts_through_read_later_and_uses_ghost_context_hint() -> None:
+    class GhostRandom(random.Random):
+        def random(self) -> float:
+            return 0.0
+
+        def uniform(self, a: float, b: float) -> float:
+            return a
+
+    class FakeStore:
+        def resolve_user(self, platform: str, platform_user_id: str) -> str:
+            return "geoff"
+
+        def get_mood_state(self, canonical_user_id: str):
+            return MoodState(
+                mood="hurt",
+                emotion_vector={"anger": 75, "sadness": 55, "joy": 5, "trust": 10},
+            )
+
+        def recent_messages(self, canonical_user_id: str, limit: int = 6):
+            return []
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = FakeStore()
+            self.read_later_reasons: list[str] = []
+            self.context_hints: list[str | None] = []
+
+        def create_read_later_task(self, message: IncomingMessage, *, defer_minutes: float, reason: str) -> int:
+            self.read_later_reasons.append(reason)
+            return 9
+
+        def create_deferred_reply_task(self, message: IncomingMessage, *, defer_minutes: float, reason: str) -> int:
+            raise AssertionError("ghost must not use unread defer")
+
+        async def handle_message(self, incoming: IncomingMessage, **kwargs) -> CompanionReply:
+            self.context_hints.append(kwargs.get("context_hint"))
+            return CompanionReply(canonical_user_id="geoff", mood="hurt", text="嗯。")
+
+        def complete_deferred_reply_task(self, task_id: int | None) -> None:
+            return None
+
+    async def fake_sleep(seconds: float) -> None:
+        return None
+
+    engine = FakeEngine()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+        enable_reply_decision=True,
+        sleep=fake_sleep,
+        rng=GhostRandom(),
+    )
+
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="我今天去买了那个键盘"),
+        type("T", (), {"reply": staticmethod(lambda **k: None)})(),
+    )
+    # Let the in-memory ghost timer fire immediately (defer_minutes * 60 with fake_sleep).
+    await asyncio.sleep(0.02)
+
+    assert engine.read_later_reasons == ["emotional_ghost"]
+    assert "故意没有马上回" in (engine.context_hints[0] or "")
 
 
 @pytest.mark.asyncio

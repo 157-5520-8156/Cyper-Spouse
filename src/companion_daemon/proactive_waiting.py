@@ -1,5 +1,6 @@
 from datetime import datetime
 
+from companion_daemon.impression import apply_user_impression
 from companion_daemon.models import MoodState
 from companion_daemon.time import utc_now
 
@@ -20,18 +21,18 @@ def apply_waiting_after_proactive(
         note = "她刚主动找过你，短时间里会有一点等你回应的心思。"
         if state.unresolved_emotion == note:
             return state
-        return state.model_copy(
+        return apply_user_impression(state.model_copy(
             update={
                 "initiative": _clamp(state.initiative + 2),
                 "emotional_charge": _clamp(state.emotional_charge + 2),
                 "unresolved_emotion": note,
             }
-        )
+        ), event_kind="proactive_timeout_short")
     if hours < 12:
         note = "主动消息没等到回应，她会从期待变成有点收住。"
         if state.unresolved_emotion == note:
             return state
-        return state.model_copy(
+        return apply_user_impression(state.model_copy(
             update={
                 "mood": "miss_you" if state.mood == "calm" else state.mood,
                 "security": _clamp(state.security - 3),
@@ -39,18 +40,18 @@ def apply_waiting_after_proactive(
                 "emotional_charge": _clamp(state.emotional_charge + 5),
                 "unresolved_emotion": note,
             }
-        )
+        ), event_kind="proactive_timeout_medium")
     note = "主动找你很久没回应，她会把期待压下去。"
     if state.unresolved_emotion == note:
         return state
-    return state.model_copy(
+    return apply_user_impression(state.model_copy(
         update={
             "security": _clamp(state.security - 5),
             "initiative": _clamp(state.initiative - 5),
             "emotional_charge": _clamp(state.emotional_charge + 3),
             "unresolved_emotion": note,
         }
-    )
+    ), event_kind="proactive_timeout_long")
 
 
 def _clamp(value: int) -> int:

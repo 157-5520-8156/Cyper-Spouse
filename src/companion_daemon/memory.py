@@ -57,7 +57,7 @@ MEMORY_CANDIDATE_PATTERNS: list[tuple[str, str, str, list[str]]] = [
     (
         "life_fact",
         "Life Fact",
-        "custom",
+        "life_fact",
         [
             r"我(?:住在|搬到|出生在|人在|在)([^，。！？\n]{2,32})",
             r"我是(?:一名|一个|个)?([^，。！？\n]{2,32}(?:学生|老师|程序员|工程师|设计师|医生|律师|作家|摄影师|研究生))",
@@ -106,10 +106,9 @@ MEMORY_CANDIDATE_PATTERNS: list[tuple[str, str, str, list[str]]] = [
     (
         "recent_event",
         "Recent Event",
-        "shared_moment",
+        "recent_event",
         [
             r"我(?:刚刚|刚|最近|今天|昨天)(?:去了|买了|开始|结束|搬了|换了|决定|发现)([^。！？\n]{4,80})",
-            r"我(?:明天|后天|这周|下周|周末)(?:要|准备|打算)([^。！？\n]{4,80})",
         ],
     ),
 ]
