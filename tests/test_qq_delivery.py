@@ -42,3 +42,42 @@ async def test_napcat_delivery_sends_background_text_to_configured_qq(monkeypatc
         "message": "隔一会儿想补一句。",
         "user_id": 2759284998,
     }
+
+
+@pytest.mark.asyncio
+async def test_generic_onebot_delivery_uses_its_own_endpoint_and_proactive_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"status": "ok"})
+
+    original_client = httpx.AsyncClient
+
+    def fake_client(*args, **kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return original_client(*args, **kwargs)
+
+    monkeypatch.setattr(onebot_adapter.httpx, "AsyncClient", fake_client)
+    settings = SimpleNamespace(
+        qq_adapter="onebot",
+        napcat_api_url="http://127.0.0.1:3000",
+        napcat_access_token="napcat-token",
+        napcat_proactive_user_id="2759284998",
+        onebot_api_url="http://127.0.0.1:5700",
+        onebot_access_token="onebot-token",
+        onebot_proactive_user_id="123456789",
+        qq_bot_app_id=None,
+        qq_bot_secret=None,
+    )
+
+    delivery = QQDelivery(settings)
+
+    assert delivery.proactive_recipient_id() == "123456789"
+    await delivery.send_text("123456789", "这句应走通用 OneBot。")
+
+    assert str(requests[0].url).startswith("http://127.0.0.1:5700/")
+    assert requests[0].headers["Authorization"] == "Bearer onebot-token"
+    assert json.loads(requests[0].content)["user_id"] == 123456789

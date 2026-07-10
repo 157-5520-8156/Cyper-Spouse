@@ -53,8 +53,8 @@ The adapter accepts NapCat's bearer token on inbound callbacks. It also accepts
 the former `X-Signature` header for compatibility with prior OneBot setups.
 
 For a non-NapCat OneBot implementation, set `QQ_ADAPTER=onebot`,
-`ONEBOT_API_URL`, and `ONEBOT_ACCESS_TOKEN`, then use
-`scripts/run_onebot_adapter.sh`.
+`ONEBOT_API_URL`, `ONEBOT_ACCESS_TOKEN`, and (for scheduled messages)
+`ONEBOT_PROACTIVE_USER_ID`, then use `scripts/run_onebot_adapter.sh`.
 
 ## Routing with Antify
 

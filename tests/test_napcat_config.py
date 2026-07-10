@@ -18,9 +18,11 @@ def test_napcat_and_generic_onebot_have_separate_settings() -> None:
     settings = Settings(
         NAPCAT_API_URL="http://127.0.0.1:3000",
         ONEBOT_API_URL="http://127.0.0.1:5700",
+        ONEBOT_PROACTIVE_USER_ID="123456789",
     )
     assert settings.napcat_api_url == "http://127.0.0.1:3000"
     assert settings.onebot_api_url == "http://127.0.0.1:5700"
+    assert settings.onebot_proactive_user_id == "123456789"
 
 
 def test_napcat_group_messages_are_opt_in() -> None:

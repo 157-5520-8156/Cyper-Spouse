@@ -14,5 +14,6 @@ external/SillyTavern/
 external/SillyTavern/node_modules/
 external/SillyTavern/config.yaml
 external/SillyTavern/data/
+external/napcat/
 
 .env

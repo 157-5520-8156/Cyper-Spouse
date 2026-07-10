@@ -44,6 +44,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("ONEBOT_ACCESS_TOKEN", "SNOWLUMA_ACCESS_TOKEN"),
     )
+    onebot_proactive_user_id: str | None = Field(
+        default=None,
+        alias="ONEBOT_PROACTIVE_USER_ID",
+    )
     conversation_core: str = Field(default="prompt", alias="CONVERSATION_CORE")
     sillytavern_base_url: str = Field(default="http://127.0.0.1:8000", alias="SILLYTAVERN_BASE_URL")
     database_path: Path = Path("data/companion.sqlite")
