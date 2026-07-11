@@ -879,6 +879,23 @@ class CompanionEngine:
             ),
             now=now,
         )
+        if social_task and social_task["kind"] == "life_share_followup":
+            payload = social_task_payload(social_task)
+            event_id = payload.get("life_event_id")
+            event = (
+                self.store.trusted_private_life_event(canonical_user_id, int(event_id))
+                if isinstance(event_id, int)
+                else None
+            )
+            if event is None:
+                # Tasks survive restarts, so source validation must happen at
+                # consumption time as well as task creation time.
+                self.store.cancel_social_task(int(social_task["id"]))
+                social_task = None
+            else:
+                return self._deterministic_life_share_decision(
+                    canonical_user_id, state, runtime, social_task, str(event["content"])
+                )
         outreach_block = self.outreach_block_reason(canonical_user_id, state)
         if outreach_block:
             if social_task:
@@ -1005,6 +1022,54 @@ class CompanionEngine:
                 }
             )
         return decision
+
+    def _deterministic_life_share_decision(
+        self,
+        canonical_user_id: str,
+        state: MoodState,
+        runtime,
+        social_task,
+        content: str,
+    ) -> ProactiveDecision:
+        allowed, reason = proactive_outreach_allowed(runtime)
+        if not allowed:
+            self.store.defer_social_task(int(social_task["id"]), due_at=utc_now() + timedelta(minutes=45))
+            return ProactiveDecision(
+                canonical_user_id=canonical_user_id,
+                private_thought=f"已发生的小事暂时不适合分享：{reason}",
+                should_send=False,
+                trigger_type="life_share_followup",
+            )
+        fact = content.strip().rstrip("。！？!? ")
+        decision = ProactiveDecision(
+            canonical_user_id=canonical_user_id,
+            private_thought="有一件已记录的小事，顺手和他分享。",
+            should_send=True,
+            platform="qq",
+            message_type="text",
+            message=f"{fact}。刚想起这件小事，想跟你说一下。",
+            trigger_type="life_share_followup",
+            cooldown_minutes=120,
+            social_task_id=int(social_task["id"]),
+        )
+        self.store.save_proactive_event(
+            canonical_user_id,
+            decision.private_thought,
+            decision.should_send,
+            decision.platform,
+            decision.message_type,
+            decision.message,
+            None,
+            decision.trigger_type,
+            decision.cooldown_minutes,
+        )
+        return decision.model_copy(
+            update={
+                "delivery_id": self.store.queue_outgoing(
+                    canonical_user_id, "qq", decision.message or "", kind="proactive"
+                )
+            }
+        )
 
     def confirm_proactive_delivery(self, decision: ProactiveDecision) -> None:
         if decision.delivery_id is None:
@@ -1153,7 +1218,11 @@ class CompanionEngine:
                 facts.append(f"角色档案/{key}: {value}")
             facts.extend(f"角色事实账本: {item}" for item in self.character_profile.canonical_facts)
         for event in self.store.recent_life_events(canonical_user_id, limit=6):
-            if event["kind"] != "private_life_event" or event["status"] != "completed":
+            if (
+                event["kind"] != "private_life_event"
+                or event["status"] != "completed"
+                or not str(event["source"]).startswith("life_runtime:")
+            ):
                 continue
             facts.append(f"已发生生活事件: {event['content']}")
         return facts[:12]

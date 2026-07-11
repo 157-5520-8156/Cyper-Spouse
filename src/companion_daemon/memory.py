@@ -190,6 +190,12 @@ def _exclude_from_reply_memory(kind: str) -> bool:
         "proactive_image_blocked",
         "consolidation_log",
         "interaction_pattern",
+        # Life events are supplied through the source-filtered life ledger, not
+        # generic retrieval.  This prevents legacy model-authored event memories
+        # from regaining factual authority through lexical overlap.
+        "life_event",
+        "private_life_event",
+        "calendar_event",
     }
 
 

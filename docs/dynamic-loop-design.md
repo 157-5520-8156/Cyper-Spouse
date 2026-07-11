@@ -102,7 +102,8 @@
 - [已实现] 基于时段的活动模板与起止时间。
 - [已实现初版] 日计划：首次进入当天时生成固定私有时段计划，活动按计划推进而非每段重新抽取。计划不是记忆，也不会被写成已发生事实；见 `tests/test_life_runtime.py::test_daily_plan_is_stable_and_its_items_are_not_lived_facts_until_activated`。
 - [已实现初版] 用户脆弱、边界、控制与修复等高显著事件会温和调整下一项尚未发生的安排，绝不改写当前或过去活动；见 `tests/test_life_runtime.py::test_salient_user_event_nudges_future_plan_without_rewriting_current_activity`。
-- [已实现初版] “发生”和“分享”分离：活动完成时偶尔留下可追溯的私有事件和私有记忆；生活分享优先选择未分享的私有事件，成功投递才将其标记为已分享。没有候选时才生成当前活动中的微小新事件。失败投递不生成共同历史，也不消耗既有事件。
+- [已实现] “发生”和“分享”分离：活动完成时偶尔留下可追溯的私有事件和私有记忆；生活分享只可选择未分享的已完成事件，成功投递才将其标记为已分享。没有候选时必须跳过，模型不得为了获得素材临场生成事件；外发文本复用账本事件，不得补写地点、人物、时间或结果。失败投递不生成共同历史，也不消耗既有事件；见 `tests/test_life_event.py::test_life_event_without_ledger_source_never_calls_the_generator`。
+- [已实现] 旧版模型直接生成的 `life_event:*` 私有事件不再进入可分享候选或回复事实账本；它们保留在 SQLite 供审计，但不能继续污染后续对话。只有 `life_runtime:*` 的确定性事件可用作生活事实。
 - [已实现] 事件结果：上课取消、临时邀约、天气、疲惫等非用户事件会写入 `life_event_result`，只影响当前余波和下一项未来计划，不把未来活动写成已发生事实；见 `tests/test_life_runtime.py::test_non_user_life_event_result_changes_future_plan_without_claiming_it_happened`。触发端已接入调度器：`plan_daily_life_result` 按用户+日期确定性地决定当天是否发生一件小事及其时段（多数日子什么都不发生），到点由 `maybe_apply_planned_life_result` 应用一次，日期化事件源保证不重复叠加，且用户事件余波优先；见 `tests/test_life_runtime.py::test_planned_life_result_fires_once_and_bends_the_day`。
 - [已实现部分] 早间计划会读取慢性状态：疲惫降低次日高专注安排的强度，边界受损减少社交型晚间安排，强情绪让晚间收尾更低负荷；见 `tests/test_life_runtime.py::test_durable_state_changes_the_next_days_private_plan`。前一天事件和未完成安排已经有初步入口，仍待做一周级轨迹回放。
 

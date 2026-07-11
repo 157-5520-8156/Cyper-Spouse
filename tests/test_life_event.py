@@ -7,7 +7,40 @@ import pytest
 import companion_daemon.life_event as life_event_module
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import seed_user
-from companion_daemon.life_event import LifeEvent, parse_life_event, run
+from companion_daemon.life_event import LifeEvent, LifeEventGenerator, parse_life_event, run
+
+
+def _record_shareable_event(store: CompanionStore) -> int:
+    now = datetime.now(UTC)
+    return store.record_life_event(
+        "geoff",
+        kind="private_life_event",
+        content="看书时翻到一段有点好笑的注释，停下来发了会儿呆。",
+        started_at=now,
+        ends_at=now,
+        status="completed",
+        source="life_runtime:incidental:test",
+    )
+
+
+def test_unshared_life_events_exclude_legacy_model_authored_sources(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    now = datetime.now(UTC)
+    store.record_life_event(
+        "geoff",
+        kind="private_life_event",
+        content="图书馆遇到一本奇怪的书名。",
+        started_at=now,
+        ends_at=now,
+        status="completed",
+        source="life_event:spontaneous_recall",
+    )
+    expected_id = _record_shareable_event(store)
+
+    rows = store.unshared_private_life_events("geoff")
+
+    assert [row["id"] for row in rows] == [expected_id]
 
 
 def test_parse_life_event_json() -> None:
@@ -19,6 +52,38 @@ def test_parse_life_event_json() -> None:
     assert len(event.messages) == 2
     assert event.sticker_category == "happy"
     assert event.memory_mode == "planned_today"
+
+
+@pytest.mark.asyncio
+async def test_life_event_generator_requires_a_previously_recorded_event() -> None:
+    generator = LifeEventGenerator(model=object())
+
+    event = await generator.generate(
+        mood="calm",
+        relationship_stage="friend",
+        relationship_status="关系状态：朋友",
+        lived_event=None,
+    )
+
+    assert event is None
+
+
+@pytest.mark.asyncio
+async def test_life_event_generator_reuses_the_event_ledger_verbatim() -> None:
+    generator = LifeEventGenerator(model=object())
+    source = "看书时翻到一段有点好笑的注释，停下来发了会儿呆。"
+
+    event = await generator.generate(
+        mood="happy",
+        relationship_stage="friend",
+        relationship_status="关系状态：朋友",
+        lived_event=source,
+    )
+
+    assert event is not None
+    assert source in "".join(event.messages)
+    assert "图书馆" not in "".join(event.messages)
+    assert "书名" not in "".join(event.messages)
 
 
 def test_parse_life_event_supports_spontaneous_recall() -> None:
@@ -38,27 +103,16 @@ def test_parse_life_event_rewrites_unrealistic_local_invitation() -> None:
 
 
 @pytest.mark.asyncio
-async def test_life_event_prompt_sets_grounded_fiction_rules() -> None:
-    class CapturingModel:
-        prompt = None
-
-        async def complete(self, prompt, temperature: float) -> str:
-            type(self).prompt = prompt
-            return '{"topic":"小事","messages":["刚刚吃了饭。"]}'
-
-    model = CapturingModel()
-    await life_event_module.LifeEventGenerator(model).generate(
+async def test_life_event_generator_has_no_model_authored_fact_path() -> None:
+    event = await life_event_module.LifeEventGenerator(model=object()).generate(
         mood="calm",
         relationship_stage="friend",
         relationship_status="关系状态：朋友",
+        lived_event="路上风有点大，路边的宣传单被吹得到处跑。",
     )
 
-    system_prompt = model.prompt[0]["content"]
-    assert "用户在成都" in system_prompt
-    assert "不要邀请用户立刻去她身边" in system_prompt
-    assert "生活连续性账本" in system_prompt
-    assert "spontaneous_recall" in system_prompt
-    assert "已发生的私有事件" in system_prompt
+    assert event is not None
+    assert event.messages == ["路上风有点大，路边的宣传单被吹得到处跑。刚想起这件小事，想跟你说一下。"]
 
 
 @pytest.mark.asyncio
@@ -66,6 +120,7 @@ async def test_life_event_send_records_outgoing_and_memory(tmp_path: Path, monke
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
     store.map_account("qq", "openid", "geoff")
+    _record_shareable_event(store)
 
     class FakeEngine:
         def __init__(self):
@@ -121,17 +176,15 @@ async def test_life_event_send_records_outgoing_and_memory(tmp_path: Path, monke
     assert store.outbox_message(1)["status"] == "delivered"
     assert store.outbox_message(2)["status"] == "delivered"
     memories = store.memories("geoff", limit=10)
-    assert any(row["kind"] == "private_life_event" and "午饭" in row["content"] for row in memories)
+    assert any(row["kind"] == "private_life_event" and row["source"] == "life_runtime:incidental:test" for row in store.recent_life_events("geoff", limit=10))
     assert any(row["kind"] == "life_event" and "午饭" in row["content"] for row in memories)
     assert any(
         row["kind"] == "private_life_event" and row["status"] == "completed"
         for row in store.recent_life_events("geoff", limit=10)
     )
-    private = store.memory_by_source("geoff", kind="private_life_event", source="life_event:spontaneous_recall")
-    assert private is not None
-    assert private["confidence"] == pytest.approx(0.68)
+    assert store.memory_by_source("geoff", kind="private_life_event", source="life_event:spontaneous_recall") is None
     assert store.unshared_private_life_events("geoff") == []
-    assert store.usage_count("life_event", "month", datetime.now(UTC)) == 1
+    assert store.usage_count("life_event", "month", datetime.now(UTC)) == 0
 
 
 @pytest.mark.asyncio
@@ -141,6 +194,7 @@ async def test_life_event_text_send_failure_does_not_record_lived_memory(
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
     store.map_account("qq", "openid", "geoff")
+    _record_shareable_event(store)
 
     class FakeEngine:
         def __init__(self):
@@ -189,14 +243,14 @@ async def test_life_event_text_send_failure_does_not_record_lived_memory(
 
     assert sent is False
     memories = store.memories("geoff", limit=10)
-    assert any(row["kind"] == "private_life_event" and "午饭" in row["content"] for row in memories)
+    assert any(row["kind"] == "private_life_event" and row["source"] == "life_runtime:incidental:test" for row in store.recent_life_events("geoff", limit=10))
     assert any(
         row["kind"] == "private_life_event" and row["status"] == "completed"
         for row in store.recent_life_events("geoff", limit=10)
     )
     assert not any(row["kind"] == "life_event" for row in memories)
     assert any(row["kind"] == "life_event_send_failed" and "午饭" in row["content"] for row in memories)
-    assert any("午饭" in row["content"] for row in store.unshared_private_life_events("geoff"))
+    assert any(row["source"] == "life_runtime:incidental:test" for row in store.unshared_private_life_events("geoff"))
     assert store.last_proactive_delivery("geoff", "qq:life_event") is None
     assert store.recent_messages("geoff", limit=5) == []
     assert store.outbox_message(1)["kind"] == "life_event"
@@ -210,6 +264,7 @@ async def test_life_event_partial_send_still_counts_as_shared(
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
     store.map_account("qq", "openid", "geoff")
+    _record_shareable_event(store)
 
     class FakeEngine:
         def __init__(self):
@@ -310,6 +365,35 @@ async def test_life_event_dry_run_does_not_record_private_life(tmp_path: Path, m
 
     assert sent is False
     assert not any(row["kind"] == "private_life_event" for row in store.memories("geoff", limit=10))
+
+
+@pytest.mark.asyncio
+async def test_life_event_without_ledger_source_never_calls_the_generator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.map_account("qq", "openid", "geoff")
+
+    class FakeEngine:
+        def __init__(self):
+            self.store = store
+
+    class FailingGenerator:
+        def __init__(self, model):
+            raise AssertionError("a model must not invent a life event without a ledger source")
+
+    monkeypatch.setattr(life_event_module, "build_companion_engine", lambda: FakeEngine())
+    monkeypatch.setattr(life_event_module, "LifeEventGenerator", FailingGenerator)
+
+    sent = await run(user_id="geoff", send=True, sandbox=True, generate_image=False, image_kind="life")
+
+    assert sent is False
+    assert store.recent_messages("geoff", limit=5) == []
+    assert not any(
+        str(row["source"]).startswith("life_event:")
+        for row in store.recent_life_events("geoff", limit=10)
+    )
 
 
 @pytest.mark.asyncio

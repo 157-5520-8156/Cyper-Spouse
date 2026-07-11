@@ -1059,11 +1059,26 @@ class CompanionStore:
                 from life_runtime_events
                 where canonical_user_id = ? and kind = 'private_life_event'
                   and status = 'completed' and shared_at is null
+                  and source like 'life_runtime:%'
                 order by id desc limit ?
                 """,
                 (canonical_user_id, limit),
             ).fetchall()
         return list(rows)
+
+    def trusted_private_life_event(self, canonical_user_id: str, event_id: int) -> sqlite3.Row | None:
+        """Return one completed event that the deterministic world runtime owns."""
+        with self.connect() as conn:
+            return conn.execute(
+                """
+                select id, kind, content, started_at, ends_at, status, source, shared_at
+                from life_runtime_events
+                where id = ? and canonical_user_id = ?
+                  and kind = 'private_life_event' and status = 'completed'
+                  and source like 'life_runtime:%'
+                """,
+                (event_id, canonical_user_id),
+            ).fetchone()
 
     def mark_life_event_shared(self, event_id: int, *, shared_at: datetime | None = None) -> None:
         with self.connect() as conn:

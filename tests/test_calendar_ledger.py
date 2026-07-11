@@ -44,7 +44,7 @@ def test_lived_private_event_is_backfilled_as_a_distinct_calendar_memory(tmp_pat
     now = datetime(2026, 7, 10, 4, 0, tzinfo=UTC)
     store.record_life_event(
         "geoff", kind="private_life_event", content="图书馆遇到奇怪书名: 翻到一本很离谱的书",
-        started_at=now - timedelta(days=1), ends_at=now - timedelta(days=1), status="completed", source="test:lived",
+            started_at=now - timedelta(days=1), ends_at=now - timedelta(days=1), status="completed", source="life_runtime:incidental:test-lived",
         shared_at=now - timedelta(days=1),
     )
 
@@ -159,7 +159,7 @@ def test_calendar_context_keeps_future_plans_and_past_events_separate(tmp_path: 
         started_at=yesterday,
         ends_at=yesterday,
         status="completed",
-        source="test:calendar",
+            source="life_runtime:incidental:test-calendar",
     )
 
     future = calendar_context_for_message(store, "geoff", MoodState(), "你明天准备做什么？", now=now)

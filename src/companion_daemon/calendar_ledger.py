@@ -17,13 +17,24 @@ def calendar_ledger(store, canonical_user_id: str, state: MoodState, *, now: dat
     start = (now - timedelta(days=past_days)).astimezone()
     end = (now + timedelta(days=future_days + 1)).astimezone()
     plans = store.life_plan_items_between(canonical_user_id, starts_at=start, ends_at=end)
-    events = store.life_events_between(canonical_user_id, starts_at=start, ends_at=end)
+    events = [
+        row
+        for row in store.life_events_between(canonical_user_id, starts_at=start, ends_at=end)
+        if row["kind"] != "private_life_event" or str(row["source"]).startswith("life_runtime:")
+    ]
+    trusted_backfill_sources = {f"calendar:backfill:{row['id']}" for row in events}
     _backfill_memorable_events(store, canonical_user_id, events)
-    special_events = store.calendar_events_between(canonical_user_id, starts_at=start, ends_at=end)
+    special_events = _trusted_calendar_events(
+        store.calendar_events_between(canonical_user_id, starts_at=start, ends_at=end),
+        trusted_backfill_sources,
+    )
     for event in special_events:
         store.sync_calendar_event_memory(canonical_user_id, int(event["id"]))
     # Re-read after synchronization so the projection exposes the linked memory.
-    special_events = store.calendar_events_between(canonical_user_id, starts_at=start, ends_at=end)
+    special_events = _trusted_calendar_events(
+        store.calendar_events_between(canonical_user_id, starts_at=start, ends_at=end),
+        trusted_backfill_sources,
+    )
     by_day: dict[str, dict[str, object]] = {}
     for offset in range(-past_days, future_days + 1):
         day = (now.astimezone() + timedelta(days=offset)).date().isoformat()
@@ -78,6 +89,19 @@ def _backfill_memorable_events(store, canonical_user_id: str, events) -> None:
             memory_note=content[:300],
             status="completed",
         )
+
+
+def _trusted_calendar_events(rows, trusted_backfill_sources: set[str]):
+    """Hide old backfills whose source event is no longer trusted as world fact."""
+    return [
+        row
+        for row in rows
+        if not (
+            row["event_type"] == "lived_memory"
+            and str(row["source"]).startswith("calendar:backfill:")
+            and str(row["source"]) not in trusted_backfill_sources
+        )
+    ]
 
 
 def _ensure_weekly_plan(store, canonical_user_id: str, *, now: datetime, future_days: int) -> None:

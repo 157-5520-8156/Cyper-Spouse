@@ -69,7 +69,7 @@ def test_reconcile_unshared_event_backfills_share_followup(tmp_path: Path) -> No
         started_at=old,
         ends_at=old,
         status="completed",
-        source="test:stale",
+        source="life_runtime:incidental:test-stale",
     )
     task_id = reconcile_unshared_life_share_tasks(store, "geoff", now=old + timedelta(hours=2))
     assert task_id is not None
@@ -113,7 +113,7 @@ async def test_due_life_share_followup_uses_share_trigger_and_marks_event_shared
         started_at=now - timedelta(hours=2),
         ends_at=now - timedelta(hours=2),
         status="completed",
-        source="test:due-share",
+        source="life_runtime:incidental:due-share",
     )
     task_id = store.create_social_task(
         "geoff",
@@ -130,10 +130,45 @@ async def test_due_life_share_followup_uses_share_trigger_and_marks_event_shared
 
     assert decision.trigger_type == "life_share_followup"
     assert decision.social_task_id == task_id
+    assert decision.message == "自习时窗外突然下起小雨。刚想起这件小事，想跟你说一下。"
+    assert engine.model.calls == []
     engine.confirm_proactive_delivery(decision)
-    row = store.life_event_by_source("geoff", "test:due-share")
+    row = store.life_event_by_source("geoff", "life_runtime:incidental:due-share")
     assert row is not None
     assert row["shared_at"] is not None
+
+
+@pytest.mark.asyncio
+async def test_due_legacy_life_share_followup_is_cancelled_before_model_generation(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, "你是知栀。")
+    now = utc_now()
+    event_id = store.record_life_event(
+        "geoff",
+        kind="private_life_event",
+        content="图书馆遇到一本奇怪的书名。",
+        started_at=now - timedelta(hours=2),
+        ends_at=now - timedelta(hours=2),
+        status="completed",
+        source="life_event:spontaneous_recall",
+    )
+    task_id = store.create_social_task(
+        "geoff",
+        kind="life_share_followup",
+        platform="qq",
+        platform_user_id="geoff",
+        payload={"life_event_id": event_id, "content": "图书馆遇到一本奇怪的书名。"},
+        reason="旧事件",
+        due_at=now - timedelta(minutes=1),
+        expires_at=now + timedelta(hours=6),
+    )
+
+    await engine.proactive_tick("geoff")
+
+    task = next(row for row in store.recent_social_tasks("geoff", limit=10) if row["id"] == task_id)
+    assert task["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

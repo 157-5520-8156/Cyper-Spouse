@@ -92,6 +92,36 @@ def test_self_fact_ledger_uses_canonical_facts_not_freeform_background(tmp_path:
     assert not any("书店门口" in fact for fact in facts)
 
 
+def test_self_fact_ledger_excludes_legacy_model_authored_life_events(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+    now = utc_now()
+    store.record_life_event(
+        "geoff",
+        kind="private_life_event",
+        content="图书馆遇到一本奇怪的书名。",
+        started_at=now,
+        ends_at=now,
+        status="completed",
+        source="life_event:spontaneous_recall",
+    )
+    store.record_life_event(
+        "geoff",
+        kind="private_life_event",
+        content="看书时翻到一段有点好笑的注释。",
+        started_at=now,
+        ends_at=now,
+        status="completed",
+        source="life_runtime:incidental:test",
+    )
+
+    facts = engine._self_fact_lines("geoff")
+
+    assert any("有点好笑的注释" in fact for fact in facts)
+    assert not any("奇怪的书名" in fact for fact in facts)
+
+
 def test_engine_wakes_for_the_next_message_after_persisting_an_unread_state(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
