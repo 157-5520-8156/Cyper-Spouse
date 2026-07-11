@@ -735,3 +735,14 @@ def test_week_long_life_simulation_rebuilds_deterministically(tmp_path: Path) ->
     assert snapshot["goals"]["literature-reading"]["status"] in {"completed", "deferred"}
     outcomes = [item for item in snapshot["outcomes"].values() if item.get("npc_id")]
     assert len({(item["activity_id"][:10], item["npc_id"]) for item in outcomes}) == len(outcomes)
+
+
+def test_two_week_world_replay_has_no_duplicate_experiences_or_open_actions(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
+    advanced = kernel.advance(started.world_id, datetime(2026, 7, 25, 22, tzinfo=NOW.tzinfo), expected_revision=started.revision)
+    snapshot = kernel.snapshot(started.world_id)
+    assert advanced.state_hash == kernel.rebuild_projection(started.world_id, "world_current_state").state_hash
+    assert len(snapshot["experiences"]) == len(set(snapshot["experiences"]))
+    assert all(item["status"] not in {"planned", "active"} for item in snapshot["agenda"].values())
+    assert all(item["status"] not in {"scheduled", "sending"} for item in snapshot["actions"].values())
