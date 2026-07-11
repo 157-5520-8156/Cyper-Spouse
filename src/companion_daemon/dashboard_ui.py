@@ -276,29 +276,29 @@ DASHBOARD_HTML = r"""<!doctype html>
     const stage = {w:1000, h:760, scale:1, ox:0, oy:0};
     const images = {};
     const imagePaths = {
-      room:'/assets/dashboard/zhizhi-room-isometric-v2.png',
+      room:'/assets/dashboard/free-bedroom/isometric-room-2.png',
+      props:'/assets/dashboard/free-bedroom/isometric-room-assets-3.png',
       sprite:'/assets/dashboard/zhizhi-sprite-sheet-v2.png'
     };
-    const anchors = {
-      desk:[264,673],
-      kitchen:[679,503],
-      entry:[674,973],
-      sofa:[544,858],
-      vanity:[1044,783],
-      bed:[1119,683],
-      window:[1094,388],
-      rug:[714,813]
+    const sceneDefinitions = {
+      'free-bedroom': {
+        source:'Sweeetpotatoo · Isometric pixel bedroom · free to use anywhere',
+        background:'room',
+        anchors:{
+          desk:[169,232], kitchen:[214,252], entry:[257,213], sofa:[265,281],
+          vanity:[232,273], bed:[164,276], window:[151,190], rug:[255,292]
+        },
+        routes:{
+          desk:['rug','window'], kitchen:['rug'], entry:['rug'], sofa:['rug'],
+          vanity:['rug','bed'], bed:['vanity','rug'], window:['desk','rug'],
+          rug:['desk','kitchen','entry','sofa','vanity','bed','window']
+        },
+        foreground:{bed:{image:'props', crop:[204,38,122,72], at:[148,244], size:[122,72]}}
+      }
     };
-    const routeGraph = {
-      desk:['rug'],
-      kitchen:['rug','window'],
-      entry:['rug'],
-      sofa:['rug'],
-      vanity:['bed','rug'],
-      bed:['vanity','rug','window'],
-      window:['kitchen','bed','rug'],
-      rug:['desk','kitchen','entry','sofa','vanity','bed','window']
-    };
+    let activeScene = sceneDefinitions['free-bedroom'];
+    let anchors = activeScene.anchors;
+    let routeGraph = activeScene.routes;
     const sprites = {
       front:{x:100,y:70,w:250,h:500,dh:108},
       left:{x:455,y:70,w:260,h:500,dh:108},
@@ -310,7 +310,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     let snapshot = null;
     let loading = false;
     let selectedCalendarDate = null;
-    const actor = {anchor:'rug', pos:[725,830], path:[], action:'idle', expression:'neutral', scene:null, direction:'front', lastTime:0, blinkUntil:0};
+    const actor = {anchor:'rug', pos:[...anchors.rug], path:[], action:'idle', expression:'neutral', scene:null, direction:'front', lastTime:0, blinkUntil:0};
 
     function preload() {
       return Promise.all(Object.entries(imagePaths).map(([key,path]) => new Promise(resolve => {
@@ -353,7 +353,18 @@ DASHBOARD_HTML = r"""<!doctype html>
       }
       return names.map(name => anchors[name]);
     }
+    function activateScene(scene) {
+      const nextScene = sceneDefinitions[scene.scene_id] || sceneDefinitions['free-bedroom'];
+      if (nextScene === activeScene) return;
+      activeScene = nextScene;
+      anchors = activeScene.anchors;
+      routeGraph = activeScene.routes;
+      actor.anchor = 'entry' in anchors ? 'entry' : 'rug';
+      actor.pos = [...anchors[actor.anchor]];
+      actor.path = [];
+    }
     function applyScene(scene) {
+      activateScene(scene);
       const target = scene.location in anchors ? scene.location : 'rug';
       actor.scene = scene;
       actor.expression = scene.expression;
@@ -425,13 +436,44 @@ DASHBOARD_HTML = r"""<!doctype html>
       ctx.clearRect(0, 0, roomCanvas.width, roomCanvas.height);
       ctx.fillStyle = '#141115';
       ctx.fillRect(0, 0, roomCanvas.width, roomCanvas.height);
-      if (images.room) drawImageContain(ctx, images.room, 18, 14, 964, 720);
+      const background = images[activeScene.background];
+      if (background) drawImageContain(ctx, background, 18, 14, 964, 720);
+      drawActivityLight(ctx, now);
       if ((actor.scene || {}).time_of_day === 'night') {
-        ctx.fillStyle = 'rgba(20, 17, 30, .10)';
+        ctx.fillStyle = 'rgba(20, 17, 30, .22)';
         ctx.fillRect(0, 0, roomCanvas.width, roomCanvas.height);
       }
       drawActor(ctx, now);
+      drawForeground(ctx);
       drawSceneRibbon(ctx);
+    }
+    function drawActivityLight(ctx, now) {
+      const scene = actor.scene || {};
+      const target = anchors[scene.location] || anchors.rug;
+      const [x,y] = project(target);
+      if (['study','read_phone','type_phone'].includes(scene.action)) {
+        const pulse = 6 + Math.sin(now / 500) * 2;
+        ctx.save();
+        ctx.globalAlpha = .20;
+        ctx.fillStyle = '#9cd9d4';
+        ctx.beginPath();
+        ctx.ellipse(x, y - 18, 38 + pulse, 16 + pulse / 3, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+    function drawForeground(ctx) {
+      const scene = actor.scene || {};
+      if (scene.location !== 'bed' || scene.action !== 'sleep') return;
+      const layer = activeScene.foreground.bed;
+      const image = images[layer.image];
+      if (!image) return;
+      const [x,y] = project(layer.at);
+      const width = layer.size[0] * stage.scale, height = layer.size[1] * stage.scale;
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(image, ...layer.crop, x, y, width, height);
+      ctx.restore();
     }
     function drawSceneRibbon(ctx) {
       const scene = actor.scene || {};

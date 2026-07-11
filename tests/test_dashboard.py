@@ -19,7 +19,12 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert 'id="roomCanvas"' in response.text
     assert "pathfind" in response.text
     assert "applyScene" in response.text
-    assert "zhizhi-room-isometric-v2.png" in response.text
+    assert "free-bedroom" in response.text
+    assert "sceneDefinitions" in response.text
+    assert "activateScene" in response.text
+    assert "scene_id" in response.text
+    assert "isometric-room-2.png" in response.text
+    assert "isometric-room-assets-3.png" in response.text
     assert "zhizhi-sprite-sheet-v2.png" in response.text
     assert "routeGraph" in response.text
     assert "/debug/users" in response.text

@@ -1,5 +1,10 @@
 # Third-Party Notices
 
+The free bedroom scene assets under `assets/dashboard/free-bedroom/` are from
+[Sweeetpotatoo's Isometric pixel bedroom](https://sweeetpotatoo.itch.io/isometric-pixel-bedroom).
+The creator's asset page states: "Free to use anywhere." The files are used as
+the dashboard's free isometric-bedroom scene source.
+
 The pixel room's furniture, floor tiles, pixel font, and base animation sprite
 under `assets/pixel_agents/` are copied from
 [pixel-agents-hq/pixel-agents](https://github.com/pixel-agents-hq/pixel-agents).
