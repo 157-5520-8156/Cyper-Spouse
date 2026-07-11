@@ -78,14 +78,20 @@ long_term_goals:
     title: 整理课程笔记
     target: 4
     deadline: "2026-07-18T20:00:00+08:00"
+    priority: 2
+    urgency_window_hours: 48
   - id: photo-portfolio
     title: 整理摄影作品
     target: 3
     deadline: "2026-07-19T20:00:00+08:00"
+    priority: 3
+    urgency_window_hours: 48
   - id: literature-reading
     title: 文学社读书会准备
     target: 3
     deadline: "2026-07-17T20:00:00+08:00"
+    priority: 3
+    urgency_window_hours: 48
 npcs:
   - id: mother-shen
     name: 沈岚

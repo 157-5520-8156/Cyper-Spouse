@@ -732,6 +732,7 @@ class WorldKernel:
                         if substitution_reason:
                             payload["substitution_reason"] = substitution_reason
                         events.append(("ActivityPlanned", payload))
+                        events.append(("ActivitySelected", {"activity_id": activity_id, "template_id": payload["template_id"], "reason": substitution_reason or "primary_template", "rule_version": self.life_simulation.RULE_VERSION}))
                         if substitution_reason == "no_eligible_template" and bool(item.get("rest_when_unavailable")):
                             events.append(("ActivityRested", {"activity_id": activity_id, "reason": "no_eligible_seeded_activity", "energy_delta": int(item.get("rest_recovery", 8))}))
                             continue

@@ -140,7 +140,7 @@ def test_clock_advance_materializes_seeded_daily_life_into_events(tmp_path: Path
     advanced = kernel.advance("zhizhi-v1", NOW + timedelta(hours=2), expected_revision=started.revision)
 
     assert [event.event_type for event in advanced.events] == [
-        "ClockAdvanced", "ActivityPlanned", "ActivityStarted", "ActivityCompleted"
+        "ClockAdvanced", "ActivityPlanned", "ActivitySelected", "ActivityStarted", "ActivityCompleted"
     ]
     assert kernel.snapshot("zhizhi-v1")["agenda"]["2026-07-11:morning"]["status"] == "completed"
 
@@ -167,7 +167,7 @@ def test_seeded_fallback_template_replaces_an_unavailable_activity(tmp_path: Pat
     kernel.advance("zhizhi-v1", NOW + timedelta(hours=2), expected_revision=started.revision)
     activity = kernel.snapshot("zhizhi-v1")["agenda"]["2026-07-11:photo"]
     assert activity["template_id"] == "course_notes"
-    assert activity["substitution_reason"] == "primary_unavailable"
+    assert activity["substitution_reason"] == "goal_priority"
 
 
 def test_no_eligible_seeded_activity_becomes_rest_instead_of_fake_completion(tmp_path: Path) -> None:

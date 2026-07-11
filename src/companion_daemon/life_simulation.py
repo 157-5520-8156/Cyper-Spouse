@@ -23,11 +23,13 @@ class LifeSimulation:
     def choose_template(self, state: dict[str, Any], activity: dict[str, Any], alternatives: list[str]) -> tuple[dict[str, Any], str | None]:
         """Choose the first seed-authorized template that can begin this activity."""
         candidates = [str(activity.get("template_id") or ""), *alternatives]
-        for template_id in candidates:
+        starts_at = datetime.fromisoformat(str(activity["starts_at"]))
+        ranked = sorted(enumerate(candidates), key=lambda item: (-self._goal_priority(state, item[1], starts_at), item[0]))
+        for _, template_id in ranked:
             spec = state.get("life_outcome_templates", {}).get(template_id)
             if not isinstance(spec, dict) or state.get("needs", {}).get("energy", 0) < int(spec.get("energy_cost", 0)):
                 continue
-            starts_at, ends_at = datetime.fromisoformat(str(activity["starts_at"])), datetime.fromisoformat(str(activity["ends_at"]))
+            ends_at = datetime.fromisoformat(str(activity["ends_at"]))
             npc_id = spec.get("npc_id")
             goal = state.get("goals", {}).get(spec.get("goal_id")) if spec.get("goal_id") else None
             if npc_id and not self._available(state.get("entities", {}), str(npc_id), starts_at, ends_at):
@@ -35,8 +37,23 @@ class LifeSimulation:
             if spec.get("goal_id") and (not goal or goal.get("status") != "active" or (goal.get("deadline") and ends_at > datetime.fromisoformat(str(goal["deadline"])))):
                 continue
             selected = {**activity, "template_id": template_id, "location": str(spec["location"])}
-            return selected, ("primary_unavailable" if template_id != activity.get("template_id") else None)
+            return selected, ("goal_priority" if template_id != activity.get("template_id") else None)
         return activity, "no_eligible_template"
+
+    @staticmethod
+    def _goal_priority(state: dict[str, Any], template_id: str, starts_at: datetime) -> int:
+        spec = state.get("life_outcome_templates", {}).get(template_id, {})
+        goal = state.get("goals", {}).get(spec.get("goal_id")) if isinstance(spec, dict) else None
+        if not goal or goal.get("status") != "active":
+            return 0
+        base = int(goal.get("priority", 0)) * 100
+        remaining = max(0, int(goal.get("target", 0)) - int(goal.get("progress", 0)))
+        deadline = goal.get("deadline")
+        if deadline:
+            hours = max(0, int((datetime.fromisoformat(str(deadline)) - starts_at).total_seconds() // 3600))
+            window = max(1, int(goal.get("urgency_window_hours", 48)))
+            base += max(0, window - hours) * 10
+        return base + remaining
 
     def events_for_activity(self, state: dict[str, Any], activity: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         valid, reason, spec = self._validate(state, activity, require_completed=False)
