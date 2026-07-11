@@ -48,6 +48,16 @@ class WorldClockRequest(BaseModel):
     target_logical_at: str
 
 
+# The browser is an operator surface, not a transport adapter.  In particular
+# it must never manufacture a delivery/model receipt or turn arbitrary text
+# into a confirmed fact.  Those commands remain available only through the
+# in-process WorldKernel adapters that own the corresponding external result.
+WORLD_OPERATOR_COMMANDS = frozenset({
+    "set_clock_mode", "register_npc", "register_user", "plan_activity",
+    "review_activity", "review_goal", "change_relationship", "change_need", "cancel_action",
+})
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -162,6 +172,12 @@ def world_integrity(world_id: str) -> dict[str, object]:
 @app.post("/world/{world_id}/commands")
 def world_command(world_id: str, request: WorldCommandRequest) -> dict[str, object]:
     command = {**request.command, "world_id": world_id}
+    command_type = str(command.get("type") or "")
+    if command_type not in WORLD_OPERATOR_COMMANDS:
+        raise HTTPException(
+            status_code=403,
+            detail="browser command is not allowed to create facts or settle external results",
+        )
     try:
         decision = WorldKernel(engine.store).submit(command, expected_revision=request.expected_revision)
     except ConcurrencyConflict as exc:

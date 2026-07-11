@@ -128,6 +128,33 @@ async def test_world_enabled_reply_records_input_action_and_delivery_settlement(
 
 
 @pytest.mark.asyncio
+async def test_world_mode_question_thread_is_opened_only_after_delivery_and_closed_by_user_turn(tmp_path: Path) -> None:
+    class QuestionModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return '{"reply_text":"你今天还好吗？","mentioned_event_ids":[],"proposed_action_ids":[]}'
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, QuestionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="在吗", message_id="thread-open")
+    )
+    assert reply is not None
+    threads = world.snapshot(world_id)["conversation_threads"]
+    assert len(threads) == 1
+    thread_id = next(iter(threads))
+    assert threads[thread_id]["status"] == "open"
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我今天很好，因为事情都做完了", message_id="thread-answer")
+    )
+    assert world.snapshot(world_id)["conversation_threads"][thread_id]["status"] == "answered"
+
+
+@pytest.mark.asyncio
 async def test_world_mode_turn_confirms_durable_user_fact_in_world_ledger(tmp_path: Path, monkeypatch) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
@@ -215,6 +242,12 @@ async def test_world_mode_store_guard_rejects_legacy_writes_but_allows_world_tur
     restarted_store = CompanionStore(tmp_path / "test.sqlite")
     with pytest.raises(RuntimeError, match="forbids legacy behaviour write"):
         restarted_store.save_mood_state("geoff", MoodState())
+    with pytest.raises(RuntimeError, match="forbids legacy behaviour write"):
+        restarted_store.cancel_social_task(1)
+    with pytest.raises(RuntimeError, match="forbids legacy behaviour write"):
+        restarted_store.save_calendar_week(
+            "geoff", week_start="2026-07-06", theme="旧日历", summary="不能旁路", source="test"
+        )
 
 
 @pytest.mark.asyncio
@@ -291,6 +324,39 @@ async def test_world_mode_withheld_proactive_is_a_reviewable_world_decision(tmp_
     deferred = list(world.snapshot(world_id)["decisions"].values())
     assert deferred and deferred[0]["kind"] == "withheld_impulse"
     assert world.snapshot(world_id)["actions"][deferred[0]["action_id"]]["status"] == "scheduled"
+
+
+@pytest.mark.asyncio
+async def test_world_proactive_does_not_bypass_an_open_conversation_thread(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="在吗", message_id="proactive-thread-input")
+    )
+    # FakeCompanionModel's normal reply is not a question; create one delivered
+    # world question explicitly to make the gate independent of model wording.
+    logical_now = engine._world_logical_now()
+    delivery_id, _, _ = world.queue_outgoing_action(
+        canonical_user_id="geoff", platform="qq", text="你还好吗？", kind="reply",
+        expires_at=logical_now + timedelta(hours=12),
+        trace={
+            "world_id": world_id, "appraisal": "ordinary_message", "expression_policy": "test",
+            "allowed_facts": [], "observable_reason": "test",
+            "conversation_thread": {
+                "thread_id": "proactive-thread", "user_id": "user:geoff", "question": "你还好吗？",
+                "expires_at": (logical_now + timedelta(hours=12)).isoformat(),
+            },
+        },
+    )
+    world.settle_outgoing_action(delivery_id, delivered=True)
+
+    decision = await engine.proactive_tick("geoff")
+
+    assert decision.should_send is False
+    assert "等待回应" in decision.private_thought
 
 
 def test_world_mode_delayed_reply_is_a_cancellable_world_action(tmp_path: Path, monkeypatch) -> None:

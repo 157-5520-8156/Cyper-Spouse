@@ -80,6 +80,7 @@ from companion_daemon.tone_inertia import build_tone_inertia, classify_outgoing_
 from companion_daemon.time import utc_now
 from companion_daemon.tool_requests import detect_tool_request, tool_prompt_line
 from companion_daemon.unanswered_question import (
+    PendingQuestion,
     apply_question_response,
     apply_unanswered_question_waiting,
     classify_response_to_own_question,
@@ -159,6 +160,17 @@ class CompanionEngine:
     @staticmethod
     def _world_user_id(canonical_user_id: str) -> str:
         return f"user:{canonical_user_id}"
+
+    @staticmethod
+    def _world_reply_question(text: str) -> str | None:
+        """Extract a bounded, observable question without creating a fact."""
+        cleaned = text.strip()
+        if not cleaned:
+            return None
+        looks_like_question = cleaned.endswith(("?", "？")) or any(
+            token in cleaned for token in ("你觉得", "要不要", "是不是", "可以吗", "在吗")
+        )
+        return cleaned[:240] if looks_like_question else None
 
     def _ensure_world_user(self, canonical_user_id: str) -> str:
         if not self.world_kernel or not self.world_id:
@@ -701,6 +713,27 @@ class CompanionEngine:
         assert self.world_kernel and self.world_id
         for action_id, action in self.world_kernel.snapshot(self.world_id)["actions"].items():
             is_life_share = bool(action.get("trace", {}).get("life_share"))
+            if action["kind"] == "decision_review" and action["status"] == "scheduled":
+                decision_id = str(action.get("payload", {}).get("decision_id") or "")
+                if decision_id:
+                    self._submit_world_with_retry(
+                        {
+                            "type": "resolve_deferred_decision", "world_id": self.world_id,
+                            "decision_id": decision_id, "outcome": "abandoned",
+                            "reason": "new_user_turn_superseded_deferred_impulse",
+                            "idempotency_key": f"decision-user-return:{decision_id}:{message.message_id}",
+                        }
+                    )
+                continue
+            if action["kind"] == "message_attention" and action["status"] == "scheduled":
+                self._submit_world_with_retry(
+                    {
+                        "type": "cancel_action", "world_id": self.world_id,
+                        "action_id": action_id, "reason": "newer_user_message_observed",
+                        "idempotency_key": f"attention-supersede:{action_id}:{message.message_id}",
+                    }
+                )
+                continue
             if (
                 (action["kind"] in {"reply_later", "conversation_pulse"} or is_life_share)
                 and action["status"] == "scheduled"
@@ -729,6 +762,22 @@ class CompanionEngine:
         event = interpret_interaction(message, MoodState())
         intent_id = f"turn:{message.message_id or message.sent_at.isoformat()}"
         user_id = self._world_user_id(canonical_user_id)
+        for thread_id, raw_thread in self.world_kernel.snapshot(self.world_id).get("conversation_threads", {}).items():
+            thread = raw_thread if isinstance(raw_thread, dict) else {}
+            if thread.get("status") != "open" or thread.get("user_id") != user_id:
+                continue
+            response = classify_response_to_own_question(
+                message.text,
+                PendingQuestion(text=str(thread.get("question") or ""), sent_at=""),
+            )
+            if response:
+                self._submit_world_with_retry(
+                    {
+                        "type": "resolve_conversation_thread", "world_id": self.world_id,
+                        "thread_id": thread_id, "outcome": response.kind, "reason": response.memory,
+                        "idempotency_key": f"thread-response:{thread_id}:{message.message_id}",
+                    }
+                )
         self._submit_world_with_retry(
             {
                 "type": "appraise_turn",
@@ -744,13 +793,15 @@ class CompanionEngine:
         if skip_reply:
             return None
         snapshot = self.world_kernel.snapshot(self.world_id)
-        facts = [str(item["value"]) for item in snapshot["facts"].values()]
-        experiences = [str(item["content"]) for item in snapshot["experiences"].values()]
+        context = self.world_kernel.conversation_context(self.world_id, user_id=user_id)
+        facts = [str(item["value"]) for item in context["referencable_facts"]]
+        experiences = [str(item["content"]) for item in context["referencable_experiences"]]
         policy = (snapshot.get("last_appraisal") or {}).get("policy", "自然回应当前消息。")
-        world_policy = self.world_kernel.conversation_policy(self.world_id)
-        needs = snapshot["needs"]
-        relationship = snapshot.get("relationships", {}).get(user_id, {})
-        modulation = snapshot.get("emotion_modulation", {})
+        behavior = context["behavior"]
+        world_policy = behavior["policy"]
+        needs = behavior["needs"]
+        relationship = behavior["relationship"]
+        modulation = behavior["emotion_modulation"]
         context_block = (
             "世界账本授权（必须遵守）：\n"
             f"- 本轮关系判断: {event.kind}\n- 本轮表达策略: {policy}\n"
@@ -789,20 +840,33 @@ class CompanionEngine:
             # a free-text fact claim.  The conservative fallback has no claim.
             candidate = {"reply_text": "我在。", "mentioned_event_ids": [], "proposed_action_ids": [], "claims": []}
         text = sanitize_chat_text(str(candidate["reply_text"]))
+        question = self._world_reply_question(text)
+        expires_at = self._world_logical_now() + timedelta(hours=12)
+        trace: dict[str, object] = {
+            "world_id": self.world_id,
+            "appraisal": event.kind,
+            "expression_policy": str(policy),
+            "allowed_facts": facts,
+            "short_lived_constraint": None,
+            "observable_reason": "由已结算世界账本和本轮判断决定。",
+        }
+        if question:
+            thread_id = "thread:" + sha256(
+                f"{user_id}|{message.message_id}|{question}".encode("utf-8")
+            ).hexdigest()[:20]
+            trace["conversation_thread"] = {
+                "thread_id": thread_id,
+                "user_id": user_id,
+                "question": question,
+                "expires_at": (self._world_logical_now() + timedelta(hours=24)).isoformat(),
+            }
         delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(
             canonical_user_id=canonical_user_id,
             platform=message.platform,
             text=text,
             kind="reply",
-            expires_at=self._world_logical_now() + timedelta(hours=12),
-            trace={
-                "world_id": self.world_id,
-                "appraisal": event.kind,
-                "expression_policy": str(policy),
-                "allowed_facts": facts,
-                "short_lived_constraint": None,
-                "observable_reason": "由已结算世界账本和本轮判断决定。",
-            },
+            expires_at=expires_at,
+            trace=trace,
         )
         reply = CompanionReply(
             canonical_user_id=canonical_user_id,
@@ -1090,7 +1154,8 @@ class CompanionEngine:
                 return None
             prompt = (
                 "只补一条不超过 60 字的聊天余波；不得新增任何未结算经历、人物或事实。"
-                "若不该发送，返回空字符串。\n"
+                "若不该发送，reply_text 置空。只返回 WorldReplyJSON："
+                '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}。\n'
                 f"已结算事实: {[item['value'] for item in snapshot['facts'].values()]}\n"
                 f"已结算经历: {[item['content'] for item in snapshot['experiences'].values()][-3:]}\n"
                 f"模式: {mode}"
@@ -1106,7 +1171,13 @@ class CompanionEngine:
             self._record_world_model_output(
                 purpose="afterthought", causation=causation, content=raw, action_id=model_action_id
             )
-            text = sanitize_chat_text(raw)
+            try:
+                candidate = self.world_kernel.validate_reply_candidate(
+                    self.world_id, parse_reply_candidate(raw)
+                )
+            except WorldError:
+                return None
+            text = sanitize_chat_text(str(candidate["reply_text"]))
             return text if text and len(text) <= 60 else None
         state = self.store.get_mood_state(canonical_user_id)
         if state.mood in {"guarded", "hurt"}:
@@ -1153,6 +1224,12 @@ class CompanionEngine:
 
     def queue_afterthought_delivery(self, canonical_user_id: str, platform: str, text: str) -> int:
         if self.world_kernel and self.world_id:
+            # This entry point is also used by scheduler recovery.  Keep its
+            # payload on the same grounded text boundary as normal replies.
+            self.world_kernel.validate_reply_candidate(
+                self.world_id,
+                {"reply_text": text, "mentioned_event_ids": [], "proposed_action_ids": [], "claims": []},
+            )
             delivery_id, _, _ = self.world_kernel.queue_outgoing_action(
                 canonical_user_id=canonical_user_id,
                 platform=platform,
@@ -1626,6 +1703,25 @@ class CompanionEngine:
             return ProactiveDecision(
                 canonical_user_id=canonical_user_id,
                 private_thought="刚刚决定先收住，等复核期限到了再判断。",
+                should_send=False,
+            )
+        user_id = self._world_user_id(canonical_user_id)
+        open_threads = [
+            thread
+            for thread in snapshot.get("conversation_threads", {}).values()
+            if isinstance(thread, dict) and thread.get("status") == "open" and thread.get("user_id") == user_id
+        ]
+        if open_threads:
+            return ProactiveDecision(
+                canonical_user_id=canonical_user_id,
+                private_thought="上一轮仍有一个等待回应的问题，先把聊天空间留给对方。",
+                should_send=False,
+            )
+        needs = snapshot["needs"]
+        if int(needs.get("boundary", 0)) >= 55 or int(needs.get("security", 50)) <= 25:
+            return ProactiveDecision(
+                canonical_user_id=canonical_user_id,
+                private_thought="当前关系边界或安全感不适合主动加一条消息。",
                 should_send=False,
             )
         prompt = (

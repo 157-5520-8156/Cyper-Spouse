@@ -459,30 +459,43 @@ class WorldKernel:
                 """,
                 ("delivered" if delivered else "failed", None if delivered else (reason or "delivery failed")[:500], now, delivery_id),
             )
+            action = _as_dict(_as_dict(state["actions"], "actions")[action_id], "action")
+            trace = _as_dict(action.get("trace", {}), "action trace")
+            specifications: list[tuple[str, dict[str, object]]] = [
+                ("ActionAttempted", {"action_id": action_id}),
+                (
+                    "ActionSettled",
+                    {
+                        "action_id": action_id,
+                        "result": {
+                            "kind": "delivery",
+                            "status": "delivered" if delivered else "failed",
+                            "reason": reason,
+                            "external_receipt": external_receipt,
+                        },
+                    },
+                ),
+            ]
+            if delivered and trace.get("life_share"):
+                specifications.append(("ExperienceShared", {"experience_id": trace.get("experience_id"), "action_id": action_id}))
+            thread = trace.get("conversation_thread")
+            if delivered and isinstance(thread, dict):
+                specifications.append((
+                    "ConversationThreadOpened",
+                    {
+                        "thread_id": str(thread["thread_id"]),
+                        "user_id": str(thread["user_id"]),
+                        "question": str(thread["question"]),
+                        "expires_at": str(thread["expires_at"]),
+                        "source_action_id": action_id,
+                    },
+                ))
             self._append_and_project(
                 conn,
                 world_id,
                 revision,
                 state,
-                [
-                    ("ActionAttempted", {"action_id": action_id}),
-                    (
-                        "ActionSettled",
-                        {
-                            "action_id": action_id,
-                            "result": {
-                                "kind": "delivery",
-                                "status": "delivered" if delivered else "failed",
-                                "reason": reason,
-                                "external_receipt": external_receipt,
-                            },
-                        },
-                    ),
-                    *(
-                        [("ExperienceShared", {"experience_id": _as_dict(_as_dict(state["actions"], "actions")[action_id], "action").get("trace", {}).get("experience_id"), "action_id": action_id})]
-                        if delivered and _as_dict(_as_dict(state["actions"], "actions")[action_id], "action").get("trace", {}).get("life_share") else []
-                    ),
-                ],
+                specifications,
                 idempotency_key=f"settle:{delivery_id}:{'delivered' if delivered else 'failed'}",
                 correlation_id=str(uuid4()),
                 source="delivery",
@@ -657,7 +670,9 @@ class WorldKernel:
         actions = [_as_dict(item, "action") for item in _as_dict(state["actions"], "actions").values()]
         open_actions = [item for item in actions if item.get("status") in {"scheduled", "sending", "unknown"}]
         days: list[dict[str, object]] = []
-        experiences = self.experiences_for_time_reference(world_id, "last")
+        # The calendar is a read projection over the complete committed
+        # experience set, not an implicit "last event" cache.
+        experiences = self._committed_experiences(state)
         for offset in range(-past_days, future_days + 1):
             day = (logical_at + timedelta(days=offset)).date().isoformat()
             day_agenda = [item for item in agenda if str(item.get("starts_at") or "")[:10] == day]
@@ -717,16 +732,24 @@ class WorldKernel:
             day = ""
         else:
             raise WorldError("time reference must be today, yesterday, last, or YYYY-MM-DD")
+        records = self._committed_experiences(state)
+        if day:
+            records = [item for item in records if str(item["occurred_at"])[:10] == day]
+        return records[-1:] if normalized in {"last", "上次"} else records
+
+    @staticmethod
+    def _committed_experiences(state: dict[str, object]) -> list[dict[str, object]]:
+        """Return every referencable experience in logical-time order."""
         outcomes = _as_dict(state.get("outcomes", {}), "outcomes")
         records: list[dict[str, object]] = []
         for experience_id, experience in _as_dict(state["experiences"], "experiences").items():
             item = _as_dict(experience, "experience")
             outcome = _as_dict(outcomes.get(str(item.get("source_outcome_id") or ""), {}), "outcome")
             occurred_at = str(outcome.get("ends_at") or "")
-            if (not day or occurred_at[:10] == day) and occurred_at:
+            if occurred_at:
                 records.append({"experience_id": experience_id, "content": item["content"], "occurred_at": occurred_at, "shared": bool(item.get("shared"))})
         records.sort(key=lambda item: str(item["occurred_at"]))
-        return records[-1:] if normalized in {"last", "上次"} else records
+        return records
 
     def conversation_policy(self, world_id: str) -> dict[str, object]:
         """Expose behavior-only world state; never fabricate a conversational fact."""
@@ -739,6 +762,60 @@ class WorldKernel:
         if urgent:
             return {"mode": "goal_urgent", "reply_length": "normal", "initiative": "low", "reason": "goal_deadline_near", "goal_ids": sorted(urgent)}
         return {"mode": "available", "reply_length": "normal", "initiative": "normal", "reason": "no_active_world_constraint"}
+
+    def conversation_context(self, world_id: str, *, user_id: str) -> dict[str, object]:
+        """Build the sole bounded read model used to authorize a world turn.
+
+        This replaces the old concatenation of mood rows, self-core memories,
+        calendar rows, and life-runtime prose.  It deliberately distinguishes
+        referencable facts from private behaviour constraints so callers cannot
+        accidentally turn a current plan into a claimed experience.
+        """
+        state = self.snapshot(world_id)
+        entities = _as_dict(state["entities"], "entities")
+        protagonist = _as_dict(entities.get("zhizhi"), "protagonist")
+        agenda = _as_dict(state["agenda"], "agenda")
+        active = next(
+            (
+                _as_dict(item, "activity")
+                for item in agenda.values()
+                if _as_dict(item, "activity").get("status") == "active"
+            ),
+            None,
+        )
+        relationship = dict(_as_dict(_as_dict(state["relationships"], "relationships").get(user_id, {}), "user relationship"))
+        open_threads = [
+            {
+                "thread_id": str(thread_id), "question": str(item.get("question") or ""),
+                "expires_at": str(item.get("expires_at") or ""),
+            }
+            for thread_id, raw in _as_dict(state.get("conversation_threads", {}), "conversation threads").items()
+            if (item := _as_dict(raw, "conversation thread")).get("status") == "open" and item.get("user_id") == user_id
+        ]
+        return {
+            "referencable_facts": [
+                {"fact_id": str(fact_id), "value": str(_as_dict(item, "fact").get("value") or "")}
+                for fact_id, item in _as_dict(state["facts"], "facts").items()
+            ],
+            "referencable_experiences": self._committed_experiences(state),
+            "behavior": {
+                "policy": self.conversation_policy(world_id),
+                "needs": dict(_as_dict(state["needs"], "needs")),
+                "relationship": relationship,
+                "emotion_modulation": dict(_as_dict(state["emotion_modulation"], "emotion modulation")),
+                "open_threads": open_threads,
+            },
+            # This is a deterministic SelfCoreProjection, not separately
+            # stored memory.  Its current activity is behavioural context,
+            # never a license to say that the activity has completed.
+            "self_core": {
+                "entity_id": str(protagonist.get("id") or "zhizhi"),
+                "name": str(protagonist.get("name") or ""),
+                "location": str((active or protagonist).get("location") or ""),
+                "active_activity": str((active or {}).get("title") or ""),
+                "boundaries": [str(item) for item in _as_list(protagonist.get("boundaries", []), "boundaries")],
+            },
+        }
 
     def events(self, world_id: str) -> list[WorldEvent]:
         with self.store.connect() as conn:
@@ -808,7 +885,12 @@ class WorldKernel:
         remainder = reply_text
         for claim in normalized_claims:
             remainder = remainder.replace(claim["text"], "")
-        if reply_text != "我在。" and re.search(r"(?:了|过|刚|已经|昨天|昨晚|早上|上午|下午|今晚|今天|明天|收到|买|等|在|去|来)", remainder):
+        # Questions about the user or a future choice are not claims that an
+        # off-screen world event occurred.  Treating every “今天/明天/在” as a
+        # historical assertion used to silently replace ordinary questions
+        # with the fallback reply, which in turn hid the conversation state.
+        is_question = "?" in reply_text or "？" in reply_text
+        if reply_text != "我在。" and not is_question and re.search(r"(?:了|过|刚|已经|昨天|昨晚|早上|上午|下午|今晚|今天|明天|收到|买|等|在|去|来)", remainder):
             raise WorldError("reply contains world-time or experience text outside committed claims")
         actions = _as_dict(state["actions"], "actions")
         invalid_actions = [str(item) for item in proposed_actions if str(item) not in actions]
@@ -962,6 +1044,14 @@ class WorldKernel:
                     and _parse_at(str(item["expires_at"])) <= _parse_at(target)
                 ):
                     events.append(("ActionExpired", {"action_id": action_id, "reason": "logical_timeout"}))
+            for thread_id, thread in _as_dict(state.get("conversation_threads", {}), "conversation threads").items():
+                item = _as_dict(thread, "conversation thread")
+                if (
+                    item.get("status") == "open"
+                    and item.get("expires_at")
+                    and _parse_at(str(item["expires_at"])) <= target_at
+                ):
+                    events.append(("ConversationThreadExpired", {"thread_id": thread_id, "reason": "logical_timeout"}))
             for goal_id, goal in _as_dict(state.get("goals", {}), "goals").items():
                 if goal.get("status") == "active" and goal.get("deadline") and _parse_at(str(goal["deadline"])) <= target_at:
                     events.append(("GoalDeferred", {"goal_id": goal_id, "reason": "deadline_reached", "next_review_at": (target_at + timedelta(days=1)).isoformat()}))
@@ -1108,6 +1198,14 @@ class WorldKernel:
             if action.get("status") == "scheduled":
                 events.append(("ActionCancelled", {"action_id": action_id, "reason": "decision_resolved"}))
             return events
+        if command_type == "resolve_conversation_thread":
+            thread_id = str(command.get("thread_id") or "")
+            outcome = str(command.get("outcome") or "")
+            reason = str(command.get("reason") or "").strip()
+            thread = _as_dict(_as_dict(state.get("conversation_threads", {}), "conversation threads").get(thread_id), "conversation thread")
+            if thread.get("status") != "open" or outcome not in {"answered", "skipped", "meta"} or not reason:
+                raise WorldError("only an open conversation thread can be resolved with a classified user response")
+            return [("ConversationThreadResolved", {"thread_id": thread_id, "outcome": outcome, "reason": reason[:160]})]
         if command_type == "cancel_action":
             action_id = str(command.get("action_id") or "")
             action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
@@ -1620,6 +1718,19 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         decision = _as_dict(_as_dict(next_state["decisions"], "decisions")[str(payload["decision_id"])], "decision")
         decision["status"] = payload["outcome"]
         decision["resolution_reason"] = payload["reason"]
+    elif event.event_type == "ConversationThreadOpened":
+        _as_dict(next_state["conversation_threads"], "conversation threads")[str(payload["thread_id"])] = {
+            **payload, "status": "open",
+        }
+    elif event.event_type == "ConversationThreadResolved":
+        thread = _as_dict(_as_dict(next_state["conversation_threads"], "conversation threads")[str(payload["thread_id"])], "conversation thread")
+        thread["status"] = str(payload["outcome"])
+        thread["resolution_reason"] = str(payload["reason"])
+    elif event.event_type == "ConversationThreadExpired":
+        thread = _as_dict(_as_dict(next_state["conversation_threads"], "conversation threads")[str(payload["thread_id"])], "conversation thread")
+        if thread.get("status") == "open":
+            thread["status"] = "expired"
+            thread["resolution_reason"] = str(payload["reason"])
     elif event.event_type == "ModelProposalRecorded":
         item = {**payload, "status": "recorded"}
         _as_dict(next_state["proposals"], "proposals")[str(item["proposal_id"])] = item
@@ -1723,6 +1834,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "emotion_modulation": {"mode": "calm", "expression": "neutral", "reason": "world_started", "charge": 0},
         "last_relationship_appraisal": None,
         "decisions": {},
+        "conversation_threads": {},
     }
 
 

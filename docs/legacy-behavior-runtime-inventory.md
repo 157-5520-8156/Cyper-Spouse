@@ -20,19 +20,20 @@
 
 ## 当前结论
 
-`WorldKernel` 已经接管了虚构世界的生活事实与大部分可结算线上行动；但它**还没有
-接管全部旧的动作和心理状态机**。世界模式不是“旧机制全部迁入后统一运行”，而是：
+`WorldKernel` 现在接管了世界模式的生活事实、通信状态、用户关系/情绪调制、可解释的
+延迟决策、对话线程、记忆摘要和小屋数据投影。旧状态机仍保留在代码库中，但只服务
+`WORLD_RUNTIME_ENABLED=false` 的历史回退；它们不再是世界模式的行为输入或写入目标。
 
 ```text
 世界模式开启
-  ├─ 世界账本：活动、NPC、目标、经历、事实、外发行动、模型调用、部分延迟/余波
-  ├─ 保留为纯分类器：互动事件识别、文本清洗等
-  ├─ 保留为传输适配器：QQ/OneBot、消息合并、实际投递
-  └─ 暂未迁入或被绕过：手机注意力、输入状态、情绪向量、心理活动、旧小屋投影
+  ├─ 世界账本：活动、NPC、目标、经历、事实、外发行动、模型调用、延迟/余波
+  ├─ 世界投影：通信状态、关系/情绪调制、决策、对话线程、Self Core、日历和小屋场景
+  ├─ 保留为纯分类器：互动事件识别、问题回应分类、文本清洗等
+  └─ 保留为传输适配器：QQ/OneBot、消息合并、实际投递（不拥有角色事实）
 ```
 
-因此，真实聊天在 `WORLD_RUNTIME_ENABLED=true` 前不能宣称“所有人味机制都在虚拟
-世界里运行”。当前开关默认关闭；演示世界不是现有真实聊天库。
+世界模式依然不是“真实人类心理的完整仿真”：它只记录可以解释和复核的决定，不把模型
+写出的散文式内心戏当事实。当前开关默认关闭，真实聊天仍应先通过启用门禁。
 
 ## 状态标记
 
@@ -74,20 +75,20 @@ LifeOutcomeCommitted -> ExperienceCommitted -> (可选) ExperienceShared`。
 
 | 领域 | 旧模块/表 | 旧职责 | 世界模式状态 | 世界侧替代或缺口 |
 | --- | --- | --- | --- | --- |
-| 私生活 | `life_runtime.py` / `life_runtime`、`life_day_plan_items` | 真实时钟驱动的活动、注意力、手机状态、生活余波 | 已绕过；小屋仍依赖它 | `world_agenda`、`needs`、活动/结果/经历；缺 `手机注意力` 语义 |
-| 日历 | `calendar_ledger.py` / `calendar_*` | 旧计划与生活事件的日历投影 | 已绕过 | `world_agenda`、`world_experiences`；缺兼容日历投影 |
+| 私生活 | `life_runtime.py` / `life_runtime`、`life_day_plan_items` | 真实时钟驱动的活动、注意力、手机状态、生活余波 | 已绕过 | `world_agenda`、`needs`、活动/结果/经历、`communication` |
+| 日历 | `calendar_ledger.py` / `calendar_*` | 旧计划与生活事件的日历投影 | 已绕过 | `world_agenda` + 全量已提交 `world_experiences` 的只读兼容投影 |
 | 生活分享 | `life_event.py`、`social_followups.py` | 从旧生活事件生成/延后分享 | 部分迁入 | 已有 `ExperienceShared` 与 life-share Action；旧 follow-up 不得参与世界模式 |
-| 回复决策 | `reply_decision.py`、`reply_timing.py`、`im_timing.py` | 立即/延迟/跳过、读后不回、打字延时、随机抖动 | 部分迁入 | 有 `reply_later` Action；缺 `seen/unread/typing/withheld` 事件和确定性抽样记录 |
+| 回复决策 | `reply_decision.py`、`reply_timing.py`、`im_timing.py` | 立即/延迟/跳过、读后不回、打字延时、随机抖动 | 已迁入/旧逻辑绕过 | `MessageAttentionDecided`、`TypingStateChanged`、`reply_later`、`DecisionDeferred`；世界模式不执行旧随机时序 |
 | 消息轮次 | `turn_taking.py`、NapCat 合并器 | 判断用户是否说完、消息合并、分段发送和打断 | 仅适配 | 可保留合并器；其产生的决定必须记录为世界 Action/外部结果 |
-| 情绪 | `mood.py`、`emotion_*.py`、`mood_state` | 情绪向量、心情、关系指标、表情与反应 | 已绕过（事件分类器仍复用） | 已有 `NeedChanged`、关系事件；缺正式情绪调制投影 |
-| 关系/印象 | `relationship.py`、`impression.py`、`repair_curve.py`、`personality_drift.py` | 信任、亲密、边界、修复与长期漂移 | 已绕过 | `NpcRelationshipChanged` 只覆盖 NPC；缺“用户—主角关系”领域模型 |
-| 心理活动 | `inner_subtext.py`、`withheld_impulse.py` | 未说出口、想联系又忍住、情绪残留 | 已绕过 | 缺 `ImpulseWithheld`/`DecisionDeferred` 等可解释世界事件 |
-| 自我与记忆 | `self_core.py`、`self_history.py`、`memory*.py`、`tone_inertia.py`、`unanswered_question.py` | 自我摘要、长期记忆、口吻惯性、未答问题 | 已绕过为行为权威 | 事实/经历已投影；Self Core 应重建为世界摘要，其他需按类型迁移 |
-| 连续性/上下文 | `life_continuity.py`、`context_orchestrator.py`、`conversation.py` | 将旧生活、情绪、记忆和关系拼入模型上下文 | 已绕过 | 世界路径有专用账本上下文；缺统一 `WorldConversationContext` |
+| 情绪 | `mood.py`、`emotion_*.py`、`mood_state` | 情绪向量、心情、关系指标、表情与反应 | 已绕过（互动分类器仍复用） | `NeedChanged`、`EmotionModulated` 投影 |
+| 关系/印象 | `relationship.py`、`impression.py`、`repair_curve.py`、`personality_drift.py` | 信任、亲密、边界、修复与长期漂移 | 已绕过 | `UserRegistered`、`RelationshipAppraised`、`RelationshipChanged` |
+| 心理活动 | `inner_subtext.py`、`withheld_impulse.py` | 未说出口、想联系又忍住、情绪残留 | 已迁入可解释部分 | `DecisionDeferred/Resolved` + 有期限的复核 Action |
+| 自我与记忆 | `self_core.py`、`self_history.py`、`memory*.py`、`tone_inertia.py`、`unanswered_question.py` | 自我摘要、长期记忆、口吻惯性、未答问题 | 已绕过为行为权威 | 事实/经历、确定性 `SelfCoreProjection`、`ConversationThreadOpened/Resolved/Expired` |
+| 连续性/上下文 | `life_continuity.py`、`context_orchestrator.py`、`conversation.py` | 将旧生活、情绪、记忆和关系拼入模型上下文 | 已绕过 | `WorldKernel.conversation_context()` 是唯一世界对话读模型 |
 | 主动行为 | `proactive_*.py`、`social_tasks`、`proactive_events` | 触发、冷却、等待、延后重试、忍住 | 部分迁入 | 世界主动消息/余波/到期 Action 已有；缺世界化触发、冷却、等待反应 |
 | 投递追踪 | `outbox_messages`、`turn_traces` | 消息计划、发送与原因记录 | 部分迁入且必须保留为投递记录 | Action 与 outbox 同事务；旧 trace 降为投递投影，不得独立授权事实 |
 | 图片/表情 | `image_requests.py`、`image_agency.py`、`reply_stickers.py` | 根据旧心情/关系决定图片或表情 | 已绕过或仅适配 | 需由世界关系/边界投影授权，图片生成结果走外部 Action |
-| 小屋/面板 | `dashboard_ui.py`、`debug_snapshot()` | 读取旧 life runtime 并投影动作 | 旁路风险 | 需新增 `WorldSceneProjection`，小屋只能读该投影 |
+| 小屋/面板 | `dashboard_ui.py`、`debug_snapshot()` | 读取旧 life runtime 并投影动作 | 已迁入（不改小屋渲染） | `daemon_dashboard_projection()` / `WorldSceneProjection`，前端只读 |
 
 以下各节给出可执行的逐项说明。
 
@@ -105,10 +106,9 @@ LifeOutcomeCommitted -> ExperienceCommitted -> (可选) ExperienceShared`。
 - 资源：`NeedChanged`；
 - 已发生结果：`LifeOutcomeCommitted`、`ExperienceCommitted`。
 
-尚缺：旧运行时最重要的即时 IM 语义——`notified`、`glanced`、`reading`、`typing`、
-`do_not_disturb`——没有世界事件、reducer 状态或投影。世界模式的
-`phone_attention_decision()` 当前直接返回“立即阅读”，`mark_phone_read_for_message()` 是
-空操作；这意味着“她在看手机但暂时不想回”目前不是世界内发生的行为。
+即时 IM 语义已收敛到 `communication` 投影：入站消息变为 `unread`，随后只能经
+`MessageAttentionDecided(seen/deferred/do_not_disturb)` 与 `TypingStateChanged` 转换；
+延迟阅读和回复使用有期限的 Action。世界模式不再调用旧 `life_runtime` 的手机状态。
 
 迁移结论：保留文件仅用于 `WORLD_RUNTIME_ENABLED=false` 的旧实例。世界模式下禁止读写。
 
@@ -119,7 +119,7 @@ LifeOutcomeCommitted -> ExperienceCommitted -> (可选) ExperienceShared`。
 替代：从 `world_agenda` 和 `world_experiences` 建立只读 `WorldCalendarProjection`。查询
 “今天/昨天/某日”必须只返回已提交经历，不得将计划展示为发生。
 
-### `life_event.py` 与 `social_followups.py` — 部分迁入
+### `life_event.py` 与 `social_followups.py` — 已迁入世界分支
 
 `life_event.py` 已有世界分支：它只渲染已提交经历，并通过
 `ActionScheduled -> ActionSettled -> ExperienceShared` 投递。此部分保留。
@@ -130,7 +130,7 @@ LifeOutcomeCommitted -> ExperienceCommitted -> (可选) ExperienceShared`。
 
 ## 2. IM 行动、时机与轮次
 
-### `reply_decision.py`、`reply_timing.py`、`im_timing.py` — 部分迁入
+### `reply_decision.py`、`reply_timing.py`、`im_timing.py` — 世界分支已绕过
 
 旧语义包括：是否马上回、是否读后不回、延迟多少分钟、情绪导致的 ghost window、
 读/思考/输入等待和随机抖动。
@@ -139,12 +139,9 @@ LifeOutcomeCommitted -> ExperienceCommitted -> (可选) ExperienceShared`。
 会取消同类待执行 Action；完成延迟会写入外部结果。对话余波也能以
 `conversation_pulse` Action 计划、取消和结算。
 
-未迁入：
-
-1. 为什么“已读但不回”、何时进入输入状态、何时停止输入，没有事件；
-2. `random.Random()` 的抖动没有 `RandomDrawRecorded`，重放不保证一致；
-3. 旧情绪 ghost 决策仍依赖 `MoodState`，世界模式没有等价的规则输入；
-4. “跳过回复”没有明确的 `ActionCancelled/Expired` 原因分类。
+世界模式不运行旧随机抖动或基于 `MoodState` 的 ghost window；因此不存在未记录的随机
+行为输入。需要延迟、取消或“先收住”的情况分别以 `reply_later` Action、
+`ActionCancelled/Expired` 与 `DecisionDeferred/Resolved` 表示。
 
 迁移目标事件：
 
@@ -180,9 +177,8 @@ RandomDrawRecorded
 
 - `interpret_interaction()` 仍作为可复用的**文本互动分类器**；
 - 世界消息路径以空 `MoodState()` 调用它，并将结果写为 `TurnAppraised`；
-- 持久化的旧 mood transition、情绪向量、表情反应没有进入 world reducer；
-- 当前世界 `needs` 只有 `energy/attention/security/initiative/boundary`，且它们主要来自种子
-  和活动规则，尚不是完整的用户交互情绪闭环。
+- 旧 mood transition 与九维向量不迁入；它们会制造一个难以解释的第二状态机；
+- 世界使用较小的 `needs` 与 `EmotionModulated`，由活动、回合判断和关系事件 reducer 更新。
 
 迁移建议：不要把旧 `MoodState` 原样复制到世界。先定义较小且可解释的
 `RelationshipState`（主角—用户）与 `EmotionModulation`（短期调制），由
@@ -193,8 +189,8 @@ RandomDrawRecorded
 
 旧职责：积累用户可靠性/尊重感、关系阶段、修复曲线与人格倾向。
 
-世界缺口：当前 `NpcRelationshipChanged` 仅描述固定 NPC；缺少主角与用户之间的关系实体、
-关系维度、修复事件和投影。世界模式主动消息目前也没有采用旧的关系/印象规则。
+世界中用户以 `UserRegistered` 实体存在；`RelationshipAppraised/Changed` 持久化尊重、
+可靠性与亲近度。主动行为会检查边界、安全感和开放对话线程，不能重新调用旧印象表。
 
 迁移目标：`UserRegistered`、`RelationshipAppraised`、`RelationshipChanged`、
 `RepairObserved`、`BoundaryChanged`，并确保只有规则 reducer 改变数值。
@@ -236,8 +232,8 @@ OutgoingUnansweredObserved -> InitiativeAdjusted
 | `memory_consolidation.py` | 汇总记忆与关系摘要 | 已绕过 | 从 world facts/experiences/relationship 投影重建摘要 |
 | `self_core.py`、`self_history.py` | 角色自我概念和叙事历史 | 已绕过 | 仅作为可重建的 `SelfCoreProjection`，绝不单独写事实 |
 | `tone_inertia.py` | 口吻连续性 | 已绕过 | 可保留为非事实、短期输出调制，必须附因果与 TTL |
-| `unanswered_question.py` | 她问过但用户未答 | 已绕过 | 迁为 `ConversationThreadOpened/Resolved/Expired` |
-| `context_orchestrator.py` | 拼旧记忆、节律、印象、日历上下文 | 已绕过 | 世界模式应使用专门的 `WorldConversationContext` |
+| `unanswered_question.py` | 她问过但用户未答 | 分类器保留 | 已迁为 `ConversationThreadOpened/Resolved/Expired`；只在送达后开启 |
+| `context_orchestrator.py` | 拼旧记忆、节律、印象、日历上下文 | 已绕过 | `WorldKernel.conversation_context()` 专门提供世界上下文 |
 
 特别说明：用户经人工/规则确认的事实可以导入新世界；旧“她今天做了什么”、旧心理叙事、
 旧摘要不能迁成已发生经历。
@@ -251,12 +247,12 @@ OutgoingUnansweredObserved -> InitiativeAdjusted
 | `proactive_feedback.py` | 主动消息后的用户反馈判断 | 分类器可留；旧 mood/social-task 写入要迁为世界关系/行动事件 |
 | `reply_postprocess.py`、`reply_segments.py` | 输出清洗与分段 | 仅适配；每段投递仍需由世界 Action 管理 |
 | `reply_stickers.py` | 表情包选择 | 仅适配；由世界表达调制和边界策略授权，不能反写情绪事实 |
-| `image_requests.py`、`image_agency.py` | 图片请求识别与自主性判定 | 当前世界路径未完整接入；须迁为 `ImageRequested/Generated/Settled` 外部行动链 |
+| `image_requests.py`、`image_agency.py` | 图片请求识别与自主性判定 | 世界聊天路径当前禁用该旧自主链；恢复该能力时必须以 `ImageRequested/Generated/Settled` 外部行动链接入，不能回读旧 mood |
 | `conversation.py` | 旧 Prompt/SillyTavern 对话核心 | 世界回复路径当前直接使用受约束 JSON 提示；旧核心仅服务旧模式或样式适配 |
 
 ## 6. 主动行为与后台调度
 
-### `proactive_scheduler.py` — 部分迁入
+### `proactive_scheduler.py` — 世界分支已迁入
 
 世界分支已经能读取 `due_actions()`、处理 `reply_later` 与 `conversation_pulse`，并在恢复时
 扫描中断的生活分享投递。它应保留为**执行器**。
@@ -270,9 +266,9 @@ OutgoingUnansweredObserved -> InitiativeAdjusted
 任务延后与重试。世界模式的 `_world_proactive_tick()` 不使用它们，而是仅基于已提交
 事实/经历与开放外发 Action 作出受限决定。
 
-因此当前世界主动性较保守，但更可追溯。若要恢复“她会想你、会忍住、会等一会儿”的
-行为，应先完成第 4 节的 `Impulse`/`ConversationThread` 事件模型，而不是把旧任务表重新
-接回来。
+世界主动性刻意保守：未答的已送达问题、待结算外发行动、待复核决定或较高边界都会阻止
+继续追加消息；模型决定不发时写入可到期复核的 `DecisionDeferred`。这取代旧任务表的
+等待/忍住逻辑。
 
 ## 7. 出站、trace 与投递
 
@@ -288,16 +284,15 @@ OutgoingUnansweredObserved -> InitiativeAdjusted
 
 ## 8. 小屋、调试面板与可视化
 
-### `dashboard_ui.py` 与 `debug_snapshot()` — 旁路风险
+### `dashboard_ui.py` 与 `debug_snapshot()` — 世界读投影
 
-小屋页面通过 `/debug/{user}/context` 读取 `debug_snapshot()`，其内容包含旧
-`life_runtime`、旧日历和旧 mood 的 `dashboard.scene`。世界控制台是独立页面，读取的是
-`WorldKernel.dashboard_overview()`。
+小屋页面通过 `/debug/{user}/context` 读取 `debug_snapshot()`；旧模式返回旧数据契约，
+世界模式返回同形的世界兼容投影。世界控制台直接读取 `WorldKernel.dashboard_overview()`。
 
-这意味着在世界模式下，目前会出现两个不同的“她在哪里/在做什么”读模型。小屋的视觉
-不是事实源，但它也不应显示与账本冲突的状态。
+世界模式下 `debug_snapshot()` 改由 `daemon_dashboard_projection()` 提供兼容数据；小屋
+渲染不变，但地点、动作、手机状态、原因均来自同一个账本投影，不调用旧运行时。
 
-必须新增：
+已实现的投影为：
 
 ```text
 WorldSceneProjection
@@ -307,18 +302,18 @@ WorldSceneProjection
 
 小屋、世界控制台和对话提示都读取这个投影；前端只能动画，不可反写。
 
-## 启用真实聊天前的迁移顺序
+## 已完成迁移与启用前核验
 
-1. **P0：通信行动投影。** 实现 `communication_state` 与看见/未读/输入/延迟/取消事件；
-   改造所有适配器只调用世界命令和结算入口。
-2. **P0：小屋切换。** `debug_snapshot()` 在世界模式改读 `WorldSceneProjection`，禁止调用
-   `advance_life_runtime()`；保留旧小屋渲染代码但替换数据源。
-3. **P0：主角—用户关系。** 迁移边界、可靠性、修复、主动性为世界 reducer；删掉世界分支
-   对空 `MoodState()` 的依赖。
-4. **P1：心理活动收敛。** 将忍住、等待、未答问题变成带 TTL 和来源的世界决策事件。
-5. **P1：记忆摘要。** 将 Self Core、长期关系摘要与时间问题上下文重建为世界投影。
-6. **P1：旧表退役。** 为每个旧读模型提供 world 替代后，世界模式 CI 扫描禁止访问
-   `life_runtime`、`calendar_*`、`social_tasks`、`mood_state`、`memories` 的行为写入口。
+1. **通信行动。** `communication`、attention、typing、延迟/取消和决策复核均为世界事件；
+   QQ 适配器在世界模式不调用旧时序/回复决策状态机。
+2. **小屋切换。** 世界模式 `debug_snapshot()` 不调用 `advance_life_runtime()`，仅返回
+   `WorldSceneProjection` 的兼容数据。
+3. **关系与心理活动。** 用户关系、情绪调制、边界和未发冲动由 reducer 与有 TTL 的 Action
+   决定；未答问题仅在外发成功后形成对话线程。
+4. **记忆与上下文。** 用户可确认事实进入 `FactConfirmed`；`conversation_context()` 从账本
+   重建事实、经历、关系和 Self Core 摘要。
+5. **旧表隔离。** 世界模式测试会阻止 `life_runtime`、`social_tasks`、`mood_state`、
+   `memories` 等旧行为表写入；它们只保留给旧模式和只读归档。
 
 ## 删除/保留准则
 

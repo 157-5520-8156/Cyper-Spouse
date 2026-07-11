@@ -367,8 +367,10 @@ class QQMessageCoalescer:
             except Exception:
                 logger.exception("failed to send QQ emoji reaction")
         timing_state = None
+        world_mode = bool(getattr(self.engine, "world_kernel", None) and getattr(self.engine, "world_id", None))
         if (
             self.human_timing
+            and not world_mode
             and hasattr(self.engine, "store")
             and hasattr(self.engine.store, "get_mood_state")
         ):
@@ -379,7 +381,11 @@ class QQMessageCoalescer:
         try:
             if hasattr(self.engine, "begin_world_typing"):
                 self.engine.begin_world_typing(merged)
-            if self.human_timing:
+            # In world mode the old stochastic timing model is not allowed to
+            # make a hidden behavioural decision.  A future delayed send must
+            # first be scheduled as a world action; an immediately dispatched
+            # reply has no adapter-side delay to simulate.
+            if self.human_timing and not world_mode:
                 await self.sleep(initial_reply_delay_seconds(merged, reply, state=timing_state, rng=self.rng))
             self._active_sends[key] = ActiveSend(incoming=merged, reply_target=reply_target)
             sent_completely = await _send_reply_parts(

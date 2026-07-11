@@ -1082,6 +1082,7 @@ class CompanionStore:
         return int(cursor.lastrowid)
 
     def complete_active_life_events(self, canonical_user_id: str, *, completed_at: datetime) -> None:
+        self._assert_legacy_behavior_write_allowed("complete_active_life_events")
         with self.connect() as conn:
             conn.execute(
                 """
@@ -1096,6 +1097,7 @@ class CompanionStore:
         self, canonical_user_id: str, *, kind: str, content: str
     ) -> None:
         """Correct an invalid generated runtime block before it becomes history."""
+        self._assert_legacy_behavior_write_allowed("correct_active_life_event")
         with self.connect() as conn:
             conn.execute(
                 """
@@ -1229,6 +1231,7 @@ class CompanionStore:
             ).fetchone()
 
     def save_calendar_week(self, canonical_user_id: str, *, week_start: str, theme: str, summary: str, source: str) -> None:
+        self._assert_legacy_behavior_write_allowed("save_calendar_week")
         now = utc_now().isoformat()
         with self.connect() as conn:
             conn.execute(
@@ -1247,6 +1250,7 @@ class CompanionStore:
             ).fetchone()
 
     def update_calendar_event_status(self, event_id: int, *, status: str, changed_reason: str | None = None) -> None:
+        self._assert_legacy_behavior_write_allowed("update_calendar_event_status")
         allowed = {
             "planned": {"active", "completed", "cancelled", "postponed"},
             "active": {"completed", "cancelled", "postponed"},
@@ -1271,6 +1275,7 @@ class CompanionStore:
         self.sync_calendar_event_memory(str(row["canonical_user_id"]), event_id)
 
     def _record_calendar_transition(self, event_id: int, *, from_status: str | None, to_status: str, reason: str | None) -> None:
+        self._assert_legacy_behavior_write_allowed("record_calendar_transition")
         with self.connect() as conn:
             conn.execute(
                 "insert into calendar_event_history (calendar_event_id,from_status,to_status,reason,changed_at) values (?, ?, ?, ?, ?)",
@@ -1294,6 +1299,7 @@ class CompanionStore:
         delay: timedelta = timedelta(days=1),
     ) -> int | None:
         """Move one compatible unfinished named plan and preserve why it changed."""
+        self._assert_legacy_behavior_write_allowed("postpone_next_calendar_event")
         placeholders = ", ".join("?" for _ in event_types)
         with self.connect() as conn:
             row = conn.execute(
@@ -1347,6 +1353,7 @@ class CompanionStore:
 
     def sync_calendar_event_memory(self, canonical_user_id: str, event_id: int) -> None:
         """Give every calendar event one stable, queryable memory record."""
+        self._assert_legacy_behavior_write_allowed("sync_calendar_event_memory")
         with self.connect() as conn:
             event = conn.execute("select * from calendar_events where id = ? and canonical_user_id = ?", (event_id, canonical_user_id)).fetchone()
             if not event:
@@ -1370,6 +1377,7 @@ class CompanionStore:
             conn.execute("insert into calendar_event_memories (calendar_event_id,memory_id,linked_at) values (?, ?, ?) on conflict(calendar_event_id) do update set memory_id=excluded.memory_id, linked_at=excluded.linked_at", (event_id, memory_id, now))
 
     def delete_calendar_events_by_source_prefix(self, canonical_user_id: str, prefix: str) -> None:
+        self._assert_legacy_behavior_write_allowed("delete_calendar_events_by_source_prefix")
         with self.connect() as conn:
             conn.execute(
                 "delete from calendar_events where canonical_user_id = ? and source like ?",
@@ -1377,6 +1385,7 @@ class CompanionStore:
             )
 
     def cancel_elapsed_calendar_plans(self, canonical_user_id: str, *, now: datetime) -> None:
+        self._assert_legacy_behavior_write_allowed("cancel_elapsed_calendar_plans")
         with self.connect() as conn:
             rows = conn.execute("select id from calendar_events where canonical_user_id = ? and status in ('planned', 'active', 'postponed') and ends_at < ?", (canonical_user_id, now.astimezone(UTC).isoformat())).fetchall()
         reason = "该计划时段已过去，但没有完成凭据；不能把它伪装成已发生。"
@@ -1385,6 +1394,7 @@ class CompanionStore:
 
     def normalize_single_day_weekly_plans(self, canonical_user_id: str) -> list[int]:
         """Repair prototype weekly plans that accidentally occupied the next day."""
+        self._assert_legacy_behavior_write_allowed("normalize_single_day_weekly_plans")
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -1462,6 +1472,7 @@ class CompanionStore:
 
     def save_life_day_plan(self, canonical_user_id: str, local_date: str, items: list[dict[str, object]]) -> None:
         """Persist a private schedule. Planned entries are not lived facts."""
+        self._assert_legacy_behavior_write_allowed("save_life_day_plan")
         with self.connect() as conn:
             conn.execute(
                 "insert or ignore into life_day_plans (canonical_user_id, local_date, generated_at) values (?, ?, ?)",
@@ -1499,6 +1510,7 @@ class CompanionStore:
         return row
 
     def update_life_day_plan_status(self, canonical_user_id: str, *, before: datetime, status: str) -> None:
+        self._assert_legacy_behavior_write_allowed("update_life_day_plan_status")
         before = before.astimezone(UTC)
         with self.connect() as conn:
             conn.execute(
@@ -1510,6 +1522,7 @@ class CompanionStore:
             )
 
     def activate_life_day_plan_item(self, item_id: int) -> None:
+        self._assert_legacy_behavior_write_allowed("activate_life_day_plan_item")
         with self.connect() as conn:
             conn.execute("update life_day_plan_items set status = 'active' where id = ?", (item_id,))
 
@@ -1523,6 +1536,7 @@ class CompanionStore:
         attention_delta: int = 0,
     ) -> None:
         """A salient interaction may nudge one future activity, never rewrite history."""
+        self._assert_legacy_behavior_write_allowed("adjust_next_life_day_plan_item")
         with self.connect() as conn:
             row = conn.execute(
                 """
@@ -1574,6 +1588,7 @@ class CompanionStore:
         return int(cursor.lastrowid)
 
     def cancel_social_task(self, task_id: int, *, resolution: str = "cancelled") -> None:
+        self._assert_legacy_behavior_write_allowed("cancel_social_task")
         with self.connect() as conn:
             conn.execute(
                 """
@@ -1584,6 +1599,7 @@ class CompanionStore:
             )
 
     def resolve_social_task(self, task_id: int, *, resolution: str = "completed") -> None:
+        self._assert_legacy_behavior_write_allowed("resolve_social_task")
         with self.connect() as conn:
             conn.execute(
                 """
@@ -1602,6 +1618,7 @@ class CompanionStore:
         return row is not None
 
     def cancel_active_social_tasks(self, canonical_user_id: str, *, kind: str) -> None:
+        self._assert_legacy_behavior_write_allowed("cancel_active_social_tasks")
         with self.connect() as conn:
             conn.execute(
                 """
@@ -1613,6 +1630,7 @@ class CompanionStore:
 
     def claim_due_social_tasks(self, *, kind: str, now: datetime, limit: int = 8) -> list[sqlite3.Row]:
         """Claim due work; stale claims are retried after a daemon crash."""
+        self._assert_legacy_behavior_write_allowed("claim_due_social_tasks")
         now = now.astimezone(UTC)
         stale_before = now - timedelta(minutes=10)
         with self.connect() as conn:
@@ -1721,6 +1739,7 @@ class CompanionStore:
             ).fetchone()
 
     def defer_social_task(self, task_id: int, *, due_at: datetime) -> None:
+        self._assert_legacy_behavior_write_allowed("defer_social_task")
         with self.connect() as conn:
             conn.execute(
                 """
@@ -2102,6 +2121,7 @@ class CompanionStore:
             ).fetchone()
 
     def delete_memory(self, canonical_user_id: str, *, kind: str, content: str) -> int:
+        self._assert_legacy_behavior_write_allowed("delete_memory")
         with self.connect() as conn:
             cursor = conn.execute(
                 """
@@ -2199,6 +2219,7 @@ class CompanionStore:
         return str(row["sent_at"]) if row else None
 
     def record_proactive_delivery(self, canonical_user_id: str, platform: str) -> None:
+        self._assert_legacy_behavior_write_allowed("record_proactive_delivery")
         with self.connect() as conn:
             conn.execute(
                 """

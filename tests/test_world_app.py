@@ -35,6 +35,18 @@ def test_world_enablement_and_trusted_delivery_settlement(tmp_path: Path, monkey
     kernel.settle_outgoing_action(delivery_id, delivered=True, external_receipt="qq:42")
     assert kernel.snapshot(started.world_id)["actions"][f"outgoing:{delivery_id}"]["status"] == "delivered"
     assert client.post(f"/world/{started.world_id}/deliveries/reconcile", json={}).status_code == 404
+    blocked = client.post(
+        f"/world/{started.world_id}/commands",
+        json={
+            "expected_revision": kernel.revision(started.world_id),
+            "command": {
+                "type": "record_external_result", "action_id": f"outgoing:{delivery_id}",
+                "result": {"kind": "delivery", "status": "delivered"},
+            },
+        },
+    )
+    assert blocked.status_code == 403
+    assert "settle external results" in blocked.json()["detail"]
 
 
 def test_world_console_reads_active_world_and_submits_clock_commands(tmp_path: Path, monkeypatch) -> None:

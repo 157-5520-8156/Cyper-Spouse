@@ -155,6 +155,24 @@ def test_world_dashboard_projection_is_self_contained_and_never_needs_legacy_run
     assert projection["state"]["world_id"] == started.world_id
 
 
+def test_world_conversation_context_is_rebuildable_and_keeps_plans_nonreferencable(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    user = kernel.submit(
+        {"type": "register_user", "world_id": started.world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=started.revision,
+    )
+    kernel.submit(
+        {"type": "plan_activity", "world_id": started.world_id, "activity_id": "study", "entity_id": "zhizhi", "title": "图书馆看书", "starts_at": NOW.isoformat(), "ends_at": (NOW + timedelta(hours=1)).isoformat()},
+        expected_revision=user.revision,
+    )
+    context = kernel.conversation_context(started.world_id, user_id="user:geoff")
+
+    assert context["self_core"]["name"] == "沈知栀"
+    assert context["referencable_experiences"] == []
+    assert context["behavior"]["policy"]["mode"] == "available"
+
+
 def test_world_deferred_decision_has_review_action_and_terminal_resolution(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
     started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
@@ -171,6 +189,60 @@ def test_world_deferred_decision_has_review_action_and_terminal_resolution(tmp_p
     )
     assert kernel.snapshot(started.world_id)["decisions"]["impulse:1"]["status"] == "abandoned"
     assert {event.event_type for event in resolved.events} == {"DecisionResolved", "ActionCancelled"}
+
+
+def test_delivered_question_opens_a_world_thread_then_resolves_or_expires(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    kernel.submit(
+        {"type": "register_user", "world_id": started.world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=started.revision,
+    )
+    delivery_id, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="你今天还好吗？",
+        kind="reply",
+        expires_at=NOW + timedelta(hours=12),
+        trace={
+            "world_id": started.world_id, "appraisal": "ordinary_message", "expression_policy": "test",
+            "allowed_facts": [], "observable_reason": "test",
+            "conversation_thread": {
+                "thread_id": "thread:one", "user_id": "user:geoff", "question": "你今天还好吗？",
+                "expires_at": (NOW + timedelta(hours=24)).isoformat(),
+            },
+        },
+    )
+    kernel.settle_outgoing_action(delivery_id, delivered=True)
+    snapshot = kernel.snapshot(started.world_id)
+    assert snapshot["conversation_threads"]["thread:one"]["status"] == "open"
+    assert snapshot["conversation_threads"]["thread:one"]["source_action_id"] == action_id
+
+    answered = kernel.submit(
+        {"type": "resolve_conversation_thread", "world_id": started.world_id, "thread_id": "thread:one", "outcome": "answered", "reason": "用户给出了明确回答"},
+        expected_revision=kernel.revision(started.world_id),
+    )
+    assert [event.event_type for event in answered.events] == ["ConversationThreadResolved"]
+    assert kernel.snapshot(started.world_id)["conversation_threads"]["thread:one"]["status"] == "answered"
+
+    second_delivery, _, _ = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="要不要明天再聊？",
+        kind="reply",
+        expires_at=NOW + timedelta(hours=12),
+        trace={
+            "world_id": started.world_id, "appraisal": "ordinary_message", "expression_policy": "test",
+            "allowed_facts": [], "observable_reason": "test",
+            "conversation_thread": {
+                "thread_id": "thread:two", "user_id": "user:geoff", "question": "要不要明天再聊？",
+                "expires_at": (NOW + timedelta(hours=2)).isoformat(),
+            },
+        },
+    )
+    kernel.settle_outgoing_action(second_delivery, delivered=True)
+    kernel.advance(started.world_id, NOW + timedelta(hours=3), expected_revision=kernel.revision(started.world_id))
+    assert kernel.snapshot(started.world_id)["conversation_threads"]["thread:two"]["status"] == "expired"
 
 def test_world_can_start_from_the_reviewable_seed_file(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
