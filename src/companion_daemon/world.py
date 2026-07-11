@@ -71,6 +71,7 @@ class LifeShareDelivery:
     trace_id: int
     action_id: str
     text: str
+    revision: int
 
 
 class WorldKernel:
@@ -249,7 +250,7 @@ class WorldKernel:
         return delivery_id, int(trace_row.lastrowid), action_id
 
     def schedule_life_share_delivery(
-        self, *, world_id: str, canonical_user_id: str, platform: str, expires_at: datetime
+        self, *, world_id: str, canonical_user_id: str, platform: str, expires_at: datetime, expected_revision: int
     ) -> LifeShareDelivery | None:
         """Atomically select one experience and create its outbox/action trace.
 
@@ -259,12 +260,13 @@ class WorldKernel:
         """
         with self.store.connect() as conn:
             revision, state = self._load_state(conn, world_id)
+            self._check_revision(revision, expected_revision)
             uncertain_experiences: set[str] = set()
             for action_id, action in _as_dict(state["actions"], "actions").items():
                 item = _as_dict(action, "action")
                 trace = _as_dict(item.get("trace", {}), "action trace")
                 if item.get("kind") == "outgoing_message" and trace.get("life_share") and item.get("status") in {"scheduled", "sending"}:
-                    return LifeShareDelivery(str(trace["experience_id"]), int(item["delivery_id"]), int(item["trace_id"]), action_id, str(item["text"]))
+                    return LifeShareDelivery(str(trace["experience_id"]), int(item["delivery_id"]), int(item["trace_id"]), action_id, str(item["text"]), revision)
                 if trace.get("life_share") and item.get("status") == "unknown":
                     uncertain_experiences.add(str(trace.get("experience_id") or ""))
             needs = _as_dict(state["needs"], "needs")
@@ -289,13 +291,13 @@ class WorldKernel:
             }
             trace_row = conn.execute("""insert into turn_traces (canonical_user_id, direction, appraisal, expression_policy, allowed_facts_json, short_lived_constraint, observable_reason, output_text, delivery_id, status, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)""", (canonical_user_id, trace["direction"], trace["appraisal"], trace["expression_policy"], _stable_json(trace["allowed_facts"]), None, trace["observable_reason"], text, delivery_id, now, now))
             action_id = f"outgoing:{delivery_id}"
-            self._append_and_project(conn, world_id, revision, state, [
+            decision = self._append_and_project(conn, world_id, revision, state, [
                 ("LifeShareSelected", {"experience_id": experience_id, "selection_id": trace["selection_id"]}),
                 ("ActionScheduled", {"action_id": action_id, "kind": "outgoing_message", "message_kind": "life_event", "expires_at": expires_at.isoformat(), "canonical_user_id": canonical_user_id, "platform": platform, "text": text, "trace": trace, "delivery_id": delivery_id, "trace_id": int(trace_row.lastrowid)}),
-            ], idempotency_key=f"life-share-delivery:{day}:{experience_id}", correlation_id=str(uuid4()), source="life_share", actor={"kind": "companion"}, causation_id=None)
-            return LifeShareDelivery(experience_id, delivery_id, int(trace_row.lastrowid), action_id, text)
+            ], idempotency_key=f"life-share-delivery:{delivery_id}", correlation_id=str(uuid4()), source="life_share", actor={"kind": "companion"}, causation_id=None)
+            return LifeShareDelivery(experience_id, delivery_id, int(trace_row.lastrowid), action_id, text, decision.revision)
 
-    def begin_outgoing_action(self, delivery_id: int) -> bool:
+    def begin_outgoing_action(self, delivery_id: int, *, expected_revision: int) -> bool:
         """Durably claim an outbox delivery before calling an unreliable adapter."""
         with self.store.connect() as conn:
             row = conn.execute("select status from outbox_messages where id = ?", (delivery_id,)).fetchone()
@@ -306,6 +308,7 @@ class WorldKernel:
                 raise WorldError(f"outbox delivery {delivery_id} has no world action")
             world_id = str(action_row["world_id"])
             revision, state = self._load_state(conn, world_id)
+            self._check_revision(revision, expected_revision)
             action_id = self.action_id_for_delivery(world_id, delivery_id)
             if not action_id or _as_dict(state["actions"], "actions")[action_id]["status"] != "scheduled":
                 return False
@@ -315,7 +318,7 @@ class WorldKernel:
             self._append_and_project(conn, world_id, revision, state, [("ActionAttempted", {"action_id": action_id}), ("ActionDispatchClaimed", {"action_id": action_id})], idempotency_key=f"begin:{delivery_id}", correlation_id=str(uuid4()), source="delivery", actor={"kind": "transport"}, causation_id=None)
             return True
 
-    def mark_outgoing_unknown(self, delivery_id: int, *, reason: str) -> bool:
+    def mark_outgoing_unknown(self, delivery_id: int, *, reason: str, expected_revision: int) -> bool:
         """Close an interrupted send without risking an unprovable duplicate retry."""
         with self.store.connect() as conn:
             row = conn.execute("select status from outbox_messages where id = ?", (delivery_id,)).fetchone()
@@ -326,6 +329,7 @@ class WorldKernel:
                 raise WorldError(f"outbox delivery {delivery_id} has no world action")
             world_id = str(action_row["world_id"])
             revision, state = self._load_state(conn, world_id)
+            self._check_revision(revision, expected_revision)
             action_id = self.action_id_for_delivery(world_id, delivery_id)
             now = utc_now().isoformat()
             conn.execute("update outbox_messages set status = 'unknown', failed_at = ?, failure_reason = ? where id = ?", (now, reason[:500], delivery_id))
@@ -342,12 +346,13 @@ class WorldKernel:
             if _as_dict(action, "action").get("status") == "sending"
             and _as_dict(_as_dict(action, "action").get("trace", {}), "action trace").get("life_share")
         ]
-        return sum(self.mark_outgoing_unknown(item, reason="process restarted during adapter delivery") for item in delivery_ids)
+        return sum(self.mark_outgoing_unknown(item, reason="process restarted during adapter delivery", expected_revision=self.revision(world_id)) for item in delivery_ids)
 
-    def cancel_life_share_delivery(self, world_id: str, action_id: str, *, reason: str) -> bool:
+    def cancel_life_share_delivery(self, world_id: str, action_id: str, *, reason: str, expected_revision: int) -> bool:
         """Cancel a still-planned share and its outbox record in one transaction."""
         with self.store.connect() as conn:
             revision, state = self._load_state(conn, world_id)
+            self._check_revision(revision, expected_revision)
             action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
             trace = _as_dict(action.get("trace", {}), "action trace")
             if action.get("status") != "scheduled" or not trace.get("life_share"):
@@ -438,7 +443,7 @@ class WorldKernel:
                     ),
                     *(
                         [("ExperienceShared", {"experience_id": _as_dict(_as_dict(state["actions"], "actions")[action_id], "action").get("trace", {}).get("experience_id"), "action_id": action_id})]
-                        if delivered and _as_dict(_as_dict(state["actions"], "actions")[action_id], "action").get("trace", {}).get("experience_id") else []
+                        if delivered and _as_dict(_as_dict(state["actions"], "actions")[action_id], "action").get("trace", {}).get("life_share") else []
                     ),
                 ],
                 idempotency_key=f"settle:{delivery_id}:{'delivered' if delivered else 'failed'}",
@@ -806,19 +811,7 @@ class WorldKernel:
                 raise WorldError("external result requires a terminal status")
             return [("ActionAttempted", {"action_id": action_id}), ("ActionSettled", {"action_id": action_id, "result": result})]
         if command_type == "commit_experience":
-            action_id = str(command.get("action_id") or "")
-            action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
-            if action["status"] != "delivered":
-                raise WorldError("only a delivered action can create a shared experience")
-            experience_id = str(command.get("experience_id") or "")
-            if not experience_id or experience_id in _as_dict(state["experiences"], "experiences"):
-                raise WorldError("experience needs a new id")
-            return [
-                (
-                    "ExperienceCommitted",
-                    {"experience_id": experience_id, "action_id": action_id, "content": str(command.get("content") or "")},
-                )
-            ]
+            raise WorldError("experiences are committed only by validated life outcomes")
         if command_type == "record_model_proposal":
             proposal_id = str(command.get("proposal_id") or "")
             entity_id = str(command.get("entity_id") or "")
@@ -889,7 +882,7 @@ class WorldKernel:
                 raise WorldError("only a recorded proposal can be accepted")
             accepted, reason, specs = self.life_simulation.events_for_candidate(state, proposal)
             if not accepted:
-                return [("LifeOutcomeRejected", {"outcome_id": proposal_id, "reason": reason, "rule_version": "life-sim-v2"})]
+                return [("LifeOutcomeRejected", {"outcome_id": proposal_id, "reason": reason, "rule_version": self.life_simulation.RULE_VERSION})]
             return specs
         if command_type == "confirm_fact":
             fact_id = str(command.get("fact_id") or "")

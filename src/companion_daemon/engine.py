@@ -634,7 +634,7 @@ class CompanionEngine:
                 and action_id != resume_action_id
             ):
                 if is_life_share:
-                    self.world_kernel.cancel_life_share_delivery(self.world_id, action_id, reason="new_user_turn")
+                    self.world_kernel.cancel_life_share_delivery(self.world_id, action_id, reason="new_user_turn", expected_revision=self.world_kernel.revision(self.world_id))
                     continue
                 self._submit_world_with_retry(
                     {

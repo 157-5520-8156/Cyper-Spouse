@@ -82,7 +82,7 @@ class LifeSimulation:
             return False, "unsupported_activity_entity", None
         if require_completed and activity.get("status") != "completed":
             return False, "completed_activity_required", None
-        if f"outcome:{activity['activity_id']}" in state.get("outcomes", {}):
+        if any(item.get("activity_id") == activity["activity_id"] for item in state.get("outcomes", {}).values()):
             return False, "activity_already_has_outcome", None
         template = str(activity.get("template_id") or "")
         specs = state.get("life_outcome_templates", {})

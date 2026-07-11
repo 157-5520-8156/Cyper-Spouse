@@ -270,12 +270,13 @@ async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bo
         return False
     scheduled = engine.world_kernel.schedule_life_share_delivery(
         world_id=engine.world_id, canonical_user_id=user_id, platform="qq",
+        expected_revision=engine.world_kernel.revision(engine.world_id),
         expires_at=(engine._world_logical_now() if hasattr(engine, "_world_logical_now") else datetime.fromisoformat(str(snapshot["clock"]["logical_at"]))) + timedelta(hours=4),
     )
     if not scheduled:
         print("life event not shared: world policy deferred it")
         return False
-    if not engine.world_kernel.begin_outgoing_action(scheduled.delivery_id):
+    if not engine.world_kernel.begin_outgoing_action(scheduled.delivery_id, expected_revision=scheduled.revision):
         return False
     try:
         await delivery.send_text(recipient_id, scheduled.text)
