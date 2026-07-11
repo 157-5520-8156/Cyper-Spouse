@@ -376,7 +376,7 @@ class QQMessageCoalescer:
             if self.human_timing:
                 await self.sleep(initial_reply_delay_seconds(merged, reply, state=timing_state, rng=self.rng))
             self._active_sends[key] = ActiveSend(incoming=merged, reply_target=reply_target)
-            await _send_reply_parts(
+            sent_completely = await _send_reply_parts(
                 reply_target,
                 reply.text_parts or [reply.text],
                 sleep=self.sleep,
@@ -384,6 +384,10 @@ class QQMessageCoalescer:
                 human_timing=self.human_timing,
                 should_continue=lambda: not self._active_sends.get(key, ActiveSend(merged, reply_target)).cancel_before_next_part,
             )
+            if not sent_completely:
+                if hasattr(self.engine, "fail_reply_delivery"):
+                    self.engine.fail_reply_delivery(reply, "QQ reply interrupted before all parts were sent")
+                return False
         except Exception:
             logger.exception("failed to send QQ reply")
             if hasattr(self.engine, "fail_reply_delivery"):
@@ -587,6 +591,11 @@ class QQMessageCoalescer:
                 )
             return text
         except asyncio.CancelledError:
+            if "delivery_id" in locals() and hasattr(self.engine, "fail_afterthought_delivery"):
+                self.engine.fail_afterthought_delivery(
+                    delivery_id,
+                    "QQ afterthought cancelled by newer user activity",
+                )
             if hasattr(self.engine, "cancel_conversation_pulse"):
                 self.engine.cancel_conversation_pulse(pulse_task_id)
             return None
@@ -808,17 +817,18 @@ async def _send_reply_parts(
     rng: random.Random | None = None,
     human_timing: bool = True,
     should_continue: Callable[[], bool] | None = None,
-) -> None:
+) -> bool:
     rng = rng or random.Random()
     for index, part in enumerate(parts):
         if should_continue and not should_continue():
-            return
+            return False
         if index:
             delay = between_part_delay_seconds(part, rng=rng) if human_timing else min(1.8, 0.45 + len(part) / 45)
             await sleep(delay)
             if should_continue and not should_continue():
-                return
+                return False
         await reply_target.reply(content=part, msg_seq=_reply_msg_seq())
+    return True
 
 
 def classify_mid_reply_interruption(text: str) -> str:

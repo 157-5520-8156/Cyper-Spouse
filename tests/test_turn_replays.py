@@ -18,6 +18,37 @@ def incoming(text: str, minute: int) -> IncomingMessage:
     )
 
 
+async def _frozen_replay(tmp_path, monkeypatch, name: str) -> tuple[dict[str, object], list[tuple[object, ...]]]:
+    """Run the same real turn path under one frozen daemon clock."""
+    import companion_daemon.context_orchestrator as context_orchestrator
+    import companion_daemon.db as db_module
+    import companion_daemon.emotion_state as emotion_state
+    import companion_daemon.engine as engine_module
+    import companion_daemon.life_runtime as life_runtime
+
+    for module in (db_module, engine_module, emotion_state, life_runtime, context_orchestrator):
+        monkeypatch.setattr(module, "utc_now", lambda: BASE)
+    store = CompanionStore(tmp_path / f"{name}.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。")
+    await engine.handle_message(incoming("我先忙一会儿", 0))
+    await engine.handle_message(incoming("我回来了", 40))
+    state = store.get_mood_state("geoff").model_dump(mode="json")
+    traces = [
+        (row["appraisal"], row["expression_policy"], row["status"], row["output_text"])
+        for row in store.recent_turn_traces("geoff")
+    ]
+    return state, traces
+
+
+@pytest.mark.asyncio
+async def test_frozen_clock_replay_is_reproducible_end_to_end(tmp_path, monkeypatch) -> None:
+    first = await _frozen_replay(tmp_path, monkeypatch, "first")
+    second = await _frozen_replay(tmp_path, monkeypatch, "second")
+
+    assert first == second
+
+
 @pytest.mark.asyncio
 async def test_replay_boundary_then_repair_keeps_a_multi_turn_behavioral_arc(tmp_path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")

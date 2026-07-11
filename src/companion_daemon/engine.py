@@ -417,6 +417,21 @@ class CompanionEngine:
         runtime = synchronize_life_runtime(self.store, canonical_user_id, next_state)
 
         if skip_reply:
+            # Silence is still a behavioral outcome.  Without this trace, state
+            # changes caused by an unread/merge decision become invisible to
+            # the audit timeline.
+            self.store.create_turn_trace(
+                canonical_user_id,
+                appraisal=event.kind,
+                expression_policy="暂不回复，保留未读并等待合适时机。",
+                allowed_facts=[],
+                short_lived_constraint=subtext.memory if subtext else None,
+                observable_reason="本轮由注意力策略合并或延后，不生成即时回复。",
+                output_text="",
+                delivery_id=None,
+                direction="incoming_skip",
+                status="observed",
+            )
             return None
 
         self_core_block = self._self_core_block(canonical_user_id)
@@ -465,21 +480,16 @@ class CompanionEngine:
         if generated_image_path:
             sticker = None
         asyncio.create_task(self._maybe_consolidate(canonical_user_id, next_state))
-        delivery_id = self.store.queue_outgoing(
+        delivery_id, turn_trace_id = self.store.queue_outgoing_with_turn_trace(
             canonical_user_id,
             message.platform,
             text,
             kind="reply",
-        )
-        turn_trace_id = self.store.create_turn_trace(
-            canonical_user_id,
             appraisal=turn_plan.appraisal,
             expression_policy=turn_plan.expression_policy,
             allowed_facts=list(turn_plan.allowed_facts),
             short_lived_constraint=turn_plan.short_lived_constraint,
             observable_reason=turn_plan.observable_reason,
-            output_text=text,
-            delivery_id=delivery_id,
         )
         reply = CompanionReply(
             canonical_user_id=canonical_user_id,
@@ -548,6 +558,8 @@ class CompanionEngine:
             platform_user_id=message.platform_user_id,
             payload={**message.model_dump(mode="json"), "_turn_trace_id": turn_trace_id},
             reason=reason,
+            origin_turn_trace_id=turn_trace_id,
+            reason_code="attention_defer",
             due_at=now + timedelta(minutes=defer_minutes),
             expires_at=now + timedelta(hours=12),
         )
@@ -591,6 +603,8 @@ class CompanionEngine:
             platform_user_id=message.platform_user_id,
             payload={**message.model_dump(mode="json"), "_turn_trace_id": turn_trace_id},
             reason=f"{preface}；{reason}",
+            origin_turn_trace_id=turn_trace_id,
+            reason_code="attention_read_later",
             due_at=now + timedelta(minutes=defer_minutes),
             expires_at=now + timedelta(hours=10),
         )
@@ -742,16 +756,16 @@ class CompanionEngine:
         return text
 
     def queue_afterthought_delivery(self, canonical_user_id: str, platform: str, text: str) -> int:
-        delivery_id = self.store.queue_outgoing(canonical_user_id, platform, text, kind="afterthought")
-        self.store.create_turn_trace(
+        delivery_id, _ = self.store.queue_outgoing_with_turn_trace(
             canonical_user_id,
+            platform,
+            text,
+            kind="afterthought",
             appraisal="conversation_pulse",
             expression_policy="只补一句新信息；用户回来前可取消，不复读旧话。",
             allowed_facts=[],
             short_lived_constraint=None,
             observable_reason="当前对话仍留有一段可取消的余韵。",
-            output_text=text,
-            delivery_id=delivery_id,
             direction="afterthought",
         )
         return delivery_id
@@ -1089,18 +1103,16 @@ class CompanionEngine:
             decision.cooldown_minutes,
         )
         if decision.should_send and decision.platform:
-            delivery_id = self.store.queue_outgoing(
-                canonical_user_id, decision.platform, decision.message or "", kind="proactive"
-            )
-            trace_id = self.store.create_turn_trace(
+            delivery_id, trace_id = self.store.queue_outgoing_with_turn_trace(
                 canonical_user_id,
+                decision.platform,
+                decision.message or "",
+                kind="proactive",
                 appraisal=decision.trigger_type or "proactive",
                 expression_policy="主动消息只轻轻开口，不索取回应。",
                 allowed_facts=[],
                 short_lived_constraint=None,
                 observable_reason=decision.private_thought[:160],
-                output_text=decision.message or "",
-                delivery_id=delivery_id,
                 direction="proactive",
             )
             decision = decision.model_copy(
@@ -1151,16 +1163,16 @@ class CompanionEngine:
             decision.trigger_type,
             decision.cooldown_minutes,
         )
-        delivery_id = self.store.queue_outgoing(canonical_user_id, "qq", decision.message or "", kind="proactive")
-        trace_id = self.store.create_turn_trace(
+        delivery_id, trace_id = self.store.queue_outgoing_with_turn_trace(
             canonical_user_id,
+            "qq",
+            decision.message or "",
+            kind="proactive",
             appraisal="life_share_followup",
             expression_policy="仅分享已记录的生活事件，不补写新事实。",
             allowed_facts=[content],
             short_lived_constraint=None,
             observable_reason=decision.private_thought,
-            output_text=decision.message or "",
-            delivery_id=delivery_id,
             direction="proactive",
         )
         return decision.model_copy(update={"delivery_id": delivery_id, "turn_trace_id": trace_id})

@@ -317,6 +317,9 @@ class CompanionStore:
                   platform_user_id text not null,
                   payload_json text not null,
                   reason text not null,
+                  origin_turn_trace_id integer references turn_traces(id),
+                  reason_code text,
+                  resolution text,
                   due_at text not null,
                   expires_at text not null,
                   claimed_at text,
@@ -359,6 +362,9 @@ class CompanionStore:
             self._ensure_column(conn, "life_runtime", "user_event_attention_delta", "integer not null default 0")
             self._ensure_column(conn, "life_runtime", "state_effect", "text")
             self._ensure_column(conn, "life_runtime_events", "shared_at", "text")
+            self._ensure_column(conn, "social_tasks", "origin_turn_trace_id", "integer")
+            self._ensure_column(conn, "social_tasks", "reason_code", "text")
+            self._ensure_column(conn, "social_tasks", "resolution", "text")
             conn.execute(
                 "update life_runtime set base_attention_demand = attention_demand where base_attention_demand is null"
             )
@@ -506,6 +512,48 @@ class CompanionStore:
                 (canonical_user_id, platform, text, kind, now),
             )
             return int(cursor.lastrowid)
+
+    def queue_outgoing_with_turn_trace(
+        self,
+        canonical_user_id: str,
+        platform: Platform,
+        text: str,
+        *,
+        kind: str,
+        appraisal: str,
+        expression_policy: str,
+        allowed_facts: list[str],
+        short_lived_constraint: str | None,
+        observable_reason: str,
+        direction: str = "incoming_reply",
+    ) -> tuple[int, int]:
+        """Create a proposed delivery and its audit record in one transaction."""
+        now = utc_now().isoformat()
+        with self.connect() as conn:
+            delivery = conn.execute(
+                """
+                insert into outbox_messages (
+                  canonical_user_id, platform, text, kind, status, created_at
+                ) values (?, ?, ?, ?, 'planned', ?)
+                """,
+                (canonical_user_id, platform, text, kind, now),
+            )
+            delivery_id = int(delivery.lastrowid)
+            trace = conn.execute(
+                """
+                insert into turn_traces (
+                  canonical_user_id, direction, appraisal, expression_policy,
+                  allowed_facts_json, short_lived_constraint, observable_reason,
+                  output_text, delivery_id, status, created_at, updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)
+                """,
+                (
+                    canonical_user_id, direction, appraisal, expression_policy,
+                    json.dumps(allowed_facts, ensure_ascii=False), short_lived_constraint,
+                    observable_reason, text, delivery_id, now, now,
+                ),
+            )
+        return delivery_id, int(trace.lastrowid)
 
     def mark_outgoing_delivered(self, delivery_id: int) -> sqlite3.Row | None:
         now = utc_now().isoformat()
@@ -666,7 +714,7 @@ class CompanionStore:
             conn.execute(
                 """
                 update turn_traces set status = ?, failure_reason = ?, updated_at = ?
-                where id = ? and status in ('planned', 'deferred')
+                where id = ? and status in ('planned', 'deferred', 'observed')
                 """,
                 (status, reason[:500] if reason else None, utc_now().isoformat(), trace_id),
             )
@@ -1357,41 +1405,43 @@ class CompanionStore:
         reason: str,
         due_at: datetime,
         expires_at: datetime,
+        origin_turn_trace_id: int | None = None,
+        reason_code: str | None = None,
     ) -> int:
         with self.connect() as conn:
             cursor = conn.execute(
                 """
                 insert into social_tasks (
                   canonical_user_id, kind, status, platform, platform_user_id, payload_json,
-                  reason, due_at, expires_at, claimed_at, resolved_at, created_at
-                ) values (?, ?, 'pending', ?, ?, ?, ?, ?, ?, null, null, ?)
+                  reason, origin_turn_trace_id, reason_code, due_at, expires_at, claimed_at, resolved_at, created_at
+                ) values (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, null, null, ?)
                 """,
                 (
                     canonical_user_id, kind, platform, platform_user_id,
-                    json.dumps(payload, ensure_ascii=False), reason, due_at.astimezone(UTC).isoformat(),
+                    json.dumps(payload, ensure_ascii=False), reason, origin_turn_trace_id, reason_code, due_at.astimezone(UTC).isoformat(),
                     expires_at.astimezone(UTC).isoformat(), utc_now().isoformat(),
                 ),
             )
         return int(cursor.lastrowid)
 
-    def cancel_social_task(self, task_id: int) -> None:
+    def cancel_social_task(self, task_id: int, *, resolution: str = "cancelled") -> None:
         with self.connect() as conn:
             conn.execute(
                 """
-                update social_tasks set status = 'cancelled', resolved_at = ?
+                update social_tasks set status = 'cancelled', resolution = ?, resolved_at = ?
                 where id = ? and status in ('pending', 'claimed')
                 """,
-                (utc_now().isoformat(), task_id),
+                (resolution, utc_now().isoformat(), task_id),
             )
 
-    def resolve_social_task(self, task_id: int) -> None:
+    def resolve_social_task(self, task_id: int, *, resolution: str = "completed") -> None:
         with self.connect() as conn:
             conn.execute(
                 """
-                update social_tasks set status = 'resolved', resolved_at = ?
+                update social_tasks set status = 'resolved', resolution = ?, resolved_at = ?
                 where id = ? and status in ('pending', 'claimed')
                 """,
-                (utc_now().isoformat(), task_id),
+                (resolution, utc_now().isoformat(), task_id),
             )
 
     def social_task_is_active(self, task_id: int) -> bool:
@@ -1406,7 +1456,7 @@ class CompanionStore:
         with self.connect() as conn:
             conn.execute(
                 """
-                update social_tasks set status = 'cancelled', resolved_at = ?
+                update social_tasks set status = 'cancelled', resolution = 'cancelled_by_new_turn', resolved_at = ?
                 where canonical_user_id = ? and kind = ? and status in ('pending', 'claimed')
                 """,
                 (utc_now().isoformat(), canonical_user_id, kind),
@@ -1419,7 +1469,7 @@ class CompanionStore:
         with self.connect() as conn:
             conn.execute(
                 """
-                update social_tasks set status = 'expired', resolved_at = ?
+                update social_tasks set status = 'expired', resolution = 'expired', resolved_at = ?
                 where kind = ? and status in ('pending', 'claimed') and expires_at <= ?
                 """,
                 (now.isoformat(), kind, now.isoformat()),
@@ -1457,7 +1507,8 @@ class CompanionStore:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                select id, kind, status, reason, due_at, expires_at, claimed_at, resolved_at, created_at
+                select id, kind, status, reason, origin_turn_trace_id, reason_code, resolution,
+                       due_at, expires_at, claimed_at, resolved_at, created_at
                 from social_tasks where canonical_user_id = ?
                 order by id desc limit ?
                 """,
@@ -1504,7 +1555,7 @@ class CompanionStore:
         with self.connect() as conn:
             conn.execute(
                 f"""
-                update social_tasks set status = 'expired', resolved_at = ?
+                update social_tasks set status = 'expired', resolution = 'expired', resolved_at = ?
                 where canonical_user_id = ? and kind in ({placeholders})
                   and status = 'pending' and expires_at <= ?
                 """,

@@ -901,7 +901,7 @@ async def test_send_reply_parts_uses_human_delay_between_parts() -> None:
         delays.append(seconds)
 
     target = FakeTarget()
-    await _send_reply_parts(
+    sent = await _send_reply_parts(
         target,
         ["嗯。", "刚刚其实还想补一句。"],
         sleep=fake_sleep,
@@ -909,9 +909,33 @@ async def test_send_reply_parts_uses_human_delay_between_parts() -> None:
         human_timing=True,
     )
 
+    assert sent is True
     assert target.replies == ["嗯。", "刚刚其实还想补一句。"]
     assert len(delays) == 1
     assert delays[0] >= 0.9
+
+
+@pytest.mark.asyncio
+async def test_send_reply_parts_reports_interruption_after_a_partial_delivery() -> None:
+    class FakeTarget:
+        def __init__(self):
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs) -> None:
+            self.replies.append(kwargs["content"])
+
+    checks = iter([True, False])
+    target = FakeTarget()
+    sent = await _send_reply_parts(
+        target,
+        ["第一句。", "第二句。"],
+        sleep=lambda _: asyncio.sleep(0),
+        human_timing=False,
+        should_continue=lambda: next(checks),
+    )
+
+    assert sent is False
+    assert target.replies == ["第一句。"]
 
 
 @pytest.mark.asyncio

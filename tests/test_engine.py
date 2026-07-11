@@ -78,6 +78,25 @@ async def test_reply_has_a_delivered_turn_trace_with_its_behavioral_contract(tmp
 
 
 @pytest.mark.asyncio
+async def test_skipped_reply_still_leaves_an_observed_turn_trace(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我先忙一下"),
+        skip_reply=True,
+        mark_unread=True,
+    )
+
+    assert reply is None
+    trace = store.recent_turn_traces("geoff")[-1]
+    assert trace["direction"] == "incoming_skip"
+    assert trace["status"] == "observed"
+    assert store.get_mood_state("geoff").has_unread is True
+
+
+@pytest.mark.asyncio
 async def test_failed_reply_marks_the_same_turn_trace_failed(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
@@ -94,7 +113,29 @@ async def test_failed_reply_marks_the_same_turn_trace_failed(tmp_path: Path) -> 
     trace = store.recent_turn_traces("geoff")[-1]
     assert trace["id"] == reply.turn_trace_id
     assert trace["status"] == "failed"
-    assert trace["failure_reason"] == "network failed"
+
+
+def test_outbox_and_trace_are_created_as_one_auditable_unit(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "companion.db")
+    store.resolve_user("qq", "user")
+
+    delivery_id, trace_id = store.queue_outgoing_with_turn_trace(
+        "geoff",
+        "qq",
+        "我晚点再认真回你。",
+        kind="reply",
+        appraisal="availability_drop",
+        expression_policy="简短说明并收住。",
+        allowed_facts=[],
+        short_lived_constraint=None,
+        observable_reason="当前不适合展开。",
+    )
+
+    assert store.outbox_message(delivery_id)["status"] == "planned"
+    trace = store.recent_turn_traces("geoff")[-1]
+    assert trace["id"] == trace_id
+    assert trace["delivery_id"] == delivery_id
+    assert trace["status"] == "planned"
 
 
 def test_afterthought_delivery_has_the_same_auditable_commit_path(tmp_path: Path) -> None:
@@ -109,6 +150,44 @@ def test_afterthought_delivery_has_the_same_auditable_commit_path(tmp_path: Path
     assert trace["direction"] == "afterthought"
     assert trace["delivery_id"] == delivery_id
     assert trace["status"] == "delivered"
+
+
+def test_cancelled_afterthought_closes_its_outbox_and_trace(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+
+    delivery_id = engine.queue_afterthought_delivery("geoff", "qq", "等等，我补一句。")
+    engine.fail_afterthought_delivery(delivery_id, "cancelled by newer user turn")
+
+    assert store.outbox_message(delivery_id)["status"] == "failed"
+    trace = store.recent_turn_traces("geoff")[-1]
+    assert trace["status"] == "failed"
+    assert trace["failure_reason"] == "cancelled by newer user turn"
+
+
+def test_read_now_attention_trace_can_be_resolved_by_a_later_task(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "companion.db")
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+    message = IncomingMessage(platform="qq", platform_user_id="user", text="在吗")
+    store.resolve_user("qq", "user")
+
+    decision = engine.phone_attention_decision(message)
+    assert decision.read_now is True
+    task_id = engine.create_read_later_task(
+        message,
+        defer_minutes=2,
+        reason="busy_after_read",
+        turn_trace_id=decision.turn_trace_id,
+    )
+    engine.complete_deferred_reply_task(task_id)
+
+    task = store.recent_social_tasks("geoff")[-1]
+    trace = store.recent_turn_traces("geoff")[-1]
+    assert task["origin_turn_trace_id"] == decision.turn_trace_id
+    assert task["reason_code"] == "attention_read_later"
+    assert task["resolution"] == "completed"
+    assert trace["status"] == "resolved"
 
 
 @pytest.mark.asyncio

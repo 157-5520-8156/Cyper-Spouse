@@ -191,13 +191,26 @@ async def run(
     shared_event_id = int(selected_event["id"])
     delivered_messages: list[str] = []
     for message in event.messages:
-        delivery_id = engine.store.queue_outgoing(user_id, "qq", message, kind="life_event")
+        delivery_id, trace_id = engine.store.queue_outgoing_with_turn_trace(
+            user_id,
+            "qq",
+            message,
+            kind="life_event",
+            appraisal="life_event_share",
+            expression_policy="只分享已登记的生活事件，不补写新的经历。",
+            allowed_facts=[event.topic],
+            short_lived_constraint=None,
+            observable_reason="生活事件已在运行时账本中发生，现决定分享。",
+            direction="life_event",
+        )
         try:
             await delivery.send_text(recipient_id, message)
         except Exception as exc:
             logger.exception("life event text send failed")
             print(f"life event not fully sent: {exc}")
-            engine.store.mark_outgoing_failed(delivery_id, str(exc))
+            engine.store.resolve_outgoing_and_turn_trace(
+                delivery_id, trace_id, delivered=False, failure_reason=str(exc)
+            )
             engine.store.upsert_memory(
                 user_id,
                 kind="life_event_send_failed",
@@ -216,7 +229,7 @@ async def run(
                     delivered_messages,
                 )
             return False
-        engine.store.mark_outgoing_delivered(delivery_id)
+        engine.store.resolve_outgoing_and_turn_trace(delivery_id, trace_id, delivered=True)
         delivered_messages.append(message)
 
     if generated_path:
