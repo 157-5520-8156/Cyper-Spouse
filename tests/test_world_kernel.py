@@ -632,3 +632,15 @@ def test_goal_deadline_is_deferred_by_logical_time_advance(tmp_path: Path) -> No
     advanced = kernel.advance("zhizhi-v1", NOW + timedelta(days=2), expected_revision=started.revision)
     assert any(event.event_type == "GoalDeferred" for event in advanced.events)
     assert kernel.snapshot("zhizhi-v1")["goals"]["course-notes"]["status"] == "deferred"
+
+
+def test_week_long_life_simulation_rebuilds_deterministically(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
+    advanced = kernel.advance(started.world_id, datetime(2026, 7, 20, 22, tzinfo=NOW.tzinfo), expected_revision=started.revision)
+    snapshot = kernel.snapshot(started.world_id)
+    report = kernel.rebuild_projection(started.world_id, "world_current_state")
+    assert advanced.state_hash == report.state_hash
+    assert snapshot["goals"]["literature-reading"]["status"] in {"completed", "deferred"}
+    outcomes = [item for item in snapshot["outcomes"].values() if item.get("npc_id")]
+    assert len({(item["activity_id"][:10], item["npc_id"]) for item in outcomes}) == len(outcomes)
