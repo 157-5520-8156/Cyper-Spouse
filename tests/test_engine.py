@@ -127,6 +127,21 @@ async def test_world_enabled_reply_records_input_action_and_delivery_settlement(
 
 
 @pytest.mark.asyncio
+async def test_world_enabled_turn_does_not_write_legacy_life_or_social_tables(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+    with store.connect() as conn:
+        before = {table: conn.execute(f"select count(*) from {table}").fetchone()[0] for table in ("life_runtime", "life_runtime_events", "calendar_events", "social_tasks")}
+    await engine.handle_message(IncomingMessage(platform="qq", platform_user_id="geoff", text="我先忙一会儿", message_id="world-isolation"))
+    with store.connect() as conn:
+        after = {table: conn.execute(f"select count(*) from {table}").fetchone()[0] for table in before}
+    assert after == before
+
+
+@pytest.mark.asyncio
 async def test_world_mode_store_guard_rejects_legacy_writes_but_allows_world_turn(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
