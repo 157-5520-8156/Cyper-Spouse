@@ -279,11 +279,15 @@ async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bo
     if not engine.world_kernel.begin_outgoing_action(scheduled.delivery_id, expected_revision=scheduled.revision):
         return False
     try:
-        await delivery.send_text(recipient_id, scheduled.text)
+        response = await delivery.send_text(recipient_id, scheduled.text)
     except Exception as exc:
         engine.world_kernel.settle_outgoing_action(scheduled.delivery_id, delivered=False, reason=str(exc))
         return False
-    engine.world_kernel.settle_outgoing_action(scheduled.delivery_id, delivered=True)
+    engine.world_kernel.settle_outgoing_action(
+        scheduled.delivery_id,
+        delivered=True,
+        external_receipt=(QQDelivery.receipt_candidate(response) if hasattr(QQDelivery, "receipt_candidate") else None),
+    )
     return True
 
 

@@ -34,7 +34,8 @@ async def test_napcat_delivery_sends_background_text_to_configured_qq(monkeypatc
 
     delivery = QQDelivery(settings)
     assert delivery.proactive_recipient_id() == "2759284998"
-    await delivery.send_text("2759284998", "隔一会儿想补一句。")
+    response = await delivery.send_text("2759284998", "隔一会儿想补一句。")
+    assert response == {"status": "ok"}
 
     assert requests[0].url.path == "/send_private_msg"
     assert requests[0].headers["Authorization"] == "Bearer token"
@@ -76,7 +77,8 @@ async def test_generic_onebot_delivery_uses_its_own_endpoint_and_proactive_targe
     delivery = QQDelivery(settings)
 
     assert delivery.proactive_recipient_id() == "123456789"
-    await delivery.send_text("123456789", "这句应走通用 OneBot。")
+    response = await delivery.send_text("123456789", "这句应走通用 OneBot。")
+    assert response == {"status": "ok"}
 
     assert str(requests[0].url).startswith("http://127.0.0.1:5700/")
     assert requests[0].headers["Authorization"] == "Bearer onebot-token"

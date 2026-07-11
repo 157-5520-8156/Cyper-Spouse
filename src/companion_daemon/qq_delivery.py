@@ -15,12 +15,21 @@ class QQDelivery:
         self.settings = settings
         self.sandbox = sandbox
 
-    async def send_text(self, recipient_id: str, text: str) -> None:
+    async def send_text(self, recipient_id: str, text: str) -> dict[str, object]:
         if self._uses_onebot():
-            await self._onebot_target(recipient_id).reply(content=text)
-            return
+            return await self._onebot_target(recipient_id).reply(content=text)
         self._require_official_adapter()
-        await self._official_client().send_c2c_text(recipient_id, text, is_wakeup=True)
+        return await self._official_client().send_c2c_text(recipient_id, text, is_wakeup=True)
+
+    @staticmethod
+    def receipt_candidate(response: dict[str, object] | None) -> str | None:
+        """Extract a persisted platform identifier without claiming final delivery."""
+        if not response:
+            return None
+        for key in ("message_id", "id", "msg_id"):
+            if response.get(key) not in {None, ""}:
+                return f"platform:{key}:{response[key]}"
+        return None
 
     async def send_image(self, recipient_id: str, image_path: Path, *, content: str | None = None) -> None:
         if self._uses_onebot():
