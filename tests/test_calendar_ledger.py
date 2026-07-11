@@ -65,6 +65,22 @@ def test_weekly_plan_is_stable_and_contains_only_a_few_named_events(tmp_path: Pa
     assert 1 <= len(first_ids) <= 2
 
 
+def test_elapsed_planned_event_is_cancelled_not_presented_as_future(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "calendar.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 12, 0, tzinfo=UTC)
+    event_id = store.create_calendar_event(
+        "geoff", title="已经错过的看展", event_type="social_plan", starts_at=now - timedelta(days=2),
+        ends_at=now - timedelta(days=1), source="test:elapsed",
+    )
+
+    calendar_ledger(store, "geoff", MoodState(), now=now, past_days=3, future_days=2)
+
+    row = next(event for event in store.calendar_events_between("geoff", starts_at=now - timedelta(days=3), ends_at=now) if event["id"] == event_id)
+    assert row["status"] == "cancelled"
+    assert row["changed_reason"]
+
+
 def test_calendar_context_keeps_future_plans_and_past_events_separate(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "calendar.sqlite")
     seed_user(store)

@@ -877,6 +877,17 @@ class CompanionStore:
                 (canonical_user_id, f"{prefix}%"),
             )
 
+    def cancel_elapsed_calendar_plans(self, canonical_user_id: str, *, now: datetime) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update calendar_events set status = 'cancelled',
+                  changed_reason = '首次生成周计划时该时段已经过去，未将其伪装成已发生。', updated_at = ?
+                where canonical_user_id = ? and status in ('planned', 'active') and ends_at < ?
+                """,
+                (utc_now().isoformat(), canonical_user_id, now.astimezone(UTC).isoformat()),
+            )
+
     def unshared_private_life_events(self, canonical_user_id: str, limit: int = 4) -> list[sqlite3.Row]:
         with self.connect() as conn:
             rows = conn.execute(

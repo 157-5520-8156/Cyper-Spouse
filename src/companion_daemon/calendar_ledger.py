@@ -71,6 +71,7 @@ def _backfill_memorable_events(store, canonical_user_id: str, events) -> None:
 def _ensure_weekly_plan(store, canonical_user_id: str, *, now: datetime, future_days: int) -> None:
     """Create a small coherent weekly plan, not independent daily impulses."""
     local = now.astimezone()
+    store.cancel_elapsed_calendar_plans(canonical_user_id, now=now)
     # One-time migration from the prototype's independent highlights.  Weekly
     # events are the new authority, so keeping both would make the calendar
     # look like it scheduled the same outing twice.
@@ -95,6 +96,8 @@ def _ensure_weekly_plan(store, canonical_user_id: str, *, now: datetime, future_
     for index in range(count):
         title, event_type, importance, day_offset, days, details = candidates[(int(ratio * 100) + index) % len(candidates)]
         day = (monday + timedelta(days=day_offset)).replace(hour=15 + index, minute=0)
+        if day <= local:
+            day = (local + timedelta(days=1 + index)).replace(hour=15 + index, minute=0, second=0, microsecond=0)
         source = f"calendar:weekly:{week_key}:{index}"
         if store.calendar_event_by_source(canonical_user_id, source):
             continue
