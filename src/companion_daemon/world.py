@@ -18,6 +18,7 @@ from companion_daemon.db import CompanionStore
 from companion_daemon.life_simulation import LifeSimulation
 from companion_daemon.time import utc_now
 from companion_daemon.world_interaction_rules import WorldInteractionRules
+from companion_daemon.world_relationship import evaluate_relationship_stage, stage_event_payload
 
 
 class WorldError(ValueError):
@@ -767,6 +768,17 @@ class WorldKernel:
         communication = _as_dict(state["communication"], "communication")
         actions = [_as_dict(item, "action") for item in _as_dict(state["actions"], "actions").values()]
         open_actions = [item for item in actions if item.get("status") in {"scheduled", "sending", "unknown"}]
+        user_relationship_stage = "stranger"
+        entities = _as_dict(state["entities"], "entities")
+        relationships = _as_dict(state["relationships"], "relationships")
+        for entity_id, entity in entities.items():
+            if _as_dict(entity, "entity").get("kind") == "user":
+                user_relationship_stage = str(
+                    _as_dict(relationships.get(entity_id, {}), "user relationship").get(
+                        "stage", "stranger"
+                    )
+                )
+                break
         days: list[dict[str, object]] = []
         # The calendar is a read projection over the complete committed
         # experience set, not an implicit "last event" cache.
@@ -794,6 +806,7 @@ class WorldKernel:
                 "world_id": world_id, "revision": overview["revision"], "state_hash": overview["state_hash"],
                 "needs": overview["needs"], "communication": dict(communication),
                 "emotion_modulation": dict(_as_dict(state["emotion_modulation"], "emotion modulation")),
+                "relationship_stage": user_relationship_stage,
             },
             "life_runtime": {"activity": activity, "started_at": starts_at, "ends_at": ends_at, "phone_attention": communication.get("attention")},
             "calendar": {"days": days},
@@ -809,7 +822,7 @@ class WorldKernel:
                 "reasons": [str(scene["observable_reason"]), phone_label],
                 "next_plan": [_dashboard_activity(item) for item in sorted(agenda, key=lambda value: str(value.get("starts_at") or "")) if item.get("status") in {"active", "planned", "deferred"}][:6],
                 "active_task_count": len(open_actions),
-                "relationship_stage": "world_projected",
+                "relationship_stage": user_relationship_stage,
                 "scene": scene,
             },
             "world_overview": overview,
@@ -1736,7 +1749,20 @@ class WorldKernel:
             entities = _as_dict(state["entities"], "entities")
             if not user_id or not name or user_id in entities:
                 raise WorldError("user must have a new id and name")
-            return [("UserRegistered", {"id": user_id, "name": name, "kind": "user"})]
+            return [
+                ("UserRegistered", {"id": user_id, "name": name, "kind": "user"}),
+                (
+                    "RelationshipStageEvaluated",
+                    stage_event_payload(
+                        entity_id=user_id,
+                        stage="stranger",
+                        from_stage=None,
+                        relationship={"interaction_count": 0},
+                        boundary=0,
+                        reason="relationship_initialized",
+                    ),
+                ),
+            ]
         if command_type == "plan_activity":
             payload = {key: command[key] for key in ("activity_id", "entity_id", "title", "starts_at", "ends_at")}
             if any(not payload.get(key) for key in payload) or _parse_at(str(payload["ends_at"])) <= _parse_at(str(payload["starts_at"])):
@@ -1997,14 +2023,42 @@ class WorldKernel:
         if command_type == "change_relationship":
             entity_id = str(command.get("entity_id") or "")
             dimension = str(command.get("dimension") or "")
-            if entity_id not in _as_dict(state["entities"], "entities") or dimension not in {"trust", "closeness", "respect"}:
+            entities = _as_dict(state["entities"], "entities")
+            if entity_id not in entities or dimension not in {"trust", "closeness", "respect"}:
                 raise WorldError("relationship change requires a registered entity and supported dimension")
-            return [
+            delta = int(command.get("delta") or 0)
+            events: list[tuple[str, dict[str, object]]] = [
                 (
                     "NpcRelationshipChanged",
-                    {"entity_id": entity_id, "dimension": dimension, "delta": int(command.get("delta") or 0)},
+                    {"entity_id": entity_id, "dimension": dimension, "delta": delta},
                 )
             ]
+            if _as_dict(entities[entity_id], "relationship entity").get("kind") == "user":
+                relation = dict(
+                    _as_dict(
+                        _as_dict(state["relationships"], "relationships").get(entity_id, {}),
+                        "user relationship",
+                    )
+                )
+                relation[dimension] = max(
+                    -100, min(100, int(relation.get(dimension) or 0) + delta)
+                )
+                boundary = int(_as_dict(state["needs"], "needs").get("boundary", 0))
+                stage, reason = evaluate_relationship_stage(relation, boundary=boundary)
+                events.append(
+                    (
+                        "RelationshipStageEvaluated",
+                        stage_event_payload(
+                            entity_id=entity_id,
+                            stage=stage,
+                            from_stage=str(relation.get("stage") or "stranger"),
+                            relationship=relation,
+                            boundary=boundary,
+                            reason=reason,
+                        ),
+                    )
+                )
+            return events
         if command_type == "change_need":
             need = str(command.get("need") or "")
             if need not in {"energy", "attention", "security", "initiative", "boundary"}:
@@ -2248,6 +2302,35 @@ class WorldKernel:
                     ("RelationshipChanged", {"entity_id": user_id, "dimension": dimension, "delta": delta})
                     for dimension, delta in consequence.relationship_deltas.items()
                 )
+                relation = dict(
+                    _as_dict(
+                        _as_dict(state["relationships"], "relationships").get(user_id, {}),
+                        "user relationship",
+                    )
+                )
+                relation["interaction_count"] = int(relation.get("interaction_count") or 0) + 1
+                for dimension, delta in consequence.relationship_deltas.items():
+                    relation[dimension] = max(
+                        -100,
+                        min(100, int(relation.get(dimension) or 0) + int(delta)),
+                    )
+                current_stage = str(relation.get("stage") or "stranger")
+                boundary = int(_as_dict(state["needs"], "needs").get("boundary", 0))
+                boundary += int(consequence.need_deltas.get("boundary", 0))
+                stage, reason = evaluate_relationship_stage(relation, boundary=boundary)
+                events.append(
+                    (
+                        "RelationshipStageEvaluated",
+                        stage_event_payload(
+                            entity_id=user_id,
+                            stage=stage,
+                            from_stage=current_stage,
+                            relationship=relation,
+                            boundary=boundary,
+                            reason=reason,
+                        ),
+                    )
+                )
             events.append((
                 "EmotionModulated",
                 {"mode": consequence.emotion_mode, "expression": consequence.emotion_expression, "charge_delta": consequence.emotion_charge_delta, "reason": appraisal, "rule_version": self.interaction_rules.RULE_VERSION},
@@ -2479,6 +2562,16 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "UserRegistered":
         user = {**payload, "status": "active"}
         _as_dict(next_state["entities"], "entities")[str(user["id"])] = user
+    elif event.event_type == "RelationshipStageEvaluated":
+        entity_id = str(payload["entity_id"])
+        relationships = _as_dict(next_state["relationships"], "relationships")
+        relation = _as_dict(relationships.setdefault(entity_id, {}), "relationship")
+        relation["stage"] = str(payload["stage"])
+        relation["interaction_count"] = int(payload.get("interaction_count") or relation.get("interaction_count") or 0)
+        relation["stage_reason"] = str(payload.get("reason") or "")
+        relation["stage_rule_version"] = str(payload.get("rule_version") or "")
+        if payload.get("from_stage") != payload.get("stage"):
+            relation["stage_changed_at"] = event.logical_at
     elif event.event_type == "ClockModeChanged":
         next_state["clock"] = {**_as_dict(next_state["clock"], "clock"), **payload}
         next_state["clock_observed_at"] = event.observed_at
@@ -2560,6 +2653,12 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         relation[dimension] = max(-100, min(100, int(relation.get(dimension, 0)) + int(payload["delta"])))
     elif event.event_type == "RelationshipAppraised":
         next_state["last_relationship_appraisal"] = dict(payload)
+        user_id = str(payload.get("user_id") or "")
+        if user_id:
+            relationships = _as_dict(next_state["relationships"], "relationships")
+            relation = _as_dict(relationships.setdefault(user_id, {}), "user relationship")
+            relation.setdefault("stage", "stranger")
+            relation["interaction_count"] = int(relation.get("interaction_count") or 0) + 1
     elif event.event_type == "EmotionModulated":
         current = _as_dict(next_state["emotion_modulation"], "emotion modulation")
         next_state["emotion_modulation"] = {

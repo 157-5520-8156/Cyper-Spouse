@@ -1027,7 +1027,19 @@ class CompanionEngine:
                         "idempotency_key": f"attention-seen:{message.message_id}:{resume_action_id or 'live'}",
                     }
                 )
-        event = interpret_interaction(message, MoodState())
+        user_id = self._world_user_id(canonical_user_id)
+        stage_snapshot = self.world_kernel.snapshot(self.world_id)
+        stage_relation = stage_snapshot.get("relationships", {}).get(user_id, {})
+        relationship_stage = (
+            str(stage_relation.get("stage") or "stranger")
+            if isinstance(stage_relation, dict)
+            else "stranger"
+        )
+        event = interpret_interaction(
+            message,
+            MoodState(),
+            relationship_stage=relationship_stage,
+        )
         appraisal = event.kind
         history = self.world_kernel.snapshot(self.world_id).get("recent_messages", [])
         if appraisal == "ordinary_message" and isinstance(history, list) and len(history) >= 2:
@@ -1041,7 +1053,6 @@ class CompanionEngine:
                     "answered": "ordinary_message",
                 }[feedback.kind]
         intent_id = f"turn:{message.message_id or message.sent_at.isoformat()}"
-        user_id = self._world_user_id(canonical_user_id)
         for thread_id, raw_thread in self.world_kernel.snapshot(self.world_id).get("conversation_threads", {}).items():
             thread = raw_thread if isinstance(raw_thread, dict) else {}
             if thread.get("status") != "open" or thread.get("user_id") != user_id:
@@ -1116,7 +1127,10 @@ class CompanionEngine:
         needs = behavior["needs"]
         relationship = behavior["relationship"]
         modulation = behavior["emotion_modulation"]
-        expression_guidance = self.world_behavior_policy.expression_guidance(snapshot)
+        expression_guidance = self.world_behavior_policy.expression_guidance(
+            snapshot,
+            user_id=user_id,
+        )
         audit_context: dict[str, object] = {
             "current_scene": current_scene_source,
             "confirmed_facts": fact_sources,
@@ -1892,6 +1906,8 @@ class CompanionEngine:
                 "只补一条不超过 60 字的聊天余波；不得新增任何未结算经历、人物或事实。"
                 "若不该发送，reply_text 置空。只返回 WorldReplyJSON："
                 '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}。\n'
+                f"当前关系阶段: {str(snapshot.get('relationships', {}).get(self._world_user_id(canonical_user_id), {}).get('stage') or 'stranger')}；"
+                f"阶段表达规则: {self.world_behavior_policy.expression_guidance(snapshot, user_id=self._world_user_id(canonical_user_id)).prompt_line}\n"
                 f"已结算事实: {[item['value'] for item in snapshot['facts'].values()]}\n"
                 f"已结算经历: {[item['content'] for item in snapshot['experiences'].values()][-3:]}\n"
                 f"模式: {mode}"
@@ -1914,6 +1930,11 @@ class CompanionEngine:
                     user_id=self._ensure_world_user(canonical_user_id),
                 )
             except WorldError:
+                return None
+            relationship = snapshot.get("relationships", {}).get(self._world_user_id(canonical_user_id), {})
+            if not isinstance(relationship, dict) or human_reply_contract_violation(
+                "", candidate, relationship
+            ):
                 return None
             text = sanitize_chat_text(str(candidate["reply_text"]))
             return text if text and len(text) <= 60 else None
@@ -2455,6 +2476,8 @@ class CompanionEngine:
         prompt = (
             "基于以下已结算世界账本，决定是否轻轻主动发一句消息。"
             "若不适合，返回 JSON 的 should_send=false；若适合，不能新增未记录事实。\n"
+            f"当前关系阶段: {str(snapshot.get('relationships', {}).get(user_id, {}).get('stage') or 'stranger')}; "
+            f"阶段表达规则: {self.world_behavior_policy.expression_guidance(snapshot, user_id=user_id).prompt_line}\n"
             f"事实: {[item['value'] for item in snapshot['facts'].values()]}\n"
             f"经历: {[item['content'] for item in snapshot['experiences'].values()][-4:]}"
         )
@@ -2470,6 +2493,24 @@ class CompanionEngine:
             causation=causation, content=raw, action_id=model_action_id,
         )
         decision = self._parse_decision(canonical_user_id, raw, MoodState())
+        relationship = snapshot.get("relationships", {}).get(user_id, {})
+        if not isinstance(relationship, dict):
+            relationship = {}
+        if decision.should_send and decision.message:
+            violation = human_reply_contract_violation(
+                "",
+                {"reply_text": decision.message, "claims": []},
+                relationship,
+            )
+            if violation:
+                decision = decision.model_copy(
+                    update={
+                        "should_send": False,
+                        "message": None,
+                        "message_type": "none",
+                        "private_thought": f"关系阶段门禁要求先收住：{violation}。",
+                    }
+                )
         if not decision.should_send or not decision.message or not decision.platform:
             self._submit_world_with_retry(
                 {

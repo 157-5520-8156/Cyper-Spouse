@@ -8,6 +8,7 @@ from companion_daemon.emotion_core import (
 from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.repair_curve import is_repair_message
 from companion_daemon.time import utc_now
+from companion_daemon.world_relationship import STAGES
 
 
 @dataclass(frozen=True)
@@ -19,8 +20,16 @@ class InteractionEvent:
     reply_style_hint: str
 
 
-def interpret_interaction(message: IncomingMessage, previous: MoodState) -> InteractionEvent:
+def interpret_interaction(
+    message: IncomingMessage,
+    previous: MoodState,
+    *,
+    relationship_stage: str | None = None,
+) -> InteractionEvent:
     text = message.text.strip()
+    effective_stage = relationship_stage or previous.relationship_stage
+    if effective_stage not in STAGES:
+        effective_stage = "stranger"
 
     if _has_any(text, ["滚", "闭嘴", "别烦", "你算什么", "有病", "废物", "傻逼", "蠢"]):
         return InteractionEvent(
@@ -50,7 +59,7 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
             "感到被控制，不舒服，但不需要吵起来。",
             "礼貌但坚定，说明自己不喜欢被命令。",
         )
-    if _has_any(text, ["老婆", "宝贝", "宝宝", "亲爱的", "爱你", "做我女朋友"]) and previous.relationship_stage in {
+    if _has_any(text, ["老婆", "宝贝", "宝宝", "亲爱的", "爱你", "做我女朋友"]) and effective_stage in {
         "stranger",
         "acquaintance",
     }:

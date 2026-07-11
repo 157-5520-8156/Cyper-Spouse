@@ -37,13 +37,13 @@ class WorldInteractionRules:
         "return_after_gap": {"security": 2, "initiative": 2},
     }
     _RELATIONSHIP = {
-        "boundary_violation": {"respect": -12, "reliability": -4},
-        "control_pressure": {"respect": -8},
-        "repair_attempt": {"respect": 3, "reliability": 2},
-        "warmth_received": {"closeness": 4, "reliability": 1},
-        "user_vulnerable": {"closeness": 2},
-        "availability_drop": {"reliability": -1},
-        "return_after_gap": {"closeness": 1, "reliability": 1},
+        "boundary_violation": {"respect": -12, "reliability": -4, "trust": -8},
+        "control_pressure": {"respect": -8, "trust": -5},
+        "repair_attempt": {"respect": 3, "reliability": 2, "trust": 4},
+        "warmth_received": {"closeness": 4, "reliability": 1, "trust": 5},
+        "user_vulnerable": {"closeness": 2, "trust": 3},
+        "availability_drop": {"reliability": -1, "trust": -1},
+        "return_after_gap": {"closeness": 1, "reliability": 1, "trust": 2},
     }
     _EMOTION = {
         "boundary_violation": ("guarded", "guarded", 16),

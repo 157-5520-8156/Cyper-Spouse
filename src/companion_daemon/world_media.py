@@ -37,12 +37,15 @@ class WorldMediaPolicy:
             return WorldMediaDecision(False, "none", "no_media_request")
         needs = _mapping(state.get("needs"))
         relation = _mapping(_mapping(state.get("relationships")).get(user_id))
+        relationship_stage = str(relation.get("stage") or "stranger")
         boundary = int(needs.get("boundary", 0))
         security = int(needs.get("security", 50))
         selfie = self._is_selfie_request(request, user_text)
         topic = str(request.directive or user_text).strip()[:120]
         if selfie and boundary >= 65 and self._is_pressure(user_text):
             return WorldMediaDecision(False, "selfie", "boundary_high_under_pressure")
+        if selfie and relationship_stage in {"stranger", "acquaintance", "friend"}:
+            return WorldMediaDecision(False, "selfie", "relationship_stage_not_ready")
         if selfie and (int(relation.get("respect", 0)) < -15 or int(relation.get("closeness", 0)) < 4):
             return WorldMediaDecision(False, "selfie", "relationship_not_ready")
         if selfie and (boundary >= 45 or security <= 28):

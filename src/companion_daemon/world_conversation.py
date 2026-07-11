@@ -559,12 +559,16 @@ def human_reply_contract_violation(
     ):
         return "unsupported_user_history_or_ability_inference"
 
-    numeric_relationship = [
-        float(value)
-        for value in (relationship or {}).values()
-        if isinstance(value, (int, float)) and not isinstance(value, bool)
-    ]
-    early_relationship = not numeric_relationship or sum(numeric_relationship) / len(numeric_relationship) < 60
+    explicit_relationship_stage = str((relationship or {}).get("stage") or "")
+    if explicit_relationship_stage:
+        early_relationship = explicit_relationship_stage in {"stranger", "acquaintance"}
+    else:
+        numeric_relationship = [
+            float(value)
+            for value in (relationship or {}).values()
+            if isinstance(value, (int, float)) and not isinstance(value, bool)
+        ]
+        early_relationship = not numeric_relationship or sum(numeric_relationship) / len(numeric_relationship) < 60
     premature_intimacy = ("宝宝", "宝贝", "老婆", "永远爱你", "只属于你", "离不开你")
     if early_relationship and any(marker in reply for marker in premature_intimacy):
         return "relationship_language_exceeds_current_closeness"

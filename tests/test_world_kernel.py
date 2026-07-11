@@ -129,7 +129,16 @@ def test_world_user_relationship_and_emotion_are_reduced_from_turn_appraisal(tmp
 
     snapshot = kernel.snapshot(started.world_id)
     assert snapshot["entities"]["user:geoff"]["kind"] == "user"
-    assert snapshot["relationships"]["user:geoff"] == {"respect": -12, "reliability": -4}
+    assert snapshot["relationships"]["user:geoff"] == {
+        "respect": -12,
+        "reliability": -4,
+        "trust": -8,
+        "stage": "stranger",
+        "interaction_count": 1,
+        "stage_reason": "relationship_steady",
+        "stage_rule_version": "world-relationship-v1",
+        "stage_changed_at": NOW.isoformat(),
+    }
     assert snapshot["emotion_modulation"] == {
         "mode": "guarded", "charge": 16, "reason": "boundary_violation",
         "expression": "guarded", "last_decay_at": NOW.isoformat(),

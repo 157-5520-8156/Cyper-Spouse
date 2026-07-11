@@ -51,6 +51,36 @@ def test_expression_guidance_is_derived_from_world_state_without_private_memory(
     assert "不讨好" in guidance.prompt_line
 
 
+def test_relationship_stage_changes_expression_and_outreach_constraints() -> None:
+    policy = WorldBehaviorPolicy()
+
+    stranger_guidance = policy.expression_guidance(
+        {
+            "needs": {"boundary": 0, "energy": 70},
+            "emotion_modulation": {"mode": "calm"},
+            "relationships": {"user:geoff": {"stage": "stranger"}},
+        },
+        user_id="user:geoff",
+    )
+    friend_guidance = policy.expression_guidance(
+        {
+            "needs": {"boundary": 0, "energy": 70},
+            "emotion_modulation": {"mode": "calm"},
+            "relationships": {"user:geoff": {"stage": "friend"}},
+        },
+        user_id="user:geoff",
+    )
+
+    assert stranger_guidance.label == "slow_warm"
+    assert friend_guidance.label == "friend"
+    assert policy.outreach_constraint(
+        {"relationships": {"user:geoff": {"stage": "stranger"}}}, user_id="user:geoff"
+    ).allowed is False
+    assert policy.outreach_constraint(
+        {"relationships": {"user:geoff": {"stage": "acquaintance"}}}, user_id="user:geoff"
+    ).allowed is True
+
+
 def test_world_media_policy_uses_world_relation_and_boundary_not_moodstate() -> None:
     policy = WorldMediaPolicy()
     request = detect_image_request("能发一张自拍吗")
@@ -60,7 +90,7 @@ def test_world_media_policy_uses_world_relation_and_boundary_not_moodstate() -> 
         user_id="user:geoff", request=request, user_text="你现在就必须发自拍",
     )
     allowed = policy.image_decision(
-        {"needs": {"boundary": 0, "security": 55}, "relationships": {"user:geoff": {"closeness": 8, "respect": 0}}},
+        {"needs": {"boundary": 0, "security": 55}, "relationships": {"user:geoff": {"stage": "close_friend", "closeness": 8, "respect": 0}}},
         user_id="user:geoff", request=request, user_text="能发一张自拍吗",
     )
 

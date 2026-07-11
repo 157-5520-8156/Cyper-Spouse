@@ -399,10 +399,19 @@ async def test_world_image_request_uses_generation_and_delivery_actions(tmp_path
     await engine.handle_message(
         IncomingMessage(platform="qq", platform_user_id="geoff", text="你好", message_id="media-register")
     )
-    world.submit(
-        {"type": "change_relationship", "world_id": world_id, "entity_id": "user:geoff", "dimension": "closeness", "delta": 8},
-        expected_revision=world.revision(world_id),
-    )
+    for index in range(1, 35):
+        world.submit(
+            {
+                "type": "appraise_turn",
+                "world_id": world_id,
+                "appraisal": "warmth_received",
+                "intent_id": f"media-warmth:{index}",
+                "message_id": f"media-warmth:{index}",
+                "user_id": "user:geoff",
+                "idempotency_key": f"media-warmth:{index}",
+            },
+            expected_revision=world.revision(world_id),
+        )
 
     reply = await engine.handle_message(
         IncomingMessage(platform="qq", platform_user_id="geoff", text="能发一张自拍吗", message_id="media-request")
@@ -542,6 +551,20 @@ async def test_world_mode_proactive_uses_only_world_action(tmp_path: Path, monke
     seed_user(store)
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    world.submit(
+        {"type": "register_user", "world_id": world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=world.revision(world_id),
+    )
+    for index in range(4):
+        world.submit(
+            {
+                "type": "appraise_turn", "world_id": world_id,
+                "appraisal": "warmth_received", "intent_id": f"proactive-warmth:{index}",
+                "message_id": f"proactive-warmth:{index}", "user_id": "user:geoff",
+                "idempotency_key": f"proactive-warmth:{index}",
+            },
+            expected_revision=world.revision(world_id),
+        )
     engine = CompanionEngine(store, WorldProactiveModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
 
     def legacy_write(*args, **kwargs):
@@ -568,6 +591,20 @@ async def test_world_mode_withheld_proactive_is_a_reviewable_world_decision(tmp_
     seed_user(store)
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    world.submit(
+        {"type": "register_user", "world_id": world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=world.revision(world_id),
+    )
+    for index in range(4):
+        world.submit(
+            {
+                "type": "appraise_turn", "world_id": world_id,
+                "appraisal": "warmth_received", "intent_id": f"withheld-warmth:{index}",
+                "message_id": f"withheld-warmth:{index}", "user_id": "user:geoff",
+                "idempotency_key": f"withheld-warmth:{index}",
+            },
+            expected_revision=world.revision(world_id),
+        )
     engine = CompanionEngine(store, WithholdingModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
 
     decision = await engine.proactive_tick("geoff")

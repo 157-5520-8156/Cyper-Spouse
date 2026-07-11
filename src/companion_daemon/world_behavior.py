@@ -11,6 +11,7 @@ from datetime import datetime
 from math import ceil
 from typing import Any, Literal
 
+from companion_daemon.world_relationship import STAGES, relationship_stage_instruction
 
 CommunicationAttention = Literal["seen", "deferred", "do_not_disturb"]
 
@@ -90,6 +91,10 @@ class WorldBehaviorPolicy:
             action = _mapping(raw)
             if action.get("kind") == "outgoing_message" and action.get("status") in {"scheduled", "sending", "unknown"}:
                 return OutreachConstraint(False, "outgoing_action_unresolved")
+        relationship = _mapping(_mapping(state.get("relationships")).get(user_id))
+        relationship_stage = str(relationship.get("stage") or "stranger")
+        if not relationship or relationship_stage == "stranger":
+            return OutreachConstraint(False, "relationship_stage_stranger")
         needs = _mapping(state.get("needs"))
         if int(needs.get("boundary", 0)) >= 55:
             return OutreachConstraint(False, "boundary_high")
@@ -97,13 +102,29 @@ class WorldBehaviorPolicy:
             return OutreachConstraint(False, "security_low")
         return OutreachConstraint(True, "world_allows_outreach")
 
-    def expression_guidance(self, state: dict[str, Any]) -> ExpressionGuidance:
+    def expression_guidance(
+        self, state: dict[str, Any], *, user_id: str | None = None
+    ) -> ExpressionGuidance:
         """Derive a short-lived expression guide without writing private prose."""
         needs = _mapping(state.get("needs"))
         modulation = _mapping(state.get("emotion_modulation"))
+        relationship = _mapping(_mapping(state.get("relationships")).get(user_id))
+        relationship_stage = str(relationship.get("stage") or "stranger")
+        if relationship_stage not in STAGES:
+            relationship_stage = "stranger"
         mode = str(modulation.get("mode") or "calm")
         if int(needs.get("boundary", 0)) >= 55 or mode == "guarded":
             return ExpressionGuidance("guarded", "表达简短、清楚，不讨好；只说愿意说的部分。")
+        if relationship_stage in {"stranger", "acquaintance"}:
+            return ExpressionGuidance("slow_warm", relationship_stage_instruction(relationship_stage))
+        if relationship_stage == "friend":
+            return ExpressionGuidance("friend", relationship_stage_instruction(relationship_stage))
+        if relationship_stage == "close_friend":
+            return ExpressionGuidance("close_friend", relationship_stage_instruction(relationship_stage))
+        if relationship_stage == "ambiguous":
+            return ExpressionGuidance("ambiguous", relationship_stage_instruction(relationship_stage))
+        if relationship_stage == "lover":
+            return ExpressionGuidance("lover", relationship_stage_instruction(relationship_stage))
         if mode == "caring":
             return ExpressionGuidance("caring", "先接住对方情绪，语气温和，不把关心变成追问。")
         if mode in {"warm", "open", "softening"}:
