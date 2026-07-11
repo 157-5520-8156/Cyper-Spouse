@@ -25,6 +25,7 @@ class ContextPackage:
     reply_policy: str
     continuity_hint: str
     subtext_hint: str
+    calendar_context: str | None
     prompt_summary: str
 
     def prompt_block(self) -> str:
@@ -53,6 +54,7 @@ class ContextPackage:
             f"- 本轮回复策略: {self.reply_policy}\n"
             f"- 连续性约束: {self.continuity_hint}\n"
             f"- 内在倾向: {self.subtext_hint}\n"
+            f"- 时间账本: {self.calendar_context or '当前问题未命中具体日期；不要把计划或旧聊天伪装成日期事实。'}\n"
             f"- 最终 prompt 摘要: {self.prompt_summary}"
         )
 
@@ -70,6 +72,7 @@ def build_context_package(
     life_context_override: str | None = None,
     self_fact_lines: list[str] | None = None,
     verified_user_fact_lines: list[str] | None = None,
+    calendar_context: str | None = None,
 ) -> ContextPackage:
     user_intent = infer_user_intent(message.text, has_attachments=bool(message.attachments))
     reply_focus = choose_reply_focus(message.text, user_intent)
@@ -103,6 +106,7 @@ def build_context_package(
         reply_policy=reply_policy,
         continuity_hint=continuity_hint or "保持最近的语气，不要突然大幅变调",
         subtext_hint=subtext_hint or "无额外潜台词，别强行演情绪",
+        calendar_context=calendar_context,
         prompt_summary=prompt_summary,
     )
 

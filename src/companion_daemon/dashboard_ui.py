@@ -187,6 +187,14 @@ DASHBOARD_HTML = r"""<!doctype html>
     .timeline-copy strong { display:block; color:#4c3d36; font-size:12px; font-weight:400; }
     .timeline-copy span,.timeline time { color:#80685b; font-size:11px; }
     .timeline time { white-space:nowrap; }
+    .calendar-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:7px; }
+    .calendar-day { min-height:94px; padding:8px; border:2px solid #cfb48f; background:#fff9ed; }
+    .calendar-day.today { border-color:#bd766a; box-shadow:2px 2px 0 #d8a29a; }
+    .calendar-day.future { background:#f4eee3; }
+    .calendar-day h3 { margin:0 0 5px; color:#5b443a; font-size:12px; font-weight:400; }
+    .calendar-day ul { margin:0; padding:0; list-style:none; color:#786055; font-size:10px; line-height:1.45; }
+    .calendar-day li::before { content:"· "; color:#bd766a; }
+    .calendar-day .planned::before { color:#557f78; }
     .task {
       padding:8px;
       margin-top:7px;
@@ -247,6 +255,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <section class="panel"><h2>现在</h2><div class="stats"><div class="stat"><b id="attention">-</b><span>注意力占用</span></div><div class="stat"><b id="taskCount">-</b><span>社交余波</span></div><div class="stat"><b id="phoneState">-</b><span>手机状态</span></div></div></section>
       <section class="panel wide"><h2>为什么是这个动作</h2><ul class="reason-list" id="reasons"></ul></section>
       <section class="panel wide"><h2>今天的轨迹</h2><div class="timeline" id="timeline"></div></section>
+      <section class="panel wide"><h2>时间账本</h2><div class="calendar-grid" id="calendar"></div></section>
       <section class="panel wide"><h2>还没收住的事</h2><div id="tasks"></div></section>
       <details class="wide"><summary>查看原始 daemon 状态</summary><pre id="state"></pre></details>
     </aside>
@@ -491,6 +500,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       document.getElementById('phoneState').textContent = d.phone_label;
       document.getElementById('reasons').innerHTML = d.reasons.map(x => `<li>${esc(x)}</li>`).join('');
       document.getElementById('timeline').innerHTML = d.next_plan.map((p,i) => `<div class="timeline-item ${i === 0 ? 'current' : ''}"><i class="dot"></i><div class="timeline-copy"><strong>${esc(p.activity)}</strong><span>${p.adjustment_note ? esc(p.adjustment_note) : (p.interruptible ? '偶尔会看手机' : '不适合被打断')}</span></div><time>${fmtTime(p.starts_at)}</time></div>`).join('') || '<span>今天还没有后续安排。</span>';
+      const calendarDays = (snapshot.calendar?.days || []).filter(day => ['前天','昨天','今天','明天','后天'].includes(day.relative));
+      document.getElementById('calendar').innerHTML = calendarDays.map(day => {
+        const happened = (day.events || []).filter(event => event.status === 'completed').slice(0,2).map(event => `<li>${esc(event.content)}</li>`).join('');
+        const planned = (day.plans || []).filter(plan => plan.status !== 'completed').slice(0,2).map(plan => `<li class="planned">${esc(plan.activity)}</li>`).join('');
+        return `<article class="calendar-day ${day.relative === '今天' ? 'today' : (['明天','后天'].includes(day.relative) ? 'future' : '')}"><h3>${esc(day.relative)} · ${esc(day.date.slice(5))}</h3><ul>${happened || planned || '<li>没有可用记录</li>'}</ul></article>`;
+      }).join('');
       const tasks = snapshot.recent_social_tasks.filter(t => ['pending','claimed'].includes(t.status));
       document.getElementById('tasks').innerHTML = tasks.length ? tasks.map(t => `<div class="task">${esc(t.reason)}<small>${esc(t.status)} · 到 ${fmtTime(t.due_at)}</small></div>`).join('') : '<span class="result">没有挂起的社交事务。</span>';
       document.getElementById('state').textContent = JSON.stringify({life_runtime:runtime, scene, state:snapshot.state}, null, 2);

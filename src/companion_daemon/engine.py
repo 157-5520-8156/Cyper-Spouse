@@ -11,6 +11,7 @@ from companion_daemon.budget import ESTIMATES, BudgetGate
 from companion_daemon.character import CharacterProfile
 from companion_daemon.conversation import ConversationCore, PromptedConversationCore
 from companion_daemon.context_orchestrator import build_context_package
+from companion_daemon.calendar_ledger import calendar_context_for_message, calendar_ledger
 from companion_daemon.db import CompanionStore
 from companion_daemon.emotion_state import interpret_interaction
 from companion_daemon.emotion_personality import mbti_temperament_note
@@ -436,6 +437,9 @@ class CompanionEngine:
             life_context_override=runtime_prompt_line(runtime),
             self_fact_lines=self._self_fact_lines(canonical_user_id),
             verified_user_fact_lines=self.store.active_fact_lines(canonical_user_id),
+            calendar_context=calendar_context_for_message(
+                self.store, canonical_user_id, next_state, message.text
+            ),
         )
         text = sanitize_chat_text(await self.conversation_core.reply(
             message,
@@ -1199,6 +1203,9 @@ class CompanionEngine:
                 life_context_override=runtime_prompt_line(runtime),
                 self_fact_lines=self._self_fact_lines(canonical_user_id),
                 verified_user_fact_lines=self.store.active_fact_lines(canonical_user_id),
+                calendar_context=calendar_context_for_message(
+                    self.store, canonical_user_id, state, preview_text
+                ),
             )
             memories = context_package.memory_lines
             prompt_messages = reply_prompt(
@@ -1228,6 +1235,7 @@ class CompanionEngine:
                 life_context_override=runtime_prompt_line(runtime),
                 self_fact_lines=self._self_fact_lines(canonical_user_id),
                 verified_user_fact_lines=self.store.active_fact_lines(canonical_user_id),
+                calendar_context=None,
             )
             memories = context_package.memory_lines
         return {
@@ -1235,6 +1243,7 @@ class CompanionEngine:
             "state": state.model_dump(mode="json"),
             "life_runtime": runtime.model_dump(mode="json"),
             "recent_life_events": [dict(row) for row in self.store.recent_life_events(canonical_user_id)],
+            "calendar": calendar_ledger(self.store, canonical_user_id, state),
             "recent_social_tasks": [dict(row) for row in self.store.recent_social_tasks(canonical_user_id)],
             "recent_tool_proposals": [dict(row) for row in self.store.recent_tool_proposals(canonical_user_id)],
             "dashboard": _dashboard_view(

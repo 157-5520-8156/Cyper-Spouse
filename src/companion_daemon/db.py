@@ -733,6 +733,37 @@ class CompanionStore:
             ).fetchall()
         return list(rows)
 
+    def life_plan_items_between(
+        self, canonical_user_id: str, *, starts_at: datetime, ends_at: datetime
+    ) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select id, local_date, slot, kind, activity, attention_demand, interruptible,
+                       starts_at, ends_at, status, adjustment_note
+                from life_day_plan_items
+                where canonical_user_id = ? and starts_at < ? and ends_at > ?
+                order by starts_at asc
+                """,
+                (canonical_user_id, ends_at.astimezone(UTC).isoformat(), starts_at.astimezone(UTC).isoformat()),
+            ).fetchall()
+        return list(rows)
+
+    def life_events_between(
+        self, canonical_user_id: str, *, starts_at: datetime, ends_at: datetime
+    ) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select id, kind, content, started_at, ends_at, status, source, shared_at
+                from life_runtime_events
+                where canonical_user_id = ? and started_at < ? and ends_at >= ?
+                order by started_at asc, id asc
+                """,
+                (canonical_user_id, ends_at.astimezone(UTC).isoformat(), starts_at.astimezone(UTC).isoformat()),
+            ).fetchall()
+        return list(rows)
+
     def unshared_private_life_events(self, canonical_user_id: str, limit: int = 4) -> list[sqlite3.Row]:
         with self.connect() as conn:
             rows = conn.execute(

@@ -238,6 +238,22 @@ def _ensure_daily_plan(store, canonical_user_id: str, now: datetime, state: Mood
     store.save_life_day_plan(canonical_user_id, local_date, items)
 
 
+def ensure_calendar_window(
+    store,
+    canonical_user_id: str,
+    state: MoodState,
+    *,
+    now: datetime | None = None,
+    future_days: int = 7,
+) -> None:
+    """Materialize private future plans without claiming that they happened."""
+    now = now or utc_now()
+    local = now.astimezone()
+    for offset in range(max(0, future_days) + 1):
+        day = local + timedelta(days=offset)
+        _ensure_daily_plan(store, canonical_user_id, day, state)
+
+
 def _adapt_template_to_state(template: ActivityTemplate, phase: str, state: MoodState) -> ActivityTemplate:
     """Carry durable state into tomorrow's plan without claiming a new event happened."""
     if state.mood == "sleepy" and phase in {"morning_focus", "afternoon_classes"}:
