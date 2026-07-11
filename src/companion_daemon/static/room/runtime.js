@@ -33,12 +33,22 @@
     }
 
     async preload() {
-      await Promise.all(Object.entries(this.scene.images).map(([key, path]) => new Promise((resolve, reject) => {
+      await this.preloadImages(this.scene.images);
+    }
+
+    async preloadImages(images) {
+      await Promise.all(Object.entries(images).map(([key, path]) => new Promise((resolve, reject) => {
+        if (this.images[key]) { resolve(); return; }
         const image = new Image();
         image.onload = () => { this.images[key] = image; resolve(); };
         image.onerror = () => reject(new Error(`房间图片加载失败: ${key} (${path})`));
         image.src = path;
       })));
+    }
+
+    async preloadArtDraft() {
+      if (!this.scene.artDraft) return;
+      await this.preloadImages(this.scene.artDraft.images || {});
     }
 
     start() {
@@ -126,6 +136,19 @@
       return (object.layers || []).find(layer => layer.role === 'front');
     }
 
+    activateArtDraft() {
+      const draft = this.scene.artDraft;
+      if (!draft) return false;
+      this.scene = {
+        ...this.scene,
+        background:draft.background,
+        objects:draft.objects,
+        activeArtStatus:draft.status
+      };
+      this.walkable = new Set(this.scene.walkable.map(point => this.key(point)));
+      return true;
+    }
+
     actionDefinition(action) {
       return this.scene.behavior.actionDefinitions[action] || {};
     }
@@ -161,6 +184,8 @@
 
     activatePreview(params) {
       const demo = params.get('demo');
+      const usingArtDraft = (params.get('art') === 'draft' || demo === 'art-draft')
+        && this.activateArtDraft();
       if (demo === 'room-editor') {
         if (!this.editor) this.editor = new DashboardRoomEditor(this);
         this.editor.mount();
@@ -169,6 +194,17 @@
       this.hiddenObjectIds.clear();
       this.soloObjectId = null;
       this.layerRoleFilter = null;
+      if (demo === 'art-draft') {
+        const actor = this.actor;
+        actor.position = [...this.scene.anchors.rug]; actor.path = []; actor.tourRoute = null;
+        actor.posePosition = null; actor.targetFacing = null; actor.action = 'idle';
+        actor.activity = 'idle'; actor.pose = 'idle'; actor.interaction = null;
+        actor.scene = {location:'rug', action:'idle', expression:'neutral', time_of_day:'day'};
+        return {
+          status:`美术草稿装配 · ${this.scene.objects.length} objects · ${this.scene.activeArtStatus} · 不写入 daemon`,
+          gameAction:'美术草稿装配 · 不写入 daemon'
+        };
+      }
       if (demo === 'atomization') {
         const objectId = params.get('object') || this.scene.objects[0].id;
         const requestedMode = params.get('mode');
@@ -191,7 +227,10 @@
           gameAction:`原子化审计 · ${object.id} · ${mode}`
         };
       }
-      if (!['walk', 'audit', 'tour', 'activity'].includes(demo)) return null;
+      if (!['walk', 'audit', 'tour', 'activity'].includes(demo)) return usingArtDraft ? {
+        status:`美术草稿装配 · ${this.scene.objects.length} objects · 不写入 daemon`,
+        gameAction:'美术草稿装配 · 不写入 daemon'
+      } : null;
       const actor = this.actor;
       const previewScene = (location='rug', action='idle') => ({location, action, expression:'neutral', time_of_day:'day'});
       if (demo === 'audit') {

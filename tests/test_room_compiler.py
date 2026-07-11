@@ -16,7 +16,7 @@ def editable_manifest(tmp_path: Path) -> tuple[dict, Path]:
     manifest["inventory"] = str((ROOM_MANIFEST.parent / manifest["inventory"]).resolve())
     for image in manifest["images"].values():
         image["source"] = str((ROOM_MANIFEST.parent / image["source"]).resolve())
-    for item in manifest["objects"]:
+    for item in [*manifest["objects"], *manifest.get("artDraft", {}).get("objects", [])]:
         specs = item.get("layers", []) or [
             spec for spec in (item.get("backLayer"), item.get("frontOccluder")) if spec
         ]
@@ -62,6 +62,20 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     assert stool["interactions"] == []
     assert stool["audits"] == {"hidden": True, "solo": True, "behind": True, "front": True}
     assert stool["provenance"]["method"] == "ai-generated-chroma"
+    assert bundle["artDraft"]["background"] == "cleanShellCandidate"
+    assert "cleanShellCandidate" not in bundle["images"]
+    assert bundle["artDraft"]["images"]["cleanShellCandidate"].endswith(
+        "/sources/clean-shell-ai-aligned-v3.png"
+    )
+    assert set(bundle["artDraft"]["images"]).isdisjoint(bundle["images"])
+    assert [item["id"] for item in bundle["artDraft"]["objects"]] == [
+        "sofa", "bed", "bed-bedding", "table", "desk", "office-chair",
+        "sofa-cushion-green", "sofa-cushion-pink", "sofa-throw",
+        "coffee-table-setting", "dining", "dining-chair-left",
+        "dining-chair-right", "dining-table-setting", "divider",
+        "bed-divider-content-cluster",
+    ]
+    assert bundle["artDraft"]["objects"][0]["layers"][0]["image"] == "sofaFront0Draft"
 
     master = Image.open(ROOT / "assets/dashboard/zhizhi-room-isometric-v2.png").convert("RGBA")
     matte = Image.open(ROOT / "assets/dashboard/layers/desk-front-v1.png").convert("RGBA")
@@ -76,6 +90,18 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     assert report.generated_assets == tuple(
         tmp_path / f"layers/{name}-front.png"
         for name in ("desk", "bed", "sofa", "table", "dining", "divider", "teal-stool")
+    ) + tuple(
+        tmp_path / f"draft-layers/{name}"
+        for name in (
+            "sofa-frame-draft.png", "bed-frame-draft.png",
+            "bed-bedding-draft.png", "coffee-table-draft.png",
+            "desk-frame-draft.png", "office-chair-draft.png",
+            "sofa-cushion-green-draft.png", "sofa-cushion-pink-draft.png",
+            "sofa-throw-draft.png", "coffee-table-setting-draft.png",
+            "dining-table-draft.png", "dining-chair-left-draft.png",
+            "dining-chair-right-draft.png", "dining-table-setting-draft.png",
+            "bed-divider-draft.png", "bed-divider-content-draft.png",
+        )
     )
 
 
@@ -243,7 +269,7 @@ def test_compile_room_replaces_stale_runtime_as_one_complete_output(
 
     assert report.bundle_path == output_dir / "room.bundle.json"
     assert not stale.exists()
-    assert len(report.generated_assets) == 7
+    assert len(report.generated_assets) == 23
 
 
 @pytest.mark.parametrize(
@@ -301,6 +327,32 @@ def test_compile_room_allows_non_occluding_objects_without_actor_audit_positions
         if item["id"] == "teal-stool"
     )
     assert compiled["audit"] == {}
+
+
+def test_compile_room_rejects_an_unowned_art_draft_object(tmp_path: Path) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    manifest["artDraft"]["objects"][0]["id"] = "untracked-sofa-draft"
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(
+        RoomCompileError,
+        match="draft object 'untracked-sofa-draft' has no inventory owner",
+    ):
+        compile_room(manifest_path, tmp_path / "runtime")
+
+
+def test_compile_room_rejects_art_draft_shell_geometry_drift(tmp_path: Path) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    wrong_shell = tmp_path / "wrong-draft-shell.png"
+    Image.new("RGBA", (100, 80), (0, 0, 0, 255)).save(wrong_shell)
+    manifest["images"]["cleanShellCandidate"]["source"] = str(wrong_shell)
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(
+        RoomCompileError,
+        match="art draft shell image size .* must match visual master",
+    ):
+        compile_room(manifest_path, tmp_path / "runtime")
 
 
 def test_compile_room_rejects_invalid_inventory_and_unowned_room_object(

@@ -19,6 +19,10 @@
     "idle": {
       "source": "../../zhizhi-sprite-sheet-v2.png",
       "url": "/assets/dashboard/zhizhi-sprite-sheet-v2.png"
+    },
+    "cleanShellCandidate": {
+      "source": "sources/clean-shell-ai-aligned-v3.png",
+      "url": "/assets/dashboard/rooms/zhizhi-home/sources/clean-shell-ai-aligned-v3.png"
     }
   },
   "sprites": {
@@ -180,6 +184,429 @@
       "audit": {"behind": [6.5, 0, 0], "front": [7, 1, 0]}
     }
   ],
+  "artDraft": {
+    "status": "needs-art",
+    "shell": {"image": "cleanShellCandidate"},
+    "objects": [
+      {
+        "id": "sofa",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [4, 6, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[4, 6], [5, 6]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/sofa-frame-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [230, 134, 1212, 951],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [340, 280]
+          },
+          "output": "sofa-frame-draft.png",
+          "origin": [400, 585],
+          "depthBias": 500
+        }],
+        "interactions": ["sofa", "phone"],
+        "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {"behind": [2.5, 4.5, 0], "front": [5, 7, 0]},
+        "auditPose": {"behind": "sit"}
+      },
+      {
+        "id": "bed",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [6, 1, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[6, 1]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/bed-frame-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [198, 112, 1215, 965],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [355, 296]
+          },
+          "output": "bed-frame-draft.png",
+          "origin": [975, 455],
+          "depthBias": 500
+        }],
+        "interactions": ["bed"],
+        "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {"behind": [5, 1, 0], "front": [5, 3, 0]}
+      },
+      {
+        "id": "bed-bedding",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "depthTile": [6.1, 1, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/bed-bedding-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [153, 112, 1295, 930],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [330, 236]
+          },
+          "output": "bed-bedding-draft.png",
+          "origin": [985, 470],
+          "depthBias": 520
+        }],
+        "interactions": ["bed"],
+        "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {"behind": [5, 1, 0], "front": [5, 3, 0]}
+      },
+      {
+        "id": "table",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [5, 6, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[6, 6]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/coffee-table-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [247, 194, 1227, 894],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [255, 182]
+          },
+          "output": "coffee-table-draft.png",
+          "origin": [625, 770],
+          "depthBias": 500
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {"behind": [6, 5, 0], "front": [6, 7, 0]}
+      },
+      {
+        "id": "desk",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [1, 5, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[1, 5]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/desk-frame-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [176, 83, 1260, 968],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [360, 294]
+          },
+          "output": "desk-frame-draft.png",
+          "origin": [45, 475],
+          "depthBias": 500
+        }],
+        "interactions": ["desk"],
+        "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {"behind": [0, 6, 0], "front": [1, 7, 0]}
+      },
+      {
+        "id": "office-chair",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [1, 6, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[1, 6]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/office-chair-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [294, 160, 965, 1065],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [140, 188]
+          },
+          "output": "office-chair-draft.png",
+          "origin": [245, 550],
+          "depthBias": 500
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "sofa-cushion-green",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "depthTile": [4.05, 6, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/sofa-cushion-green-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [307, 275, 936, 912],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [72, 73]
+          },
+          "output": "sofa-cushion-green-draft.png",
+          "origin": [590, 625],
+          "depthBias": 520
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "sofa-cushion-pink",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "depthTile": [4.1, 6, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/sofa-cushion-pink-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [278, 233, 960, 980],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [74, 81]
+          },
+          "output": "sofa-cushion-pink-draft.png",
+          "origin": [485, 685],
+          "depthBias": 530
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "sofa-throw",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "depthTile": [4.15, 6, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/sofa-throw-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [299, 139, 1111, 935],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [108, 132]
+          },
+          "output": "sofa-throw-draft.png",
+          "origin": [420, 700],
+          "depthBias": 540
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "coffee-table-setting",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "depthTile": [5.05, 6, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/coffee-table-setting-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [272, 231, 1248, 894],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [178, 121]
+          },
+          "output": "coffee-table-setting-draft.png",
+          "origin": [665, 755],
+          "depthBias": 550
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "dining",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [2, 1, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[2, 1]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/dining-table-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [192, 206, 1062, 1059],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [220, 216]
+          },
+          "output": "dining-table-draft.png",
+          "origin": [720, 335],
+          "depthBias": 500
+        }],
+        "interactions": ["dining"],
+        "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {"behind": [1, 0, 0], "front": [2, 3, 0]}
+      },
+      {
+        "id": "dining-chair-left",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [1, 1, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[1, 1]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/dining-chair-left-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [326, 139, 915, 1045],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [98, 151]
+          },
+          "output": "dining-chair-left-draft.png",
+          "origin": [675, 390],
+          "depthBias": 500
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "dining-chair-right",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [2, 2, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[2, 2]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/dining-chair-right-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [336, 118, 920, 1073],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [96, 157]
+          },
+          "output": "dining-chair-right-draft.png",
+          "origin": [785, 390],
+          "depthBias": 500
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "dining-table-setting",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "depthTile": [2.05, 1, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/dining-table-setting-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [343, 248, 1081, 854],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [146, 120]
+          },
+          "output": "dining-table-setting-draft.png",
+          "origin": [758, 325],
+          "depthBias": 550
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "divider",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [5, 3, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[4, 2], [4, 3], [5, 2], [5, 3]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/bed-divider-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [274, 156, 1139, 961],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [278, 259]
+          },
+          "output": "bed-divider-draft.png",
+          "origin": [775, 515],
+          "depthBias": 500
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {"behind": [4, 2, 0], "front": [6, 4, 0]}
+      },
+      {
+        "id": "bed-divider-content-cluster",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "depthTile": [5.05, 3, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/bed-divider-content-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [115, 261, 1430, 763],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [286, 109]
+          },
+          "output": "bed-divider-content-draft.png",
+          "origin": [770, 500],
+          "depthBias": 550
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      }
+    ]
+  },
   "interactions": {
     "desk": {
       "object": "desk", "location": "desk", "action": "study", "approach": [1, 6, 0],

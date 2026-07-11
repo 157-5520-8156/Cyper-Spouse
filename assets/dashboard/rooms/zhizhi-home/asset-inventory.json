@@ -14,14 +14,31 @@
     },
     {
       "id": "wave1-major-furniture-chroma-v1",
-      "targets": ["sofa", "bed", "bed-bedding", "table"],
+      "targets": [
+        "sofa", "sofa-cushion-green", "sofa-cushion-pink", "bed",
+        "bed-bedding", "table", "coffee-table-setting", "desk", "office-chair",
+        "sofa-throw", "dining", "dining-chair-left", "dining-chair-right",
+        "dining-table-setting", "divider", "bed-divider-content-cluster"
+      ],
       "status": "needs-art",
       "method": "imagegen-background-extraction",
       "sources": [
         "sources/sofa-frame-chroma-v1.png",
         "sources/bed-frame-chroma-v1.png",
         "sources/bed-bedding-chroma-v1.png",
-        "sources/coffee-table-chroma-v1.png"
+        "sources/coffee-table-chroma-v1.png",
+        "sources/desk-frame-chroma-v1.png",
+        "sources/office-chair-chroma-v1.png",
+        "sources/sofa-cushion-green-chroma-v1.png",
+        "sources/sofa-cushion-pink-chroma-v1.png",
+        "sources/sofa-throw-chroma-v1.png",
+        "sources/coffee-table-setting-chroma-v1.png",
+        "sources/dining-table-chroma-v1.png",
+        "sources/dining-chair-left-chroma-v1.png",
+        "sources/dining-chair-right-chroma-v1.png",
+        "sources/dining-table-setting-chroma-v1.png",
+        "sources/bed-divider-chroma-v1.png",
+        "sources/bed-divider-content-chroma-v1.png"
       ],
       "note": "Raw flat-green candidates; not compiled until chroma, scale and origin audits pass."
     }

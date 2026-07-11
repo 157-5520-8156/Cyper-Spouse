@@ -138,6 +138,35 @@ test('runtime path occupancy uses the generic occupancy contract', () => {
   assert.equal(runtime.pathfind([7, 4, 0], [7, 0, 0]).length, 0);
 });
 
+test('art draft preview swaps shell and objects without a second renderer', () => {
+  const runtime = new DashboardRoomRuntime(fakeCanvas(), bundle, {});
+
+  const preview = runtime.activatePreview(new URLSearchParams('demo=art-draft'));
+
+  assert.equal(runtime.scene.background, bundle.artDraft.background);
+  assert.deepEqual(runtime.scene.objects, bundle.artDraft.objects);
+  assert.match(preview.status, /美术草稿装配/);
+});
+
+test('default preload is isolated from needs-art draft assets', async () => {
+  const loaded = [];
+  const PreviousImage = global.Image;
+  global.Image = class {
+    set src(value) { loaded.push(value); queueMicrotask(() => this.onload()); }
+  };
+  try {
+    const runtime = new DashboardRoomRuntime(fakeCanvas(), bundle, {});
+    await runtime.preload();
+    assert.deepEqual(new Set(loaded), new Set(Object.values(bundle.images)));
+    assert.equal(loaded.some(path => Object.values(bundle.artDraft.images).includes(path)), false);
+
+    await runtime.preloadArtDraft();
+    assert.equal(loaded.some(path => Object.values(bundle.artDraft.images).includes(path)), true);
+  } finally {
+    global.Image = PreviousImage;
+  }
+});
+
 test('action interaction, effects, location facing, and audit poses come from the bundle', () => {
   const configuredBundle = structuredClone(bundle);
   configuredBundle.behavior.actionDefinitions.compose_reply = {

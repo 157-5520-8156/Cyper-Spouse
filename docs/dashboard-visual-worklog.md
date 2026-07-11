@@ -77,6 +77,15 @@
 - 同一流程生成首批波次 1 chroma 候选：`sofa-frame`、`bed-frame`、`bed-bedding`、`coffee-table`。它们仅是待去背、缩放与 origin 校准的 `needs-art` 源，不计入 inventory 完成度。
 - Compiler 新增 shell 与视觉母版尺寸一致校验，防止未经对齐的 AI 底图进入构建。
 
+## 全资产原子化 · 波次 1 草稿装配（2026-07-12）
+
+- 新增可编译 `artDraft`：使用 clean shell 候选作为背景，并让草稿对象复用正式 `layers/occupancy/depth/audits/provenance` 契约；Runtime 仅通过数据切换，不新增家具名称分支。
+- `?demo=art-draft` 已在浏览器实际装配 16 个对象：书桌/办公椅、沙发框架/两抱枕/毯子、茶几/茶几摆件、床架/床品、餐桌/两把餐椅/餐桌摆件、床前隔断/内容 cluster。
+- 四批内置图像编辑均以视觉母版为 reference，使用 flat green/magenta chroma 背景；项目保存原始候选，由 Compiler 执行 crop、chroma key、despill 和 resize，避免把一次性手工导出当事实来源。
+- 浏览器画面显示整体比例、等距角度和暖色像素风格已能形成一致空房装配；控制台无加载/绘制错误。隔断内容仍需向柜体内重新校准，所有对象仍为 `needs-art`，默认生产画面保持旧母版不变。
+- Compiler 已验证草稿对象 inventory 所有权、统一 id/output/footprint、source、alpha 轮廓、母版边界、审计能力与 clean shell 尺寸；runtime 整体替换会同时清除过期 draft layers。
+- 代码审查发现默认 preload 曾包含草稿图片；现已将候选 URL 隔离到 `artDraft.images` 并按需加载。自动测试确认 production/draft 图片集合不相交，浏览器重新检查默认 sofa behind 画面无错误。
+
 ## 后续扩展规则
 
 - 后续若新增家具或新动作，必须同时添加 `behind/front` 或动作巡检入口，不能只改 daemon 映射。
@@ -85,4 +94,4 @@
 
 ## 当前技术约束
 
-原始小屋是一张合成背景，并没有原始分层文件。当前以母版像素生成近侧家具的 alpha 前景层，作为过渡性、可复现的分层资产；长期应以原始的 `back / frontOccluder` 美术文件替换这些轮廓导出层。AI 家具层只作为研究素材，不直接叠加到原始背景。
+原始小屋是一张合成背景，并没有原始分层文件。默认生产画面仍以母版像素生成近侧家具 alpha 层；AI 家具目前只进入 clean-shell `artDraft` 装配，不替换默认画面。每件候选必须通过 origin、hidden/solo、behind/front 与删除测试后才能从 `needs-art` 晋级并替换母版内容。

@@ -285,10 +285,11 @@ def _validate_sources_and_grid(
     manifest: dict[str, Any], manifest_dir: Path
 ) -> None:
     errors: list[str] = []
+    all_objects = [*manifest["objects"], *manifest.get("_draftObjects", [])]
     for name, image in manifest["images"].items():
         if not _source_path(manifest_dir, image["source"]).is_file():
             errors.append(f"image {name!r} source does not exist")
-    for item in manifest["objects"]:
+    for item in all_objects:
         for spec in item["layers"]:
             role = f"{spec['role']} layer"
             source_value = spec.get("source") or spec.get("matte")
@@ -317,7 +318,7 @@ def _validate_sources_and_grid(
             errors.append(
                 f"interaction {name!r} depth references unknown object {depth.get('relativeTo')!r}"
             )
-    for item in manifest["objects"]:
+    for item in all_objects:
         required_audits = {
             side for side in ("behind", "front") if item.get("audits", {}).get(side)
         }
@@ -372,7 +373,7 @@ def _validate_sources_and_grid(
     for name, point in manifest["anchors"].items():
         if not in_grid(point):
             errors.append(f"anchor {name!r} is outside the room grid")
-    for item in manifest["objects"]:
+    for item in all_objects:
         if not in_grid(item["depthTile"]):
             errors.append(f"object {item['id']!r} depth tile is outside the room grid")
         for point in item["occupancy"].get("tiles", []):
@@ -485,44 +486,67 @@ def _emit_runtime(
     build_dir: Path,
     inventory: dict[str, Any],
 ) -> tuple[Path, ...]:
-    runtime_images = {name: spec["url"] for name, spec in manifest["images"].items()}
+    draft_shell_image = manifest.get("artDraft", {}).get("shell", {}).get("image")
+    runtime_images = {
+        name: spec["url"]
+        for name, spec in manifest["images"].items()
+        if name != draft_shell_image
+    }
+    draft_images = (
+        {draft_shell_image: manifest["images"][draft_shell_image]["url"]}
+        if draft_shell_image else {}
+    )
     runtime_base_url = manifest["runtimeBaseUrl"].rstrip("/")
-    runtime_objects: list[dict[str, Any]] = []
     generated_assets: list[Path] = []
-    for source_object in manifest["objects"]:
-        runtime_object: dict[str, Any] = {
-            "id": source_object["id"],
-            "category": source_object["category"],
-            "assetMode": source_object["assetMode"],
-            "tile": source_object["depthTile"],
-            "occupancy": source_object["occupancy"],
-            "layers": [],
-            "interactions": source_object["interactions"],
-            "audits": source_object["audits"],
-            "provenance": source_object["provenance"],
-            "audit": source_object.get("audit", {}),
-            "auditPose": source_object.get("auditPose", {}),
-        }
-        for index, source_layer in enumerate(source_object["layers"]):
-            role = source_layer["role"]
-            image_key = _image_key(source_object["id"], role, index)
-            runtime_images[image_key] = f"{runtime_base_url}/layers/{source_layer['output']}"
-            generated_assets.append(
-                _build_layer(
-                    master=master,
-                    manifest_dir=manifest_dir,
-                    output_dir=build_dir,
-                    spec=source_layer,
-                    subdirectory="layers",
+    def emit_objects(
+        source_objects: list[dict[str, Any]],
+        subdirectory: str,
+        image_map: dict[str, str],
+        key_suffix: str = "",
+    ) -> list[dict[str, Any]]:
+        runtime_objects: list[dict[str, Any]] = []
+        for source_object in source_objects:
+            runtime_object: dict[str, Any] = {
+                "id": source_object["id"],
+                "category": source_object["category"],
+                "assetMode": source_object["assetMode"],
+                "tile": source_object["depthTile"],
+                "occupancy": source_object["occupancy"],
+                "layers": [],
+                "interactions": source_object["interactions"],
+                "audits": source_object["audits"],
+                "provenance": source_object["provenance"],
+                "audit": source_object.get("audit", {}),
+                "auditPose": source_object.get("auditPose", {}),
+            }
+            for index, source_layer in enumerate(source_object["layers"]):
+                role = source_layer["role"]
+                image_key = f"{_image_key(source_object['id'], role, index)}{key_suffix}"
+                image_map[image_key] = (
+                    f"{runtime_base_url}/{subdirectory}/{source_layer['output']}"
                 )
-            )
-            runtime_object["layers"].append({
-                "role": role,
-                "image": image_key,
-                "origin": source_layer["origin"],
-                "depthBias": source_layer.get("depthBias", ROLE_DEPTH_BIAS[role]),
-            })
-        runtime_objects.append(runtime_object)
+                generated_assets.append(
+                    _build_layer(
+                        master=master,
+                        manifest_dir=manifest_dir,
+                        output_dir=build_dir,
+                        spec=source_layer,
+                        subdirectory=subdirectory,
+                    )
+                )
+                runtime_object["layers"].append({
+                    "role": role,
+                    "image": image_key,
+                    "origin": source_layer["origin"],
+                    "depthBias": source_layer.get("depthBias", ROLE_DEPTH_BIAS[role]),
+                })
+            runtime_objects.append(runtime_object)
+        return runtime_objects
+
+    runtime_objects = emit_objects(manifest["objects"], "layers", runtime_images)
+    draft_objects = emit_objects(
+        manifest.get("_draftObjects", []), "draft-layers", draft_images, "Draft"
+    )
 
     bundle = {
         "schemaVersion": manifest["schemaVersion"],
@@ -544,6 +568,13 @@ def _emit_runtime(
         "routes": manifest["routes"],
         "axisAudits": manifest["axisAudits"],
     }
+    if art_draft := manifest.get("artDraft"):
+        bundle["artDraft"] = {
+            "background": art_draft["shell"]["image"],
+            "status": art_draft["status"],
+            "images": draft_images,
+            "objects": draft_objects,
+        }
     (build_dir / "room.bundle.json").write_text(
         json.dumps(bundle, ensure_ascii=False, indent=2) + "\n"
     )
@@ -575,8 +606,24 @@ def compile_room(manifest_path: Path | str, output_dir: Path | str) -> CompileRe
     manifest_dir = manifest_path.parent
 
     manifest = {**manifest, "objects": _normalize_objects(manifest)}
+    if art_draft := manifest.get("artDraft"):
+        draft_objects = _normalize_objects(
+            {**manifest, "objects": art_draft.get("objects", [])}
+        )
+        manifest = {**manifest, "_draftObjects": draft_objects}
     _validate_identity(manifest["objects"])
+    if manifest.get("_draftObjects"):
+        _validate_identity(manifest["_draftObjects"])
     inventory = _load_inventory(manifest, manifest_dir)
+    inventory_ids = {item["id"] for item in inventory["items"]}
+    missing_draft_owners = {
+        item["id"] for item in manifest.get("_draftObjects", [])
+    } - inventory_ids
+    if missing_draft_owners:
+        raise RoomCompileError([
+            f"draft object {object_id!r} has no inventory owner"
+            for object_id in sorted(missing_draft_owners)
+        ])
     _validate_sources_and_grid(manifest, manifest_dir)
     master_spec = manifest["images"]["room"]
     master = Image.open(_source_path(manifest_dir, master_spec["source"])).convert("RGBA")
@@ -588,10 +635,24 @@ def compile_room(manifest_path: Path | str, output_dir: Path | str) -> CompileRe
         raise RoomCompileError(
             [f"shell image size {shell.size} must match visual master {master.size}"]
         )
+    if art_draft := manifest.get("artDraft"):
+        draft_shell_image = art_draft.get("shell", {}).get("image")
+        if draft_shell_image not in manifest["images"]:
+            raise RoomCompileError(
+                [f"art draft shell references unknown image {draft_shell_image!r}"]
+            )
+        draft_shell = Image.open(
+            _source_path(manifest_dir, manifest["images"][draft_shell_image]["source"])
+        )
+        if draft_shell.size != master.size:
+            raise RoomCompileError([
+                f"art draft shell image size {draft_shell.size} "
+                f"must match visual master {master.size}"
+            ])
     _validate_layers(
         master=master,
         manifest_dir=manifest_dir,
-        objects=manifest["objects"],
+        objects=[*manifest["objects"], *manifest.get("_draftObjects", [])],
     )
     _validate_topology(manifest)
     output_dir.parent.mkdir(parents=True, exist_ok=True)

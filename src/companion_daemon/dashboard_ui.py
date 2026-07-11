@@ -309,17 +309,20 @@ DASHBOARD_HTML = r"""<!doctype html>
         select.innerHTML = '<option value="geoff">geoff</option>';
       }
       select.onchange = loadContext;
-      applyPreviewMode();
+      await applyPreviewMode();
       await loadContext();
-      applyPreviewMode();
+      await applyPreviewMode();
       if (!new URLSearchParams(location.search).get('demo')) setInterval(loadContext, 20000);
       if (new URLSearchParams(location.search).get('freeze') === '1') roomRuntime.draw(0);
       else roomRuntime.start();
     }
-    function applyPreviewMode() {
+    async function applyPreviewMode() {
       // A non-persistent visual check for the dashboard.  It never changes
       // daemon state and is intentionally opt-in via the URL.
       const params = new URLSearchParams(location.search);
+      if (params.get('art') === 'draft' || params.get('demo') === 'art-draft') {
+        await roomRuntime.preloadArtDraft();
+      }
       const preview = roomRuntime.activatePreview(params);
       if (!preview) return;
       document.getElementById('updated').textContent = preview.status;

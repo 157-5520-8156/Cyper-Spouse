@@ -1540,5 +1540,789 @@
         0
       ]
     ]
+  },
+  "artDraft": {
+    "background": "cleanShellCandidate",
+    "status": "needs-art",
+    "images": {
+      "cleanShellCandidate": "/assets/dashboard/rooms/zhizhi-home/sources/clean-shell-ai-aligned-v3.png",
+      "sofaFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/sofa-frame-draft.png",
+      "bedFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-frame-draft.png",
+      "bedBeddingFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-bedding-draft.png",
+      "tableFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/coffee-table-draft.png",
+      "deskFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-frame-draft.png",
+      "officeChairFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/office-chair-draft.png",
+      "sofaCushionGreenFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/sofa-cushion-green-draft.png",
+      "sofaCushionPinkFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/sofa-cushion-pink-draft.png",
+      "sofaThrowFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/sofa-throw-draft.png",
+      "coffeeTableSettingFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/coffee-table-setting-draft.png",
+      "diningFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/dining-table-draft.png",
+      "diningChairLeftFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/dining-chair-left-draft.png",
+      "diningChairRightFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/dining-chair-right-draft.png",
+      "diningTableSettingFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/dining-table-setting-draft.png",
+      "dividerFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-divider-draft.png",
+      "bedDividerContentClusterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-divider-content-draft.png"
+    },
+    "objects": [
+      {
+        "id": "sofa",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          4,
+          6,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              4,
+              6
+            ],
+            [
+              5,
+              6
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "sofaFront0Draft",
+            "origin": [
+              400,
+              585
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [
+          "sofa",
+          "phone"
+        ],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            2.5,
+            4.5,
+            0
+          ],
+          "front": [
+            5,
+            7,
+            0
+          ]
+        },
+        "auditPose": {
+          "behind": "sit"
+        }
+      },
+      {
+        "id": "bed",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          6,
+          1,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              6,
+              1
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "bedFront0Draft",
+            "origin": [
+              975,
+              455
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [
+          "bed"
+        ],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            5,
+            1,
+            0
+          ],
+          "front": [
+            5,
+            3,
+            0
+          ]
+        },
+        "auditPose": {}
+      },
+      {
+        "id": "bed-bedding",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "tile": [
+          6.1,
+          1,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "bedBeddingFront0Draft",
+            "origin": [
+              985,
+              470
+            ],
+            "depthBias": 520
+          }
+        ],
+        "interactions": [
+          "bed"
+        ],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            5,
+            1,
+            0
+          ],
+          "front": [
+            5,
+            3,
+            0
+          ]
+        },
+        "auditPose": {}
+      },
+      {
+        "id": "table",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          5,
+          6,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              6,
+              6
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "tableFront0Draft",
+            "origin": [
+              625,
+              770
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            6,
+            5,
+            0
+          ],
+          "front": [
+            6,
+            7,
+            0
+          ]
+        },
+        "auditPose": {}
+      },
+      {
+        "id": "desk",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          1,
+          5,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              1,
+              5
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "deskFront0Draft",
+            "origin": [
+              45,
+              475
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [
+          "desk"
+        ],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            0,
+            6,
+            0
+          ],
+          "front": [
+            1,
+            7,
+            0
+          ]
+        },
+        "auditPose": {}
+      },
+      {
+        "id": "office-chair",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          1,
+          6,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              1,
+              6
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "officeChairFront0Draft",
+            "origin": [
+              245,
+              550
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "sofa-cushion-green",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "tile": [
+          4.05,
+          6,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "sofaCushionGreenFront0Draft",
+            "origin": [
+              590,
+              625
+            ],
+            "depthBias": 520
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "sofa-cushion-pink",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "tile": [
+          4.1,
+          6,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "sofaCushionPinkFront0Draft",
+            "origin": [
+              485,
+              685
+            ],
+            "depthBias": 530
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "sofa-throw",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "tile": [
+          4.15,
+          6,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "sofaThrowFront0Draft",
+            "origin": [
+              420,
+              700
+            ],
+            "depthBias": 540
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "coffee-table-setting",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "tile": [
+          5.05,
+          6,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "coffeeTableSettingFront0Draft",
+            "origin": [
+              665,
+              755
+            ],
+            "depthBias": 550
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "dining",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          2,
+          1,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              2,
+              1
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "diningFront0Draft",
+            "origin": [
+              720,
+              335
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [
+          "dining"
+        ],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            1,
+            0,
+            0
+          ],
+          "front": [
+            2,
+            3,
+            0
+          ]
+        },
+        "auditPose": {}
+      },
+      {
+        "id": "dining-chair-left",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          1,
+          1,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              1,
+              1
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "diningChairLeftFront0Draft",
+            "origin": [
+              675,
+              390
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "dining-chair-right",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          2,
+          2,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              2,
+              2
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "diningChairRightFront0Draft",
+            "origin": [
+              785,
+              390
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "dining-table-setting",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "tile": [
+          2.05,
+          1,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "diningTableSettingFront0Draft",
+            "origin": [
+              758,
+              325
+            ],
+            "depthBias": 550
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "divider",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          5,
+          3,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              4,
+              2
+            ],
+            [
+              4,
+              3
+            ],
+            [
+              5,
+              2
+            ],
+            [
+              5,
+              3
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "dividerFront0Draft",
+            "origin": [
+              775,
+              515
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            4,
+            2,
+            0
+          ],
+          "front": [
+            6,
+            4,
+            0
+          ]
+        },
+        "auditPose": {}
+      },
+      {
+        "id": "bed-divider-content-cluster",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "tile": [
+          5.05,
+          3,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "bedDividerContentClusterFront0Draft",
+            "origin": [
+              770,
+              500
+            ],
+            "depthBias": 550
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      }
+    ]
   }
 }

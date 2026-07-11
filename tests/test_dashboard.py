@@ -27,6 +27,7 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert "DashboardRoomRuntime.load" in response.text
     assert "roomRuntime.setActor" in response.text
     assert "roomRuntime.activatePreview" in response.text
+    assert "roomRuntime.preloadArtDraft" in response.text
     assert "get('freeze') === '1'" in response.text
     assert "get('view') === 'canvas'" in response.text
     assert "applyPreviewMode" in response.text

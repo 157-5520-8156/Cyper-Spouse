@@ -10,7 +10,8 @@
 - [x] Runtime 增加 `?demo=atomization&object=<id>&mode=<hidden|solo>`；隐藏不改变 occupancy 与路径。
 - [x] Room Editor 显示 inventory 进度，并提供 hidden/solo 删除测试。
 - [x] 波次 0：通用对象 `layers / occupancy / audits / provenance` schema；`teal-stool` 已作为无互动原生对象接入，旧对象经 Compiler 归一化到同一 bundle 契约。
-- [ ] 波次 1–6：clean shell、全对象拆分、路径动作与最终验收。
+- [ ] 波次 1：主要遮挡家具（进行中：clean shell 与 16 个家具/附属对象已进入可编译 `artDraft`，仍需逐件校准和删除测试）。
+- [ ] 波次 2–6：厨房/收纳、软装/灯/植物、decor、路径动作与最终验收。
 
 ### 波次 0 验收记录
 
@@ -20,6 +21,14 @@
 - `?demo=atomization&mode=layers&role=<shadow|back|body|front|light>`、Editor 图层选择、角色视图、provenance 查看和 origin 导出已接通；hidden/solo/layers 均不改变 occupancy。
 - 浏览器实测 `teal-stool` front-only、沙发 behind 和 room-editor；素材加载与控制台无错误，沙发现有遮挡画面未回退。
 - clean shell 首次 AI 候选已生成并对齐到母版尺寸，但由于生成器改变过原始输出尺寸且窗洞/地砖边界仍需几何复核，当前只标记 `needs-art`，未替换生产背景。
+
+### 波次 1 草稿装配记录
+
+- `artDraft` 与正式对象共用 Compiler、runtime bundle、通用绘制队列和 Editor，不维护第二套家具渲染器；`?demo=art-draft` 可在 clean shell 上查看当前装配，`?demo=room-editor&art=draft` 可校准图层。
+- 当前草稿对象：`desk`、`office-chair`、`sofa`、两个 sofa cushion、`sofa-throw`、`table`、`coffee-table-setting`、`bed`、`bed-bedding`、`dining`、两把 dining chair、`dining-table-setting`、`divider`、`bed-divider-content-cluster`。
+- 所有原始 AI 输出保留为 flat chroma source；裁切、key color、despill、resize、origin 与 depthBias 均由 `room.json` 声明并由 Compiler 可复现构建。
+- 草稿 URL 位于独立 `artDraft.images`；默认 dashboard 不下载也不依赖任何 `needs-art` 文件，只有显式草稿入口会先懒加载再切换场景。
+- 浏览器已实际装配 16 个对象，未出现资源或控制台错误；目前仍存在隔断内容与柜体的局部校准、clean shell 瓷砖/窗洞几何复核及逐对象 hidden/solo/behind/front 证据缺口，因此不提升 inventory 状态。
 
 ## 用户目标
 
