@@ -213,6 +213,22 @@ def world_enablement(world_id: str) -> dict[str, object]:
     }
 
 
+@app.get("/world/active/enablement")
+def active_world_enablement() -> dict[str, object]:
+    if not engine.world_kernel or not engine.world_id:
+        return {"enabled": False}
+    report = engine.world_kernel.audit_enablement(
+        engine.world_id,
+        delivery_receipts_supported=QQDelivery(get_settings()).supports_delivery_receipts(),
+    )
+    return {
+        "enabled": True, "world_id": report.world_id, "ready": report.ready,
+        "delivery_receipts_supported": report.delivery_receipts_supported,
+        "open_action_ids": list(report.open_action_ids), "unknown_action_ids": list(report.unknown_action_ids),
+        "projections": [item.__dict__ for item in report.projection_reports],
+    }
+
+
 @app.post("/qq/webhook")
 async def qq_webhook(
     request: Request,
