@@ -57,6 +57,26 @@
         "sources/kitchen-wall-cabinet-decor-chroma-v1.png"
       ],
       "note": "Wave 2 draft sources compiled with attachment ownership; origin and deletion audits remain."
+    },
+    {
+      "id": "wave2-kitchen-base-appliances-chroma-v1",
+      "targets": ["kitchen-sink-counter", "kitchen-stove-counter", "fridge"],
+      "status": "needs-art",
+      "method": "imagegen-background-extraction",
+      "sources": [
+        "sources/kitchen-sink-counter-chroma-v1.png",
+        "sources/kitchen-stove-counter-chroma-v1.png",
+        "sources/fridge-chroma-v1.png"
+      ],
+      "note": "Draft candidates generated from the room master; chroma background varies slightly and uses a wider compiler threshold."
+    },
+    {
+      "id": "wave2-oven-range-chroma-v1",
+      "targets": ["oven"],
+      "status": "rejected",
+      "method": "imagegen-background-extraction",
+      "sources": ["sources/oven-chroma-v1.png"],
+      "note": "Rejected: generated a freestanding range with cooktop instead of the reference room's under-counter oven."
     }
   ],
   "items": [

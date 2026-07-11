@@ -75,7 +75,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "dining-chair-right", "dining-table-setting", "divider",
         "bed-divider-content-cluster", "tall-bookcase",
         "bookcase-content-cluster", "kitchen-wall-cabinets",
-        "kitchen-wall-cabinet-decor",
+        "kitchen-wall-cabinet-decor", "kitchen-sink-counter",
+        "kitchen-stove-counter", "fridge",
     ]
     assert bundle["artDraft"]["objects"][0]["layers"][0]["image"] == "sofaFront0Draft"
     bookcase = next(item for item in bundle["artDraft"]["objects"] if item["id"] == "tall-bookcase")
@@ -109,6 +110,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
             "tall-bookcase-draft.png", "bookcase-content-draft.png",
             "kitchen-wall-cabinets-draft.png",
             "kitchen-wall-cabinet-decor-draft.png",
+            "kitchen-sink-counter-draft.png",
+            "kitchen-stove-counter-draft.png", "fridge-draft.png",
         )
     )
 
@@ -277,7 +280,7 @@ def test_compile_room_replaces_stale_runtime_as_one_complete_output(
 
     assert report.bundle_path == output_dir / "room.bundle.json"
     assert not stale.exists()
-    assert len(report.generated_assets) == 27
+    assert len(report.generated_assets) == 30
 
 
 @pytest.mark.parametrize(

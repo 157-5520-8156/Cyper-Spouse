@@ -96,6 +96,15 @@
 - 代码审查发现局部 effect 原先未复用父子可见性，以及高书柜 `body` 角色无法参与人物前后排序；现已统一 effect 判断，并将柜体/内容放入共享 `front` 深度队列。浏览器复核高书柜 behind 时角色被柜体轮廓遮住、front 时角色完整位于柜前。
 - 自动验证：Room Runtime JS 17 项通过，Room Compiler Python 23 项通过，小屋相关 Ruff 与 `git diff --check` 通过。四件新对象仍处于 `planned / needs-art`，等待厨房剩余对象组合后做 origin、删除测试和视觉基线统一校准。
 
+## 全资产原子化 · 波次 2 厨房下柜与冰箱草稿（2026-07-12）
+
+- 以母版为 reference 生成水槽柜、灶台柜、冰箱和烤箱 chroma 候选；烤箱错误成为带炉面的独立 range，已在 machine-readable `artCandidates` 标记 `rejected`，未接入 runtime。
+- 水槽柜、灶台柜和冰箱进入 `artDraft`，对象总数从 20 增至 23，runtime 构建资产从 27 增至 30；三者均声明 category、footprint、depthTile、front layer、hidden/solo/behind/front、provenance 与 audit 点。
+- 色键背景存在轻微渐变，主体边界在色差阈值 40–80 内稳定；manifest 使用较宽的 `transparentThreshold=50 / opaqueThreshold=160`，Compiler 仍从原始 source 可复现裁切、去色键和缩放。
+- 首次整屋浏览器截图发现灶台柜过大并侵入餐桌；将水槽柜校准为 `165×145 @ [515,285]`，灶台柜校准为 `150×150 @ [655,270]` 后，两组下柜回到厨房后排，冰箱与水槽柜保持前后叠放，餐桌区不再被覆盖，页面无破图。
+- 浏览器完成三件对象各自 hidden/solo/behind/front 共 12 项矩阵：hidden 只移除目标，solo 在 clean shell 上独立显示，behind/front 均按家具不规则轮廓切换角色深度；全部页面无破图，console 无 warning/error。
+- 三件资产仍为 `planned / needs-art`：删除与深度矩阵已通过，但逐像素风格终稿、嵌入式烤箱、墙架、挂具、台面 decor、垃圾桶和厨房最终视觉基线尚未补齐。
+
 ## 后续扩展规则
 
 - 后续若新增家具或新动作，必须同时添加 `behind/front` 或动作巡检入口，不能只改 daemon 映射。

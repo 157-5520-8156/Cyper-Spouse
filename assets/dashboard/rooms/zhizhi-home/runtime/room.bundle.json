@@ -1568,7 +1568,10 @@
       "tallBookcaseFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/tall-bookcase-draft.png",
       "bookcaseContentClusterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bookcase-content-draft.png",
       "kitchenWallCabinetsBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-wall-cabinets-draft.png",
-      "kitchenWallCabinetDecorBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-wall-cabinet-decor-draft.png"
+      "kitchenWallCabinetDecorBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-wall-cabinet-decor-draft.png",
+      "kitchenSinkCounterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-sink-counter-draft.png",
+      "kitchenStoveCounterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-stove-counter-draft.png",
+      "fridgeFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/fridge-draft.png"
     },
     "objects": [
       {
@@ -2517,6 +2520,168 @@
         "audit": {},
         "auditPose": {},
         "attachedTo": "kitchen-wall-cabinets"
+      },
+      {
+        "id": "kitchen-sink-counter",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          1.5,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              0,
+              0
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "kitchenSinkCounterFront0Draft",
+            "origin": [
+              515,
+              285
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            0,
+            1,
+            0
+          ],
+          "front": [
+            1,
+            2,
+            0
+          ]
+        },
+        "auditPose": {}
+      },
+      {
+        "id": "kitchen-stove-counter",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          1,
+          1,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              1,
+              0
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "kitchenStoveCounterFront0Draft",
+            "origin": [
+              655,
+              270
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            0.5,
+            0.5,
+            0
+          ],
+          "front": [
+            1.5,
+            1.5,
+            0
+          ]
+        },
+        "auditPose": {}
+      },
+      {
+        "id": "fridge",
+        "category": "appliance",
+        "assetMode": "layered",
+        "tile": [
+          0.3,
+          2.2,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              0,
+              3
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "fridgeFront0Draft",
+            "origin": [
+              495,
+              330
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            0,
+            2,
+            0
+          ],
+          "front": [
+            1,
+            3,
+            0
+          ]
+        },
+        "auditPose": {}
       }
     ]
   }

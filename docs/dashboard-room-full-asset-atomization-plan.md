@@ -11,7 +11,7 @@
 - [x] Room Editor 显示 inventory 进度，并提供 hidden/solo 删除测试。
 - [x] 波次 0：通用对象 `layers / occupancy / audits / provenance` schema；`teal-stool` 已作为无互动原生对象接入，旧对象经 Compiler 归一化到同一 bundle 契约。
 - [ ] 波次 1：主要遮挡家具（进行中：clean shell 与 16 个家具/附属对象已进入可编译 `artDraft`，仍需逐件校准和删除测试）。
-- [ ] 波次 2：厨房与大型收纳（进行中：高书柜/内容 cluster、厨房吊柜/顶部 decor 共 4 件已接入，草稿合计 20 对象）。
+- [ ] 波次 2：厨房与大型收纳（进行中：高书柜/内容、吊柜/decor、水槽柜、灶台柜和冰箱共 7 件已接入，草稿合计 23 对象）。
 - [ ] 波次 3–6：软装/灯/植物、decor、路径动作与最终验收。
 
 ### 波次 0 验收记录
@@ -33,12 +33,13 @@
 
 ### 波次 2 收纳与厨房草稿记录
 
-- `tall-bookcase`、`bookcase-content-cluster`、`kitchen-wall-cabinets`、`kitchen-wall-cabinet-decor` 已按同一 `artDraft` 契约接入；草稿现有 20 个对象，没有新增专用渲染分支。
+- `tall-bookcase`、`bookcase-content-cluster`、`kitchen-wall-cabinets`、`kitchen-wall-cabinet-decor`、`kitchen-sink-counter`、`kitchen-stove-counter`、`fridge` 已按同一 `artDraft` 契约接入；草稿现有 23 个对象，没有新增专用渲染分支。
 - 新增通用 `attachedTo` 依赖：隐藏父对象会关闭全部后代图层；solo 子对象会自动保留完整祖先链。Compiler 拒绝未知父对象和循环依赖。
 - Compiler 对 production 与 `artDraft` 分别执行 topology 校验，不允许草稿家具占住 interaction approach；确有座椅占位的交互必须通过 `allowOccupiedBy` 明确列出对象 id，Runtime 寻路只为该次目标排除此占地。
 - 浏览器实际验证高书柜与吊柜两组父子对象：父对象 hidden 后主体和附属内容同时消失；内容 cluster solo 时父体保留；高书柜 behind/front 会按角色深度切换完整柜体与内容层；无破图，整屋其余对象不受影响。
 - 双轴检查点审查补出一处依赖遗漏：局部 effect 现在与对象图层复用同一可见性集合，隐藏父对象不会残留子对象光效；高书柜也从永远位于角色后的 `body` 改为共享深度队列中的 `front`，并补齐前后审计点。
-- 这四件素材仍为 `planned / needs-art`：hidden/solo 的依赖逻辑已通过，但 origin、与母版的逐像素删除测试、厨房完整组合和最终视觉基线尚未完成，不能据此升级 inventory 状态。
+- 这七件素材仍为 `planned / needs-art`：书柜/吊柜父子 hidden/solo、高书柜前后深度，以及三件下厨资产的 12 项 hidden/solo/behind/front 浏览器矩阵均已通过；厨房完整组合、逐像素风格校准和最终视觉基线尚未完成，不能据此升级 inventory 状态。
+- 首次烤箱候选被明确标为 `rejected`：它错误生成了带炉面的独立灶具，而母版需要柜下嵌入式烤箱；被拒素材保留 provenance，但没有进入 manifest 或 runtime。
 
 ## 用户目标
 

@@ -717,6 +717,84 @@
         "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
         "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
         "audit": {}
+      },
+      {
+        "id": "kitchen-sink-counter",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [0, 1.5, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[0, 0]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/kitchen-sink-counter-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [270, 170, 1170, 960],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 50,
+            "opaqueThreshold": 160,
+            "despill": true,
+            "resize": [165, 145]
+          },
+          "output": "kitchen-sink-counter-draft.png",
+          "origin": [515, 285],
+          "depthBias": 0
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {"behind": [0, 1, 0], "front": [1, 2, 0]}
+      },
+      {
+        "id": "kitchen-stove-counter",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [1, 1, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[1, 0]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/kitchen-stove-counter-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [385, 180, 1095, 890],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 50,
+            "opaqueThreshold": 160,
+            "despill": true,
+            "resize": [150, 150]
+          },
+          "output": "kitchen-stove-counter-draft.png",
+          "origin": [655, 270],
+          "depthBias": 0
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {"behind": [0.5, 0.5, 0], "front": [1.5, 1.5, 0]}
+      },
+      {
+        "id": "fridge",
+        "category": "appliance",
+        "assetMode": "layered",
+        "depthTile": [0.3, 2.2, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[0, 3]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/fridge-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [365, 185, 850, 1095],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 50,
+            "opaqueThreshold": 160,
+            "despill": true,
+            "resize": [105, 201]
+          },
+          "output": "fridge-draft.png",
+          "origin": [495, 330],
+          "depthBias": 0
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {"behind": [0, 2, 0], "front": [1, 3, 0]}
       }
     ]
   },
