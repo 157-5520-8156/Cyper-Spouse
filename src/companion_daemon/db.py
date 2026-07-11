@@ -619,6 +619,7 @@ class CompanionStore:
         output_text: str,
         delivery_id: int | None,
         direction: str = "incoming_reply",
+        status: str = "planned",
     ) -> int:
         now = utc_now().isoformat()
         with self.connect() as conn:
@@ -628,7 +629,7 @@ class CompanionStore:
                   canonical_user_id, direction, appraisal, expression_policy,
                   allowed_facts_json, short_lived_constraint, observable_reason,
                   output_text, delivery_id, status, created_at, updated_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     canonical_user_id,
@@ -640,6 +641,7 @@ class CompanionStore:
                     observable_reason,
                     output_text,
                     delivery_id,
+                    status,
                     now,
                     now,
                 ),

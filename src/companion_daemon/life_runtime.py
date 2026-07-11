@@ -16,6 +16,7 @@ class PhoneDecision:
     read_now: bool
     defer_minutes: float | None
     reason: str
+    turn_trace_id: int | None = None
 
 
 @dataclass(frozen=True)

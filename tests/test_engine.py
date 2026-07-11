@@ -204,6 +204,9 @@ def test_engine_wakes_for_the_next_message_after_persisting_an_unread_state(tmp_
 
     assert first.read_now is False
     assert store.get_mood_state("geoff").has_unread is True
+    first_trace = store.recent_turn_traces("geoff")[-2]
+    assert first_trace["direction"] == "attention"
+    assert first_trace["status"] == "deferred"
     assert second.read_now is True
 
 

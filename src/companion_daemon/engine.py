@@ -512,7 +512,21 @@ class CompanionEngine:
             unread_state = state.model_copy(update={"has_unread": True})
             self.store.save_mood_state(canonical_user_id, unread_state)
             synchronize_life_runtime(self.store, canonical_user_id, unread_state)
-        return decision
+        trace_id = self.store.create_turn_trace(
+            canonical_user_id,
+            appraisal=state.last_interaction_event or "attention_check",
+            expression_policy="等待合适时机再回应" if not decision.read_now else "读取消息，继续判断如何回应",
+            allowed_facts=[],
+            short_lived_constraint=None,
+            observable_reason=decision.reason,
+            output_text="",
+            delivery_id=None,
+            direction="attention",
+            status="deferred" if not decision.read_now else "observed",
+        )
+        return PhoneDecision(
+            decision.read_now, decision.defer_minutes, decision.reason, turn_trace_id=trace_id
+        )
 
     def create_deferred_reply_task(
         self,
