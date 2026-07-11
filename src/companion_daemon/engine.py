@@ -452,7 +452,7 @@ class CompanionEngine:
             context_package.memory_lines,
             attachment_lines,
             self_core_block=self_core_block,
-            context_block=context_package.prompt_block(),
+            context_block=turn_plan.prompt_block(),
         ))
         text_parts = split_reply_text(text, next_state)
         suggested_reaction = select_character_reaction(message.text, next_state)
@@ -475,7 +475,7 @@ class CompanionEngine:
             canonical_user_id,
             appraisal=turn_plan.appraisal,
             expression_policy=turn_plan.expression_policy,
-            allowed_facts=turn_plan.allowed_facts,
+            allowed_facts=list(turn_plan.allowed_facts),
             short_lived_constraint=turn_plan.short_lived_constraint,
             observable_reason=turn_plan.observable_reason,
             output_text=text,

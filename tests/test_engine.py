@@ -73,6 +73,8 @@ async def test_reply_has_a_delivered_turn_trace_with_its_behavioral_contract(tmp
     assert trace["status"] == "delivered"
     assert "优先接住情绪" in trace["observable_reason"]
     assert trace["output_text"] == reply.text
+    prompt_text = "\n".join(item["content"] for item in engine.model.calls[-1])
+    assert "回合授权（daemon 决定，必须遵守）" in prompt_text
 
 
 @pytest.mark.asyncio
@@ -167,8 +169,8 @@ def test_engine_wakes_for_the_next_message_after_persisting_an_unread_state(tmp_
     store.save_life_runtime(
         "geoff",
         LifeRuntimeState(
-            activity="正在上课，手机放在包里",
-            activity_kind="class",
+                activity="正在专注看书，手机放在包里",
+                activity_kind="study",
             attention_demand=88,
             interruptible=False,
             started_at=now - timedelta(minutes=10),

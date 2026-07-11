@@ -29,7 +29,7 @@ def test_turn_plan_exposes_the_behavioral_contract_for_a_vulnerable_message() ->
     assert isinstance(plan, TurnPlan)
     assert plan.appraisal == "user_vulnerable"
     assert plan.expression_policy == package.reply_policy
-    assert plan.allowed_facts == ["用户事实/所在地: 成都"]
+    assert plan.allowed_facts == ("用户事实/所在地: 成都",)
     assert plan.observable_reason == "用户在示弱，优先接住情绪。"
 
 
@@ -47,6 +47,7 @@ def test_turn_plan_keeps_subtext_as_a_short_lived_constraint_not_a_fact() -> Non
 
     assert plan.short_lived_constraint == "想被认真对待，但嘴上会硬一点。"
     assert plan.short_lived_constraint not in plan.allowed_facts
+    assert "回合授权" in plan.prompt_block()
 
 
 @pytest.mark.asyncio
