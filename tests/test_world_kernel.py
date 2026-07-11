@@ -158,6 +158,7 @@ def test_completed_activity_creates_deterministic_outcome_goal_and_experience(tm
     snapshot = kernel.snapshot("zhizhi-v1")
     assert snapshot["goals"]["course-notes"]["progress"] == 1
     assert snapshot["experiences"]["outcome:2026-07-11:notes"]["source_outcome_id"] == "outcome:2026-07-11:notes"
+    assert kernel.experiences_for_time_reference("zhizhi-v1", "today")[0]["experience_id"] == "outcome:2026-07-11:notes"
 
 
 def test_seeded_fallback_template_replaces_an_unavailable_activity(tmp_path: Path) -> None:

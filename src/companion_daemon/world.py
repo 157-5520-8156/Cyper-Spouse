@@ -560,6 +560,44 @@ class WorldKernel:
             _, state = self._load_state(conn, world_id)
         return state
 
+    def experiences_for_time_reference(self, world_id: str, reference: str) -> list[dict[str, object]]:
+        """Return only committed experiences in a deterministic logical-time range."""
+        state = self.snapshot(world_id)
+        logical_at = _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+        normalized = reference.strip().lower()
+        if normalized in {"today", "今天"}:
+            day = logical_at.date().isoformat()
+        elif normalized in {"yesterday", "昨天"}:
+            day = (logical_at - timedelta(days=1)).date().isoformat()
+        elif re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
+            day = normalized
+        elif normalized in {"last", "上次"}:
+            day = ""
+        else:
+            raise WorldError("time reference must be today, yesterday, last, or YYYY-MM-DD")
+        outcomes = _as_dict(state.get("outcomes", {}), "outcomes")
+        records: list[dict[str, object]] = []
+        for experience_id, experience in _as_dict(state["experiences"], "experiences").items():
+            item = _as_dict(experience, "experience")
+            outcome = _as_dict(outcomes.get(str(item.get("source_outcome_id") or ""), {}), "outcome")
+            occurred_at = str(outcome.get("ends_at") or "")
+            if (not day or occurred_at[:10] == day) and occurred_at:
+                records.append({"experience_id": experience_id, "content": item["content"], "occurred_at": occurred_at, "shared": bool(item.get("shared"))})
+        records.sort(key=lambda item: str(item["occurred_at"]))
+        return records[-1:] if normalized in {"last", "上次"} else records
+
+    def conversation_policy(self, world_id: str) -> dict[str, object]:
+        """Expose behavior-only world state; never fabricate a conversational fact."""
+        state = self.snapshot(world_id)
+        active = [item for item in _as_dict(state["agenda"], "agenda").values() if _as_dict(item, "activity").get("status") == "active"]
+        logical_at = _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+        urgent = [goal_id for goal_id, goal in _as_dict(state.get("goals", {}), "goals").items() if goal.get("status") == "active" and goal.get("deadline") and _parse_at(str(goal["deadline"])) - logical_at <= timedelta(hours=48)]
+        if active:
+            return {"mode": "busy", "reply_length": "brief", "initiative": "hold", "reason": "active_world_activity"}
+        if urgent:
+            return {"mode": "goal_urgent", "reply_length": "normal", "initiative": "low", "reason": "goal_deadline_near", "goal_ids": sorted(urgent)}
+        return {"mode": "available", "reply_length": "normal", "initiative": "normal", "reason": "no_active_world_constraint"}
+
     def events(self, world_id: str) -> list[WorldEvent]:
         with self.store.connect() as conn:
             return self._load_events(conn, world_id)

@@ -664,6 +664,7 @@ class CompanionEngine:
         facts = [str(item["value"]) for item in snapshot["facts"].values()]
         experiences = [str(item["content"]) for item in snapshot["experiences"].values()]
         policy = (snapshot.get("last_appraisal") or {}).get("policy", "自然回应当前消息。")
+        world_policy = self.world_kernel.conversation_policy(self.world_id)
         needs = snapshot["needs"]
         context_block = (
             "世界账本授权（必须遵守）：\n"
@@ -671,6 +672,7 @@ class CompanionEngine:
             f"- 可引用事实: {'；'.join(facts[:8]) or '无'}\n"
             f"- 已结算经历: {'；'.join(experiences[-6:]) or '无'}\n"
             f"- 当前可见行为调制: 安全感={needs['security']}，主动性={needs['initiative']}，边界={needs['boundary']}。\n"
+            f"- 世界行为策略: {world_policy['mode']}；回复长度={world_policy['reply_length']}；主动性={world_policy['initiative']}。\n"
             "- 未列入账本的计划、人物、经历和结果不得说成已经发生。"
         )
         model_action_id = self._begin_world_model_call(purpose="reply", causation=intent_id)
