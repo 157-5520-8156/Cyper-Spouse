@@ -25,6 +25,7 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert "scene_id" in response.text
     assert "zhizhi-room-isometric-v2.png" in response.text
     assert "zhizhi-iso-walk-v4.png" in response.text
+    assert "zhizhi-sprite-sheet-v2.png" in response.text
     assert "characterAction" in response.text
     assert "spriteCell" in response.text
     assert "downRight" in response.text
@@ -35,6 +36,7 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert "footprint" in response.text
     assert "depthKey" in response.text
     assert "directionFor" in response.text
+    assert "walkSheet = action === 'walk'" in response.text
     assert "applyPreviewMode" in response.text
     assert "demo') !== 'walk'" in response.text
     assert "drawPhone" in response.text

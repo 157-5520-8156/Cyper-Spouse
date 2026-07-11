@@ -277,7 +277,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     const images = {};
     const imagePaths = {
       room:'/assets/dashboard/zhizhi-room-isometric-v2.png',
-      sprite:'/assets/dashboard/zhizhi-iso-walk-v4.png'
+      sprite:'/assets/dashboard/zhizhi-iso-walk-v4.png',
+      idle:'/assets/dashboard/zhizhi-sprite-sheet-v2.png'
     };
     const sceneDefinitions = {
       'free-bedroom': {
@@ -391,14 +392,18 @@ DASHBOARD_HTML = r"""<!doctype html>
     function drawActor(ctx, now) {
       if (actor.action === 'sleep') { drawSleep(ctx, now); return; }
       const action = characterAction();
-      const sheet = images.sprite;
+      const sheet = action === 'walk' ? images.sprite : images.idle;
       if (!sheet) return;
       const [px, py] = project(actor.position);
       const cell = spriteCell(action, actor.facing);
-      const cw = sheet.width / 4, ch = sheet.height / 4;
-      const sx = cell.column * cw, sy = cell.row * ch;
-      // Every v4 cell is baseline-aligned; never add a per-frame y offset.
-      const dh = 132, dw = 132;
+      const walkSheet = action === 'walk';
+      const cw = walkSheet ? sheet.width / 4 : 250;
+      const ch = walkSheet ? sheet.height / 4 : 500;
+      const sx = walkSheet ? cell.column * cw : 100;
+      const sy = walkSheet ? cell.row * ch : 70;
+      // Idle is deliberately a separate source asset: do not freeze a walk
+      // frame after arriving at an interaction point.
+      const dh = walkSheet ? 132 : 116, dw = walkSheet ? 132 : 58;
       const x = px - dw / 2, y = py - dh + 6;
       ctx.save();
       ctx.imageSmoothingEnabled = false;
