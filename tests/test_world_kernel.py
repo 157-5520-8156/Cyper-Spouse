@@ -622,3 +622,12 @@ def test_life_share_selection_is_replayable_and_limited_per_logical_day(tmp_path
     again = kernel.submit({"type": "select_life_share", "world_id": started.world_id, "idempotency_key": "select-2"}, expected_revision=selected.revision)
     assert selected.events[-1].event_type == "LifeShareSelected"
     assert again.events[-1].payload["reason"] == "daily_limit"
+
+
+def test_goal_deadline_is_deferred_by_logical_time_advance(tmp_path: Path) -> None:
+    seed = world_seed() | {"long_term_goals": [{"id": "course-notes", "title": "课程", "target": 2, "deadline": (NOW + timedelta(days=1)).isoformat()}]}
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": seed}, expected_revision=0)
+    advanced = kernel.advance("zhizhi-v1", NOW + timedelta(days=2), expected_revision=started.revision)
+    assert any(event.event_type == "GoalDeferred" for event in advanced.events)
+    assert kernel.snapshot("zhizhi-v1")["goals"]["course-notes"]["status"] == "deferred"

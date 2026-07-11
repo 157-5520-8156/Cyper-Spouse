@@ -578,6 +578,9 @@ class WorldKernel:
                     and _parse_at(str(item["expires_at"])) <= _parse_at(target)
                 ):
                     events.append(("ActionExpired", {"action_id": action_id, "reason": "logical_timeout"}))
+            for goal_id, goal in _as_dict(state.get("goals", {}), "goals").items():
+                if goal.get("status") == "active" and goal.get("deadline") and _parse_at(str(goal["deadline"])) <= target_at:
+                    events.append(("GoalDeferred", {"goal_id": goal_id, "reason": "deadline_reached", "next_review_at": (target_at + timedelta(days=1)).isoformat()}))
             completed_activities: list[dict[str, object]] = []
             for event_type, payload in list(events):
                 if event_type == "ActivityCompleted":
@@ -1064,6 +1067,12 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         goal["progress"] = min(int(goal["target"]), int(goal["progress"]) + int(payload["delta"]))
         if goal["progress"] >= int(goal["target"]):
             goal["status"] = "completed"
+    elif event.event_type == "GoalDeferred":
+        goal = _as_dict(_as_dict(next_state["goals"], "goals").get(str(payload["goal_id"])), "goal")
+        if goal["status"] == "active":
+            goal["status"] = "deferred"
+            goal["deferred_reason"] = payload["reason"]
+            goal["next_review_at"] = payload["next_review_at"]
     elif event.event_type == "ExperienceShared":
         _as_dict(next_state["experiences"], "experiences")[str(payload["experience_id"])]["shared"] = True
         _as_dict(next_state["experiences"], "experiences")[str(payload["experience_id"])]["shared_action_id"] = payload["action_id"]
