@@ -761,6 +761,15 @@ class WorldKernel:
             if experience.get("shared") or action["status"] != "delivered":
                 raise WorldError("experience sharing requires one delivered action and an unshared experience")
             return [("ExperienceShared", {"experience_id": experience_id, "action_id": action_id})]
+        if command_type == "select_life_share":
+            needs = _as_dict(state["needs"], "needs")
+            if needs["initiative"] < 20 or needs["security"] < 45:
+                return [("LifeShareDeferred", {"reason": "needs_prefer_private"})]
+            day = str(_as_dict(state["clock"], "clock")["logical_at"])[:10]
+            if day in _as_dict(state.get("share_decisions", {}), "share decisions"):
+                return [("LifeShareDeferred", {"reason": "daily_limit"})]
+            candidate = next((key for key, value in _as_dict(state["experiences"], "experiences").items() if not value.get("shared")), None)
+            return [("LifeShareSelected", {"experience_id": candidate})] if candidate else [("LifeShareDeferred", {"reason": "no_unshared_experience"})]
         if command_type == "observe_user_message":
             return [(
                 "UserMessageObserved",

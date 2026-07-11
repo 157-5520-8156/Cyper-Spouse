@@ -260,6 +260,11 @@ async def run(
 async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bool) -> bool:
     """Share one committed-but-private world experience without legacy life tables."""
     snapshot = engine.world_kernel.snapshot(engine.world_id)
+    decision = engine._submit_world_with_retry({"type": "select_life_share", "world_id": engine.world_id, "idempotency_key": f"life-share:{snapshot['clock']['logical_at']}"})
+    selected = next((event.payload.get("experience_id") for event in (decision.events if decision else ()) if event.event_type == "LifeShareSelected"), None)
+    if not selected:
+        print("life event not shared: world policy deferred it")
+        return False
     needs = snapshot["needs"]
     if needs["initiative"] < 20 or needs["security"] < 45:
         print("life event not shared: current world needs prefer keeping it private")
@@ -271,7 +276,7 @@ async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bo
         (
             (experience_id, experience)
             for experience_id, experience in snapshot["experiences"].items()
-            if not experience.get("shared")
+            if experience_id == selected and not experience.get("shared")
         ),
         None,
     )
