@@ -631,7 +631,7 @@ def test_delivered_life_share_consumes_daily_limit(tmp_path: Path) -> None:
     kernel = WorldKernel(store)
     started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
     proposed = kernel.submit({"type": "record_model_proposal", "world_id": started.world_id, "proposal_id": "once", "entity_id": "roommate-lin", "template_id": "dorm_chat", "content": "晚饭后在宿舍聊了几句新书。"}, expected_revision=started.revision)
-    accepted = kernel.submit({"type": "accept_model_proposal", "world_id": started.world_id, "proposal_id": "once"}, expected_revision=proposed.revision)
+    kernel.submit({"type": "accept_model_proposal", "world_id": started.world_id, "proposal_id": "once"}, expected_revision=proposed.revision)
     delivery_id, _, action_id = kernel.queue_outgoing_action(canonical_user_id="geoff", platform="qq", text="分享。", kind="life_event", expires_at=NOW + timedelta(hours=1), trace={"world_id": started.world_id, "appraisal": "life_event_share", "expression_policy": "只分享已提交经历。", "allowed_facts": [], "short_lived_constraint": None, "observable_reason": "测试。"})
     kernel.settle_outgoing_action(delivery_id, delivered=True)
     kernel.submit({"type": "share_experience", "world_id": started.world_id, "experience_id": "once", "action_id": action_id}, expected_revision=kernel.revision(started.world_id))
