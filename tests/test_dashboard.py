@@ -28,6 +28,7 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert "characterAction" in response.text
     assert "drawPhone" in response.text
     assert "drawSleep" in response.text
+    assert "drawInteractionCue" in response.text
     assert "状态同步失败 · 可稍后重试" in response.text
     assert "zhizhi-sprite-sheet-v2.png" not in response.text
     assert "routeGraph" in response.text

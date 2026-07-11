@@ -291,6 +291,10 @@ DASHBOARD_HTML = r"""<!doctype html>
           desk:['rug','window'], kitchen:['rug'], entry:['rug'], sofa:['rug'],
           vanity:['rug','bed'], bed:['vanity','rug'], window:['desk','rug'],
           rug:['desk','kitchen','entry','sofa','vanity','bed','window']
+        },
+        foreground:{
+          desk:[282,438,420,126],
+          sofa:[720,620,500,230]
         }
       }
     };
@@ -436,6 +440,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       const background = images[activeScene.background];
       if (background) drawImageContain(ctx, background, 18, 14, 964, 720);
       drawActivityLight(ctx, now);
+      drawInteractionCue(ctx, now);
       if ((actor.scene || {}).time_of_day === 'night') {
         ctx.fillStyle = 'rgba(20, 17, 30, .22)';
         ctx.fillRect(0, 0, roomCanvas.width, roomCanvas.height);
@@ -459,11 +464,41 @@ DASHBOARD_HTML = r"""<!doctype html>
         ctx.restore();
       }
     }
+    function drawInteractionCue(ctx, now) {
+      const scene = actor.scene || {};
+      const [x,y] = project(anchors[scene.location] || anchors.rug);
+      const pulse = Math.sin(now / 240);
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      if (scene.action === 'tidy') {
+        ctx.fillStyle = '#ffe49a';
+        for (const [dx,dy] of [[-15,-42],[5,-54],[19,-36]]) ctx.fillRect(x + dx, y + dy + pulse * 2, 4, 4);
+      } else if (scene.action === 'walk_out') {
+        ctx.globalAlpha = .28 + pulse * .06;
+        ctx.fillStyle = '#f5c77b';
+        ctx.fillRect(x - 20, y - 42, 40, 42);
+      } else if (scene.action === 'eat') {
+        ctx.strokeStyle = '#e9efff';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(x + 9, y - 33, 7, Math.PI * 1.1, Math.PI * 1.9);
+        ctx.stroke();
+      } else if (['social','relax'].includes(scene.action)) {
+        ctx.fillStyle = '#f7e5ba';
+        ctx.fillRect(x + 16, y - 44 + pulse * 2, 4, 4);
+      }
+      ctx.restore();
+    }
     function drawForeground(ctx) {
       const scene = actor.scene || {};
-      if (scene.location !== 'bed' || scene.action !== 'sleep') return;
-      // The bed front is part of the Q-room background.  Sleeping is represented
-      // by the actor being hidden and the breathing marker from drawSleep().
+      const crop = activeScene.foreground?.[scene.location];
+      const background = images[activeScene.background];
+      if (!crop || !background) return;
+      const [sx,sy,sw,sh] = crop;
+      ctx.save();
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(background, sx, sy, sw, sh, stage.ox + sx * stage.scale, stage.oy + sy * stage.scale, sw * stage.scale, sh * stage.scale);
+      ctx.restore();
     }
     function drawSceneRibbon(ctx) {
       const scene = actor.scene || {};
