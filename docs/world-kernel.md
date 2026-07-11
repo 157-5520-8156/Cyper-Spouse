@@ -9,7 +9,7 @@
 2. 每个写入带预期 revision。过期 revision 会失败，调用方必须重新读取并决定。
 3. LLM、随机数、时钟和投递结果均是记录过的外部结果；回放不会重新调用它们。
 4. 计划、候选提议和未发送文本不能作为对话可引用经历。
-5. 每个线上行动最终只能是 delivered、failed、cancelled 或 expired 之一。
+5. 每个线上行动最终只能是 delivered、failed、cancelled、expired 或 unknown 之一；`unknown` 表示适配器调用后进程中断且无法取得平台回执，系统不得盲目重发。
 
 ## 启用与时间
 

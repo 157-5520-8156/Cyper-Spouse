@@ -681,7 +681,7 @@ def test_life_share_delivery_is_atomic_and_uncertain_sends_are_not_retried(tmp_p
     assert delivery is not None
     assert kernel.snapshot(started.world_id)["actions"][delivery.action_id]["status"] == "scheduled"
     assert kernel.begin_outgoing_action(delivery.delivery_id) is True
-    assert kernel.mark_outgoing_unknown(delivery.delivery_id, reason="process stopped after adapter call") is True
+    assert kernel.recover_interrupted_life_share_deliveries(started.world_id) == 1
     assert store.outbox_message(delivery.delivery_id)["status"] == "unknown"
     assert kernel.snapshot(started.world_id)["actions"][delivery.action_id]["status"] == "unknown"
     assert kernel.begin_outgoing_action(delivery.delivery_id) is False
