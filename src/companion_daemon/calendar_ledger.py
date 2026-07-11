@@ -76,6 +76,7 @@ def _ensure_weekly_plan(store, canonical_user_id: str, *, now: datetime, future_
     """Create a small coherent weekly plan, not independent daily impulses."""
     local = now.astimezone()
     store.cancel_elapsed_calendar_plans(canonical_user_id, now=now)
+    store.normalize_single_day_weekly_plans(canonical_user_id)
     # One-time migration from the prototype's independent highlights.  Weekly
     # events are the new authority, so keeping both would make the calendar
     # look like it scheduled the same outing twice.
@@ -110,7 +111,7 @@ def _ensure_weekly_plan(store, canonical_user_id: str, *, now: datetime, future_
             title=title,
             event_type=event_type,
             starts_at=day,
-            ends_at=day + timedelta(days=days, hours=2),
+            ends_at=day + timedelta(days=days - 1, hours=2),
             importance=importance,
             source=source,
             details=details,

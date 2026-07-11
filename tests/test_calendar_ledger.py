@@ -67,6 +67,31 @@ def test_weekly_plan_is_stable_and_contains_only_a_few_named_events(tmp_path: Pa
     assert 1 <= len(first_ids) <= 2
 
 
+def test_single_day_weekly_plan_does_not_bleed_into_the_next_day(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "calendar.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 4, 0, tzinfo=UTC)
+
+    ledger = calendar_ledger(store, "geoff", MoodState(), now=now, past_days=0, future_days=7)
+    projected_dates: dict[int, list[str]] = {}
+    for day in ledger["days"]:
+        for event in day["special_events"]:
+            if str(event["source"]).startswith("calendar:weekly:"):
+                projected_dates.setdefault(int(event["id"]), []).append(str(day["date"]))
+
+    events = {
+        int(event["id"]): event
+        for day in ledger["days"]
+        for event in day["special_events"]
+        if str(event["source"]).startswith("calendar:weekly:")
+    }
+    assert all(
+        len(projected_dates[event_id]) == 1
+        for event_id, event in events.items()
+        if event["event_type"] != "trip"
+    )
+
+
 def test_elapsed_planned_event_is_cancelled_not_presented_as_future(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "calendar.sqlite")
     seed_user(store)
@@ -151,3 +176,14 @@ def test_calendar_context_refuses_ungrounded_past_day(tmp_path: Path) -> None:
     context = calendar_context_for_message(store, "geoff", MoodState(), "你上周三做了什么？", now=now)
 
     assert context and "没有已发生记录" in context
+
+
+def test_calendar_projection_can_supply_fifteen_days_on_each_side(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "calendar.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 4, 0, tzinfo=UTC)
+
+    ledger = calendar_ledger(store, "geoff", MoodState(), now=now, past_days=15, future_days=15)
+
+    assert len(ledger["days"]) == 31
+    assert ledger["days"][15]["relative"] == "今天"

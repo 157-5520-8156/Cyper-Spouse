@@ -1243,7 +1243,7 @@ class CompanionEngine:
             "state": state.model_dump(mode="json"),
             "life_runtime": runtime.model_dump(mode="json"),
             "recent_life_events": [dict(row) for row in self.store.recent_life_events(canonical_user_id)],
-            "calendar": calendar_ledger(self.store, canonical_user_id, state),
+            "calendar": calendar_ledger(self.store, canonical_user_id, state, past_days=15, future_days=15),
             "recent_social_tasks": [dict(row) for row in self.store.recent_social_tasks(canonical_user_id)],
             "recent_tool_proposals": [dict(row) for row in self.store.recent_tool_proposals(canonical_user_id)],
             "dashboard": _dashboard_view(

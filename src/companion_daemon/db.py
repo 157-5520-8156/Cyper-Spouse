@@ -966,6 +966,28 @@ class CompanionStore:
         for row in rows:
             self.update_calendar_event_status(int(row["id"]), status="cancelled", changed_reason=reason)
 
+    def normalize_single_day_weekly_plans(self, canonical_user_id: str) -> list[int]:
+        """Repair prototype weekly plans that accidentally occupied the next day."""
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select id, starts_at, ends_at from calendar_events
+                where canonical_user_id = ? and source like 'calendar:weekly:%'
+                  and event_type <> 'trip' and status in ('planned', 'active')
+                """,
+                (canonical_user_id,),
+            ).fetchall()
+            for row in rows:
+                starts_at = datetime.fromisoformat(str(row["starts_at"]))
+                ends_at = datetime.fromisoformat(str(row["ends_at"]))
+                if ends_at <= starts_at + timedelta(hours=6):
+                    continue
+                conn.execute(
+                    "update calendar_events set ends_at = ?, updated_at = ? where id = ?",
+                    ((starts_at + timedelta(hours=2)).isoformat(), utc_now().isoformat(), int(row["id"])),
+                )
+        return [int(row["id"]) for row in rows]
+
     def unshared_private_life_events(self, canonical_user_id: str, limit: int = 4) -> list[sqlite3.Row]:
         with self.connect() as conn:
             rows = conn.execute(
