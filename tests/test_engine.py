@@ -231,16 +231,6 @@ async def test_world_communication_policy_defers_busy_low_energy_turn_as_world_a
     seed_user(store)
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
-    logical_now = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
-    planned = world.submit(
-        {
-            "type": "plan_activity", "world_id": world_id, "activity_id": "busy",
-            "entity_id": "zhizhi", "title": "整理资料", "starts_at": logical_now.isoformat(),
-            "ends_at": (logical_now + timedelta(hours=2)).isoformat(),
-        },
-        expected_revision=world.revision(world_id),
-    )
-    world.advance(world_id, logical_now, expected_revision=planned.revision)
     world.submit(
         {"type": "change_need", "world_id": world_id, "need": "energy", "delta": -40},
         expected_revision=world.revision(world_id),
@@ -372,7 +362,7 @@ async def test_misquoted_current_scene_is_salvaged_as_exact_grounded_text(tmp_pa
     )
 
     assert reply is not None
-    assert reply.text == "现在在华东师范大学宿舍。"
+    assert reply.text == "现在在华东师范大学，正在图书馆看书。"
     assert model.calls == 1
 
 
@@ -463,7 +453,7 @@ def test_world_mode_debug_snapshot_uses_only_world_projection(tmp_path: Path, mo
     snapshot = engine.debug_snapshot("geoff")
 
     assert snapshot["state"]["world_id"] == world_id
-    assert snapshot["dashboard"]["scene"]["location"] == "rug"
+    assert snapshot["dashboard"]["scene"]["location"] == "desk"
     assert snapshot["recent_social_tasks"] == []
 
 

@@ -377,6 +377,11 @@ async def scheduler_loop(
         engine = build_companion_engine()
         if getattr(engine, "world_kernel", None):
             try:
+                engine.world_kernel.recover_expired_external_leases(
+                    engine.world_id,
+                    observed_now=datetime.now().astimezone(),
+                    expected_revision=engine.world_kernel.revision(engine.world_id),
+                )
                 WorldClockDriver(engine.world_kernel).tick(
                     engine.world_id,
                     observed_now=datetime.now().astimezone(),

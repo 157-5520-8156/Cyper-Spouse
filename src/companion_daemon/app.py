@@ -89,6 +89,8 @@ async def post_message(message: IncomingMessage) -> CompanionReply | JSONRespons
             status_code=202,
             content={"status": "no_immediate_reply", "message_id": message.message_id},
         )
+    engine.confirm_media_delivery(reply)
+    engine.confirm_sticker_delivery(reply)
     return reply
 
 

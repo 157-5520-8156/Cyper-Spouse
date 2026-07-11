@@ -71,6 +71,21 @@ def sanitize_chat_text(text: str) -> str:
     return enforce_character_location(_limit_questions(_repair_flattened_questions("\n".join(cleaned_lines).strip())))
 
 
+def sanitize_world_chat_text(text: str) -> str:
+    """Clean transport noise without rewriting already-grounded world semantics."""
+    cleaned_lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped or _looks_like_pure_stage_direction(stripped):
+            continue
+        stripped = _STAGE_DIRECTION_RE.sub("", stripped)
+        stripped = _ASTERISK_ACTION_RE.sub("", stripped)
+        stripped = re.sub(r"\s{2,}", " ", stripped).strip()
+        if stripped:
+            cleaned_lines.append(stripped)
+    return _limit_questions("\n".join(cleaned_lines).strip())
+
+
 def enforce_character_location(text: str) -> str:
     """Correct only unambiguous first-person Chengdu claims from the character."""
     replacements = (

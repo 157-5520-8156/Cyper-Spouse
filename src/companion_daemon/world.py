@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -111,6 +112,8 @@ class WorldKernel:
             revision, state = self._load_state(conn, world_id)
             self._check_revision(revision, expected_revision)
             events = self._events_for_command(command, state)
+            if not events:
+                return WorldDecision(world_id, revision, (), _state_hash(state))
             try:
                 return self._append_and_project(
                     conn,
@@ -154,6 +157,19 @@ class WorldKernel:
                     return False
                 raise
             return True
+
+    def settle_turn(
+        self, world_id: str, message_id: str, *, status: str, reason: str,
+        expected_revision: int,
+    ) -> WorldDecision:
+        return self.submit(
+            {
+                "type": "settle_turn", "world_id": world_id,
+                "message_id": message_id, "status": status, "reason": reason,
+                "idempotency_key": f"turn-settle:{message_id}:{status}:{reason}",
+            },
+            expected_revision=expected_revision,
+        )
 
     def start_from_seed_file(self, path: Path) -> WorldDecision:
         """Start one clean world epoch from a human-reviewed YAML seed."""
@@ -566,6 +582,28 @@ class WorldKernel:
             expected_revision=expected_revision,
         )
 
+    def recover_expired_external_leases(
+        self,
+        world_id: str,
+        *,
+        observed_now: datetime,
+        expected_revision: int,
+    ) -> WorldDecision:
+        """Settle external work abandoned by a crashed process.
+
+        The deadline is observed wall time recorded in the ledger. Logical time
+        deliberately has no authority over an in-flight external call.
+        """
+        return self.submit(
+            {
+                "type": "recover_expired_external_leases",
+                "world_id": world_id,
+                "observed_now": observed_now.isoformat(),
+                "idempotency_key": f"external-lease-recovery:{world_id}:{observed_now.isoformat()}",
+            },
+            expected_revision=expected_revision,
+        )
+
     def rebuild_projection(self, world_id: str, projection_name: str) -> ProjectionReport:
         projection_names = {
             "world_current_state", "world_entities", "world_agenda",
@@ -850,6 +888,34 @@ class WorldKernel:
             if str(_as_dict(item, "fact").get("subject") or "") == user_id
         ]
         goals = _as_dict(state.get("goals", {}), "goals")
+        recent_conversation: list[dict[str, str]] = []
+        referencable_conversation: list[dict[str, str]] = []
+        for raw in _as_list(state.get("recent_messages", []), "recent messages"):
+            item = _as_dict(raw, "recent message")
+            direction = str(item.get("direction") or "")
+            item_user_id = str(item.get("user_id") or "")
+            if item_user_id and item_user_id != user_id:
+                continue
+            message_id = str(item.get("message_id") or "")
+            text = str(item.get("text") or "").strip()
+            if direction not in {"in", "out"} or not message_id or not text:
+                continue
+            transcript_item = {
+                "source_id": f"message:{message_id}",
+                "speaker": "user" if direction == "in" else "companion",
+                "content": text,
+                "logical_at": str(item.get("logical_at") or item.get("sent_at") or ""),
+            }
+            recent_conversation.append(transcript_item)
+            if direction == "in":
+                referencable_conversation.append(
+                    {
+                        **transcript_item,
+                        "source_type": "user_message",
+                        "sent_at": str(item.get("sent_at") or ""),
+                        "reference_state": "observed",
+                    }
+                )
         current_scene, current_scene_source = self._current_scene_source(state)
         open_threads = [
             {
@@ -869,6 +935,8 @@ class WorldKernel:
                     "reference_state": "confirmed",
                 }
                 for fact_id, item in _as_dict(state["facts"], "facts").items()
+                if str(_as_dict(item, "fact").get("subject") or "")
+                in {user_id, "world", "zhizhi"}
             ],
             "referencable_experiences": [
                 {
@@ -879,6 +947,8 @@ class WorldKernel:
                 }
                 for item in self._committed_experiences(state)
             ],
+            "recent_conversation": recent_conversation[-12:],
+            "referencable_conversation": referencable_conversation[-8:],
             "user_profile": [
                 {
                     "source_id": str(_as_dict(item, "fact").get("fact_id") or ""),
@@ -917,6 +987,89 @@ class WorldKernel:
                 },
             },
         }
+
+    def conversation_sources_for_query(
+        self,
+        world_id: str,
+        *,
+        user_id: str,
+        text: str,
+        current_message_id: str | None,
+        limit: int = 4,
+    ) -> list[dict[str, str]]:
+        """Retrieve older inbound messages without promoting them to permanent facts."""
+        state = self.snapshot(world_id)
+        candidates: list[tuple[int, int, dict[str, str]]] = []
+        history = _as_list(state.get("recent_messages", []), "recent messages")
+        for index, raw in enumerate(history):
+            item = _as_dict(raw, "recent message")
+            message_id = str(item.get("message_id") or "")
+            item_user_id = str(item.get("user_id") or "")
+            content = str(item.get("text") or "").strip()
+            if (
+                item.get("direction") != "in"
+                or not message_id
+                or message_id == current_message_id
+                or (item_user_id and item_user_id != user_id)
+                or not content
+            ):
+                continue
+            score = _conversation_relevance(text, content)
+            if score <= 0:
+                continue
+            candidates.append(
+                (
+                    score,
+                    index,
+                    {
+                        "source_id": f"message:{message_id}",
+                        "source_type": "user_message",
+                        "speaker": "user",
+                        "content": content,
+                        "logical_at": str(item.get("logical_at") or item.get("sent_at") or ""),
+                        "sent_at": str(item.get("sent_at") or ""),
+                        "reference_state": "observed",
+                    },
+                )
+            )
+        candidates.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        for fact_id, raw in _as_dict(state.get("facts", {}), "facts").items():
+            fact = _as_dict(raw, "fact")
+            content = str(fact.get("value") or "").strip()
+            if (
+                fact.get("scope") != "conversation"
+                or str(fact.get("subject") or "") != user_id
+                or not content
+            ):
+                continue
+            score = _conversation_relevance(text, content)
+            if score > 0:
+                candidates.append(
+                    (
+                        score + 1,
+                        -1,
+                        {
+                            "source_id": str(fact_id),
+                            "source_type": "fact",
+                            "speaker": "user",
+                            "content": content,
+                            "logical_at": "",
+                            "sent_at": "",
+                            "reference_state": "confirmed",
+                        },
+                    )
+                )
+        candidates.sort(key=lambda entry: (entry[0], entry[1]), reverse=True)
+        unique: list[dict[str, str]] = []
+        seen_content: set[str] = set()
+        for _, _, item in candidates:
+            if item["content"] in seen_content:
+                continue
+            seen_content.add(item["content"])
+            unique.append(item)
+            if len(unique) >= max(1, min(limit, 8)):
+                break
+        return unique
 
     @staticmethod
     def _current_scene_source(
@@ -982,7 +1135,11 @@ class WorldKernel:
         return {"world_id": world_id, "valid": not invalid and contiguous and rebuilt.matches_live, "invalid_event_ids": invalid, "contiguous_revisions": contiguous, "state_hash": rebuilt.state_hash}
 
     def validate_reply_candidate(
-        self, world_id: str, candidate: dict[str, object]
+        self,
+        world_id: str,
+        candidate: dict[str, object],
+        *,
+        user_id: str | None = None,
     ) -> dict[str, object]:
         """Reject model output that cites a planned, absent, or failed world fact."""
         reply_text = str(candidate.get("reply_text") or "").strip()
@@ -991,51 +1148,151 @@ class WorldKernel:
         state = self.snapshot(world_id)
         experiences = _as_dict(state["experiences"], "experiences")
         facts = _as_dict(state["facts"], "facts")
+        visible_facts = {
+            fact_id: raw
+            for fact_id, raw in facts.items()
+            if user_id is None
+            or str(_as_dict(raw, "fact").get("subject") or "")
+            in {user_id, "world", "zhizhi"}
+        }
+        conversation_sources = {
+            f"message:{str(item.get('message_id') or '')}": str(item.get("text") or "")
+            for raw in _as_list(state.get("recent_messages", []), "recent messages")
+            if (item := _as_dict(raw, "recent message")).get("direction") == "in"
+            and item.get("message_id")
+            and (user_id is None or str(item.get("user_id") or "") == user_id)
+            and str(item.get("text") or "").strip()
+        }
+        user_owned_sources = set(conversation_sources)
+        if user_id is not None:
+            user_owned_sources.update(
+                str(fact_id)
+                for fact_id, raw in facts.items()
+                if str(_as_dict(raw, "fact").get("subject") or "") == user_id
+            )
         _, current_scene_source = self._current_scene_source(state)
-        known = set(experiences) | set(facts) | {current_scene_source["source_id"]}
-        mentioned = _as_list(candidate.get("mentioned_event_ids", []), "mentioned_event_ids")
+        known = set(experiences) | set(visible_facts) | set(conversation_sources) | {current_scene_source["source_id"]}
+        mentioned = [
+            str(item)
+            for item in _as_list(candidate.get("mentioned_event_ids", []), "mentioned_event_ids")
+        ]
         claims = _as_list(candidate.get("claims", []), "claims")
+        mentioned = list(
+            dict.fromkeys(
+                [
+                    *mentioned,
+                    *(
+                        str(_as_dict(item, "reply claim").get("source_id") or "")
+                        for item in claims
+                    ),
+                ]
+            )
+        )
+        mentioned = [source_id for source_id in mentioned if source_id]
         proposed_actions = _as_list(candidate.get("proposed_action_ids", []), "proposed_action_ids")
-        unknown = [str(item) for item in mentioned if str(item) not in known]
+        unknown = [source_id for source_id in mentioned if source_id not in known]
         if unknown:
             raise WorldError(f"reply cites uncommitted world records: {', '.join(unknown)}")
         sources = {
             **{record_id: str(_as_dict(item, "experience")["content"]) for record_id, item in experiences.items()},
-            **{record_id: str(_as_dict(item, "fact")["value"]) for record_id, item in facts.items()},
+            **{record_id: str(_as_dict(item, "fact")["value"]) for record_id, item in visible_facts.items()},
+            **conversation_sources,
             current_scene_source["source_id"]: current_scene_source["content"],
         }
         normalized_claims: list[dict[str, str]] = []
+        epistemic_reply = bool(
+            re.search(r"(?:我猜|我觉得可能|可能|也许|或许|大概|说不准|未必)", reply_text)
+        )
         for raw_claim in claims:
             claim = _as_dict(raw_claim, "reply claim")
             source_id = str(claim.get("source_id") or "")
             text = str(claim.get("text") or "").strip()
+            assertion = str(claim.get("assertion") or "").strip()
             if source_id not in sources or source_id not in mentioned or not text:
                 raise WorldError("each reply claim needs a mentioned committed source id and text")
-            if text not in reply_text or text not in sources[source_id]:
+            if text not in sources[source_id]:
                 raise WorldError("reply claim text must be quoted from its committed source")
+            if (
+                source_id in user_owned_sources
+                and text.startswith("我")
+                and not assertion
+                and text in reply_text
+                and f"“{text}”" not in reply_text
+                and f'"{text}"' not in reply_text
+                and f"说：{text}" not in reply_text
+            ):
+                raise WorldError(
+                    "first-person user evidence must be quoted or rewritten as an assertion"
+                )
+            if assertion:
+                if assertion not in reply_text:
+                    raise WorldError("reply claim assertion must appear in reply_text")
+                if not _bounded_paraphrase(assertion, text):
+                    raise WorldError("reply claim assertion is not supported by its evidence")
+                normalized_claims.append(
+                    {"source_id": source_id, "text": text, "assertion": assertion}
+                )
+                continue
+            if text not in reply_text and epistemic_reply:
+                # Models sometimes attach the context that informed a guess.
+                # The guess is not a factual assertion, so provenance remains
+                # in mentioned_event_ids but is not promoted to a reply claim.
+                continue
+            if text not in reply_text:
+                raise WorldError("reply claim text must appear in the factual reply")
             normalized_claims.append({"source_id": source_id, "text": text})
         # A reply without claims may still converse, but it cannot state a
         # completed off-screen experience.  Claim text is intentionally quoted
         # from its source, making provenance deterministic rather than a model
         # assertion that merely names an arbitrary id.
         event_claim = re.search(
-            r"(?:我|她).{0,24}(?:去了|吃了|见了|聊了|做了|完成了|回来|逛了|看了|参加了|上了)",
+            r"(?:我|她)(?:(?:刚刚?|昨天|昨晚|今天|上午|下午|之前|已经).{0,8}|.{0,12})"
+            r"(?:去了|吃了|见了|聊了|做了|完成了|回来|逛了|看了|参加了|上了)",
             reply_text,
         )
         if event_claim and not normalized_claims:
             raise WorldError("reply states an experience without a committed source id")
+        entities = _as_dict(state["entities"], "entities")
+        for entity in entities.values():
+            npc = _as_dict(entity, "entity")
+            name = str(npc.get("name") or "")
+            if (
+                npc.get("kind") not in {"companion", "user"}
+                and name
+                and re.search(
+                    rf"{re.escape(name)}[^。！!?！？]{{0,18}}(?:是我|是个|很顺利|不顺利|说了|告诉我|喜欢|讨厌)",
+                    reply_text,
+                )
+                and not normalized_claims
+            ):
+                raise WorldError("reply states an NPC detail without a committed source id")
         remainder = reply_text
         for claim in normalized_claims:
-            remainder = remainder.replace(claim["text"], "")
+            remainder = remainder.replace(claim.get("assertion") or claim["text"], "")
         # A question mark only protects the actual question about the user; it
         # must not launder a preceding first-person world claim.  Keep this
         # deterministic and deliberately conservative: claims are either
         # quoted from a committed source above, or use an explicitly
         # first-person/implicit-current-world opening here and are rejected.
-        unsupported_world_claim = re.search(
-            r"(?:^|[。！!?！？；;])\s*(?:我|这边|刚|已经|昨天|昨晚|早上|上午|下午|今晚|今天|明天|现在|正在|还在|在)"
-            r"[^。！!?！？]{0,60}(?:了|过|刚|已经|收到|买|等|在|去|来|爬|看|忙|做|整理|上课|下课)",
-            remainder,
+        unsupported_world_claim = any(
+            re.search(pattern, remainder)
+            for pattern in (
+                r"(?:这会儿|此刻|刚刚?|现在|正在|还在)[^。！!?！？]{0,36}(?:醒|睡|赖|爬|去|上课|下课|吃|看书|散步|整理|忙|回来|在床|在宿舍|在图书馆|盘)",
+                r"(?:昨天|昨晚|早上|上午|下午|今晚|今天|明天)[^。！!?！？]{0,36}(?:去了|做了|吃了|见了|聊了|看了|参加了|完成了|回来|上课|下课)",
+                r"我(?:以前|曾经|也)[^。！!?！？]{0,24}(?:有过|经历过|做过|去过|见过|聊过)",
+                r"(?:我这儿|我这里|这边|这里)[^。！!?！？]{0,36}(?:空调|天气|温度|有点凉|有点冷|有点热|很吵|很安静|下雨)",
+                r"我(?:书包里|包里|手边|桌上|宿舍里)[^。！!?！？]{0,30}(?:常备|放着|带着|有茶|有咖啡)",
+                r"(?:桌上|手边|旁边|包里)[^。！!?！？]{0,24}(?:正好)?(?:有|放着|摆着)[^。！!?！？]{0,16}(?:杯|茶|咖啡|饮料|书|东西)",
+                r"(?:难怪)?你[^。！!?！？]{0,12}(?:一大早|这么早)[^。！!?！？]{0,12}(?:起来|醒|没睡)",
+                r"(?:最近|现在)[^。！!?！？]{0,28}(?:很多人|挺多人|大家都|很流行|都在做)",
+                r"我[^。！!?！？]{0,36}(?:换个位置|换位置|靠窗|拿出|走到|坐到)",
+                r"(?:我)?在宿舍[^。！!?！？]{0,18}(?:歇着|休息|躺着|发呆)",
+                r"我(?:现在|这会儿|此刻)?在[^。！!?！？]{1,18}(?:上|里|馆|校|室|店|家)(?:。|，|！|$)",
+                r"(?:本地|云端|服务器|硬盘|数据库)[^。！!?！？]{0,12}(?:没了|丢了|坏了|删除了)",
+                r"我[^。！!?！？]{0,18}(?:睡不着|失眠|难受)(?:的时候|时)[^。！!?！？]{0,18}(?:会|就)",
+                r"(?:我跟着[^。！!?！？]{0,18}|松了一口气|确实在意了|我反而觉得[^。！!?！？]{0,12}踏实)",
+                r"有一点[^。！!?！？]{0,16}不舒服",
+            )
         )
         if reply_text != "我在。" and unsupported_world_claim:
             raise WorldError("reply contains world-time or experience text outside committed claims")
@@ -1051,7 +1308,11 @@ class WorldKernel:
         }
 
     def grounded_reply_from_mentions(
-        self, world_id: str, candidate: dict[str, object]
+        self,
+        world_id: str,
+        candidate: dict[str, object],
+        *,
+        user_id: str | None = None,
     ) -> dict[str, object] | None:
         """Build an exact-source fallback when a model cited but misquoted it."""
         state = self.snapshot(world_id)
@@ -1064,6 +1325,17 @@ class WorldKernel:
             **{
                 str(record_id): str(_as_dict(item, "fact")["value"])
                 for record_id, item in _as_dict(state["facts"], "facts").items()
+                if user_id is None
+                or str(_as_dict(item, "fact").get("subject") or "")
+                in {user_id, "world", "zhizhi"}
+            },
+            **{
+                f"message:{str(item.get('message_id') or '')}": str(item.get("text") or "")
+                for raw in _as_list(state.get("recent_messages", []), "recent messages")
+                if (item := _as_dict(raw, "recent message")).get("direction") == "in"
+                and item.get("message_id")
+                and (user_id is None or str(item.get("user_id") or "") == user_id)
+                and str(item.get("text") or "").strip()
             },
             scene["source_id"]: scene["content"],
         }
@@ -1075,14 +1347,38 @@ class WorldKernel:
             str(_as_dict(item, "reply claim").get("source_id") or "")
             for item in _as_list(candidate.get("claims", []), "claims")
         )
-        mentioned = list(dict.fromkeys(source_id for source_id in requested_ids if source_id in sources))[:2]
-        if not mentioned:
+        requested = list(dict.fromkeys(source_id for source_id in requested_ids if source_id in sources))
+        if not requested:
             return None
+        unique_mentions: list[str] = []
+        seen_texts: set[str] = set()
+        for source_id in requested:
+            if sources[source_id] in seen_texts:
+                continue
+            seen_texts.add(sources[source_id])
+            unique_mentions.append(source_id)
+            if len(unique_mentions) == 2:
+                break
+        mentioned = unique_mentions
+        facts = _as_dict(state["facts"], "facts")
+        entities = _as_dict(state["entities"], "entities")
+
+        def source_is_user(source_id: str) -> bool:
+            if source_id.startswith("message:"):
+                return True
+            raw_fact = facts.get(source_id)
+            if not isinstance(raw_fact, dict):
+                return False
+            raw_entity = entities.get(str(raw_fact.get("subject") or ""))
+            return isinstance(raw_entity, dict) and raw_entity.get("kind") == "user"
+
+        user_sourced = all(source_is_user(source_id) for source_id in mentioned)
         texts = [sources[source_id] for source_id in mentioned]
         return {
             "reply_text": "".join(texts),
             "mentioned_event_ids": mentioned,
             "proposed_action_ids": [],
+            "_user_sourced": user_sourced,
             "claims": [
                 {"source_id": source_id, "text": sources[source_id]}
                 for source_id in mentioned
@@ -1139,6 +1435,51 @@ class WorldKernel:
             ]
             for npc in _as_list(seed.get("npcs", []), "npcs"):
                 events.append(("NpcRegistered", _as_dict(npc, "npc")))
+            if bool(seed.get("materialize_current_schedule")):
+                logical_now = _parse_at(logical_at)
+                active_seed_items: list[tuple[dict[str, object], datetime, datetime]] = []
+                for raw_item in _as_list(seed.get("daily_schedule", []), "daily schedule"):
+                    item = _as_dict(raw_item, "daily schedule item")
+                    starts = logical_now.replace(
+                        hour=int(item["starts_hour"]), minute=0, second=0, microsecond=0
+                    )
+                    ends = logical_now.replace(
+                        hour=int(item["ends_hour"]), minute=0, second=0, microsecond=0
+                    )
+                    if starts <= logical_now < ends:
+                        active_seed_items.append((item, starts, ends))
+                if len(active_seed_items) > 1:
+                    raise WorldError("world seed has overlapping activities at logical epoch")
+                for item, starts, ends in active_seed_items:
+                    activity_id = f"{logical_now.date().isoformat()}:{item['slot']}"
+                    activity = {
+                        "activity_id": activity_id,
+                        "entity_id": "zhizhi",
+                        "title": str(item["title"]),
+                        "template_id": str(item.get("template_id") or ""),
+                        "location": str(item.get("location") or ""),
+                        "starts_at": starts.isoformat(),
+                        "ends_at": ends.isoformat(),
+                        "attention_demand": int(item.get("attention_demand", 35)),
+                        "interruptible": bool(item.get("interruptible", True)),
+                    }
+                    if str(item.get("kind") or "") == "rest":
+                        activity["activity_kind"] = "rest"
+                        activity["rest_recovery"] = int(item.get("rest_recovery", 8))
+                    events.append(("ActivityPlanned", activity))
+                    if activity["template_id"]:
+                        events.append(
+                            (
+                                "ActivitySelected",
+                                {
+                                    "activity_id": activity_id,
+                                    "template_id": activity["template_id"],
+                                    "reason": "seed_epoch_activity",
+                                    "rule_version": self.life_simulation.RULE_VERSION,
+                                },
+                            )
+                        )
+                    events.append(("ActivityStarted", {"activity_id": activity_id}))
             state = _empty_state(world_id)
             return self._append_and_project(
                 conn,
@@ -1275,6 +1616,8 @@ class WorldKernel:
                         "location": str(schedule_item.get("location") or ""),
                         "starts_at": starts.isoformat(),
                         "ends_at": ends.isoformat(),
+                        "attention_demand": int(schedule_item.get("attention_demand", 35)),
+                        "interruptible": bool(schedule_item.get("interruptible", True)),
                     }
                     if str(schedule_item.get("kind") or "") == "rest":
                         activity["activity_kind"] = "rest"
@@ -1424,6 +1767,69 @@ class WorldKernel:
                     },
                 )
             ]
+        if command_type == "claim_external_action":
+            action_id = str(command.get("action_id") or "")
+            action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
+            if action.get("status") != "scheduled":
+                raise WorldError("only a scheduled external action can be claimed")
+            lease_expires_observed_at = str(command.get("lease_expires_observed_at") or "")
+            if not lease_expires_observed_at:
+                raise WorldError("external action claim requires an observed-time lease")
+            return [
+                ("ActionAttempted", {"action_id": action_id}),
+                (
+                    "ActionDispatchClaimed",
+                    {
+                        "action_id": action_id,
+                        "lease_expires_observed_at": lease_expires_observed_at,
+                    },
+                ),
+            ]
+        if command_type == "recover_expired_external_leases":
+            observed_now = _parse_at(str(command.get("observed_now") or ""))
+            events: list[tuple[str, dict[str, object]]] = []
+            for action_id, raw in _as_dict(state["actions"], "actions").items():
+                action = _as_dict(raw, "action")
+                lease = str(action.get("lease_expires_observed_at") or "")
+                if (
+                    action.get("status") == "sending"
+                    and lease
+                    and _parse_at(lease) <= observed_now
+                ):
+                    events.append(
+                        (
+                            "ActionSettled",
+                            {
+                                "action_id": action_id,
+                                "result": {
+                                    "status": "failed",
+                                    "reason": "external_lease_expired",
+                                    "observed_at": observed_now.isoformat(),
+                                },
+                            },
+                        )
+                    )
+                    causation = str(_as_dict(action.get("payload", {}), "action payload").get("causation") or "")
+                    if causation and _as_dict(state.get("intents", {}), "intents").get(causation, {}).get("status") == "open":
+                        intent = _as_dict(state["intents"], "intents")[causation]
+                        events.append(
+                            (
+                                "IntentFailed",
+                                {"intent_id": causation, "reason": "external_lease_expired"},
+                            )
+                        )
+                        if intent.get("message_id"):
+                            events.append(
+                                (
+                                    "TurnProcessingSettled",
+                                    {
+                                        "message_id": intent["message_id"],
+                                        "status": "failed",
+                                        "reason": "external_lease_expired",
+                                    },
+                                )
+                            )
+            return events
         if command_type == "defer_message_reply":
             message_id = str(command.get("message_id") or "")
             action_id = str(command.get("action_id") or f"reply_later:{message_id}")
@@ -1674,16 +2080,16 @@ class WorldKernel:
         if command_type == "record_external_result":
             action_id = str(command.get("action_id") or "")
             action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
-            if action["status"] != "scheduled":
-                raise WorldError("only a scheduled action can settle")
+            if action["status"] not in {"scheduled", "sending"}:
+                raise WorldError("only a scheduled or claimed external action can settle")
             result = _as_dict(command.get("result"), "result")
             status = str(result.get("status") or "")
             if status not in {"delivered", "failed", "cancelled"}:
                 raise WorldError("external result requires a terminal status")
-            events: list[tuple[str, dict[str, object]]] = [
-                ("ActionAttempted", {"action_id": action_id}),
-                ("ActionSettled", {"action_id": action_id, "result": result}),
-            ]
+            events: list[tuple[str, dict[str, object]]] = []
+            if action["status"] == "scheduled":
+                events.append(("ActionAttempted", {"action_id": action_id}))
+            events.append(("ActionSettled", {"action_id": action_id, "result": result}))
             payload = _as_dict(action.get("payload", {}), "action payload")
             if action.get("kind") == "media_generation" and status == "delivered":
                 artifact_path = str(result.get("artifact_path") or "")
@@ -1784,6 +2190,8 @@ class WorldKernel:
                         "subject": str(command.get("subject") or "world"),
                         "value": value,
                         "source": str(command.get("source") or "verified"),
+                        "scope": str(command.get("scope") or "durable"),
+                        "source_message_id": str(command.get("source_message_id") or ""),
                     },
                 )
             ]
@@ -1794,14 +2202,37 @@ class WorldKernel:
         if command_type == "observe_user_message":
             return [(
                 "UserMessageObserved",
-                {"message_id": command.get("message_id"), "text": command.get("text", ""), "sent_at": command.get("sent_at")},
+                {
+                    "message_id": command.get("message_id"),
+                    "user_id": command.get("user_id"),
+                    "text": command.get("text", ""),
+                    "sent_at": command.get("sent_at"),
+                },
             )]
+        if command_type == "settle_turn":
+            message_id = str(command.get("message_id") or "")
+            status = str(command.get("status") or "")
+            reason = str(command.get("reason") or "")
+            if status not in {"delivered", "deferred", "failed"} or not message_id or not reason:
+                raise WorldError("turn settlement requires message, terminal status, and reason")
+            turn = _as_dict(_as_dict(state.get("turns", {}), "turns").get(message_id), "turn")
+            if turn.get("status") in {"delivered", "deferred", "failed"}:
+                return []
+            if turn.get("status") not in {"claimed", "processing"}:
+                raise WorldError("only a claimed turn can be settled")
+            return [("TurnProcessingSettled", {"message_id": message_id, "status": status, "reason": reason})]
         if command_type == "appraise_turn":
             appraisal = str(command.get("appraisal") or "ordinary_message")
             consequence = self.interaction_rules.consequence(appraisal)
             events: list[tuple[str, dict[str, object]]] = [
                 ("TurnAppraised", {"appraisal": appraisal, "policy": consequence.policy, "rule_version": self.interaction_rules.RULE_VERSION}),
-                ("IntentCreated", {"intent_id": str(command["intent_id"]), "kind": "reply", "status": "open"}),
+                (
+                    "IntentCreated",
+                    {
+                        "intent_id": str(command["intent_id"]), "kind": "reply", "status": "open",
+                        "message_id": str(command.get("message_id") or ""),
+                    },
+                ),
             ]
             events.extend(
                 ("NeedChanged", {"need": need, "delta": delta})
@@ -2089,7 +2520,9 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "ActionAttempted":
         _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]["attempted"] = True
     elif event.event_type == "ActionDispatchClaimed":
-        _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]["status"] = "sending"
+        action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
+        action["status"] = "sending"
+        action["lease_expires_observed_at"] = str(payload.get("lease_expires_observed_at") or "")
     elif event.event_type == "ActionSettled":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["status"] = str(_as_dict(payload["result"], "result")["status"])
@@ -2101,9 +2534,11 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
             history.append({
                 "direction": "out", "message_id": str(payload["action_id"]),
                 "text": str(action.get("text") or ""), "sent_at": event.logical_at,
+                "logical_at": event.logical_at,
+                "user_id": str(trace.get("user_id") or ""),
                 "source_action_id": str(payload["action_id"]), "outgoing_direction": str(trace.get("direction") or ""),
             })
-            next_state["recent_messages"] = history[-16:]
+            next_state["recent_messages"] = history[-64:]
     elif event.event_type == "ActionExpired":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["status"] = "expired"
@@ -2247,18 +2682,31 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         _as_dict(next_state["facts"], "facts")[str(item["fact_id"])] = item
     elif event.event_type == "UserMessageObserved":
         history = _as_list(next_state["recent_messages"], "recent_messages")
-        history.append({"direction": "in", **payload})
-        next_state["recent_messages"] = history[-16:]
+        history.append({"direction": "in", "logical_at": event.logical_at, **payload})
+        next_state["recent_messages"] = history[-64:]
         next_state["communication"] = {
             "message_id": payload.get("message_id"), "attention": "unread", "typing": "idle",
             "reason": "message_observed", "due_at": None, "deferred_action_id": None,
         }
     elif event.event_type == "TurnProcessingClaimed":
-        pass
+        _as_dict(next_state.setdefault("turns", {}), "turns")[str(payload["message_id"])] = {
+            "message_id": str(payload["message_id"]), "status": "claimed",
+        }
+    elif event.event_type == "TurnProcessingSettled":
+        turn = _as_dict(
+            _as_dict(next_state.setdefault("turns", {}), "turns").get(str(payload["message_id"])),
+            "turn",
+        )
+        turn["status"] = str(payload["status"])
+        turn["reason"] = str(payload["reason"])
     elif event.event_type == "TurnAppraised":
         next_state["last_appraisal"] = dict(payload)
     elif event.event_type == "IntentCreated":
         _as_dict(next_state["intents"], "intents")[str(payload["intent_id"])] = dict(payload)
+    elif event.event_type == "IntentFailed":
+        intent = _as_dict(next_state["intents"], "intents")[str(payload["intent_id"])]
+        intent["status"] = "failed"
+        intent["reason"] = payload["reason"]
     return next_state
 
 
@@ -2274,6 +2722,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "facts": {},
         "proposals": {},
         "intents": {},
+        "turns": {},
         "recent_messages": [],
         "last_appraisal": None,
         "relationships": {},
@@ -2484,6 +2933,108 @@ def _parse_at(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise WorldError(f"timestamp requires an explicit timezone: {value}")
     return parsed
+
+
+def _bounded_paraphrase(assertion: str, evidence: str) -> bool:
+    """Allow close speaker/tense rewrites while rejecting unrelated sourced claims."""
+    cleanup = re.compile(r"[\s，。！？!?、；;：:\"'“”‘’（）()…]+")
+    normalized_assertion = cleanup.sub("", assertion)
+    normalized_evidence = cleanup.sub("", evidence)
+    if not normalized_assertion or not normalized_evidence:
+        return False
+    if any(pronoun in normalized_assertion for pronoun in ("他", "她")) and not any(
+        pronoun in normalized_evidence for pronoun in ("他", "她")
+    ):
+        return False
+    negation = re.compile(r"(?:没有|没怎么|没|未曾|未|不曾|不是|不太|不)")
+    polarity_concepts = (
+        "赶", "睡", "去", "来", "做", "完成", "见", "聊", "看", "吃", "喝",
+        "喜欢", "同意", "记得", "找到", "恢复", "发送", "收到", "参加",
+    )
+    for concept in polarity_concepts:
+        if concept not in normalized_assertion or concept not in normalized_evidence:
+            continue
+
+        def is_negated(text: str) -> bool:
+            index = text.find(concept)
+            return bool(negation.search(text[max(0, index - 4):index]))
+
+        if is_negated(normalized_assertion) != is_negated(normalized_evidence):
+            return False
+    contradictory_pairs = (
+        ("很好", "不好"), ("顺利", "不顺利"), ("成功", "失败"),
+        ("完成", "没完成"), ("记得", "忘了"), ("有", "没有"),
+        ("去了", "没去"), ("喜欢", "讨厌"), ("同意", "拒绝"),
+    )
+    for positive, negative in contradictory_pairs:
+        if (positive in normalized_assertion and negative in normalized_evidence) or (
+            negative in normalized_assertion and positive in normalized_evidence
+        ):
+            return False
+    assertion_numbers = set(re.findall(r"\d+(?:\.\d+)?", normalized_assertion))
+    evidence_numbers = set(re.findall(r"\d+(?:\.\d+)?", normalized_evidence))
+    if assertion_numbers - evidence_numbers:
+        return False
+    time_groups = (
+        ("今天", "昨日", "昨天", "明天"),
+        ("今晚", "昨晚", "明晚"),
+        ("上午", "下午", "晚上", "夜里"),
+    )
+    for group in time_groups:
+        assertion_times = {token for token in group if token in normalized_assertion}
+        evidence_times = {token for token in group if token in normalized_evidence}
+        if assertion_times and evidence_times and assertion_times.isdisjoint(evidence_times):
+            return False
+    degree_anchors = ("一夜", "整晚", "完全", "一点都", "特别", "非常")
+    if any(
+        anchor in normalized_assertion and anchor not in normalized_evidence
+        for anchor in degree_anchors
+    ):
+        return False
+    additive_anchors = (
+        "宿舍", "图书馆", "教室", "书店", "床上", "家里", "窗边", "路上",
+        "因为", "所以", "不然", "免得", "导致", "为了",
+        "顺便", "然后", "同时", "接着", "还要",
+        "心里", "脑子里", "觉得", "想着", "担心", "害怕", "高兴", "难过", "会忘",
+        "出神", "最想记住", "安静选片", "感觉",
+        "上课", "下课", "课上完", "回宿舍", "到宿舍", "出门", "回来",
+    )
+    if any(
+        anchor in normalized_assertion and anchor not in normalized_evidence
+        for anchor in additive_anchors
+    ):
+        return False
+    return SequenceMatcher(
+        None,
+        normalized_assertion,
+        normalized_evidence,
+        autojunk=False,
+    ).ratio() >= 0.35
+
+
+def _conversation_relevance(query: str, content: str) -> int:
+    cleanup = re.compile(r"[\s，。！？!?、；;：:\"'“”‘’（）()…\d]+")
+    query_text = cleanup.sub("", query)
+    content_text = cleanup.sub("", content)
+    ignored = set("你我他她的是了在有还记得为什么吗呢啊这那条第")
+    overlap = {
+        char for char in set(query_text) & set(content_text)
+        if char not in ignored
+    }
+    score = len(overlap)
+    topics = (
+        ("睡", "失眠", "熬夜", "没睡", "困"),
+        ("项目", "工作", "赶工", "方案", "代码"),
+        ("胃", "咖啡", "冰美式", "喝"),
+        ("数据", "丢", "找回", "文件"),
+        ("难过", "伤心", "焦虑", "害怕", "撑不住"),
+    )
+    for topic in topics:
+        if any(marker in query_text for marker in topic) and any(
+            marker in content_text for marker in topic
+        ):
+            score += 20
+    return score
 
 
 def parse_reply_candidate(raw: str) -> dict[str, object]:

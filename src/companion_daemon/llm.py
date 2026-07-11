@@ -62,6 +62,11 @@ class FakeCompanionModel:
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         self.calls.append(messages)
         joined = "\n".join(message["content"] for message in messages)
+        if "严格的虚拟世界事实审计器" in joined:
+            return json.dumps(
+                {"supported": True, "unsupported_spans": [], "reason": "fake audit pass"},
+                ensure_ascii=False,
+            )
         if "聊天余波" in joined and "WorldReplyJSON" in joined:
             return json.dumps(
                 {

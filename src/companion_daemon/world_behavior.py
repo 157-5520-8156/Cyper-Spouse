@@ -7,6 +7,8 @@ wall clock time, MoodState, social tasks, or a model response.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from math import ceil
 from typing import Any, Literal
 
 
@@ -54,10 +56,24 @@ class WorldBehaviorPolicy:
             return CommunicationDecision("do_not_disturb", "boundary_high_under_pressure")
         if resumed_action or self._is_urgent(text):
             return CommunicationDecision("seen", "resumed_or_urgent_turn")
-        active = any(
-            _mapping(item).get("status") == "active"
-            for item in _mapping(state.get("agenda")).values()
+        active = next(
+            (
+                _mapping(item)
+                for item in _mapping(state.get("agenda")).values()
+                if _mapping(item).get("status") == "active"
+            ),
+            None,
         )
+        if active:
+            attention_demand = int(active.get("attention_demand", 35))
+            interruptible = bool(active.get("interruptible", True))
+            if attention_demand >= 90 or (attention_demand >= 70 and not interruptible):
+                phase, remaining_minutes = _activity_phase(state, active)
+                return CommunicationDecision(
+                    "deferred",
+                    f"active_world_activity_not_interruptible:{phase}",
+                    defer_minutes=max(1, min(20, remaining_minutes)),
+                )
         if active and int(needs.get("energy", 70)) <= 35:
             return CommunicationDecision("deferred", "active_world_activity_low_energy", defer_minutes=20)
         if security <= 20 and boundary >= 55:
@@ -107,3 +123,16 @@ class WorldBehaviorPolicy:
 
 def _mapping(value: object) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _activity_phase(
+    state: dict[str, Any], active: dict[str, Any]
+) -> tuple[str, int]:
+    now = datetime.fromisoformat(str(_mapping(state.get("clock")).get("logical_at")))
+    starts_at = datetime.fromisoformat(str(active.get("starts_at")))
+    ends_at = datetime.fromisoformat(str(active.get("ends_at")))
+    duration = max(1.0, (ends_at - starts_at).total_seconds())
+    progress = max(0.0, min(1.0, (now - starts_at).total_seconds() / duration))
+    phase = "early" if progress < 0.33 else "middle" if progress < 0.8 else "ending"
+    remaining = max(1, ceil((ends_at - now).total_seconds() / 60))
+    return phase, remaining

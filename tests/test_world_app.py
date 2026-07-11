@@ -9,6 +9,7 @@ from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.world import WorldKernel
 from companion_daemon.models import IncomingMessage
+from companion_daemon.stickers import Sticker, StickerCatalog
 
 
 def test_world_enablement_and_trusted_delivery_settlement(tmp_path: Path, monkeypatch) -> None:
@@ -99,20 +100,6 @@ def test_http_message_endpoint_represents_world_defer_without_server_error(tmp_p
     seed_user(store)
     kernel = WorldKernel(store)
     started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
-    logical_now = datetime.fromisoformat(str(kernel.snapshot(started.world_id)["clock"]["logical_at"]))
-    planned = kernel.submit(
-        {
-            "type": "plan_activity",
-            "world_id": started.world_id,
-            "activity_id": "busy-http",
-            "entity_id": "zhizhi",
-            "title": "整理资料",
-            "starts_at": logical_now.isoformat(),
-            "ends_at": (logical_now + timedelta(hours=2)).isoformat(),
-        },
-        expected_revision=started.revision,
-    )
-    kernel.advance(started.world_id, logical_now, expected_revision=planned.revision)
     kernel.submit(
         {"type": "change_need", "world_id": started.world_id, "need": "energy", "delta": -50},
         expected_revision=kernel.revision(started.world_id),
@@ -134,23 +121,71 @@ def test_http_message_endpoint_represents_world_defer_without_server_error(tmp_p
     assert response.json() == {"status": "no_immediate_reply", "message_id": "http-defer"}
 
 
+def test_http_message_endpoint_settles_returned_sticker_action(tmp_path: Path, monkeypatch) -> None:
+    store = CompanionStore(tmp_path / "sticker-world.sqlite")
+    seed_user(store)
+    kernel = WorldKernel(store)
+    started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
+    stickers = StickerCatalog(
+        stickers=[
+            Sticker(
+                id="comfort",
+                category="comfort",
+                mood="calm",
+                intent="comfort",
+                path=Path("assets/stickers/comfort.png"),
+            )
+        ]
+    )
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        "你是知栀。",
+        stickers=stickers,
+        world_kernel=kernel,
+        world_id=started.world_id,
+    )
+    monkeypatch.setattr(app_module, "engine", engine)
+
+    response = TestClient(app_module.app).post(
+        "/messages",
+        json=IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            text="我今天有点撑不住",
+            message_id="http-sticker",
+        ).model_dump(mode="json"),
+    )
+
+    assert response.status_code == 200
+    action = kernel.snapshot(started.world_id)["actions"]["sticker-delivery:http-sticker"]
+    assert action["status"] == "delivered"
+    assert kernel.snapshot(started.world_id)["stickers"]["sticker-delivery:http-sticker"]["status"] == "shared"
+
+
 def test_world_console_keeps_unresolved_activity_visible_after_long_history(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "long-world.sqlite"))
     started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
-    start = datetime.fromisoformat(str(kernel.snapshot(started.world_id)["clock"]["logical_at"]))
-    revision = started.revision
+    epoch = datetime.fromisoformat(str(kernel.snapshot(started.world_id)["clock"]["logical_at"]))
+    settled = kernel.advance(
+        started.world_id,
+        epoch + timedelta(hours=3, minutes=30),
+        expected_revision=started.revision,
+    )
+    start = epoch + timedelta(hours=3, minutes=30)
+    revision = settled.revision
     for index in range(13):
-        begins = start + timedelta(hours=index * 2)
+        begins = start + timedelta(minutes=index * 40)
         planned = kernel.submit(
             {
                 "type": "plan_activity", "world_id": started.world_id,
                 "activity_id": f"history-{index}", "entity_id": "zhizhi", "title": "历史活动",
-                "starts_at": begins.isoformat(), "ends_at": (begins + timedelta(hours=1)).isoformat(),
+                "starts_at": begins.isoformat(), "ends_at": (begins + timedelta(minutes=20)).isoformat(),
             },
             expected_revision=revision,
         )
         revision = planned.revision
-    advanced_to = start + timedelta(hours=27)
+    advanced_to = start + timedelta(hours=10)
     advanced = kernel.advance(started.world_id, advanced_to, expected_revision=revision)
     current = kernel.submit(
         {

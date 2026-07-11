@@ -106,15 +106,6 @@ async def test_policy_deferred_reply_recovery_does_not_cancel_itself_or_reobserv
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
     logical_at = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
-    planned = world.submit(
-        {
-            "type": "plan_activity", "world_id": world_id, "activity_id": "busy-recovery",
-            "entity_id": "zhizhi", "title": "整理资料", "starts_at": logical_at.isoformat(),
-            "ends_at": (logical_at + timedelta(hours=1)).isoformat(),
-        },
-        expected_revision=world.revision(world_id),
-    )
-    world.advance(world_id, logical_at, expected_revision=planned.revision)
     world.submit(
         {"type": "change_need", "world_id": world_id, "need": "energy", "delta": -50},
         expected_revision=world.revision(world_id),

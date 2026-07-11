@@ -68,7 +68,7 @@ from companion_daemon.relationship_events import apply_key_relationship_event, d
 from companion_daemon.repair_curve import apply_repair_curve, serious_repair_key_event
 from companion_daemon.reply_segments import split_reply_text
 from companion_daemon.reply_stickers import choose_reply_sticker
-from companion_daemon.sanitize import sanitize_chat_text
+from companion_daemon.sanitize import sanitize_chat_text, sanitize_world_chat_text
 from companion_daemon.social_followups import (
     create_contradiction_followup,
     detect_mild_contradiction,
@@ -90,7 +90,18 @@ from companion_daemon.withheld_impulse import apply_withheld_impulse, build_with
 from companion_daemon.turns import TurnCommit, build_turn_plan
 from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel, parse_reply_candidate
 from companion_daemon.world_behavior import WorldBehaviorPolicy
+from companion_daemon.world_conversation import (
+    asks_for_source_detail,
+    build_safe_failure_candidate,
+    classify_world_query,
+    conversation_fact_candidate,
+    only_echoes_user_message,
+    only_recites_irrelevant_sources,
+    only_repeats_claimed_sources,
+    repeats_recent_companion_reply,
+)
 from companion_daemon.world_media import WorldMediaPolicy
+from companion_daemon.world_reply_audit import WorldReplyAuditor
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +142,7 @@ class CompanionEngine:
         rewrite_model: ChatModel | None = None,
         world_kernel: WorldKernel | None = None,
         world_id: str | None = None,
+        world_grounding_audit_model: ChatModel | None = None,
     ):
         self.store = store
         self.model = model
@@ -146,6 +158,8 @@ class CompanionEngine:
         self.world_id = world_id
         self.world_behavior_policy = WorldBehaviorPolicy()
         self.world_media_policy = WorldMediaPolicy()
+        self.world_grounding_audit_model = world_grounding_audit_model
+        self.world_reply_auditor = WorldReplyAuditor()
         # Character-card examples are style references already included in the
         # system prompt. Replaying them as fake chat history duplicates tokens
         # and makes concrete example details look like reusable live facts.
@@ -171,9 +185,7 @@ class CompanionEngine:
         cleaned = text.strip()
         if not cleaned:
             return None
-        looks_like_question = cleaned.endswith(("?", "？")) or any(
-            token in cleaned for token in ("你觉得", "要不要", "是不是", "可以吗", "在吗")
-        )
+        looks_like_question = cleaned.endswith(("?", "？"))
         return cleaned[:240] if looks_like_question else None
 
     def _ensure_world_user(self, canonical_user_id: str) -> str:
@@ -225,6 +237,24 @@ class CompanionEngine:
                     "idempotency_key": f"user-fact:{digest}",
                 }
             )
+        conversation_fact = conversation_fact_candidate(message.text)
+        if conversation_fact:
+            digest = sha256(
+                f"{user_id}|conversation|{conversation_fact}".encode()
+            ).hexdigest()[:20]
+            self._submit_world_with_retry(
+                {
+                    "type": "confirm_fact",
+                    "world_id": self.world_id,
+                    "fact_id": f"user-conversation:{digest}",
+                    "subject": user_id,
+                    "value": conversation_fact,
+                    "source": f"user_message:{key}",
+                    "scope": "conversation",
+                    "source_message_id": key,
+                    "idempotency_key": f"user-conversation:{digest}",
+                }
+            )
 
     def _world_turn_already_observed(self, message_id: str) -> bool:
         """Whether an adapter message already entered the durable world."""
@@ -252,6 +282,15 @@ class CompanionEngine:
         digest = sha256(f"{purpose}|{causation}".encode("utf-8")).hexdigest()[:20]
         action_id = f"model_call:{digest}"
         self._submit_world_with_retry({"type": "schedule_action", "world_id": self.world_id, "action_id": action_id, "kind": "model_call", "expires_at": (self._world_logical_now() + timedelta(minutes=5)).isoformat(), "payload": {"purpose": purpose, "causation": causation}, "idempotency_key": f"schedule:{action_id}"})
+        self._submit_world_with_retry(
+            {
+                "type": "claim_external_action",
+                "world_id": self.world_id,
+                "action_id": action_id,
+                "lease_expires_observed_at": (utc_now() + timedelta(minutes=2)).isoformat(),
+                "idempotency_key": f"claim:{action_id}",
+            }
+        )
         return action_id
 
     def _record_world_model_output(self, *, purpose: str, causation: str, content: str, action_id: str) -> None:
@@ -269,6 +308,8 @@ class CompanionEngine:
                 "idempotency_key": f"settle:{action_id}",
             }
         )
+        if not content.strip():
+            return
         self._submit_world_with_retry(
             {
                 "type": "record_model_output",
@@ -284,6 +325,38 @@ class CompanionEngine:
 
     def _fail_world_model_call(self, action_id: str, reason: str) -> None:
         self._submit_world_with_retry({"type": "record_external_result", "world_id": self.world_id, "action_id": action_id, "result": {"kind": "model_call", "status": "failed", "reason": reason[:300]}, "idempotency_key": f"fail:{action_id}"})
+
+    async def _audit_world_reply(
+        self,
+        *,
+        purpose: str,
+        causation: str,
+        user_text: str,
+        reply_text: str,
+        grounding_context: dict[str, object],
+    ) -> None:
+        if not self.world_grounding_audit_model:
+            return
+        action_id = self._begin_world_model_call(purpose=purpose, causation=causation)
+        try:
+            raw, audit = await self.world_reply_auditor.evaluate(
+                self.world_grounding_audit_model,
+                user_text=user_text,
+                reply_text=reply_text,
+                grounding_context=grounding_context,
+            )
+        except Exception as exc:
+            self._fail_world_model_call(action_id, str(exc))
+            raise WorldError("independent grounding audit failed") from exc
+        self._record_world_model_output(
+            purpose=purpose,
+            causation=causation,
+            content=raw,
+            action_id=action_id,
+        )
+        if not audit.supported:
+            spans = "；".join(audit.unsupported_spans) or "未定位片段"
+            raise WorldError(f"independent grounding audit rejected: {spans}; {audit.reason}")
 
     def _world_logical_now(self) -> datetime:
         if not self.world_kernel or not self.world_id:
@@ -460,17 +533,37 @@ class CompanionEngine:
             if not resume_action_id and self._world_turn_already_observed(str(message.message_id)):
                 return None
             self._record_world_input(message, canonical_user_id)
-            if not resume_action_id and not self.world_kernel.claim_message_turn(
-                self.world_id, str(message.message_id)
+            turn_id = str(message.message_id)
+            turns = self.world_kernel.snapshot(self.world_id).get("turns", {})
+            if turn_id not in turns and not self.world_kernel.claim_message_turn(
+                self.world_id, turn_id
             ):
                 return None
-            return await self._handle_world_message(
-                canonical_user_id,
-                message,
-                skip_reply=skip_reply,
-                defer_delivery=defer_delivery,
-                resume_action_id=resume_action_id,
+            try:
+                reply = await self._handle_world_message(
+                    canonical_user_id,
+                    message,
+                    skip_reply=skip_reply,
+                    defer_delivery=defer_delivery,
+                    resume_action_id=resume_action_id,
+                )
+            except Exception as exc:
+                try:
+                    self.world_kernel.settle_turn(
+                        self.world_id, str(message.message_id), status="failed",
+                        reason=type(exc).__name__,
+                        expected_revision=self.world_kernel.revision(self.world_id),
+                    )
+                except Exception:
+                    logger.exception("failed to settle world turn after exception")
+                raise
+            self.world_kernel.settle_turn(
+                self.world_id, str(message.message_id),
+                status="deferred" if reply is None else "delivered",
+                reason="communication_deferred" if reply is None else "reply_action_created",
+                expected_revision=self.world_kernel.revision(self.world_id),
             )
+            return reply
         # A new user turn means a previously planned check-in has been overtaken by reality.
         self.store.cancel_active_social_tasks(canonical_user_id, kind="comfort_followup")
         self.store.cancel_active_social_tasks(canonical_user_id, kind="promise_followup")
@@ -968,6 +1061,7 @@ class CompanionEngine:
                 "world_id": self.world_id,
                 "appraisal": appraisal,
                 "intent_id": intent_id,
+                "message_id": str(message.message_id or ""),
                 "user_id": user_id,
                 "actor": {"kind": "companion", "id": "zhizhi"},
                 "causation_id": message.message_id,
@@ -990,6 +1084,24 @@ class CompanionEngine:
         context = self.world_kernel.conversation_context(self.world_id, user_id=user_id)
         fact_sources = list(context["referencable_facts"])[-8:]
         experience_sources = list(context["referencable_experiences"])[-6:]
+        recent_sources = list(context["referencable_conversation"])[-8:]
+        retrieved_sources = self.world_kernel.conversation_sources_for_query(
+            self.world_id,
+            user_id=user_id,
+            text=message.text,
+            current_message_id=str(message.message_id or ""),
+            limit=4,
+        )
+        source_by_id = {
+            str(item["source_id"]): item
+            for item in [*recent_sources, *retrieved_sources]
+        }
+        conversation_sources = list(source_by_id.values())[-12:]
+        recent_conversation = [
+            item
+            for item in list(context["recent_conversation"])[-12:]
+            if str(item.get("source_id") or "") != f"message:{message.message_id}"
+        ]
         facts = [str(item["value"]) for item in fact_sources]
         current_scene = context["current_scene"]
         current_scene_source = context["current_scene_source"]
@@ -1002,6 +1114,13 @@ class CompanionEngine:
         relationship = behavior["relationship"]
         modulation = behavior["emotion_modulation"]
         expression_guidance = self.world_behavior_policy.expression_guidance(snapshot)
+        audit_context: dict[str, object] = {
+            "current_scene": current_scene_source,
+            "confirmed_facts": fact_sources,
+            "committed_experiences": experience_sources,
+            "user_messages": conversation_sources,
+            "self_core": self_core,
+        }
         context_block = (
             "世界账本授权（必须遵守）：\n"
             f"- 本轮关系判断: {appraisal}\n- 本轮表达策略: {policy}\n"
@@ -1011,6 +1130,8 @@ class CompanionEngine:
             f"- 可引用当前场景来源(JSON): {json.dumps(current_scene_source, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 角色核心投影(JSON): {json.dumps(self_core, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 用户画像投影(JSON): {json.dumps(user_profile, ensure_ascii=False, separators=(',', ':')) if user_profile else '[]'}\n"
+            f"- 最近已结算对话(JSON): {json.dumps(recent_conversation, ensure_ascii=False, separators=(',', ':')) if recent_conversation else '[]'}\n"
+            f"- 可引用用户消息来源(JSON): {json.dumps(conversation_sources, ensure_ascii=False, separators=(',', ':')) if conversation_sources else '[]'}\n"
             f"- 可引用事实来源(JSON): {json.dumps(fact_sources, ensure_ascii=False, separators=(',', ':')) if fact_sources else '[]'}\n"
             f"- 已结算经历来源(JSON): {json.dumps(experience_sources, ensure_ascii=False, separators=(',', ':')) if experience_sources else '[]'}\n"
             f"- 当前可见行为调制: 安全感={needs['security']}，主动性={needs['initiative']}，边界={needs['boundary']}。\n"
@@ -1028,9 +1149,10 @@ class CompanionEngine:
                     "role": "user",
                     "content": (
                         f"{context_block}\n\n用户: {message.text}\n"
-                        "WorldReplyJSON: 只返回 JSON。事实或经历声明必须逐字引用来源 content/value，"
-                        "并把该来源的 source_id 同时放入 mentioned_event_ids 和 claims.source_id："
-                        '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字引用的已结算片段"}]}。'
+                        "WorldReplyJSON: 只返回 JSON。事实或经历声明要把来源的 source_id 放入 mentioned_event_ids；"
+                        "claims.text 必须逐字复制来源证据，claims.assertion 必须逐字复制 reply_text 中对应的自然陈述。"
+                        "猜测、建议和问题不是事实声明，不要为它们创建 claim："
+                        '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
                     ),
                 },
             ], temperature=0.75)
@@ -1040,44 +1162,100 @@ class CompanionEngine:
         self._record_world_model_output(
             purpose="reply", causation=intent_id, content=raw, action_id=model_action_id
         )
-        parsed_candidate = parse_reply_candidate(raw)
+        parsed_candidate: dict[str, object] = {
+            "reply_text": "",
+            "mentioned_event_ids": [],
+            "proposed_action_ids": [],
+            "claims": [],
+        }
+        query_scope = classify_world_query(message.text)
         try:
+            parsed_candidate = parse_reply_candidate(raw)
             candidate = self.world_kernel.validate_reply_candidate(
-                self.world_id, parsed_candidate
+                self.world_id, parsed_candidate, user_id=user_id
+            )
+            if query_scope.asks_availability:
+                previous = [
+                    str(item.get("text") or "")
+                    for item in snapshot.get("recent_messages", [])
+                    if item.get("direction") == "out"
+                ][-1:]
+                availability_text = (
+                    "现在可以聊。"
+                    if previous and previous[0] == "这会儿可以说话。"
+                    else "这会儿可以说话。"
+                )
+                candidate = {
+                    "reply_text": availability_text,
+                    "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
+                }
+            if only_repeats_claimed_sources(message.text, candidate):
+                raise WorldError("reply repeats a source without answering the requested detail")
+            if only_echoes_user_message(message.text, candidate):
+                raise WorldError("reply only echoes the current user message")
+            if only_recites_irrelevant_sources(message.text, candidate):
+                raise WorldError("reply only recites sources unrelated to the current turn")
+            if repeats_recent_companion_reply(candidate, list(snapshot.get("recent_messages", []))):
+                raise WorldError("reply repeats one of the last two companion replies")
+            mentioned_npc_names = {
+                str(entity.get("name") or "")
+                for entity in snapshot.get("entities", {}).values()
+                if isinstance(entity, dict)
+                and entity.get("kind") not in {"companion", "user"}
+                and str(entity.get("name") or "") in message.text
+            }
+            related_npc_experiences = [
+                item
+                for item in experience_sources
+                if any(
+                    name and name in str(item.get("content") or "")
+                    for name in mentioned_npc_names
+                )
+            ]
+            if (
+                asks_for_source_detail(message.text)
+                and mentioned_npc_names
+                and not related_npc_experiences
+            ):
+                candidate = {
+                    "reply_text": "目前没有可以确认的互动记录，所以顺不顺利我不能乱说。",
+                    "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
+                }
+            await self._audit_world_reply(
+                purpose="reply_audit",
+                causation=intent_id,
+                user_text=message.text,
+                reply_text=str(candidate["reply_text"]),
+                grounding_context=audit_context,
             )
         except WorldError as validation_error:
-            asks_current_scene = any(
-                marker in message.text
-                for marker in ("现在", "在哪", "在做什么", "干嘛", "忙吗", "方便说话")
-            )
             grounded_fallback = None
-            if asks_current_scene:
-                grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
-                    self.world_id,
-                    {"mentioned_event_ids": [current_scene_source["source_id"]]},
-                )
-            else:
-                time_reference = next(
-                    (
-                        reference
-                        for marker, reference in (
-                            ("昨天", "昨天"), ("今天", "今天"), ("上午", "今天"),
-                            ("下午", "今天"), ("上次", "上次"),
-                        )
-                        if marker in message.text
-                    ),
-                    None,
-                )
+            if query_scope.asks_current_scene:
+                if query_scope.asks_availability:
+                    grounded_fallback = {
+                        "reply_text": "这会儿可以说话。",
+                        "mentioned_event_ids": [],
+                        "proposed_action_ids": [],
+                        "claims": [],
+                    }
+                else:
+                    grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
+                        self.world_id,
+                        {"mentioned_event_ids": [current_scene_source["source_id"]]},
+                        user_id=user_id,
+                    )
+            elif query_scope.asks_experience and query_scope.time_reference:
+                time_reference = query_scope.time_reference
                 if time_reference:
                     records = self.world_kernel.experiences_for_time_reference(
                         self.world_id, time_reference
                     )
-                    if "上午" in message.text:
+                    if query_scope.day_part == "上午":
                         records = [
                             item for item in records
                             if datetime.fromisoformat(str(item["occurred_at"])).hour < 13
                         ]
-                    elif "下午" in message.text:
+                    elif query_scope.day_part == "下午":
                         records = [
                             item for item in records
                             if 13 <= datetime.fromisoformat(str(item["occurred_at"])).hour < 19
@@ -1085,72 +1263,129 @@ class CompanionEngine:
                     grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
                         self.world_id,
                         {"mentioned_event_ids": [item["experience_id"] for item in records[-2:]]},
+                        user_id=user_id,
                     )
+            elif query_scope.target in {"user", "conversation"} and retrieved_sources:
+                grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
+                    self.world_id,
+                    {
+                        "mentioned_event_ids": [
+                            str(item["source_id"]) for item in retrieved_sources[:2]
+                        ]
+                    },
+                    user_id=user_id,
+                )
+            elif asks_for_source_detail(message.text):
+                mentioned_names = {
+                    str(entity.get("name") or "")
+                    for entity in snapshot.get("entities", {}).values()
+                    if isinstance(entity, dict)
+                    and entity.get("kind") not in {"companion", "user"}
+                    and str(entity.get("name") or "") in message.text
+                }
+                related = [
+                    item
+                    for item in experience_sources
+                    if any(name and name in str(item.get("content") or "") for name in mentioned_names)
+                ]
+                grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
+                    self.world_id,
+                    {"mentioned_event_ids": [str(item["source_id"]) for item in related[-2:]]},
+                    user_id=user_id,
+                )
+            else:
                 if grounded_fallback is None:
                     grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
-                        self.world_id, parsed_candidate
+                        self.world_id, parsed_candidate, user_id=user_id
                     )
-            if grounded_fallback is not None:
+            # Current-scene questions have one complete authoritative answer;
+            # do not spend another external call after a hallucinated scene.
+            if query_scope.asks_current_scene and grounded_fallback is not None:
                 candidate = grounded_fallback
+                repaired_raw = None
             else:
-                # One bounded repair attempt keeps a formatting/provenance
-                # mistake from erasing an otherwise useful turn.  It is a
-                # separate model action and external result, so replay never
-                # conflates two model outputs under one action id.
+                repaired_raw = ""
+            # Other failures get one bounded chance to repair their wording.
+            # Exact-source fallback is safe but conversationally destructive,
+            # so it is reserved for a second validation failure.
+            if repaired_raw is None:
+                pass
+            else:
                 repair_action_id = self._begin_world_model_call(
                     purpose="reply_repair", causation=intent_id
                 )
                 try:
                     repaired_raw = await self.model.complete(
-                    [
-                        {"role": "system", "content": self.companion_system_prompt},
-                        {
-                            "role": "user",
-                            "content": (
-                                f"{context_block}\n\n用户: {message.text}\n"
-                                f"上一次 WorldReplyJSON 未通过校验：{validation_error}。"
-                                "重新生成一次；不得补造来源，不得使用临时 event_1/exp1 标识。"
-                                "只返回规定的 WorldReplyJSON。"
-                            ),
-                        },
-                    ],
+                        [
+                            {"role": "system", "content": self.companion_system_prompt},
+                            {
+                                "role": "user",
+                                "content": (
+                                    f"{context_block}\n\n用户: {message.text}\n"
+                                    f"上一次候选(JSON): {json.dumps(parsed_candidate, ensure_ascii=False, separators=(',', ':'))}\n"
+                                    f"未通过校验：{validation_error}。"
+                                    "只修复无依据的声明，保留用户问题的语义和自然接话；"
+                                    "资料没有回答的细节要明确说不知道。不得补造来源，"
+                                    "不得使用临时 event_1/exp1 标识。claims.text 是逐字来源证据，"
+                                    "claims.assertion 是 reply_text 中对应的自然陈述；猜测/建议不创建 claim。"
+                                    "只返回规定的 WorldReplyJSON。"
+                                ),
+                            },
+                        ],
                         temperature=0.2,
                     )
                 except Exception as repair_error:
                     self._fail_world_model_call(repair_action_id, str(repair_error))
-                    candidate = {
-                        "reply_text": "嗯，你说。",
-                        "mentioned_event_ids": [],
-                        "proposed_action_ids": [],
-                        "claims": [],
-                    }
+                    candidate = build_safe_failure_candidate(message.text, grounded_fallback)
                 else:
                     self._record_world_model_output(
-                    purpose="reply_repair",
-                    causation=intent_id,
+                        purpose="reply_repair",
+                        causation=intent_id,
                         content=repaired_raw,
                         action_id=repair_action_id,
                     )
                     try:
                         candidate = self.world_kernel.validate_reply_candidate(
-                            self.world_id, parse_reply_candidate(repaired_raw)
+                            self.world_id,
+                            parse_reply_candidate(repaired_raw),
+                            user_id=user_id,
+                        )
+                        if only_repeats_claimed_sources(message.text, candidate):
+                            raise WorldError(
+                                "reply repeats a source without answering the requested detail"
+                            )
+                        if only_echoes_user_message(message.text, candidate):
+                            raise WorldError("reply only echoes the current user message")
+                        if only_recites_irrelevant_sources(message.text, candidate):
+                            raise WorldError(
+                                "reply only recites sources unrelated to the current turn"
+                            )
+                        if repeats_recent_companion_reply(
+                            candidate, list(snapshot.get("recent_messages", []))
+                        ):
+                            raise WorldError("reply repeats one of the last two companion replies")
+                        await self._audit_world_reply(
+                            purpose="reply_repair_audit",
+                            causation=intent_id,
+                            user_text=message.text,
+                            reply_text=str(candidate["reply_text"]),
+                            grounding_context=audit_context,
                         )
                     except WorldError:
-                        candidate = {
-                            "reply_text": "嗯，你说。",
-                            "mentioned_event_ids": [],
-                            "proposed_action_ids": [],
-                            "claims": [],
-                        }
-        text = sanitize_chat_text(str(candidate["reply_text"]))
+                        candidate = build_safe_failure_candidate(message.text, grounded_fallback)
+        text = sanitize_world_chat_text(str(candidate["reply_text"]))
         question = self._world_reply_question(text)
         expires_at = self._world_logical_now() + timedelta(hours=12)
         trace: dict[str, object] = {
             "world_id": self.world_id,
+            "user_id": user_id,
             "input_message_id": str(message.message_id or ""),
             "appraisal": appraisal,
             "expression_policy": str(policy),
-            "allowed_facts": facts,
+            "allowed_facts": [
+                *facts,
+                *(str(item.get("content") or "") for item in conversation_sources),
+            ],
             "short_lived_constraint": None,
             "observable_reason": "由已结算世界账本和本轮判断决定。",
         }
@@ -1539,7 +1774,9 @@ class CompanionEngine:
             )
             try:
                 candidate = self.world_kernel.validate_reply_candidate(
-                    self.world_id, parse_reply_candidate(raw)
+                    self.world_id,
+                    parse_reply_candidate(raw),
+                    user_id=self._ensure_world_user(canonical_user_id),
                 )
             except WorldError:
                 return None
@@ -1595,6 +1832,7 @@ class CompanionEngine:
             self.world_kernel.validate_reply_candidate(
                 self.world_id,
                 {"reply_text": text, "mentioned_event_ids": [], "proposed_action_ids": [], "claims": []},
+                user_id=self._ensure_world_user(canonical_user_id),
             )
             delivery_id, _, _ = self.world_kernel.queue_outgoing_action(
                 canonical_user_id=canonical_user_id,

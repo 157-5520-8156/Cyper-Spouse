@@ -2,6 +2,7 @@
 # later change must be an event in the append-only ledger.
 world_id: zhizhi-world-v1
 logical_at: "2026-07-11T09:00:00+08:00"
+materialize_current_schedule: true
 protagonist:
   id: zhizhi
   name: 沈知栀
@@ -98,12 +99,16 @@ daily_schedule:
     starts_hour: 0
     ends_hour: 8
     rest_recovery: 22
+    attention_demand: 95
+    interruptible: false
   - slot: morning_study
     title: 图书馆看书
     starts_hour: 9
     ends_hour: 12
     template_id: literature_reading
     location: 华东师范大学
+    attention_demand: 68
+    interruptible: true
   - slot: afternoon_class
     title: 整理课程笔记或参加社团活动
     starts_hour: 14
@@ -111,6 +116,8 @@ daily_schedule:
     template_id: course_notes
     location: 华东师范大学
     fallback_templates: [independent_sort]
+    attention_demand: 88
+    interruptible: false
   - slot: photo_work
     title: 整理摄影作品
     starts_hour: 18
@@ -119,12 +126,16 @@ daily_schedule:
     location: 上海
     fallback_templates: [course_notes]
     rest_recovery: 8
+    attention_demand: 72
+    interruptible: true
   - slot: evening_walk
     title: 傍晚散步或整理照片
     starts_hour: 20
     ends_hour: 22
     template_id: campus_walk
     location: 华东师范大学
+    attention_demand: 42
+    interruptible: true
 long_term_goals:
   - id: course-notes
     title: 整理课程笔记
