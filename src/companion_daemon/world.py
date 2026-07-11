@@ -441,8 +441,8 @@ class WorldKernel:
         remainder = reply_text
         for claim in normalized_claims:
             remainder = remainder.replace(claim["text"], "")
-        if re.search(r"(?:我|她|和).{0,28}(?:去了|吃了|见了|聊了|做了|完成了|回来|逛了|看了|参加了|上了)", remainder):
-            raise WorldError("reply contains an experience clause outside its committed claim")
+        if reply_text != "我在。" and re.search(r"(?:了|过|刚|已经|昨天|昨晚|早上|上午|下午|今晚|今天|明天|收到|买|等|在|去|来)", remainder):
+            raise WorldError("reply contains world-time or experience text outside committed claims")
         actions = _as_dict(state["actions"], "actions")
         invalid_actions = [str(item) for item in proposed_actions if str(item) not in actions]
         if invalid_actions:

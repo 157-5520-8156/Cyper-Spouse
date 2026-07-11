@@ -211,6 +211,9 @@ class CompanionEngine:
             }
         )
 
+    def _fail_world_model_call(self, action_id: str, reason: str) -> None:
+        self._submit_world_with_retry({"type": "record_external_result", "world_id": self.world_id, "action_id": action_id, "result": {"kind": "model_call", "status": "failed", "reason": reason[:300]}, "idempotency_key": f"fail:{action_id}"})
+
     def _world_logical_now(self) -> datetime:
         if not self.world_kernel or not self.world_id:
             raise RuntimeError("world logical time requested outside world mode")
@@ -667,8 +670,8 @@ class CompanionEngine:
             "- 未列入账本的计划、人物、经历和结果不得说成已经发生。"
         )
         model_action_id = self._begin_world_model_call(purpose="reply", causation=intent_id)
-        raw = await self.model.complete(
-            [
+        try:
+            raw = await self.model.complete([
                 {"role": "system", "content": self.companion_system_prompt},
                 {
                     "role": "user",
@@ -678,9 +681,10 @@ class CompanionEngine:
                         '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字引用的已结算片段"}]}。'
                     ),
                 },
-            ],
-            temperature=0.75,
-        )
+            ], temperature=0.75)
+        except Exception as exc:
+            self._fail_world_model_call(model_action_id, str(exc))
+            raise
         self._record_world_model_output(
             purpose="reply", causation=intent_id, content=raw, action_id=model_action_id
         )
@@ -1003,7 +1007,8 @@ class CompanionEngine:
             model_action_id = self._begin_world_model_call(purpose="afterthought", causation=causation)
             try:
                 raw = await self.model.complete([{"role": "user", "content": prompt}], temperature=0.7)
-            except Exception:
+            except Exception as exc:
+                self._fail_world_model_call(model_action_id, str(exc))
                 logger.exception("world afterthought generation failed")
                 return None
             self._record_world_model_output(
@@ -1513,7 +1518,11 @@ class CompanionEngine:
         )
         causation = f"proactive:{self.world_kernel.revision(self.world_id)}"
         model_action_id = self._begin_world_model_call(purpose="proactive", causation=causation)
-        raw = await self.model.complete([{"role": "user", "content": prompt}], temperature=0.7)
+        try:
+            raw = await self.model.complete([{"role": "user", "content": prompt}], temperature=0.7)
+        except Exception as exc:
+            self._fail_world_model_call(model_action_id, str(exc))
+            raise
         self._record_world_model_output(
             purpose="proactive",
             causation=causation, content=raw, action_id=model_action_id,
