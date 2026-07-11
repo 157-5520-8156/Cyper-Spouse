@@ -555,6 +555,7 @@ class WorldKernel:
                             "activity_id": activity_id,
                             "entity_id": "zhizhi",
                             "title": str(item["title"]),
+                            "template_id": str(item.get("template_id") or ""),
                             "starts_at": starts.isoformat(),
                             "ends_at": ends.isoformat(),
                         }
@@ -577,6 +578,7 @@ class WorldKernel:
                     and _parse_at(str(item["expires_at"])) <= _parse_at(target)
                 ):
                     events.append(("ActionExpired", {"action_id": action_id, "reason": "logical_timeout"}))
+            completed_activities: list[dict[str, object]] = []
             for event_type, payload in list(events):
                 if event_type == "ActivityCompleted":
                     activity_id = str(payload["activity_id"])
@@ -584,7 +586,8 @@ class WorldKernel:
                     if activity is None:
                         activity = next((item for kind, item in events if kind == "ActivityPlanned" and item["activity_id"] == activity_id), None)
                     if activity is not None:
-                        events.extend(self.life_simulation.outcomes_for(state, _as_dict(activity, "activity")))
+                        completed_activities.append(_as_dict(activity, "activity"))
+            events.extend(self.life_simulation.advance(state, completed_activities))
             return events
         if command_type == "register_npc":
             npc = _as_dict(command.get("npc"), "npc")
@@ -1045,6 +1048,8 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "LifeOutcomeCommitted":
         _as_dict(next_state.setdefault("outcomes", {}), "outcomes")[str(payload["outcome_id"])] = {**payload, "status": "committed"}
         _as_dict(next_state["proposals"], "proposals")[str(payload["outcome_id"])] ["status"] = "committed"
+    elif event.event_type == "LifeOutcomeValidated":
+        _as_dict(next_state["proposals"], "proposals")[str(payload["outcome_id"])] ["validated"] = True
     elif event.event_type == "GoalProgressed":
         goal = _as_dict(_as_dict(next_state["goals"], "goals").get(str(payload["goal_id"])), "goal")
         goal["progress"] = min(int(goal["target"]), int(goal["progress"]) + int(payload["delta"]))
