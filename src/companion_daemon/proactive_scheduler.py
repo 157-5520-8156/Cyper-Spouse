@@ -164,6 +164,75 @@ async def recover_overdue_deferred_replies(
     return recovered
 
 
+async def recover_overdue_conversation_pulses(
+    engine,
+    *,
+    send: bool,
+    sandbox: bool,
+    now: datetime | None = None,
+) -> int:
+    """Deliver continuation stages that outlived an adapter process.
+
+    The live QQ coalescer owns normal sub-minute timing.  This only claims a
+    stage after a grace period, and every incoming turn cancels its task through
+    ``CompanionEngine.handle_message`` before it can be claimed.
+    """
+    if not send or not hasattr(engine.store, "claim_due_social_tasks"):
+        return 0
+    now = now or datetime.now().astimezone()
+    rows = engine.store.claim_due_social_tasks(
+        kind="conversation_pulse", now=now - timedelta(minutes=2)
+    )
+    if not rows:
+        return 0
+    delivery = QQDelivery(get_settings(), sandbox=sandbox)
+    recovered = 0
+    for row in rows:
+        task_id = int(row["id"])
+        payload = json.loads(row["payload_json"])
+        delivery_id = None
+        try:
+            reply_sent_at = datetime.fromisoformat(str(payload["reply_sent_at"]))
+            mode = str(payload.get("mode") or "quick_continue")
+            text = await engine.generate_afterthought(
+                str(row["canonical_user_id"]), reply_sent_at, mode=mode
+            )
+            if not text:
+                engine.cancel_conversation_pulse(task_id)
+                continue
+            delivery_id = engine.queue_afterthought_delivery(
+                str(row["canonical_user_id"]), str(row["platform"]), text
+            )
+            await delivery.send_text(str(row["platform_user_id"]), text)
+            engine.confirm_afterthought_delivery(
+                str(row["canonical_user_id"]),
+                str(row["platform"]),
+                text,
+                delivery_id=delivery_id,
+            )
+            engine.complete_conversation_pulse(task_id)
+            remaining = payload.get("remaining") or []
+            if remaining and hasattr(engine, "schedule_conversation_pulse"):
+                next_stage = remaining[0]
+                engine.schedule_conversation_pulse(
+                    canonical_user_id=str(row["canonical_user_id"]),
+                    platform=str(row["platform"]),
+                    platform_user_id=str(row["platform_user_id"]),
+                    reply_sent_at=reply_sent_at,
+                    mode=str(next_stage.get("mode") or "topic_drift"),
+                    delay_seconds=float(next_stage.get("delay_seconds") or 60),
+                    remaining=list(remaining[1:]),
+                )
+            recovered += 1
+            logger.info("recovered conversation pulse %s", task_id)
+        except Exception:
+            logger.exception("failed to recover conversation pulse %s", task_id)
+            if delivery_id is not None:
+                engine.fail_afterthought_delivery(delivery_id, "conversation pulse recovery delivery failed")
+            engine.cancel_conversation_pulse(task_id)
+    return recovered
+
+
 async def scheduler_loop(
     *,
     send: bool,
@@ -177,6 +246,7 @@ async def scheduler_loop(
     while True:
         engine = build_companion_engine()
         await recover_overdue_deferred_replies(engine, send=send, sandbox=sandbox)
+        await recover_overdue_conversation_pulses(engine, send=send, sandbox=sandbox)
         users = engine.store.canonical_users() or ["geoff"]
         for user_id in users:
             # Time keeps flowing through her waiting psychology even when the

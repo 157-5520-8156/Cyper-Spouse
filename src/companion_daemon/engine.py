@@ -156,6 +156,10 @@ class CompanionEngine:
         self.store.cancel_active_social_tasks(canonical_user_id, kind="comfort_followup")
         self.store.cancel_active_social_tasks(canonical_user_id, kind="promise_followup")
         self.store.cancel_active_social_tasks(canonical_user_id, kind="contradiction_followup")
+        # A real new turn, regardless of its platform, overtakes any delayed
+        # continuation.  This is the shared cancellation point used by QQ
+        # official, NapCat, and future adapters.
+        self.store.cancel_active_social_tasks(canonical_user_id, kind="conversation_pulse")
         previous_state = self.store.get_mood_state(canonical_user_id)
         runtime = advance_life_runtime(self.store, canonical_user_id, previous_state)
         recent_dicts_before = self._recent_dicts(canonical_user_id, limit=16)
@@ -766,7 +770,12 @@ class CompanionEngine:
         state even while the proactive cooldown is skipping decisions.
         """
         state = self.store.get_mood_state(canonical_user_id)
-        last_sent = self.store.last_initiated_delivery(canonical_user_id, "qq")
+        # Do not reset the emotional clock when she sends a second bubble into
+        # the same silence.  The relevant moment is when this unanswered turn
+        # began, not the most recent attempt to fill it.
+        last_sent = self.store.unanswered_outgoing_started_at(canonical_user_id)
+        if last_sent is None:
+            last_sent = self.store.last_initiated_delivery(canonical_user_id, "qq")
         state = apply_waiting_after_proactive(
             state,
             last_sent_iso=last_sent,
@@ -781,6 +790,72 @@ class CompanionEngine:
         self.store.save_mood_state(canonical_user_id, state)
         synchronize_life_runtime(self.store, canonical_user_id, state)
         return state
+
+    def outreach_block_reason(self, canonical_user_id: str, state: MoodState | None = None) -> str | None:
+        """Return why she should not add another unsolicited bubble yet."""
+        state = state or self.store.get_mood_state(canonical_user_id)
+        limit = {
+            "stranger": 1,
+            "acquaintance": 1,
+            "friend": 2,
+            "close_friend": 2,
+            "ambiguous": 2,
+            "lover": 3,
+        }[state.relationship_stage]
+        streak = self.store.unanswered_outgoing_streak(canonical_user_id)
+        latest_outgoing = self.store.latest_outgoing_at(canonical_user_id)
+        age_minutes = (
+            (utc_now() - datetime.fromisoformat(latest_outgoing)).total_seconds() / 60
+            if latest_outgoing
+            else 0
+        )
+        # The immediate response to a user turn is not a "chasing" pattern.
+        # This gate starts after it has had time to become an unanswered turn.
+        if streak >= limit and age_minutes >= 30:
+            return f"她已经连续发了{streak}条而没得到新回应，应该把聊天空间还给对方。"
+        if state.relationship_stage in {"stranger", "acquaintance"} and state.initiative <= 8:
+            return "刚认识且主动欲已经收住，不为了证明存在感再开新话题。"
+        return None
+
+    def schedule_conversation_pulse(
+        self,
+        *,
+        canonical_user_id: str,
+        platform: str,
+        platform_user_id: str,
+        reply_sent_at: datetime,
+        mode: str,
+        delay_seconds: float,
+        remaining: list[dict[str, object]],
+    ) -> int:
+        """Persist one tentative continuation bubble before its live timer runs."""
+        now = utc_now()
+        due_at = now + timedelta(seconds=max(1.0, delay_seconds))
+        return self.store.create_social_task(
+            canonical_user_id,
+            kind="conversation_pulse",
+            platform=platform,  # type: ignore[arg-type]
+            platform_user_id=platform_user_id,
+            payload={
+                "reply_sent_at": reply_sent_at.isoformat(),
+                "mode": mode,
+                "remaining": remaining,
+            },
+            reason="这轮对话还留着一点没说完的余韵；用户回来就立刻取消，不重放旧话。",
+            due_at=due_at,
+            expires_at=due_at + timedelta(minutes=35),
+        )
+
+    def conversation_pulse_is_active(self, task_id: int | None) -> bool:
+        return task_id is None or self.store.social_task_is_active(task_id)
+
+    def complete_conversation_pulse(self, task_id: int | None) -> None:
+        if task_id is not None:
+            self.store.resolve_social_task(task_id)
+
+    def cancel_conversation_pulse(self, task_id: int | None) -> None:
+        if task_id is not None:
+            self.store.cancel_social_task(task_id)
 
     async def proactive_tick(self, canonical_user_id: str) -> ProactiveDecision:
         now = utc_now()
@@ -800,6 +875,27 @@ class CompanionEngine:
             ),
             now=now,
         )
+        outreach_block = self.outreach_block_reason(canonical_user_id, state)
+        if outreach_block:
+            if social_task:
+                self.store.defer_social_task(int(social_task["id"]), due_at=now + timedelta(hours=2))
+            decision = ProactiveDecision(
+                canonical_user_id=canonical_user_id,
+                private_thought=outreach_block,
+                should_send=False,
+            )
+            self.store.save_proactive_event(
+                canonical_user_id,
+                decision.private_thought,
+                False,
+                None,
+                "none",
+                None,
+                None,
+                None,
+                120,
+            )
+            return decision
         trigger = _social_task_trigger(social_task) or evaluate_proactive_trigger(
             state=state,
             recent_messages=recent_rows,

@@ -423,10 +423,19 @@ class QQMessageCoalescer:
         if not selected:
             logger.info("no afterthought planned for %s", key)
             return
+        first = selected[0]
+        remaining = _pulse_remaining(selected[1:], first.delay_seconds)
+        pulse_task_id = self._persist_conversation_pulse(
+            merged,
+            reply_sent_at,
+            mode=first.mode,
+            delay_seconds=first.delay_seconds,
+            remaining=remaining,
+        )
         self._afterthought_tasks[key] = [
             asyncio.create_task(
                 self._fire_afterthought_episode(
-                    key, selected, merged, reply_target, reply_sent_at
+                    key, selected, merged, reply_target, reply_sent_at, pulse_task_id=pulse_task_id
                 )
             )
         ]
@@ -436,6 +445,32 @@ class QQMessageCoalescer:
             ",".join(plan.mode for plan in selected),
         )
 
+    def _persist_conversation_pulse(
+        self,
+        merged: IncomingMessage,
+        reply_sent_at: datetime,
+        *,
+        mode: str,
+        delay_seconds: float,
+        remaining: list[dict[str, object]],
+    ) -> int | None:
+        if not hasattr(self.engine, "schedule_conversation_pulse"):
+            return None
+        try:
+            canonical_user_id = self.engine.store.resolve_user(merged.platform, merged.platform_user_id)
+            return self.engine.schedule_conversation_pulse(
+                canonical_user_id=canonical_user_id,
+                platform=merged.platform,
+                platform_user_id=merged.platform_user_id,
+                reply_sent_at=reply_sent_at,
+                mode=mode,
+                delay_seconds=delay_seconds,
+                remaining=remaining,
+            )
+        except Exception:
+            logger.exception("failed to persist conversation pulse; retaining live timer")
+            return None
+
     async def _fire_afterthought_episode(
         self,
         key: str,
@@ -443,6 +478,8 @@ class QQMessageCoalescer:
         merged: IncomingMessage,
         reply_target: ReplyTarget,
         reply_sent_at: datetime,
+        *,
+        pulse_task_id: int | None = None,
     ) -> None:
         """Run a bounded, cancellable continuation episode.
 
@@ -452,20 +489,32 @@ class QQMessageCoalescer:
         """
         elapsed = 0.0
         sent_texts: list[str] = []
-        for plan in plans:
+        for index, plan in enumerate(plans):
+            remaining_delay = max(0.0, plan.delay_seconds - elapsed)
+            if index:
+                pulse_task_id = self._persist_conversation_pulse(
+                    merged,
+                    reply_sent_at,
+                    mode=plan.mode,
+                    delay_seconds=remaining_delay,
+                    remaining=_pulse_remaining(plans[index + 1 :], plan.delay_seconds),
+                )
             sent = await self._fire_afterthought(
                 key,
                 plan,
                 merged,
                 reply_target,
                 reply_sent_at,
-                delay_seconds=max(0.0, plan.delay_seconds - elapsed),
+                delay_seconds=remaining_delay,
                 avoid_texts=sent_texts,
+                pulse_task_id=pulse_task_id,
             )
             # If a generation was withheld, there is no conversational thread
             # to extend.  Cancellation is also represented by task completion.
             if not sent or key not in self._afterthought_tasks:
                 return
+            if hasattr(self.engine, "complete_conversation_pulse"):
+                self.engine.complete_conversation_pulse(pulse_task_id)
             sent_texts.append(sent)
             elapsed = plan.delay_seconds
 
@@ -479,9 +528,13 @@ class QQMessageCoalescer:
         *,
         delay_seconds: float | None = None,
         avoid_texts: list[str] | None = None,
+        pulse_task_id: int | None = None,
     ) -> str | None:
         try:
             await self.sleep(plan.delay_seconds if delay_seconds is None else delay_seconds)
+            if hasattr(self.engine, "conversation_pulse_is_active") and not self.engine.conversation_pulse_is_active(pulse_task_id):
+                logger.info("afterthought pulse %s was cancelled by newer user activity", pulse_task_id)
+                return None
             canonical_user_id = self.engine.store.resolve_user(
                 merged.platform, merged.platform_user_id
             )
@@ -493,6 +546,8 @@ class QQMessageCoalescer:
             if not text:
                 logger.info("afterthought withheld for %s mode=%s", key, plan.mode)
                 self._afterthought_tasks.pop(key, None)
+                if hasattr(self.engine, "cancel_conversation_pulse"):
+                    self.engine.cancel_conversation_pulse(pulse_task_id)
                 return None
             if any(_afterthought_texts_overlap(text, earlier) for earlier in avoid_texts or []):
                 logger.info("afterthought withheld for %s because it repeats this episode", key)
@@ -516,6 +571,8 @@ class QQMessageCoalescer:
                 )
             return text
         except asyncio.CancelledError:
+            if hasattr(self.engine, "cancel_conversation_pulse"):
+                self.engine.cancel_conversation_pulse(pulse_task_id)
             return None
         except Exception:
             logger.exception("afterthought failed")
@@ -548,6 +605,16 @@ def _afterthought_texts_overlap(candidate: str, earlier: str) -> bool:
     if not left or not right:
         return False
     return left in right or right in left or len(set(left) & set(right)) / max(len(set(left)), 1) >= 0.82
+
+
+def _pulse_remaining(plans: list[AfterthoughtPlan], previous_delay: float) -> list[dict[str, object]]:
+    """Serialize later stages as delays relative to the stage before them."""
+    remaining: list[dict[str, object]] = []
+    elapsed = previous_delay
+    for plan in plans:
+        remaining.append({"mode": plan.mode, "delay_seconds": max(1.0, plan.delay_seconds - elapsed)})
+        elapsed = plan.delay_seconds
+    return remaining
 
 
 def _afterthought_plans(text: str, rng: random.Random) -> list[AfterthoughtPlan]:

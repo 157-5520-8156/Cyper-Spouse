@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 import hashlib
 
 from companion_daemon.models import IncomingMessage, LifeRuntimeState, MoodState
@@ -27,7 +27,7 @@ class ActivityTemplate:
     duration_minutes: tuple[int, int]
 
 
-_TEMPLATES: dict[str, tuple[ActivityTemplate, ...]] = {
+_TERM_TEMPLATES: dict[str, tuple[ActivityTemplate, ...]] = {
     "morning_focus": (
         ActivityTemplate("class", "上课或自习，手机调成了静音放在旁边", 78, False, (35, 85)),
         ActivityTemplate("study", "在图书馆看书，偶尔会瞄一眼手机", 62, True, (30, 70)),
@@ -55,6 +55,36 @@ _TEMPLATES: dict[str, tuple[ActivityTemplate, ...]] = {
     "early_morning": (
         ActivityTemplate("morning", "刚醒，慢慢收拾今天要做什么", 55, True, (20, 50)),
     ),
+}
+
+# July and August should not silently pretend that every weekday is a normal
+# campus timetable.  These are private runtime candidates, not character facts:
+# a particular day can be at home, in Shanghai, or out for something small.
+_SUMMER_TEMPLATES: dict[str, tuple[ActivityTemplate, ...]] = {
+    "deep_night": _TERM_TEMPLATES["deep_night"],
+    "early_morning": (
+        ActivityTemplate("morning", "暑假醒得慢一点，先看天气和消息", 42, True, (20, 50)),
+        ActivityTemplate("quiet", "清早醒了一下，又赖回去看了会儿窗外", 36, True, (20, 45)),
+    ),
+    "morning_focus": (
+        ActivityTemplate("study", "在家或咖啡店慢慢看书，没按课表赶时间", 50, True, (45, 100)),
+        ActivityTemplate("errand", "出门办一点暑假里的小事，手机偶尔在手边", 44, True, (35, 85)),
+    ),
+    "lunch_break": (
+        ActivityTemplate("meal", "吃午饭，顺便想下午要不要出门", 25, True, (25, 55)),
+        ActivityTemplate("walk", "挑太阳没那么晒的时候在附近走走", 22, True, (20, 55)),
+    ),
+    "afternoon_classes": (
+        ActivityTemplate("study", "暑假把想看的东西摊开慢慢看，没按课表赶时间", 48, True, (45, 115)),
+        ActivityTemplate("walk", "去附近逛一段，顺手拍点路上的光影", 32, True, (35, 90)),
+        ActivityTemplate("friends", "和朋友约着待一会儿，未必一直看手机", 45, True, (45, 110)),
+    ),
+    "evening_unwind": (
+        ActivityTemplate("walk", "傍晚出去透透气，慢慢走一段路", 24, True, (35, 85)),
+        ActivityTemplate("friends", "和熟人吃饭或坐一会儿，聊天不总盯手机", 46, True, (45, 105)),
+        ActivityTemplate("unwind", "回到自己的节奏里，整理照片或随便看看东西", 28, True, (35, 85)),
+    ),
+    "late_evening": _TERM_TEMPLATES["late_evening"],
 }
 
 _DAY_SLOTS: tuple[tuple[str, int, int, str], ...] = (
@@ -88,6 +118,7 @@ def advance_life_runtime(store, canonical_user_id: str, state: MoodState, *, now
     _ensure_daily_plan(store, canonical_user_id, now, state)
     current = store.get_life_runtime(canonical_user_id)
     if current and current.ends_at > now:
+        current = _correct_stale_summer_classification(store, canonical_user_id, current, now)
         if current.user_event_effect_until and current.user_event_effect_until <= now:
             current = current.model_copy(
                 update={
@@ -146,6 +177,34 @@ def advance_life_runtime(store, canonical_user_id: str, state: MoodState, *, now
         source="life_runtime",
     )
     return runtime
+
+
+def _correct_stale_summer_classification(
+    store,
+    canonical_user_id: str,
+    runtime: LifeRuntimeState,
+    now: datetime,
+) -> LifeRuntimeState:
+    """Repair a pre-calendar active class block before it is treated as lived."""
+    local_date = now.astimezone().date().isoformat()
+    if not _is_summer_break(local_date) or runtime.activity_kind != "class":
+        return runtime
+    template = _choose_template(canonical_user_id, now)
+    if template.kind == "class":
+        return runtime
+    corrected = runtime.model_copy(
+        update={
+            "activity": template.activity,
+            "activity_kind": template.kind,
+            "base_attention_demand": template.attention_demand,
+            "attention_demand": template.attention_demand,
+            "interruptible": template.interruptible,
+            "updated_at": now,
+        }
+    )
+    store.save_life_runtime(canonical_user_id, corrected)
+    store.correct_active_life_event(canonical_user_id, kind=template.kind, content=template.activity)
+    return corrected
 
 
 def _ensure_daily_plan(store, canonical_user_id: str, now: datetime, state: MoodState) -> None:
@@ -437,6 +496,8 @@ _LIFE_RESULT_WINDOWS: dict[str, tuple[int, int, tuple[str, ...]]] = {
     "friend_invite": (17, 21, ()),
     "weather_shift": (10, 19, ()),
     "fatigue": (14, 22, ()),
+    "city_exhibit": (10, 19, ("walk", "study", "errand")),
+    "photo_walk": (16, 21, ("walk", "unwind", "friends")),
 }
 
 # Most days nothing notable happens; the ratio gate keeps that the default.
@@ -449,6 +510,9 @@ def plan_daily_life_result(canonical_user_id: str, local_date: str) -> tuple[str
     if ratio > _LIFE_RESULT_DAY_PROBABILITY:
         return None
     kinds = tuple(_LIFE_RESULT_WINDOWS)
+    if _is_summer_break(local_date):
+        # A cancelled class is not an available plot beat during vacation.
+        kinds = tuple(kind for kind in kinds if kind != "class_cancelled")
     kind = kinds[min(len(kinds) - 1, int(ratio / _LIFE_RESULT_DAY_PROBABILITY * len(kinds)))]
     start_hour, end_hour, _ = _LIFE_RESULT_WINDOWS[kind]
     hour = start_hour + int(
@@ -554,9 +618,14 @@ def _choose_template(canonical_user_id: str, now: datetime) -> ActivityTemplate:
 
 
 def _choose_template_for_phase(canonical_user_id: str, phase: str, local_date: str) -> ActivityTemplate:
-    templates = _TEMPLATES[phase]
+    templates = (_SUMMER_TEMPLATES if _is_summer_break(local_date) else _TERM_TEMPLATES)[phase]
     index = int(_stable_ratio(canonical_user_id, phase, local_date) * len(templates))
     return templates[min(index, len(templates) - 1)]
+
+
+def _is_summer_break(local_date: str) -> bool:
+    day = date.fromisoformat(local_date)
+    return day.month in {7, 8}
 
 
 def _stable_duration(canonical_user_id: str, template: ActivityTemplate, now: datetime) -> int:
@@ -652,6 +721,22 @@ def _life_event_result_effect(event_kind: str) -> tuple[str, int, int, str, str,
             "把后面的事拆小一点慢慢做，不强撑高专注",
             "疲惫后的降速",
             12,
+        ),
+        "city_exhibit": (
+            "路过一个小展或书店活动，临时停下来待了一会儿",
+            95,
+            4,
+            "把刚刚看到的东西记了两句，慢慢回到自己的安排里",
+            "临时停留后的余韵",
+            2,
+        ),
+        "photo_walk": (
+            "傍晚的光线刚好，临时多走了一段路拍了几张照片",
+            100,
+            -4,
+            "回去整理刚拍的照片，心情比原来松一点",
+            "散步后的松弛",
+            -4,
         ),
     }
     return effects.get(event_kind)

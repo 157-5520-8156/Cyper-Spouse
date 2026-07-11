@@ -690,6 +690,23 @@ class CompanionStore:
                 (completed_at.isoformat(), canonical_user_id),
             )
 
+    def correct_active_life_event(
+        self, canonical_user_id: str, *, kind: str, content: str
+    ) -> None:
+        """Correct an invalid generated runtime block before it becomes history."""
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update life_runtime_events set kind = ?, content = ?
+                where id = (
+                  select id from life_runtime_events
+                  where canonical_user_id = ? and status = 'active' and source = 'life_runtime'
+                  order by id desc limit 1
+                )
+                """,
+                (kind, content, canonical_user_id),
+            )
+
     def recent_life_events(self, canonical_user_id: str, limit: int = 8) -> list[sqlite3.Row]:
         with self.connect() as conn:
             rows = conn.execute(
@@ -885,6 +902,14 @@ class CompanionStore:
                 """,
                 (utc_now().isoformat(), task_id),
             )
+
+    def social_task_is_active(self, task_id: int) -> bool:
+        with self.connect() as conn:
+            row = conn.execute(
+                "select 1 from social_tasks where id = ? and status in ('pending', 'claimed')",
+                (task_id,),
+            ).fetchone()
+        return row is not None
 
     def cancel_active_social_tasks(self, canonical_user_id: str, *, kind: str) -> None:
         with self.connect() as conn:
@@ -1423,6 +1448,59 @@ class CompanionStore:
                 order by sent_at desc limit 1
                 """,
                 (canonical_user_id, *channels),
+            ).fetchone()
+        return str(row["sent_at"]) if row else None
+
+    def unanswered_outgoing_streak(self, canonical_user_id: str, *, limit: int = 24) -> int:
+        """Count delivered chat bubbles after the newest user turn.
+
+        This is deliberately based on chat history rather than proactive event
+        rows: life sharing, afterthoughts, and ordinary proactive messages must
+        all consume the same "she has the floor" budget.
+        """
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select direction from messages
+                where canonical_user_id = ?
+                order by id desc limit ?
+                """,
+                (canonical_user_id, limit),
+            ).fetchall()
+        streak = 0
+        for row in rows:
+            if row["direction"] == "in":
+                break
+            if row["direction"] == "out":
+                streak += 1
+        return streak
+
+    def latest_outgoing_at(self, canonical_user_id: str) -> str | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select sent_at from messages
+                where canonical_user_id = ? and direction = 'out'
+                order by id desc limit 1
+                """,
+                (canonical_user_id,),
+            ).fetchone()
+        return str(row["sent_at"]) if row else None
+
+    def unanswered_outgoing_started_at(self, canonical_user_id: str) -> str | None:
+        """Return when the current unanswered companion turn actually began."""
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select sent_at from messages
+                where canonical_user_id = ? and direction = 'out'
+                  and id > coalesce((
+                    select max(id) from messages
+                    where canonical_user_id = ? and direction = 'in'
+                  ), 0)
+                order by id asc limit 1
+                """,
+                (canonical_user_id, canonical_user_id),
             ).fetchone()
         return str(row["sent_at"]) if row else None
 

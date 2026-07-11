@@ -262,3 +262,78 @@ async def test_recovered_split_reply_keeps_a_turn_taking_gap(tmp_path: Path, mon
     assert recovered == 1
     assert FakeDelivery.sent == ["第一句。", "第二句。"]
     assert pauses and pauses[0] >= 1.8
+
+
+@pytest.mark.asyncio
+async def test_new_message_cancels_persisted_conversation_pulse_across_adapters(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.map_account("qq", "official-openid", "geoff")
+    store.map_account("simulator", "napcat-qq", "geoff")
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。")
+    task_id = engine.schedule_conversation_pulse(
+        canonical_user_id="geoff",
+        platform="qq",
+        platform_user_id="official-openid",
+        reply_sent_at=datetime.now(UTC),
+        mode="quick_continue",
+        delay_seconds=30,
+        remaining=[],
+    )
+
+    await engine.handle_message(
+        IncomingMessage(platform="simulator", platform_user_id="napcat-qq", text="我回来了"),
+        skip_reply=True,
+    )
+
+    assert store.social_task_is_active(task_id) is False
+
+
+@pytest.mark.asyncio
+async def test_scheduler_recovers_persisted_conversation_pulse_and_keeps_next_stage(tmp_path: Path, monkeypatch) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.map_account("qq", "2759284998", "geoff")
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。")
+    now = datetime.now(UTC)
+    task_id = store.create_social_task(
+        "geoff",
+        kind="conversation_pulse",
+        platform="qq",
+        platform_user_id="2759284998",
+        payload={
+            "reply_sent_at": (now - timedelta(minutes=5)).isoformat(),
+            "mode": "quick_continue",
+            "remaining": [{"mode": "topic_drift", "delay_seconds": 60}],
+        },
+        reason="测试持久余韵",
+        due_at=now - timedelta(minutes=3),
+        expires_at=now + timedelta(hours=1),
+    )
+
+    async def generated(*args, **kwargs) -> str:
+        return "刚刚又想到一点。"
+
+    class FakeDelivery:
+        sent: list[str] = []
+
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def send_text(self, recipient_id: str, text: str) -> None:
+            assert recipient_id == "2759284998"
+            self.sent.append(text)
+
+    monkeypatch.setattr(engine, "generate_afterthought", generated)
+    monkeypatch.setattr(scheduler_module, "QQDelivery", FakeDelivery)
+    monkeypatch.setattr(scheduler_module, "get_settings", lambda: object())
+
+    recovered = await scheduler_module.recover_overdue_conversation_pulses(
+        engine, send=True, sandbox=False, now=now
+    )
+
+    assert recovered == 1
+    assert FakeDelivery.sent == ["刚刚又想到一点。"]
+    assert store.social_task_is_active(task_id) is False
+    pending = [task for task in store.recent_social_tasks("geoff") if task["kind"] == "conversation_pulse"]
+    assert any(task["status"] == "pending" for task in pending)

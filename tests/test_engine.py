@@ -301,8 +301,54 @@ def test_refresh_waiting_state_advances_waiting_psychology(tmp_path: Path) -> No
 
     state = engine.refresh_waiting_state("geoff")
 
-    assert state.unresolved_emotion == "主动消息没等到回应，她会从期待变成有点收住。"
+    assert state.unresolved_emotion == "主动消息没等到回应，她会把分享欲收住，先回到自己的节奏。"
     assert store.get_mood_state("geoff").unresolved_emotion == state.unresolved_emotion
+
+
+def test_long_unanswered_outgoing_streak_blocks_new_proactive_turns(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+    store.save_outgoing("geoff", "qq", "刚刚想到一件小事。")
+    store.save_outgoing("geoff", "qq", "再补一句。")
+    with store.connect() as conn:
+        conn.execute(
+            "update messages set sent_at = ? where canonical_user_id = ? and direction = 'out'",
+            ((utc_now() - timedelta(hours=2)).isoformat(), "geoff"),
+        )
+
+    assert engine.outreach_block_reason("geoff")
+
+
+def test_waiting_clock_uses_first_outgoing_after_last_user_turn(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.save_incoming("geoff", IncomingMessage(platform="qq", platform_user_id="geoff", text="晚安"))
+    store.save_outgoing("geoff", "qq", "晚安。")
+    store.save_outgoing("geoff", "qq", "刚刚又想到一点。")
+    with store.connect() as conn:
+        conn.execute(
+            "update messages set sent_at = ? where canonical_user_id = ? and direction = 'in'",
+            ((utc_now() - timedelta(hours=14)).isoformat(), "geoff"),
+        )
+        rows = conn.execute(
+            "select id from messages where canonical_user_id = ? and direction = 'out' order by id",
+            ("geoff",),
+        ).fetchall()
+        conn.execute(
+            "update messages set sent_at = ? where id = ?",
+            ((utc_now() - timedelta(hours=13)).isoformat(), rows[0]["id"]),
+        )
+        conn.execute(
+            "update messages set sent_at = ? where id = ?",
+            ((utc_now() - timedelta(minutes=5)).isoformat(), rows[1]["id"]),
+        )
+
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+    state = engine.refresh_waiting_state("geoff")
+
+    assert state.initiative <= 8
+    assert "不再追着补话" in (state.unresolved_emotion or "")
 
 
 def test_debug_snapshot_includes_social_task_visibility(tmp_path: Path) -> None:

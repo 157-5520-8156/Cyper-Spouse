@@ -21,7 +21,7 @@ from companion_daemon.models import IncomingMessage, LifeRuntimeState, MoodState
 def test_life_runtime_persists_current_activity(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
-    now = datetime(2026, 7, 10, 2, 0, tzinfo=UTC)
+    now = datetime(2026, 6, 10, 2, 0, tzinfo=UTC)
 
     runtime = advance_life_runtime(store, "geoff", MoodState(), now=now)
 
@@ -97,12 +97,47 @@ def test_time_travel_across_a_day_keeps_continuity_and_completes_only_elapsed_ac
     evening = advance_life_runtime(store, "geoff", MoodState(), now=morning + timedelta(hours=12))
     events = store.recent_life_events("geoff", limit=20)
 
-    assert first.activity_kind == "morning"
-    assert evening.activity_kind in {"unwind", "friends"}
+    assert first.activity_kind in {"morning", "quiet"}
+    assert evening.activity_kind in {"walk", "unwind", "friends"}
     assert any(event["status"] == "completed" for event in events)
     # Planned slots remain internal. An entered activity may additionally leave one
     # small private event, but no future plan item becomes a lived fact.
     assert len([event for event in events if event["kind"] != "private_life_event"]) == 2
+
+
+def test_summer_daily_plan_does_not_treat_vacation_as_regular_classes(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    afternoon = datetime(2026, 7, 10, 7, 0, tzinfo=UTC)  # 15:00 Shanghai
+
+    runtime = advance_life_runtime(store, "geoff", MoodState(), now=afternoon)
+
+    assert runtime.activity_kind in {"study", "walk", "friends"}
+    assert "上课" not in runtime.activity
+
+
+def test_active_pre_calendar_class_block_is_corrected_during_summer(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 7, 0, tzinfo=UTC)
+    store.save_life_runtime(
+        "geoff",
+        LifeRuntimeState(
+            activity="下午上课或自习，注意力被手头的事占着",
+            activity_kind="class",
+            attention_demand=72,
+            interruptible=False,
+            started_at=now - timedelta(hours=1),
+            ends_at=now + timedelta(hours=2),
+            phone_attention="away",
+            updated_at=now - timedelta(hours=1),
+        ),
+    )
+
+    runtime = advance_life_runtime(store, "geoff", MoodState(), now=now)
+
+    assert runtime.activity_kind != "class"
+    assert "上课" not in runtime.activity
 
 
 def test_durable_state_changes_the_next_days_private_plan(tmp_path: Path) -> None:
@@ -344,7 +379,7 @@ def test_sent_reply_returns_phone_to_current_activity(tmp_path: Path) -> None:
 def test_high_focus_question_can_wait_but_emotional_message_breaks_through(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
-    now = datetime(2026, 7, 10, 2, 0, tzinfo=UTC)
+    now = datetime(2026, 6, 10, 2, 0, tzinfo=UTC)
     store.save_life_runtime(
         "geoff",
         LifeRuntimeState(

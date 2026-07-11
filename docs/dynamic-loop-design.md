@@ -114,6 +114,8 @@
 - [已实现初版] 失败投递后创建 `reply_reconsider` 事务，不重放原入站消息；失败 outbox 保留为事实，稍后由主动决策重新判断是否自然补一句；见 `tests/test_engine.py::test_failed_deferred_reply_creates_reconsider_task_without_writing_history`。
 - [已实现] 语义化未完成事务：用户脆弱表达会创建 `comfort_followup`；“晚点/明天跟你说”会创建 `promise_followup`；私有生活事件会创建 `life_share_followup`，到期后作为低压力分享候选，成功投递才标记已分享并收束；用户指出前后说法不一致会创建 `contradiction_followup`，新消息会取消挂起项，到期后允许轻描淡写地圆过去。见 `tests/test_social_tasks.py` 与 `tests/test_social_followups.py`。
 - [已实现初版] 关系事件的滞后效应：最近一批互动里反复出现的温暖/修复/解释，或反复冒犯/控制/过早亲密，才会推动长期 `emotion_baseline` 与 `emotion_affinity`；单次事件只影响即时心情和印象，避免一次消息决定关系；见 `tests/test_advanced_state.py::test_repeated_interactions_change_affinity_but_one_event_does_not`。
+- [已实现] 统一“她已经说过而用户尚未接住”的消息预算。普通主动、生活分享和会话余韵都读取同一条出站连续计数；陌生/认识阶段只允许一轮未回应外发，半小时后仍未收到新输入就停止追加，避免三个模块各自认为“再补一句”无害。等待会降低安全感、回应印象和主动欲，但陌生阶段不会把沉默误写成恋人式想念或生气；见 `CompanionEngine.outreach_block_reason` 与 `tests/test_advanced_state.py`。
+- [已实现] 会话余韵的跨进程/跨适配器持久化：每一个候选阶段先成为 `social_tasks.conversation_pulse`，QQ 实时定时器是正常路径，调度器只在超出宽限期后接管。任何平台的用户新消息都在 `engine.handle_message` 的共享入口取消它；因此重启、官方 QQ/NapCat 切换不会让旧余韵继续自言自语。见 `tests/test_social_tasks.py::test_new_message_cancels_persisted_conversation_pulse_across_adapters`。
 
 #### 会话节律与发散剧集（2026-07-11）
 
@@ -155,6 +157,11 @@
 - [计划] 扩展时间旅行测试：固定时钟模拟一周，断言情绪、期待、冷却和恢复轨迹。
 - [已实现初版] 增加会话回放评测：已有 `companion-eval-dialogue` / context regression；新增同一输入在不同生活状态和关系状态下必须得到不同上下文策略的确定性测试，见 `tests/test_context_orchestrator.py::test_same_input_gets_different_context_under_different_state_and_life`。`tests/test_dialogue_eval.py::test_context_regression_suite_passes` 已纳入默认 `pytest` 套件，GitHub Actions `.github/workflows/test.yml` 会在 push/PR 时自动跑。
 - [已实现] 面板显示最近社交事务及其原因、到期和状态，并将活动、手机、状态余波和挂起事务汇总为“她为什么这样”的可读原因；不暴露完整提示词。视觉小屋在本机 daemon 面板中渲染当前生活投影。
+
+### P4：日历与生活素材
+
+- [已实现初版] 日程会读取学期语境。七、八月为暑假候选池：上午看书/办事，下午看书/散步/朋友，傍晚散步、照片或放松，不再将每个工作日固定成上课。旧版尚未结束的 `class` 运行时块会被一次性校正，防止错误日程继续成为可见生活事实；见 `tests/test_life_runtime.py::test_summer_daily_plan_does_not_treat_vacation_as_regular_classes`。
+- [已实现初版] 非日常事件从“课程取消、疲惫、天气、临时邀约”扩展到小展/书店活动与傍晚拍照散步。它们先改变运行时和后续日程，之后才可能成为可分享的私有素材；没有发生就不允许模型为了聊天凭空引用。后续会扩展学期周、回嘉兴、社团和旅行等季节性日程，但必须继续遵守“先发生、后可说”的账本规则。
 
 ## 新机制接入检查单
 

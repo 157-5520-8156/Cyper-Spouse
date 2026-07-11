@@ -7,6 +7,7 @@ from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import IncomingMessage, LifeRuntimeState
+from companion_daemon.time import utc_now
 from companion_daemon.social_followups import (
     cancel_life_share_followup_for_event,
     create_life_share_followup,
@@ -104,7 +105,7 @@ async def test_due_life_share_followup_uses_share_trigger_and_marks_event_shared
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
     engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。")
-    now = datetime(2026, 7, 10, 14, 0, tzinfo=UTC)
+    now = utc_now()
     event_id = store.record_life_event(
         "geoff",
         kind="private_life_event",

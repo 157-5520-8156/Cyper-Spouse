@@ -127,6 +127,14 @@ async def run(
     settings = get_settings()
     engine = build_companion_engine()
     state = engine.store.get_mood_state(user_id)
+    outreach_block = (
+        engine.outreach_block_reason(user_id, state)
+        if hasattr(engine, "outreach_block_reason")
+        else None
+    )
+    if outreach_block:
+        print(f"life event not shared: {outreach_block}")
+        return False
     runtime = advance_life_runtime(engine.store, user_id, state)
     unshared_events = engine.store.unshared_private_life_events(user_id, limit=1)
     selected_event = unshared_events[0] if unshared_events else None
