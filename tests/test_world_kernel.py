@@ -20,6 +20,7 @@ def world_seed() -> dict[str, object]:
             "dorm_chat": {"location": "华师大宿舍", "npc_id": "roommate-lin", "energy_cost": 4, "content": "晚饭后在宿舍聊了几句新书。"},
             "course_notes": {"location": "华东师范大学", "goal_id": "course-notes", "energy_cost": 7, "content": "整理完了今天的课程笔记。"},
         },
+        "daily_schedule": [{"slot": "dorm", "title": "宿舍闲聊", "template_id": "dorm_chat", "location": "华师大宿舍", "starts_hour": 8, "ends_hour": 9}],
         "npcs": [
             {
                 "id": "roommate-lin",
@@ -159,6 +160,16 @@ def test_completed_activity_creates_deterministic_outcome_goal_and_experience(tm
     assert snapshot["experiences"]["outcome:2026-07-11:notes"]["source_outcome_id"] == "outcome:2026-07-11:notes"
 
 
+def test_seeded_fallback_template_replaces_an_unavailable_activity(tmp_path: Path) -> None:
+    seed = world_seed() | {"daily_schedule": [{"slot": "photo", "title": "摄影整理", "template_id": "missing_template", "location": "上海", "fallback_templates": ["course_notes"], "starts_hour": 9, "ends_hour": 10}], "long_term_goals": [{"id": "course-notes", "title": "课程", "target": 2, "deadline": (NOW + timedelta(days=1)).isoformat()}]}
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": seed}, expected_revision=0)
+    kernel.advance("zhizhi-v1", NOW + timedelta(hours=2), expected_revision=started.revision)
+    activity = kernel.snapshot("zhizhi-v1")["agenda"]["2026-07-11:photo"]
+    assert activity["template_id"] == "course_notes"
+    assert activity["substitution_reason"] == "primary_unavailable"
+
+
 def test_external_delivery_result_is_idempotent_and_only_settled_action_can_create_experience(
     tmp_path: Path,
 ) -> None:
@@ -260,8 +271,8 @@ def test_model_proposal_is_not_a_fact_until_rules_accept_it(tmp_path: Path) -> N
         expected_revision=proposed.revision,
     )
 
-    assert {event.event_type for event in accepted.events} >= {"ActivityCompleted", "LifeOutcomeCommitted", "ExperienceCommitted"}
-    assert kernel.snapshot("zhizhi-v1")["experiences"]["proposal-1"]["content"] == "晚饭后在宿舍聊了几句新书。"
+    assert accepted.events[-1].event_type == "LifeOutcomeRejected"
+    assert kernel.snapshot("zhizhi-v1")["experiences"] == {}
 
 
 def test_model_cannot_accept_an_event_outside_the_registered_entity_templates(tmp_path: Path) -> None:
@@ -598,8 +609,7 @@ def test_reply_claim_must_quote_the_specific_committed_source(tmp_path: Path) ->
 def test_life_share_scheduling_is_idempotent_until_delivery(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
     started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
-    proposed = kernel.submit({"type": "record_model_proposal", "world_id": started.world_id, "proposal_id": "shareable", "entity_id": "zhizhi", "template_id": "dorm_chat", "content": "晚饭后在宿舍聊了几句新书。", "activity_id": "shareable-activity", "location": "华师大宿舍", "starts_at": (NOW - timedelta(hours=1)).isoformat(), "ends_at": NOW.isoformat(), "npc_id": "roommate-lin"}, expected_revision=started.revision)
-    kernel.submit({"type": "accept_model_proposal", "world_id": started.world_id, "proposal_id": "shareable"}, expected_revision=proposed.revision)
+    kernel.advance(started.world_id, NOW, expected_revision=started.revision)
     selected = kernel.schedule_life_share_delivery(world_id=started.world_id, canonical_user_id="geoff", platform="qq", expires_at=NOW + timedelta(hours=1), expected_revision=kernel.revision(started.world_id))
     again = kernel.schedule_life_share_delivery(world_id=started.world_id, canonical_user_id="geoff", platform="qq", expires_at=NOW + timedelta(hours=1), expected_revision=selected.revision)
     assert selected is not None and again is not None
@@ -611,12 +621,11 @@ def test_delivered_life_share_consumes_daily_limit(tmp_path: Path) -> None:
     store.resolve_user("qq", "geoff")
     kernel = WorldKernel(store)
     started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
-    proposed = kernel.submit({"type": "record_model_proposal", "world_id": started.world_id, "proposal_id": "once", "entity_id": "zhizhi", "template_id": "dorm_chat", "content": "晚饭后在宿舍聊了几句新书。", "activity_id": "once-activity", "location": "华师大宿舍", "starts_at": (NOW - timedelta(hours=1)).isoformat(), "ends_at": NOW.isoformat(), "npc_id": "roommate-lin"}, expected_revision=started.revision)
-    kernel.submit({"type": "accept_model_proposal", "world_id": started.world_id, "proposal_id": "once"}, expected_revision=proposed.revision)
+    kernel.advance(started.world_id, NOW, expected_revision=started.revision)
     delivery = kernel.schedule_life_share_delivery(world_id=started.world_id, canonical_user_id="geoff", platform="qq", expires_at=NOW + timedelta(hours=1), expected_revision=kernel.revision(started.world_id))
     assert delivery is not None
     kernel.settle_outgoing_action(delivery.delivery_id, delivered=True)
-    assert kernel.snapshot(started.world_id)["experiences"]["once"]["shared"] is True
+    assert any(item.get("shared") for item in kernel.snapshot(started.world_id)["experiences"].values())
     assert kernel.schedule_life_share_delivery(world_id=started.world_id, canonical_user_id="geoff", platform="qq", expires_at=NOW + timedelta(hours=2), expected_revision=kernel.revision(started.world_id)) is None
 
 
@@ -647,8 +656,7 @@ def test_life_share_delivery_is_atomic_and_uncertain_sends_are_not_retried(tmp_p
     store.resolve_user("qq", "geoff")
     kernel = WorldKernel(store)
     started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
-    proposed = kernel.submit({"type": "record_model_proposal", "world_id": started.world_id, "proposal_id": "atomic-share", "entity_id": "zhizhi", "template_id": "dorm_chat", "content": "晚饭后在宿舍聊了几句新书。", "activity_id": "atomic-activity", "location": "华师大宿舍", "starts_at": (NOW - timedelta(hours=1)).isoformat(), "ends_at": NOW.isoformat(), "npc_id": "roommate-lin"}, expected_revision=started.revision)
-    kernel.submit({"type": "accept_model_proposal", "world_id": started.world_id, "proposal_id": "atomic-share"}, expected_revision=proposed.revision)
+    kernel.advance(started.world_id, NOW, expected_revision=started.revision)
 
     delivery = kernel.schedule_life_share_delivery(world_id=started.world_id, canonical_user_id="geoff", platform="qq", expires_at=NOW + timedelta(hours=1), expected_revision=kernel.revision(started.world_id))
     assert delivery is not None
@@ -659,6 +667,10 @@ def test_life_share_delivery_is_atomic_and_uncertain_sends_are_not_retried(tmp_p
     assert kernel.snapshot(started.world_id)["actions"][delivery.action_id]["status"] == "unknown"
     assert kernel.begin_outgoing_action(delivery.delivery_id, expected_revision=kernel.revision(started.world_id)) is False
     assert kernel.snapshot(started.world_id)["experiences"][delivery.experience_id].get("shared") is not True
+    with pytest.raises(WorldError, match="external receipt"):
+        kernel.settle_outgoing_action(delivery.delivery_id, delivered=True)
+    kernel.settle_outgoing_action(delivery.delivery_id, delivered=True, external_receipt="qq:message-42")
+    assert kernel.snapshot(started.world_id)["experiences"][delivery.experience_id]["shared"] is True
     assert kernel.schedule_life_share_delivery(world_id=started.world_id, canonical_user_id="geoff", platform="qq", expires_at=NOW + timedelta(hours=2), expected_revision=kernel.revision(started.world_id)) is None
 
 

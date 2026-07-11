@@ -20,6 +20,24 @@ class LifeSimulation:
             self._apply(working, events)
         return emitted
 
+    def choose_template(self, state: dict[str, Any], activity: dict[str, Any], alternatives: list[str]) -> tuple[dict[str, Any], str | None]:
+        """Choose the first seed-authorized template that can begin this activity."""
+        candidates = [str(activity.get("template_id") or ""), *alternatives]
+        for template_id in candidates:
+            spec = state.get("life_outcome_templates", {}).get(template_id)
+            if not isinstance(spec, dict) or state.get("needs", {}).get("energy", 0) < int(spec.get("energy_cost", 0)):
+                continue
+            starts_at, ends_at = datetime.fromisoformat(str(activity["starts_at"])), datetime.fromisoformat(str(activity["ends_at"]))
+            npc_id = spec.get("npc_id")
+            goal = state.get("goals", {}).get(spec.get("goal_id")) if spec.get("goal_id") else None
+            if npc_id and not self._available(state.get("entities", {}), str(npc_id), starts_at, ends_at):
+                continue
+            if spec.get("goal_id") and (not goal or goal.get("status") != "active" or (goal.get("deadline") and ends_at > datetime.fromisoformat(str(goal["deadline"])))):
+                continue
+            selected = {**activity, "template_id": template_id, "location": str(spec["location"])}
+            return selected, ("primary_unavailable" if template_id != activity.get("template_id") else None)
+        return activity, "no_eligible_template"
+
     def events_for_activity(self, state: dict[str, Any], activity: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         valid, reason, spec = self._validate(state, activity, require_completed=False)
         if not valid or spec is None:
@@ -31,28 +49,16 @@ class LifeSimulation:
         """Accept a model candidate only as the result of one completed activity."""
         activity_id = str(candidate.get("activity_id") or "")
         activity = state.get("agenda", {}).get(activity_id)
-        planned_events: list[tuple[str, dict[str, Any]]] = []
-        if activity:
-            if activity.get("status") != "completed":
-                return False, "completed_activity_required", []
-            for key in ("entity_id", "template_id", "location", "starts_at", "ends_at"):
-                if str(candidate.get(key) or "") != str(activity.get(key) or ""):
-                    return False, f"candidate_{key}_does_not_match_activity", []
-        else:
-            activity = {key: candidate.get(key) for key in ("activity_id", "entity_id", "template_id", "location", "starts_at", "ends_at")}
-            activity["title"] = str(candidate.get("title") or candidate.get("template_id") or "world activity")
-            activity["status"] = "completed"
-            for existing in state.get("agenda", {}).values():
-                if existing.get("entity_id") == activity["entity_id"] and existing.get("status") in {"planned", "active", "completed"}:
-                    if str(activity["starts_at"]) < str(existing.get("ends_at")) and str(existing.get("starts_at")) < str(activity["ends_at"]):
-                        return False, "activity_conflicts_with_world_commitment", []
-            planned_events = [("ActivityPlanned", {key: activity[key] for key in ("activity_id", "entity_id", "title", "template_id", "location", "starts_at", "ends_at")}), ("ActivityStarted", {"activity_id": activity_id}), ("ActivityCompleted", {"activity_id": activity_id})]
+        if not activity or activity.get("status") != "completed":
+            return False, "completed_activity_required", []
+        for key in ("entity_id", "template_id", "location", "starts_at", "ends_at"):
+            if str(candidate.get(key) or "") != str(activity.get(key) or ""):
+                return False, f"candidate_{key}_does_not_match_activity", []
         valid, reason, spec = self._validate(state, activity, require_completed=True, candidate=candidate)
         if not valid or spec is None:
             return False, reason, []
         outcome_id = str(candidate["proposal_id"])
         return True, reason, [
-            *planned_events,
             ("LifeOutcomeValidated", {"outcome_id": outcome_id, "activity_id": activity_id, "validation": reason, "rule_version": self.RULE_VERSION}),
             ("ModelProposalAccepted", {"proposal_id": outcome_id}),
             *self._events(outcome_id, activity, spec, validation=reason, proposed=False, validated=True, content=str(candidate["content"])),
@@ -119,8 +125,11 @@ class LifeSimulation:
     def _available(entities: dict[str, Any], npc_id: str, starts_at: datetime, ends_at: datetime) -> bool:
         for window in entities.get(npc_id, {}).get("availability", []):
             start, end = str(window).split("-", 1)
-            start_hour, end_hour = int(start[:2]), int(end[:2])
-            if start_hour <= starts_at.hour and ends_at.hour <= end_hour and starts_at.date() == ends_at.date():
+            start_minutes = int(start[:2]) * 60 + int(start[3:])
+            end_minutes = int(end[:2]) * 60 + int(end[3:])
+            activity_start = starts_at.hour * 60 + starts_at.minute
+            activity_end = ends_at.hour * 60 + ends_at.minute
+            if start_minutes <= activity_start and activity_end <= end_minutes and starts_at.date() == ends_at.date():
                 return True
         return False
 

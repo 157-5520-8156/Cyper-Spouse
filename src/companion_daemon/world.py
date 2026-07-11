@@ -365,7 +365,8 @@ class WorldKernel:
             return True
 
     def settle_outgoing_action(
-        self, delivery_id: int, *, delivered: bool, reason: str | None = None
+        self, delivery_id: int, *, delivered: bool, reason: str | None = None,
+        external_receipt: str | None = None,
     ) -> dict[str, object] | None:
         """Atomically settle transport history, turn trace, and its world action."""
         with self.store.connect() as conn:
@@ -376,8 +377,10 @@ class WorldKernel:
             if not row:
                 return None
             result = dict(row)
-            if row["status"] not in {"planned", "sending"}:
+            if row["status"] not in {"planned", "sending", "unknown"}:
                 return result
+            if row["status"] == "unknown" and not external_receipt:
+                raise WorldError("unknown delivery needs an external receipt before reconciliation")
             action_row = conn.execute(
                 "select world_id from world_actions where json_extract(state_json, '$.delivery_id') = ?",
                 (delivery_id,),
@@ -438,6 +441,7 @@ class WorldKernel:
                                 "kind": "delivery",
                                 "status": "delivered" if delivered else "failed",
                                 "reason": reason,
+                                "external_receipt": external_receipt,
                             },
                         },
                     ),
@@ -692,6 +696,11 @@ class WorldKernel:
                             "starts_at": starts.isoformat(),
                             "ends_at": ends.isoformat(),
                         }
+                        payload, substitution_reason = self.life_simulation.choose_template(
+                            state, payload, [str(value) for value in _as_list(item.get("fallback_templates", []), "fallback templates")]
+                        )
+                        if substitution_reason:
+                            payload["substitution_reason"] = substitution_reason
                         events.append(("ActivityPlanned", payload))
                         events.append(("ActivityStarted", {"activity_id": activity_id}))
                         if ends <= target_at:

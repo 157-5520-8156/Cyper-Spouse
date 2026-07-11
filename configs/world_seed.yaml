@@ -65,6 +65,7 @@ daily_schedule:
     ends_hour: 18
     template_id: photo_portfolio
     location: 上海
+    fallback_templates: [course_notes]
   - slot: evening_walk
     title: 傍晚散步或整理照片
     starts_hour: 19
