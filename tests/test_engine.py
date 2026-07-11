@@ -144,6 +144,24 @@ async def test_world_mode_typing_transitions_do_not_touch_legacy_mood(tmp_path: 
     assert world.snapshot(world_id)["communication"]["typing"] == "idle"
 
 
+def test_world_mode_debug_snapshot_uses_only_world_projection(tmp_path: Path, monkeypatch) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+    monkeypatch.setattr(
+        "companion_daemon.engine.advance_life_runtime",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy runtime read")),
+    )
+
+    snapshot = engine.debug_snapshot("geoff")
+
+    assert snapshot["state"]["world_id"] == world_id
+    assert snapshot["dashboard"]["scene"]["location"] == "rug"
+    assert snapshot["recent_social_tasks"] == []
+
+
 @pytest.mark.asyncio
 async def test_world_enabled_turn_does_not_write_legacy_life_or_social_tables(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")

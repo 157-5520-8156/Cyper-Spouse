@@ -633,6 +633,75 @@ class WorldKernel:
             "timeline": [_console_event(event) for event in events[-24:]][::-1],
         }
 
+    def daemon_dashboard_projection(
+        self, world_id: str, *, past_days: int = 15, future_days: int = 15
+    ) -> dict[str, object]:
+        """Project the world into the legacy dashboard's read contract.
+
+        This is a compatibility projection, not a second state machine.  It
+        lets the visual home retain its renderer while all displayed facts come
+        from the same ledger as dialogue and the operator console.
+        """
+        overview = self.dashboard_overview(world_id)
+        state = self.snapshot(world_id)
+        clock = _as_dict(state["clock"], "clock")
+        logical_at = _parse_at(str(clock["logical_at"]))
+        agenda = [_as_dict(item, "agenda item") for item in _as_dict(state["agenda"], "agenda").values()]
+        active = next((item for item in agenda if item.get("status") == "active"), None)
+        current = active or next(
+            (item for item in sorted(agenda, key=lambda value: str(value.get("starts_at") or "")) if item.get("status") in {"planned", "deferred"}),
+            None,
+        )
+        scene = _world_scene_projection(state, current)
+        communication = _as_dict(state["communication"], "communication")
+        actions = [_as_dict(item, "action") for item in _as_dict(state["actions"], "actions").values()]
+        open_actions = [item for item in actions if item.get("status") in {"scheduled", "sending", "unknown"}]
+        days: list[dict[str, object]] = []
+        experiences = self.experiences_for_time_reference(world_id, "last")
+        for offset in range(-past_days, future_days + 1):
+            day = (logical_at + timedelta(days=offset)).date().isoformat()
+            day_agenda = [item for item in agenda if str(item.get("starts_at") or "")[:10] == day]
+            day_experiences = [item for item in experiences if str(item.get("occurred_at") or "")[:10] == day]
+            days.append({
+                "date": day,
+                "relative": "今天" if offset == 0 else ("昨天" if offset == -1 else ("明天" if offset == 1 else "")),
+                "plans": [_dashboard_activity(item) for item in day_agenda],
+                "events": [
+                    {"starts_at": item["occurred_at"], "content": item["content"], "status": "completed"}
+                    for item in day_experiences
+                ],
+                "special_events": [],
+            })
+        activity = str(current.get("title") if current else "空档")
+        starts_at = str(current.get("starts_at") if current else logical_at.isoformat())
+        ends_at = str(current.get("ends_at") if current else logical_at.isoformat())
+        phone_label = _communication_phone_label(str(communication.get("attention") or "idle"), str(communication.get("typing") or "idle"))
+        return {
+            "state": {
+                "world_id": world_id, "revision": overview["revision"], "state_hash": overview["state_hash"],
+                "needs": overview["needs"], "communication": dict(communication),
+                "emotion_modulation": dict(_as_dict(state["emotion_modulation"], "emotion modulation")),
+            },
+            "life_runtime": {"activity": activity, "started_at": starts_at, "ends_at": ends_at, "phone_attention": communication.get("attention")},
+            "calendar": {"days": days},
+            "recent_social_tasks": [
+                {"status": item["status"], "reason": item.get("reason") or item.get("kind"), "due_at": _as_dict(item.get("payload", {}), "action payload").get("due_at") or item.get("expires_at")}
+                for item in open_actions
+            ],
+            "dashboard": {
+                "mood_label": _world_mood_label(_as_dict(state["emotion_modulation"], "emotion modulation")),
+                "phone_label": phone_label,
+                "attention": int(_as_dict(state["needs"], "needs").get("attention", 0)),
+                "activity": activity,
+                "reasons": [str(scene["observable_reason"]), phone_label],
+                "next_plan": [_dashboard_activity(item) for item in sorted(agenda, key=lambda value: str(value.get("starts_at") or "")) if item.get("status") in {"active", "planned", "deferred"}][:6],
+                "active_task_count": len(open_actions),
+                "relationship_stage": "world_projected",
+                "scene": scene,
+            },
+            "world_overview": overview,
+        }
+
     def experiences_for_time_reference(self, world_id: str, reference: str) -> list[dict[str, object]]:
         """Return only committed experiences in a deterministic logical-time range."""
         state = self.snapshot(world_id)
@@ -1687,6 +1756,72 @@ def _console_event(event: WorldEvent) -> dict[str, object]:
         "logical_at": event.logical_at,
         "subject": str(subject),
     }
+
+
+def _dashboard_activity(activity: dict[str, object]) -> dict[str, object]:
+    return {
+        "activity": str(activity.get("title") or "未命名活动"),
+        "starts_at": str(activity.get("starts_at") or ""),
+        "ends_at": str(activity.get("ends_at") or ""),
+        "status": str(activity.get("status") or "unknown"),
+        "interruptible": str(activity.get("status") or "") != "active",
+        "adjustment_note": str(activity.get("reason") or activity.get("substitution_reason") or ""),
+    }
+
+
+def _world_scene_projection(state: dict[str, object], activity: dict[str, object] | None) -> dict[str, object]:
+    title = str(activity.get("title") if activity else "")
+    location = str(activity.get("location") if activity else "")
+    lowered = f"{title} {location}"
+    if any(token in lowered for token in ("吃", "饭", "食堂", "饮料")):
+        anchor, action = "kitchen", "eat"
+    elif any(token in lowered for token in ("散步", "出门", "校园", "嘉兴", "上海")):
+        anchor, action = "entry", "walk_out"
+    elif any(token in lowered for token in ("摄影", "照片", "窗")):
+        anchor, action = "window", "gaze"
+    elif any(token in lowered for token in ("休息", "睡", "宿舍")):
+        anchor, action = "bed", "sleep" if "睡" in lowered else "relax"
+    elif title:
+        anchor, action = "desk", "study"
+    else:
+        anchor, action = "rug", "idle"
+    communication = _as_dict(state["communication"], "communication")
+    attention = str(communication.get("attention") or "idle")
+    typing = str(communication.get("typing") or "idle")
+    if typing == "started":
+        action = "type_phone"
+    elif attention == "unread":
+        action = "notice_phone"
+    elif attention == "seen":
+        action = "read_phone"
+    elif attention in {"deferred", "do_not_disturb"}:
+        action = "withdraw"
+    modulation = _as_dict(state["emotion_modulation"], "emotion modulation")
+    return {
+        "location": anchor, "action": action,
+        "expression": str(modulation.get("expression") or "neutral"),
+        "time_of_day": "night" if _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"])).hour < 6 else "day",
+        "has_notification": attention == "unread", "has_open_task": bool(communication.get("deferred_action_id")),
+        "activity_kind": str(activity.get("template_id") if activity else "idle"),
+        "phone_attention": attention,
+        "observable_reason": str(communication.get("reason") or activity.get("reason") if activity else "world_idle"),
+    }
+
+
+def _communication_phone_label(attention: str, typing: str) -> str:
+    if typing == "started":
+        return "正在组织回复"
+    return {
+        "unread": "收到了提醒", "seen": "正在看消息", "deferred": "稍后再看",
+        "do_not_disturb": "先不看手机", "idle": "手机放在一边",
+    }.get(attention, "手机状态未知")
+
+
+def _world_mood_label(modulation: dict[str, object]) -> str:
+    return {
+        "guarded": "在收着", "softening": "慢慢缓和", "warm": "心情不错",
+        "caring": "有点挂心", "patient": "在等一等", "open": "愿意接近", "calm": "平静",
+    }.get(str(modulation.get("mode") or "calm"), "平静")
 
 
 def _as_dict(value: Any, name: str) -> dict[str, Any]:

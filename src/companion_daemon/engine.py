@@ -1873,6 +1873,33 @@ class CompanionEngine:
         platform: str = "qq",
     ) -> dict[str, object]:
         """Return daemon-owned context for local inspection without sending a reply."""
+        if self.world_kernel and self.world_id:
+            projection = self.world_kernel.daemon_dashboard_projection(self.world_id)
+            recent = [
+                self._format_recent_line(
+                    direction=str(item.get("direction") or "in"), platform=platform,
+                    text=str(item.get("text") or ""), sent_at=str(item.get("sent_at") or ""),
+                )
+                for item in self.world_kernel.snapshot(self.world_id).get("recent_messages", [])
+                if isinstance(item, dict) and item.get("sent_at")
+            ]
+            facts = self.world_kernel.snapshot(self.world_id).get("facts", {})
+            experiences = self.world_kernel.snapshot(self.world_id).get("experiences", {})
+            return {
+                "canonical_user_id": canonical_user_id,
+                **projection,
+                "recent_life_events": [], "recent_turn_traces": [], "recent_tool_proposals": [],
+                "recent": recent[-16:],
+                "memories": [],
+                "available_memories": [
+                    {"kind": "world_fact", "content": str(item.get("value") or "")}
+                    for item in facts.values() if isinstance(item, dict)
+                ] + [
+                    {"kind": "world_experience", "content": str(item.get("content") or "")}
+                    for item in experiences.values() if isinstance(item, dict)
+                ],
+                "prompt_messages": [],
+            }
         state = self.store.get_mood_state(canonical_user_id)
         runtime = advance_life_runtime(self.store, canonical_user_id, state)
         recent_rows = self._recent_dicts(canonical_user_id, limit=16)

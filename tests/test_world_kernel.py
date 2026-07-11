@@ -138,6 +138,22 @@ def test_world_user_relationship_and_emotion_are_reduced_from_turn_appraisal(tmp
         "RelationshipAppraised", "RelationshipChanged", "EmotionModulated",
     }
 
+
+def test_world_dashboard_projection_is_self_contained_and_never_needs_legacy_runtime(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    kernel.submit(
+        {"type": "plan_activity", "world_id": started.world_id, "activity_id": "study", "entity_id": "zhizhi", "title": "图书馆看书", "starts_at": NOW.isoformat(), "ends_at": (NOW + timedelta(hours=1)).isoformat()},
+        expected_revision=started.revision,
+    )
+    projection = kernel.daemon_dashboard_projection(started.world_id, past_days=0, future_days=0)
+
+    assert projection["dashboard"]["scene"]["location"] == "desk"
+    assert projection["dashboard"]["scene"]["action"] == "study"
+    assert projection["life_runtime"]["activity"] == "图书馆看书"
+    assert projection["calendar"]["days"][0]["plans"][0]["activity"] == "图书馆看书"
+    assert projection["state"]["world_id"] == started.world_id
+
 def test_world_can_start_from_the_reviewable_seed_file(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
 
