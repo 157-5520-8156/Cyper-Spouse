@@ -180,6 +180,18 @@ def test_no_eligible_seeded_activity_becomes_rest_instead_of_fake_completion(tmp
     assert snapshot["needs"]["energy"] == 79
 
 
+def test_unavailable_activity_can_be_deferred_then_explicitly_reviewed(tmp_path: Path) -> None:
+    seed = world_seed() | {"daily_schedule": [{"slot": "defer", "title": "等待安排", "template_id": "missing_template", "location": "宿舍", "starts_hour": 9, "ends_hour": 10, "defer_when_unavailable": True, "review_after_hours": 3}]}
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": seed}, expected_revision=0)
+    deferred = kernel.advance("zhizhi-v1", NOW + timedelta(hours=2), expected_revision=started.revision)
+    snapshot = kernel.snapshot("zhizhi-v1")
+    assert snapshot["agenda"]["2026-07-11:defer"]["status"] == "deferred"
+    rested = kernel.submit({"type": "review_activity", "world_id": started.world_id, "activity_id": "2026-07-11:defer", "decision": "rest", "energy_delta": 5}, expected_revision=deferred.revision)
+    assert rested.events[-1].event_type == "ActivityRested"
+    assert kernel.snapshot(started.world_id)["agenda"]["2026-07-11:defer"]["status"] == "rested"
+
+
 def test_external_delivery_result_is_idempotent_and_only_settled_action_can_create_experience(
     tmp_path: Path,
 ) -> None:

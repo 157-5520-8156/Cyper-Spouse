@@ -736,6 +736,9 @@ class WorldKernel:
                         if substitution_reason == "no_eligible_template" and bool(item.get("rest_when_unavailable")):
                             events.append(("ActivityRested", {"activity_id": activity_id, "reason": "no_eligible_seeded_activity", "energy_delta": int(item.get("rest_recovery", 8))}))
                             continue
+                        if substitution_reason == "no_eligible_template" and bool(item.get("defer_when_unavailable")):
+                            events.append(("ActivityDeferred", {"activity_id": activity_id, "reason": "no_eligible_seeded_activity", "next_review_at": (target_at + timedelta(hours=int(item.get("review_after_hours", 4)))).isoformat()}))
+                            continue
                         events.append(("ActivityStarted", {"activity_id": activity_id}))
                         if ends <= target_at:
                             events.append(("ActivityCompleted", {"activity_id": activity_id}))
@@ -813,6 +816,19 @@ class WorldKernel:
             if action["status"] != "scheduled":
                 raise WorldError("only a scheduled action can be cancelled")
             return [("ActionCancelled", {"action_id": action_id, "reason": str(command.get("reason") or "cancelled")})]
+        if command_type == "review_activity":
+            activity_id = str(command.get("activity_id") or "")
+            decision = str(command.get("decision") or "")
+            activity = _as_dict(_as_dict(state["agenda"], "agenda").get(activity_id), "activity")
+            if activity.get("status") != "deferred":
+                raise WorldError("only a deferred activity can be reviewed")
+            if decision == "resume":
+                return [("ActivityResumed", {"activity_id": activity_id})]
+            if decision == "cancel":
+                return [("ActivityCancelled", {"activity_id": activity_id, "reason": str(command.get("reason") or "review_cancelled")})]
+            if decision == "rest":
+                return [("ActivityRested", {"activity_id": activity_id, "reason": "review_rest", "energy_delta": int(command.get("energy_delta") or 6)})]
+            raise WorldError("activity review decision must be resume, cancel, or rest")
         if command_type == "change_relationship":
             entity_id = str(command.get("entity_id") or "")
             dimension = str(command.get("dimension") or "")
@@ -1191,17 +1207,21 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "ActivityPlanned":
         item = {**payload, "status": "planned"}
         _as_dict(next_state["agenda"], "agenda")[str(item["activity_id"])] = item
-    elif event.event_type in {"ActivityStarted", "ActivityCompleted", "ActivityInterrupted", "ActivityCancelled", "ActivityRested"}:
+    elif event.event_type in {"ActivityStarted", "ActivityCompleted", "ActivityInterrupted", "ActivityCancelled", "ActivityRested", "ActivityDeferred", "ActivityResumed"}:
         activity = _as_dict(next_state["agenda"], "agenda")[str(payload["activity_id"])]
         activity["status"] = {
             "ActivityStarted": "active", "ActivityCompleted": "completed",
             "ActivityInterrupted": "interrupted", "ActivityCancelled": "cancelled",
             "ActivityRested": "rested",
+            "ActivityDeferred": "deferred", "ActivityResumed": "planned",
         }[event.event_type]
         if event.event_type == "ActivityRested":
             activity["reason"] = payload["reason"]
             needs = _as_dict(next_state["needs"], "needs")
             needs["energy"] = max(0, min(100, int(needs.get("energy", 50)) + int(payload["energy_delta"])))
+        if event.event_type == "ActivityDeferred":
+            activity["reason"] = payload["reason"]
+            activity["next_review_at"] = payload["next_review_at"]
     elif event.event_type == "ActionScheduled":
         item = {**payload, "status": "scheduled"}
         _as_dict(next_state["actions"], "actions")[str(item["action_id"])] = item
