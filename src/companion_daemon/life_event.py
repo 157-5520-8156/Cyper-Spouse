@@ -306,6 +306,7 @@ async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bo
             "expression_policy": "只分享已提交的世界经历，不补写新事实。",
             "allowed_facts": [str(experience["content"])],
             "experience_id": experience_id,
+            "selection_id": f"life-share:{snapshot['clock']['logical_at']}:{experience_id}",
             "short_lived_constraint": None,
             "observable_reason": "一个已发生但尚未分享的世界经历。",
         },
