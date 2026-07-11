@@ -417,13 +417,25 @@ class QQMessageCoalescer:
         if self.on_sticker and reply.sticker_path:
             try:
                 await self.on_sticker(merged, reply)
+                if hasattr(self.engine, "confirm_sticker_delivery"):
+                    self.engine.confirm_sticker_delivery(reply)
             except Exception:
                 logger.exception("failed to send QQ sticker reply")
+                if hasattr(self.engine, "fail_sticker_delivery"):
+                    self.engine.fail_sticker_delivery(reply, "QQ sticker delivery failed")
+        elif reply.sticker_path and hasattr(self.engine, "fail_sticker_delivery"):
+            self.engine.fail_sticker_delivery(reply, "sticker adapter unavailable")
         if self.on_image and reply.image_path:
             try:
                 await self.on_image(merged, reply)
+                if hasattr(self.engine, "confirm_media_delivery"):
+                    self.engine.confirm_media_delivery(reply)
             except Exception:
                 logger.exception("failed to send QQ image reply")
+                if hasattr(self.engine, "fail_media_delivery"):
+                    self.engine.fail_media_delivery(reply, "QQ image delivery failed")
+        elif reply.image_path and hasattr(self.engine, "fail_media_delivery"):
+            self.engine.fail_media_delivery(reply, "image adapter unavailable")
         if self.on_reply:
             await self.on_reply(reply)
         self._schedule_afterthought(key, merged, reply_target, utc_now())

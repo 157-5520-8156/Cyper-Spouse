@@ -56,6 +56,8 @@ class CompanionReply(BaseModel):
     delivery_id: int | None = None
     turn_trace_id: int | None = None
     world_action_id: str | None = None
+    media_action_id: str | None = None
+    sticker_action_id: str | None = None
 
 
 class ProactiveDecision(BaseModel):

@@ -87,7 +87,7 @@ LifeOutcomeCommitted -> ExperienceCommitted -> (可选) ExperienceShared`。
 | 连续性/上下文 | `life_continuity.py`、`context_orchestrator.py`、`conversation.py` | 将旧生活、情绪、记忆和关系拼入模型上下文 | 已绕过 | `WorldKernel.conversation_context()` 是唯一世界对话读模型 |
 | 主动行为 | `proactive_*.py`、`social_tasks`、`proactive_events` | 触发、冷却、等待、延后重试、忍住 | 部分迁入 | 世界主动消息/余波/到期 Action 已有；缺世界化触发、冷却、等待反应 |
 | 投递追踪 | `outbox_messages`、`turn_traces` | 消息计划、发送与原因记录 | 部分迁入且必须保留为投递记录 | Action 与 outbox 同事务；旧 trace 降为投递投影，不得独立授权事实 |
-| 图片/表情 | `image_requests.py`、`image_agency.py`、`reply_stickers.py` | 根据旧心情/关系决定图片或表情 | 已绕过或仅适配 | 需由世界关系/边界投影授权，图片生成结果走外部 Action |
+| 图片/表情 | `image_requests.py`、`image_agency.py`、`reply_stickers.py` | 根据旧心情/关系决定图片或表情 | 已迁入 | `WorldMediaPolicy` 授权，生成和投递各自以 Action 结算 |
 | 小屋/面板 | `dashboard_ui.py`、`debug_snapshot()` | 读取旧 life runtime 并投影动作 | 已迁入（不改小屋渲染） | `daemon_dashboard_projection()` / `WorldSceneProjection`，前端只读 |
 
 以下各节给出可执行的逐项说明。
@@ -110,7 +110,8 @@ LifeOutcomeCommitted -> ExperienceCommitted -> (可选) ExperienceShared`。
 `MessageAttentionDecided(seen/deferred/do_not_disturb)` 与 `TypingStateChanged` 转换；
 延迟阅读和回复使用有期限的 Action。世界模式不再调用旧 `life_runtime` 的手机状态。
 
-迁移结论：保留文件仅用于 `WORLD_RUNTIME_ENABLED=false` 的旧实例。世界模式下禁止读写。
+迁移结论：保留文件只用于历史归档、迁移参考和故障诊断；不再作为新功能或运行回退路径。
+世界模式下禁止读写。
 
 ### `calendar_ledger.py` — 已绕过
 
@@ -247,7 +248,7 @@ OutgoingUnansweredObserved -> InitiativeAdjusted
 | `proactive_feedback.py` | 主动消息后的用户反馈判断 | 分类器可留；旧 mood/social-task 写入要迁为世界关系/行动事件 |
 | `reply_postprocess.py`、`reply_segments.py` | 输出清洗与分段 | 仅适配；每段投递仍需由世界 Action 管理 |
 | `reply_stickers.py` | 表情包选择 | 仅适配；由世界表达调制和边界策略授权，不能反写情绪事实 |
-| `image_requests.py`、`image_agency.py` | 图片请求识别与自主性判定 | 世界聊天路径当前禁用该旧自主链；恢复该能力时必须以 `ImageRequested/Generated/Settled` 外部行动链接入，不能回读旧 mood |
+| `image_requests.py`、`image_agency.py` | 图片请求识别与自主性判定 | 请求识别保留为纯解析；`WorldMediaPolicy` 与 media generation/delivery Action 已替代旧 mood 授权 |
 | `conversation.py` | 旧 Prompt/SillyTavern 对话核心 | 世界回复路径当前直接使用受约束 JSON 提示；旧核心仅服务旧模式或样式适配 |
 
 ## 6. 主动行为与后台调度

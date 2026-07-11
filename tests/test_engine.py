@@ -187,6 +187,112 @@ async def test_world_mode_typing_transitions_do_not_touch_legacy_mood(tmp_path: 
     assert world.snapshot(world_id)["communication"]["typing"] == "idle"
 
 
+@pytest.mark.asyncio
+async def test_world_communication_policy_defers_busy_low_energy_turn_as_world_actions(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    logical_now = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
+    planned = world.submit(
+        {
+            "type": "plan_activity", "world_id": world_id, "activity_id": "busy",
+            "entity_id": "zhizhi", "title": "整理资料", "starts_at": logical_now.isoformat(),
+            "ends_at": (logical_now + timedelta(hours=2)).isoformat(),
+        },
+        expected_revision=world.revision(world_id),
+    )
+    world.advance(world_id, logical_now, expected_revision=planned.revision)
+    world.submit(
+        {"type": "change_need", "world_id": world_id, "need": "energy", "delta": -40},
+        expected_revision=world.revision(world_id),
+    )
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="晚点聊", message_id="policy-defer")
+    )
+
+    snapshot = world.snapshot(world_id)
+    assert reply is None
+    assert snapshot["communication"]["attention"] == "deferred"
+    assert snapshot["communication"]["rule_version"] == "world-behavior-v1"
+    assert any(item["kind"] == "reply_later" and item["status"] == "scheduled" for item in snapshot["actions"].values())
+
+
+@pytest.mark.asyncio
+async def test_world_communication_policy_does_not_reply_to_high_boundary_pressure(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    world.submit(
+        {"type": "change_need", "world_id": world_id, "need": "boundary", "delta": 80},
+        expected_revision=world.revision(world_id),
+    )
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你现在就必须发给我", message_id="policy-dnd")
+    )
+
+    assert reply is None
+    assert world.snapshot(world_id)["communication"]["attention"] == "do_not_disturb"
+
+
+@pytest.mark.asyncio
+async def test_world_image_request_uses_generation_and_delivery_actions(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id,
+        image_generator=FakeImageGenerator(), image_output_dir=tmp_path / "images",
+    )
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你好", message_id="media-register")
+    )
+    world.submit(
+        {"type": "change_relationship", "world_id": world_id, "entity_id": "user:geoff", "dimension": "closeness", "delta": 8},
+        expected_revision=world.revision(world_id),
+    )
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="能发一张自拍吗", message_id="media-request")
+    )
+
+    assert reply is not None
+    assert reply.image_path and Path(reply.image_path).exists()
+    assert reply.media_action_id
+    media = next(iter(world.snapshot(world_id)["media"].values()))
+    assert media["status"] == "generated"
+    engine.confirm_media_delivery(reply)
+    assert world.snapshot(world_id)["media"][media["request_id"]]["status"] == "shared"
+
+
+@pytest.mark.asyncio
+async def test_world_sticker_selection_and_delivery_are_world_actions(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    stickers = StickerCatalog(
+        stickers=[Sticker(id="comfort", category="comfort", mood="calm", intent="comfort", path=Path("assets/stickers/comfort.png"))]
+    )
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, stickers=stickers, world_kernel=world, world_id=world_id)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我今天有点撑不住", message_id="sticker-world")
+    )
+
+    assert reply is not None
+    assert reply.sticker_path == "assets/stickers/comfort.png"
+    assert reply.sticker_action_id == "sticker-delivery:sticker-world"
+    engine.confirm_sticker_delivery(reply)
+    assert world.snapshot(world_id)["stickers"][reply.sticker_action_id]["status"] == "shared"
+
+
 def test_world_mode_debug_snapshot_uses_only_world_projection(tmp_path: Path, monkeypatch) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
@@ -356,7 +462,34 @@ async def test_world_proactive_does_not_bypass_an_open_conversation_thread(tmp_p
     decision = await engine.proactive_tick("geoff")
 
     assert decision.should_send is False
-    assert "等待回应" in decision.private_thought
+    assert "open_conversation_thread" in decision.private_thought
+
+
+@pytest.mark.asyncio
+async def test_world_proactive_feedback_becomes_a_versioned_turn_consequence(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你好", message_id="feedback-register")
+    )
+    delivery_id, _, _ = world.queue_outgoing_action(
+        canonical_user_id="geoff", platform="qq", text="今天还顺利吗？", kind="proactive",
+        expires_at=engine._world_logical_now() + timedelta(hours=12),
+        trace={"world_id": world_id, "direction": "proactive", "appraisal": "checkin", "expression_policy": "test", "allowed_facts": [], "observable_reason": "test"},
+    )
+    world.settle_outgoing_action(delivery_id, delivered=True)
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="谢谢你，我在", message_id="feedback-warm")
+    )
+
+    snapshot = world.snapshot(world_id)
+    assert snapshot["last_appraisal"]["appraisal"] == "warmth_received"
+    assert snapshot["last_appraisal"]["rule_version"] == "world-interaction-v1"
+    assert snapshot["relationships"]["user:geoff"]["closeness"] >= 4
 
 
 def test_world_mode_delayed_reply_is_a_cancellable_world_action(tmp_path: Path, monkeypatch) -> None:

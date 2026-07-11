@@ -95,6 +95,13 @@ class LifeSimulation:
             events.append(("LifeOutcomeValidated", {**payload, "validation": validation}))
         events.extend([("LifeOutcomeCommitted", payload), ("NeedChanged", {"need": "energy", "delta": -int(spec["energy_cost"])}), ("ExperienceCommitted", {"experience_id": outcome_id, "action_id": None, "content": content, "source_outcome_id": outcome_id})])
         if spec.get("npc_id"):
+            events.append(("NpcInteractionCommitted", {
+                "interaction_id": f"npc-interaction:{outcome_id}", "outcome_id": outcome_id,
+                "activity_id": activity["activity_id"], "npc_id": spec["npc_id"],
+                "template_id": activity["template_id"], "location": activity["location"],
+                "starts_at": activity["starts_at"], "ends_at": activity["ends_at"],
+                "rule_version": self.RULE_VERSION,
+            }))
             events.append(("NpcRelationshipChanged", {"entity_id": spec["npc_id"], "dimension": "closeness", "delta": int(spec.get("relationship_delta", 2))}))
         if spec.get("goal_id"):
             events.append(("GoalProgressed", {"goal_id": spec["goal_id"], "activity_id": activity["activity_id"], "delta": 1}))

@@ -16,6 +16,7 @@ import yaml
 from companion_daemon.db import CompanionStore
 from companion_daemon.life_simulation import LifeSimulation
 from companion_daemon.time import utc_now
+from companion_daemon.world_interaction_rules import WorldInteractionRules
 
 
 class WorldError(ValueError):
@@ -94,6 +95,7 @@ class WorldKernel:
     def __init__(self, store: CompanionStore):
         self.store = store
         self.life_simulation = LifeSimulation()
+        self.interaction_rules = WorldInteractionRules()
 
     def submit(self, command: dict[str, object], *, expected_revision: int) -> WorldDecision:
         command_type = str(command.get("type") or "")
@@ -1134,6 +1136,7 @@ class WorldKernel:
             payload: dict[str, object] = {
                 "message_id": message_id, "attention": attention, "reason": reason,
                 "due_at": None, "deferred_action_id": None,
+                "rule_version": str(command.get("rule_version") or ""),
             }
             if attention == "deferred":
                 due_at = str(command.get("due_at") or "")
@@ -1241,6 +1244,59 @@ class WorldKernel:
             if need not in {"energy", "attention", "security", "initiative", "boundary"}:
                 raise WorldError("unsupported world need")
             return [("NeedChanged", {"need": need, "delta": int(command.get("delta") or 0)})]
+        if command_type == "request_media":
+            request_id = str(command.get("request_id") or "")
+            user_id = str(command.get("user_id") or "")
+            media_kind = str(command.get("media_kind") or "")
+            topic = str(command.get("topic") or "").strip()
+            reason = str(command.get("reason") or "").strip()
+            media = _as_dict(state.get("media", {}), "media")
+            entities = _as_dict(state["entities"], "entities")
+            if (
+                not request_id or request_id in media or not topic or len(topic) > 120 or not reason or len(reason) > 160
+                or media_kind not in {"creative_image", "selfie"}
+                or _as_dict(entities.get(user_id), "media user").get("kind") != "user"
+            ):
+                raise WorldError("media request requires a registered user, new id, supported kind, bounded topic and reason")
+            action_id = f"media-generation:{request_id}"
+            now = _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+            return [
+                ("MediaRequested", {"request_id": request_id, "user_id": user_id, "media_kind": media_kind, "topic": topic, "reason": reason, "rule_version": str(command.get("rule_version") or "")}),
+                ("ActionScheduled", {"action_id": action_id, "kind": "media_generation", "expires_at": (now + timedelta(hours=2)).isoformat(), "payload": {"request_id": request_id, "media_kind": media_kind, "topic": topic}}),
+            ]
+        if command_type == "reject_media_request":
+            request_id = str(command.get("request_id") or "")
+            user_id = str(command.get("user_id") or "")
+            reason = str(command.get("reason") or "").strip()
+            if not request_id or not reason or _as_dict(_as_dict(state["entities"], "entities").get(user_id), "media user").get("kind") != "user":
+                raise WorldError("media rejection requires request id, registered user, and reason")
+            return [("MediaRequestRejected", {"request_id": request_id, "user_id": user_id, "reason": reason[:160], "rule_version": str(command.get("rule_version") or "")})]
+        if command_type == "schedule_media_delivery":
+            request_id = str(command.get("request_id") or "")
+            media = _as_dict(state.get("media", {}), "media")
+            item = _as_dict(media.get(request_id), "media request")
+            if item.get("status") != "generated" or not item.get("artifact_path"):
+                raise WorldError("only generated media can be scheduled for delivery")
+            action_id = f"media-delivery:{request_id}"
+            if action_id in _as_dict(state["actions"], "actions"):
+                raise WorldError("media delivery is already scheduled")
+            now = _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+            return [("ActionScheduled", {"action_id": action_id, "kind": "media_delivery", "expires_at": (now + timedelta(hours=12)).isoformat(), "payload": {"request_id": request_id, "artifact_path": item["artifact_path"], "media_kind": item["media_kind"]}})]
+        if command_type == "schedule_sticker_delivery":
+            sticker_id = str(command.get("sticker_id") or "")
+            sticker_path = str(command.get("sticker_path") or "")
+            intent = str(command.get("intent") or "")
+            causation = str(command.get("causation_id") or "")
+            if not sticker_id or not sticker_path or len(sticker_path) > 500 or not intent or not causation:
+                raise WorldError("sticker delivery requires id, bounded path, intent, and causation")
+            action_id = f"sticker-delivery:{causation}"
+            if action_id in _as_dict(state["actions"], "actions"):
+                raise WorldError("sticker delivery is already scheduled")
+            now = _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+            return [
+                ("StickerSelected", {"action_id": action_id, "sticker_id": sticker_id, "sticker_path": sticker_path, "intent": intent, "rule_version": str(command.get("rule_version") or "")}),
+                ("ActionScheduled", {"action_id": action_id, "kind": "sticker_delivery", "expires_at": (now + timedelta(hours=12)).isoformat(), "payload": {"sticker_id": sticker_id, "sticker_path": sticker_path, "intent": intent}}),
+            ]
         if command_type == "review_goal":
             goal_id = str(command.get("goal_id") or "")
             decision = str(command.get("decision") or "")
@@ -1264,7 +1320,22 @@ class WorldKernel:
             status = str(result.get("status") or "")
             if status not in {"delivered", "failed", "cancelled"}:
                 raise WorldError("external result requires a terminal status")
-            return [("ActionAttempted", {"action_id": action_id}), ("ActionSettled", {"action_id": action_id, "result": result})]
+            events: list[tuple[str, dict[str, object]]] = [
+                ("ActionAttempted", {"action_id": action_id}),
+                ("ActionSettled", {"action_id": action_id, "result": result}),
+            ]
+            payload = _as_dict(action.get("payload", {}), "action payload")
+            if action.get("kind") == "media_generation" and status == "delivered":
+                artifact_path = str(result.get("artifact_path") or "")
+                artifact_hash = str(result.get("artifact_hash") or "")
+                if not artifact_path or len(artifact_path) > 500 or not artifact_hash or len(artifact_hash) > 128:
+                    raise WorldError("generated media result requires bounded artifact path and hash")
+                events.append(("MediaGenerated", {"request_id": str(payload["request_id"]), "artifact_path": artifact_path, "artifact_hash": artifact_hash, "action_id": action_id}))
+            if action.get("kind") == "media_delivery" and status == "delivered":
+                events.append(("MediaShared", {"request_id": str(payload["request_id"]), "action_id": action_id}))
+            if action.get("kind") == "sticker_delivery" and status == "delivered":
+                events.append(("StickerShared", {"action_id": action_id}))
+            return events
         if command_type == "commit_experience":
             raise WorldError("experiences are committed only by validated life outcomes")
         if command_type == "record_model_proposal":
@@ -1367,63 +1438,28 @@ class WorldKernel:
             )]
         if command_type == "appraise_turn":
             appraisal = str(command.get("appraisal") or "ordinary_message")
-            policies = {
-                "user_vulnerable": "先接住情绪，不急着追问。",
-                "boundary_violation": "短而清楚地守住边界。",
-                "control_pressure": "不讨好，平静地说明边界。",
-                "repair_attempt": "可以缓和，但不立刻翻篇。",
-                "availability_drop": "收住主动性，不追发。",
-                "return_after_gap": "自然接上，不抱怨。",
-            }
-            need_deltas = {
-                "boundary_violation": {"security": -12, "boundary": 12, "initiative": -8},
-                "control_pressure": {"security": -8, "boundary": 8, "initiative": -5},
-                "repair_attempt": {"security": 5, "boundary": -3},
-                "warmth_received": {"security": 4, "initiative": 3},
-                "user_vulnerable": {"initiative": 5, "attention": -4},
-                "availability_drop": {"initiative": -6},
-                "return_after_gap": {"security": 2, "initiative": 2},
-            }
-            relationship_deltas = {
-                "boundary_violation": {"respect": -12, "reliability": -4},
-                "control_pressure": {"respect": -8},
-                "repair_attempt": {"respect": 3, "reliability": 2},
-                "warmth_received": {"closeness": 4, "reliability": 1},
-                "user_vulnerable": {"closeness": 2},
-                "availability_drop": {"reliability": -1},
-                "return_after_gap": {"closeness": 1, "reliability": 1},
-            }
-            modulation = {
-                "boundary_violation": ("guarded", "guarded", 16),
-                "control_pressure": ("guarded", "guarded", 11),
-                "repair_attempt": ("softening", "soft", -5),
-                "warmth_received": ("warm", "smile", 5),
-                "user_vulnerable": ("caring", "worry", 7),
-                "availability_drop": ("patient", "neutral", -2),
-                "return_after_gap": ("open", "soft", 3),
-            }
+            consequence = self.interaction_rules.consequence(appraisal)
             events: list[tuple[str, dict[str, object]]] = [
-                ("TurnAppraised", {"appraisal": appraisal, "policy": policies.get(appraisal, "自然回应当前消息。")}),
+                ("TurnAppraised", {"appraisal": appraisal, "policy": consequence.policy, "rule_version": self.interaction_rules.RULE_VERSION}),
                 ("IntentCreated", {"intent_id": str(command["intent_id"]), "kind": "reply", "status": "open"}),
             ]
             events.extend(
                 ("NeedChanged", {"need": need, "delta": delta})
-                for need, delta in need_deltas.get(appraisal, {}).items()
+                for need, delta in consequence.need_deltas.items()
             )
             user_id = str(command.get("user_id") or "")
             if user_id:
                 user = _as_dict(_as_dict(state["entities"], "entities").get(user_id), "appraised user")
                 if user.get("kind") != "user":
                     raise WorldError("turn appraisal user must be a registered user")
-                events.append(("RelationshipAppraised", {"user_id": user_id, "appraisal": appraisal}))
+                events.append(("RelationshipAppraised", {"user_id": user_id, "appraisal": appraisal, "rule_version": self.interaction_rules.RULE_VERSION}))
                 events.extend(
                     ("RelationshipChanged", {"entity_id": user_id, "dimension": dimension, "delta": delta})
-                    for dimension, delta in relationship_deltas.get(appraisal, {}).items()
+                    for dimension, delta in consequence.relationship_deltas.items()
                 )
-            mode, expression, charge_delta = modulation.get(appraisal, ("calm", "neutral", -1))
             events.append((
                 "EmotionModulated",
-                {"mode": mode, "expression": expression, "charge_delta": charge_delta, "reason": appraisal},
+                {"mode": consequence.emotion_mode, "expression": consequence.emotion_expression, "charge_delta": consequence.emotion_charge_delta, "reason": appraisal, "rule_version": self.interaction_rules.RULE_VERSION},
             ))
             return events
         raise WorldError(f"unsupported command: {command_type}")
@@ -1673,14 +1709,26 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["status"] = str(_as_dict(payload["result"], "result")["status"])
         action["result"] = payload["result"]
+        _reduce_media_action_terminal(next_state, action, str(_as_dict(payload["result"], "result")["status"]))
+        if action.get("kind") == "outgoing_message" and action["status"] == "delivered":
+            history = _as_list(next_state["recent_messages"], "recent_messages")
+            trace = _as_dict(action.get("trace", {}), "outgoing trace")
+            history.append({
+                "direction": "out", "message_id": str(payload["action_id"]),
+                "text": str(action.get("text") or ""), "sent_at": event.logical_at,
+                "source_action_id": str(payload["action_id"]), "outgoing_direction": str(trace.get("direction") or ""),
+            })
+            next_state["recent_messages"] = history[-16:]
     elif event.event_type == "ActionExpired":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["status"] = "expired"
         action["reason"] = payload.get("reason")
+        _reduce_media_action_terminal(next_state, action, "expired")
     elif event.event_type == "ActionCancelled":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["status"] = "cancelled"
         action["reason"] = payload.get("reason")
+        _reduce_media_action_terminal(next_state, action, "cancelled")
     elif event.event_type == "ActionDeliveryUncertain":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["status"] = "unknown"
@@ -1703,11 +1751,14 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         need = str(payload["need"])
         needs[need] = max(0, min(100, int(needs.get(need, 50)) + int(payload["delta"])))
     elif event.event_type == "MessageAttentionDecided":
-        next_state["communication"] = {
+        communication = {
             "message_id": payload["message_id"], "attention": payload["attention"], "typing": "idle",
             "reason": payload["reason"], "due_at": payload["due_at"],
             "deferred_action_id": payload["deferred_action_id"],
         }
+        if payload.get("rule_version"):
+            communication["rule_version"] = payload["rule_version"]
+        next_state["communication"] = communication
     elif event.event_type == "TypingStateChanged":
         communication = _as_dict(next_state["communication"], "communication")
         communication["typing"] = "started" if payload["typing"] == "started" else "idle"
@@ -1731,6 +1782,24 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         if thread.get("status") == "open":
             thread["status"] = "expired"
             thread["resolution_reason"] = str(payload["reason"])
+    elif event.event_type == "MediaRequested":
+        _as_dict(next_state["media"], "media")[str(payload["request_id"])] = {**payload, "status": "requested"}
+    elif event.event_type == "MediaRequestRejected":
+        _as_dict(next_state["media"], "media")[str(payload["request_id"])] = {**payload, "status": "rejected"}
+    elif event.event_type == "MediaGenerated":
+        media = _as_dict(_as_dict(next_state["media"], "media")[str(payload["request_id"])], "media request")
+        media.update({"status": "generated", "artifact_path": payload["artifact_path"], "artifact_hash": payload["artifact_hash"], "generation_action_id": payload["action_id"]})
+    elif event.event_type == "MediaShared":
+        media = _as_dict(_as_dict(next_state["media"], "media")[str(payload["request_id"])], "media request")
+        media["status"] = "shared"
+        media["delivery_action_id"] = payload["action_id"]
+    elif event.event_type == "NpcInteractionCommitted":
+        _as_dict(next_state["npc_interactions"], "npc interactions")[str(payload["interaction_id"])] = dict(payload)
+    elif event.event_type == "StickerSelected":
+        _as_dict(next_state["stickers"], "stickers")[str(payload["action_id"])] = {**payload, "status": "selected"}
+    elif event.event_type == "StickerShared":
+        sticker = _as_dict(_as_dict(next_state["stickers"], "stickers")[str(payload["action_id"])], "sticker")
+        sticker["status"] = "shared"
     elif event.event_type == "ModelProposalRecorded":
         item = {**payload, "status": "recorded"}
         _as_dict(next_state["proposals"], "proposals")[str(item["proposal_id"])] = item
@@ -1835,7 +1904,31 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "last_relationship_appraisal": None,
         "decisions": {},
         "conversation_threads": {},
+        "media": {},
+        "npc_interactions": {},
+        "stickers": {},
     }
+
+
+def _reduce_media_action_terminal(state: dict[str, object], action: dict[str, object], status: str) -> None:
+    """Reflect a failed/cancelled media Action without inventing a media result."""
+    kind = str(action.get("kind") or "")
+    if kind == "sticker_delivery" and status != "delivered":
+        sticker = _as_dict(state.get("stickers", {}), "stickers").get(str(action.get("action_id") or ""))
+        if isinstance(sticker, dict):
+            sticker["status"] = "delivery_failed"
+            sticker["failure_status"] = status
+        return
+    if kind not in {"media_generation", "media_delivery"} or status == "delivered":
+        return
+    request_id = str(_as_dict(action.get("payload", {}), "action payload").get("request_id") or "")
+    if not request_id:
+        return
+    media = _as_dict(state.get("media", {}), "media").get(request_id)
+    if not isinstance(media, dict):
+        return
+    media["status"] = "generation_failed" if kind == "media_generation" else "delivery_failed"
+    media["failure_status"] = status
 
 
 def _action_console_rank(status: str) -> int:

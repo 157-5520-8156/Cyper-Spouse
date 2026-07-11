@@ -244,6 +244,65 @@ def test_delivered_question_opens_a_world_thread_then_resolves_or_expires(tmp_pa
     kernel.advance(started.world_id, NOW + timedelta(hours=3), expected_revision=kernel.revision(started.world_id))
     assert kernel.snapshot(started.world_id)["conversation_threads"]["thread:two"]["status"] == "expired"
 
+
+def test_media_generation_and_delivery_are_separate_world_actions(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    user = kernel.submit(
+        {"type": "register_user", "world_id": started.world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=started.revision,
+    )
+    requested = kernel.submit(
+        {
+            "type": "request_media", "world_id": started.world_id, "request_id": "image:one",
+            "user_id": "user:geoff", "media_kind": "selfie", "topic": "宿舍里的随手拍",
+            "reason": "world_relationship_allows_selfie", "rule_version": "world-media-v1",
+        },
+        expected_revision=user.revision,
+    )
+    generated = kernel.record_external_result(
+        "media-generation:image:one",
+        {"kind": "media_generation", "status": "delivered", "artifact_path": "assets/life/one.png", "artifact_hash": "abc123"},
+        expected_revision=requested.revision,
+        world_id=started.world_id,
+    )
+    assert kernel.snapshot(started.world_id)["media"]["image:one"]["status"] == "generated"
+    delivery = kernel.submit(
+        {"type": "schedule_media_delivery", "world_id": started.world_id, "request_id": "image:one"},
+        expected_revision=generated.revision,
+    )
+    kernel.record_external_result(
+        "media-delivery:image:one", {"kind": "media_delivery", "status": "delivered"},
+        expected_revision=delivery.revision, world_id=started.world_id,
+    )
+    media = kernel.snapshot(started.world_id)["media"]["image:one"]
+    assert media["status"] == "shared"
+    assert media["delivery_action_id"] == "media-delivery:image:one"
+
+
+def test_failed_media_generation_cannot_be_shared(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    user = kernel.submit(
+        {"type": "register_user", "world_id": started.world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=started.revision,
+    )
+    requested = kernel.submit(
+        {"type": "request_media", "world_id": started.world_id, "request_id": "image:failed", "user_id": "user:geoff", "media_kind": "creative_image", "topic": "一张插画", "reason": "user_requested_creative_image"},
+        expected_revision=user.revision,
+    )
+    failed = kernel.record_external_result(
+        "media-generation:image:failed", {"kind": "media_generation", "status": "failed", "reason": "provider_down"},
+        expected_revision=requested.revision, world_id=started.world_id,
+    )
+
+    assert kernel.snapshot(started.world_id)["media"]["image:failed"]["status"] == "generation_failed"
+    with pytest.raises(WorldError, match="generated media"):
+        kernel.submit(
+            {"type": "schedule_media_delivery", "world_id": started.world_id, "request_id": "image:failed"},
+            expected_revision=failed.revision,
+        )
+
 def test_world_can_start_from_the_reviewable_seed_file(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
 
@@ -355,6 +414,18 @@ def test_completed_activity_creates_deterministic_outcome_goal_and_experience(tm
     assert snapshot["goals"]["course-notes"]["progress"] == 1
     assert snapshot["experiences"]["outcome:2026-07-11:notes"]["source_outcome_id"] == "outcome:2026-07-11:notes"
     assert kernel.experiences_for_time_reference("zhizhi-v1", "today")[0]["experience_id"] == "outcome:2026-07-11:notes"
+
+
+def test_seeded_npc_activity_commits_a_constrained_npc_interaction(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    advanced = kernel.advance("zhizhi-v1", NOW + timedelta(hours=2), expected_revision=started.revision)
+
+    assert "NpcInteractionCommitted" in [event.event_type for event in advanced.events]
+    interaction = next(iter(kernel.snapshot("zhizhi-v1")["npc_interactions"].values()))
+    assert interaction["npc_id"] == "roommate-lin"
+    assert interaction["rule_version"] == "life-sim-v3"
 
 
 def test_seeded_fallback_template_replaces_an_unavailable_activity(tmp_path: Path) -> None:
