@@ -38,7 +38,8 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert "directionFor" in response.text
     assert "walkSheet = action === 'walk'" in response.text
     assert "applyPreviewMode" in response.text
-    assert "demo') !== 'walk'" in response.text
+    assert "demo !== 'walk' && demo !== 'audit'" in response.text
+    assert "auditPaths" in response.text
     assert "drawPhone" in response.text
     assert "drawSleep" in response.text
     assert "drawInteractionCue" in response.text

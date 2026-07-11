@@ -567,7 +567,26 @@ DASHBOARD_HTML = r"""<!doctype html>
     function applyPreviewMode() {
       // A non-persistent visual check for the dashboard.  It never changes
       // daemon state and is intentionally opt-in via the URL.
-      if (new URLSearchParams(location.search).get('demo') !== 'walk') return;
+      const params = new URLSearchParams(location.search);
+      const demo = params.get('demo');
+      if (demo !== 'walk' && demo !== 'audit') return;
+      if (demo === 'audit') {
+        const axis = params.get('axis') || 'downRight';
+        const auditPaths = {
+          // These routes are hand-calibrated to the central clear floor in
+          // the original room illustration; none cross a furniture footprint.
+          downRight:[[3,3,0],[[4,3,0]]],
+          downLeft:[[3,3,0],[[3,4,0]]],
+          upLeft:[[4,3,0],[[3,3,0]]],
+          upRight:[[3,4,0],[[3,3,0]]]
+        };
+        const [start,path] = auditPaths[axis] || auditPaths.downRight;
+        actor.position = [...start]; actor.path = path.map(point => [...point]);
+        actor.action = 'walk'; actor.activity = 'idle'; actor.scene = {location:'rug',action:'idle',expression:'neutral',time_of_day:'day'};
+        document.getElementById('updated').textContent = `斜向巡检 · ${axis} · 不写入 daemon`;
+        document.getElementById('gameAction').textContent = `巡检 · ${axis}`;
+        return;
+      }
       // Cross the clear central floor so the visual check shows both stepping
       // frames before the activity pose takes over at the destination.
       applyScene({location:'entry', action:'walk_out', expression:'neutral', time_of_day:'day', has_notification:false, has_open_task:false});
