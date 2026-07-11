@@ -314,6 +314,10 @@ class WorldKernel:
                             },
                         },
                     ),
+                    *(
+                        [("ExperienceShared", {"experience_id": _as_dict(_as_dict(state["actions"], "actions")[action_id], "action").get("trace", {}).get("experience_id"), "action_id": action_id})]
+                        if delivered and _as_dict(_as_dict(state["actions"], "actions")[action_id], "action").get("trace", {}).get("experience_id") else []
+                    ),
                 ],
                 idempotency_key=f"settle:{delivery_id}:{'delivered' if delivered else 'failed'}",
                 correlation_id=str(uuid4()),

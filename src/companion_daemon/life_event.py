@@ -305,6 +305,7 @@ async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bo
             "appraisal": "life_event_share",
             "expression_policy": "只分享已提交的世界经历，不补写新事实。",
             "allowed_facts": [str(experience["content"])],
+            "experience_id": experience_id,
             "short_lived_constraint": None,
             "observable_reason": "一个已发生但尚未分享的世界经历。",
         },
@@ -315,15 +316,6 @@ async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bo
         engine.world_kernel.settle_outgoing_action(delivery_id, delivered=False, reason=str(exc))
         return False
     engine.world_kernel.settle_outgoing_action(delivery_id, delivered=True)
-    engine._submit_world_with_retry(
-        {
-            "type": "share_experience",
-            "world_id": engine.world_id,
-            "experience_id": experience_id,
-            "action_id": action_id,
-            "idempotency_key": f"share-experience:{experience_id}:{action_id}",
-        }
-    )
     return True
 
 
