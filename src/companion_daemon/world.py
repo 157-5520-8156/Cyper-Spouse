@@ -733,11 +733,11 @@ class WorldKernel:
             proposal = _as_dict(_as_dict(state["proposals"], "proposals").get(proposal_id), "proposal")
             if proposal["status"] != "recorded":
                 raise WorldError("only a recorded proposal can be accepted")
-            entity = _as_dict(_as_dict(state["entities"], "entities").get(str(proposal["entity_id"])), "proposal entity")
-            if str(proposal["template_id"]) not in _as_list(entity.get("templates", []), "entity templates"):
-                raise WorldError("proposal template is no longer permitted")
+            accepted, reason = self.life_simulation.validate_candidate(state, proposal)
+            if not accepted:
+                return [("LifeOutcomeRejected", {"outcome_id": proposal_id, "reason": reason, "rule_version": "life-sim-v2"})]
             return [
-                ("LifeOutcomeValidated", {"outcome_id": proposal_id, "validation": "registered_entity/template/content_bound", "rule_version": "life-proposal-v1"}),
+                ("LifeOutcomeValidated", {"outcome_id": proposal_id, "validation": reason, "rule_version": "life-sim-v2"}),
                 ("ModelProposalAccepted", {"proposal_id": proposal_id}),
                 (
                     "ExperienceCommitted",
@@ -1072,6 +1072,11 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         _as_dict(next_state["proposals"], "proposals")[str(payload["outcome_id"])] ["status"] = "committed"
     elif event.event_type == "LifeOutcomeValidated":
         _as_dict(next_state["proposals"], "proposals")[str(payload["outcome_id"])] ["validated"] = True
+    elif event.event_type == "LifeOutcomeRejected":
+        proposal = _as_dict(next_state["proposals"], "proposals").get(str(payload["outcome_id"]))
+        if proposal is not None:
+            proposal["status"] = "rejected"
+            proposal["rejection_reason"] = payload["reason"]
     elif event.event_type == "GoalProgressed":
         goal = _as_dict(_as_dict(next_state["goals"], "goals").get(str(payload["goal_id"])), "goal")
         goal["progress"] = min(int(goal["target"]), int(goal["progress"]) + int(payload["delta"]))

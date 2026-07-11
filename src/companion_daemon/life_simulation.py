@@ -18,6 +18,19 @@ class LifeSimulation:
             self._apply(working, events)
         return emitted
 
+    def validate_candidate(self, state: dict[str, Any], candidate: dict[str, Any]) -> tuple[bool, str]:
+        """One rule seam for model-proposed life outcomes; never creates facts."""
+        entity_id = str(candidate.get("entity_id") or "")
+        template_id = str(candidate.get("template_id") or "")
+        entity = state.get("entities", {}).get(entity_id)
+        if not entity or template_id not in entity.get("templates", []):
+            return False, "unregistered_entity_or_template"
+        if state.get("needs", {}).get("energy", 0) < 15:
+            return False, "insufficient_energy"
+        if len(str(candidate.get("content") or "")) > 160:
+            return False, "content_too_long"
+        return True, "registered_template_and_resources"
+
     def _outcome(self, state: dict[str, Any], activity: dict[str, Any]) -> list[tuple[str, dict[str, Any]]]:
         spec = self._spec(activity, state)
         if spec is None:
