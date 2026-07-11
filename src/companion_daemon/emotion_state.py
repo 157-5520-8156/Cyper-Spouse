@@ -30,7 +30,19 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
             "被明显冒犯了，先收起亲近感，语气短一点，维护边界。",
             "短、冷静、有边界；不要讨好，不要撒娇。",
         )
-    if _has_any(text, ["命令你", "必须听我的", "不准", "你只能", "立刻", "马上给我"]):
+    # Repair language takes precedence over a quoted description of the
+    # previous bad behavior (for example, “我不该这样命令你”).
+    if is_repair_message(text):
+        return InteractionEvent(
+            "repair_attempt",
+            3,
+            "apology_or_repair",
+            "听到道歉后缓和了一些，但还会观察后续是否真的改变。",
+            "接受一点点，但不要立刻完全恢复热情。",
+        )
+    if _has_any(text, ["命令你", "必须听我的", "不准", "你只能", "立刻", "马上给我"]) or (
+        "必须" in text and "回我" in text
+    ):
         return InteractionEvent(
             "control_pressure",
             3,
@@ -49,14 +61,6 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
             "对过早亲昵称呼有点退缩，觉得关系还没到那里。",
             "轻轻挡回去，可以带一点玩笑，但明确慢慢来。",
         )
-    if is_repair_message(text):
-        return InteractionEvent(
-            "repair_attempt",
-            3,
-            "apology_or_repair",
-            "听到道歉后缓和了一些，但还会观察后续是否真的改变。",
-            "接受一点点，但不要立刻完全恢复热情。",
-        )
     if _has_any(text, ["谢谢", "辛苦", "你说得对", "你真细心", "我记得你"]):
         return InteractionEvent(
             "warmth_received",
@@ -65,7 +69,7 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
             "被认真对待了，心里放松一点。",
             "自然柔和一点，可以露出小小开心。",
         )
-    if _has_any(text, ["难受", "崩溃", "好累", "撑不住", "失眠", "焦虑", "委屈", "想哭", "好烦"]):
+    if _has_any(text, ["难受", "崩溃", "好累", "有点累", "撑不住", "失眠", "焦虑", "委屈", "想哭", "好烦"]):
         return InteractionEvent(
             "user_vulnerable",
             3,
@@ -73,7 +77,7 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
             "用户在示弱，需要先稳住对方，而不是急着开玩笑。",
             "温柔、具体、少说教，先接住情绪。",
         )
-    if _has_any(text, ["刚在忙", "我回来了", "刚下课", "刚下班", "刚到家"]):
+    if _has_any(text, ["刚在忙", "我回来了", "刚下课", "刚下班", "刚到家", "我到家了"]):
         return InteractionEvent(
             "return_after_gap",
             1,
@@ -81,7 +85,7 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
             "对方回来了，轻微放松，但如果之前等太久会有一点点小别扭。",
             "自然回应；若之前是 miss_you/sulking，可轻轻提一句。",
         )
-    if _has_any(text, ["忙", "等下", "一会儿", "没空"]):
+    if _has_any(text, ["忙", "等下", "等一下", "一会儿", "没空"]):
         return InteractionEvent(
             "availability_drop",
             1,

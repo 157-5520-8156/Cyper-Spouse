@@ -87,3 +87,46 @@ async def test_replay_early_intimacy_keeps_boundary_instead_of_accepting_the_lab
     trace = store.recent_turn_traces("geoff")[-1]
     assert trace["appraisal"] == "premature_intimacy"
     assert store.get_mood_state("geoff").relationship_stage == "stranger"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_text", "second_text", "expected"),
+    [
+        ("你必须马上回我", "对不起，刚刚太急了", ("control_pressure", "repair_attempt")),
+        ("谢谢你刚才认真听我说", "你觉得呢？", ("warmth_received", "curiosity_invited")),
+        ("我先忙一下", "我今天其实挺难受的", ("availability_drop", "user_vulnerable")),
+        ("今天下雨了", "你在吗？", ("ordinary_message", "curiosity_invited")),
+        ("宝宝你在吗", "那我们慢慢聊", ("premature_intimacy", "ordinary_message")),
+        ("我好烦，想哭", "现在好一点了", ("user_vulnerable", "ordinary_message")),
+        ("闭嘴", "我认真道歉，以后会注意", ("boundary_violation", "repair_attempt")),
+        ("我刚下班", "你觉得今天怎么样？", ("return_after_gap", "curiosity_invited")),
+        ("没空，晚点说", "我回来了", ("availability_drop", "return_after_gap")),
+            ("你只能听我的", "对不起，我不该这样命令你", ("control_pressure", "repair_attempt")),
+        ("你真细心", "我有点累", ("warmth_received", "user_vulnerable")),
+        ("我先忙", "今天成都下雨了", ("availability_drop", "ordinary_message")),
+        ("亲爱的你在吗", "你叫什么？", ("premature_intimacy", "curiosity_invited")),
+        ("我撑不住了", "谢谢你", ("user_vulnerable", "warmth_received")),
+        ("有病", "对不起", ("boundary_violation", "repair_attempt")),
+        ("我到家了", "你还在吗？", ("return_after_gap", "curiosity_invited")),
+            ("等一下", "我想问你个问题？", ("availability_drop", "curiosity_invited")),
+        ("今天普通的一天", "我有点焦虑", ("ordinary_message", "user_vulnerable")),
+        ("老婆你在吗", "算了慢慢认识", ("premature_intimacy", "ordinary_message")),
+        ("我真的失眠了", "我现在去睡了", ("user_vulnerable", "ordinary_message")),
+            ("你算什么", "对不起，刚才是我不对", ("boundary_violation", "repair_attempt")),
+    ],
+)
+async def test_replay_matrix_preserves_two_turn_appraisal_causality(
+    tmp_path, first_text: str, second_text: str, expected: tuple[str, str]
+) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。")
+
+    first = await engine.handle_message(incoming(first_text, 0))
+    second = await engine.handle_message(incoming(second_text, 5))
+
+    assert first and second
+    traces = store.recent_turn_traces("geoff")[-2:]
+    assert tuple(trace["appraisal"] for trace in traces) == expected
+    assert all(trace["status"] == "delivered" for trace in traces)
