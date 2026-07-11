@@ -97,6 +97,20 @@ async def test_failed_reply_marks_the_same_turn_trace_failed(tmp_path: Path) -> 
     assert trace["failure_reason"] == "network failed"
 
 
+def test_afterthought_delivery_has_the_same_auditable_commit_path(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+
+    delivery_id = engine.queue_afterthought_delivery("geoff", "qq", "哦对，还想补一句。")
+    engine.confirm_afterthought_delivery("geoff", "qq", "哦对，还想补一句。", delivery_id=delivery_id)
+
+    trace = store.recent_turn_traces("geoff")[-1]
+    assert trace["direction"] == "afterthought"
+    assert trace["delivery_id"] == delivery_id
+    assert trace["status"] == "delivered"
+
+
 @pytest.mark.asyncio
 async def test_delivery_trace_cannot_be_changed_to_failed_after_delivery(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")

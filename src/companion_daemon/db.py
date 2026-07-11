@@ -684,6 +684,13 @@ class CompanionStore:
             ).fetchall()
         return list(reversed(rows))
 
+    def turn_trace_id_for_delivery(self, delivery_id: int) -> int | None:
+        with self.connect() as conn:
+            row = conn.execute(
+                "select id from turn_traces where delivery_id = ? order by id desc limit 1", (delivery_id,)
+            ).fetchone()
+        return int(row["id"]) if row else None
+
     def save_outgoing(self, canonical_user_id: str, platform: Platform, text: str) -> None:
         with self.connect() as conn:
             conn.execute(

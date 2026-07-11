@@ -742,7 +742,19 @@ class CompanionEngine:
         return text
 
     def queue_afterthought_delivery(self, canonical_user_id: str, platform: str, text: str) -> int:
-        return self.store.queue_outgoing(canonical_user_id, platform, text, kind="afterthought")
+        delivery_id = self.store.queue_outgoing(canonical_user_id, platform, text, kind="afterthought")
+        self.store.create_turn_trace(
+            canonical_user_id,
+            appraisal="conversation_pulse",
+            expression_policy="只补一句新信息；用户回来前可取消，不复读旧话。",
+            allowed_facts=[],
+            short_lived_constraint=None,
+            observable_reason="当前对话仍留有一段可取消的余韵。",
+            output_text=text,
+            delivery_id=delivery_id,
+            direction="afterthought",
+        )
+        return delivery_id
 
     def confirm_afterthought_delivery(
         self,
@@ -754,7 +766,9 @@ class CompanionEngine:
     ) -> None:
         if delivery_id is None:
             delivery_id = self.queue_afterthought_delivery(canonical_user_id, platform, text)
-        delivered = self.store.mark_outgoing_delivered(delivery_id)
+        delivered = self.store.resolve_outgoing_and_turn_trace(
+            delivery_id, self.store.turn_trace_id_for_delivery(delivery_id), delivered=True
+        )
         if not delivered or delivered["status"] != "planned":
             return
         state = self.store.get_mood_state(canonical_user_id)
@@ -764,7 +778,12 @@ class CompanionEngine:
 
     def fail_afterthought_delivery(self, delivery_id: int | None, reason: str) -> None:
         if delivery_id is not None:
-            self.store.mark_outgoing_failed(delivery_id, reason)
+            self.store.resolve_outgoing_and_turn_trace(
+                delivery_id,
+                self.store.turn_trace_id_for_delivery(delivery_id),
+                delivered=False,
+                failure_reason=reason,
+            )
 
     def confirm_life_event_delivery(self, canonical_user_id: str, platform: str = "qq") -> None:
         self.store.record_proactive_delivery(canonical_user_id, f"{platform}:life_event")
