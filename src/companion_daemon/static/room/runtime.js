@@ -18,6 +18,9 @@
       this.stage = {scale:1, ox:0, oy:0};
       this.images = {};
       this.walkable = new Set(bundle.walkable.map(point => this.key(point)));
+      this.hiddenObjectIds = new Set();
+      this.soloObjectId = null;
+      this.layerRoleFilter = null;
       this.running = false;
       this.frameRequest = null;
       this.actor = {
@@ -74,7 +77,9 @@
     }
 
     pathfind(start, target) {
-      const blocked = new Set(this.scene.objects.flatMap(object => object.footprint).map(point => this.key(point)));
+      const blocked = new Set(this.scene.objects
+        .flatMap(object => object.occupancy?.tiles || [])
+        .map(point => this.key(point)));
       const allowed = new Set([...this.walkable].filter(tile => !blocked.has(tile)));
       const startKey = this.key(start), targetKey = this.key(target);
       if (!allowed.has(targetKey)) return [];
@@ -101,6 +106,24 @@
         current = came.get(this.key(current));
       }
       return path;
+    }
+
+    visibleObjects() {
+      return this.scene.objects.filter(object => (
+        !this.hiddenObjectIds.has(object.id)
+        && (this.soloObjectId === null || object.id === this.soloObjectId)
+      ));
+    }
+
+    visibleLayers(object) {
+      const layers = object.layers || [];
+      return this.layerRoleFilter === null
+        ? layers
+        : layers.filter(layer => layer.role === this.layerRoleFilter);
+    }
+
+    frontLayer(object) {
+      return (object.layers || []).find(layer => layer.role === 'front');
     }
 
     actionDefinition(action) {
@@ -143,14 +166,45 @@
         this.editor.mount();
         return {status:'房间校准工具 · 只改预览', gameAction:'Room Editor · 不写入 daemon'};
       }
+      this.hiddenObjectIds.clear();
+      this.soloObjectId = null;
+      this.layerRoleFilter = null;
+      if (demo === 'atomization') {
+        const objectId = params.get('object') || this.scene.objects[0].id;
+        const requestedMode = params.get('mode');
+        const mode = ['solo', 'layers'].includes(requestedMode) ? requestedMode : 'hidden';
+        const object = this.scene.objects.find(item => item.id === objectId) || this.scene.objects[0];
+        if (mode === 'solo') this.soloObjectId = object.id;
+        else if (mode === 'layers') {
+          this.soloObjectId = object.id;
+          const requestedRole = params.get('role');
+          this.layerRoleFilter = ['shadow', 'back', 'body', 'front', 'light'].includes(requestedRole)
+            ? requestedRole : 'front';
+        } else this.hiddenObjectIds.add(object.id);
+        const inventory = this.scene.inventory.items.find(item => item.id === object.id);
+        const actor = this.actor;
+        actor.position = [...this.scene.anchors.rug]; actor.path = []; actor.tourRoute = null;
+        actor.posePosition = null; actor.targetFacing = null; actor.action = 'idle'; actor.activity = 'idle'; actor.pose = 'idle'; actor.interaction = null;
+        actor.scene = {location:'rug', action:'idle', expression:'neutral', time_of_day:'day'};
+        return {
+          status:`原子化审计 · ${object.id} · ${mode}${this.layerRoleFilter ? `:${this.layerRoleFilter}` : ''} · ${inventory?.status || 'untracked'} · 不写入 daemon`,
+          gameAction:`原子化审计 · ${object.id} · ${mode}`
+        };
+      }
       if (!['walk', 'audit', 'tour', 'activity'].includes(demo)) return null;
       const actor = this.actor;
       const previewScene = (location='rug', action='idle') => ({location, action, expression:'neutral', time_of_day:'day'});
       if (demo === 'audit') {
         const objectId = params.get('object');
         if (objectId) {
-          const object = this.scene.objects.find(item => item.id === objectId) || this.scene.objects.find(item => item.id === 'sofa');
+          const object = this.scene.objects.find(item => item.id === objectId) || this.scene.objects[0];
           const side = params.get('side') === 'front' ? 'front' : 'behind';
+          if (!object.audits?.[side] || !object.audit?.[side]) {
+            return {
+              status:`遮挡巡检 · ${object.id} · ${side} · 不适用 · 不写入 daemon`,
+              gameAction:`遮挡巡检 · ${object.id} · ${side} · 不适用`
+            };
+          }
           actor.position = [...object.audit[side]];
           actor.path = []; actor.tourRoute = null; actor.posePosition = null; actor.targetFacing = null;
           actor.action = 'idle'; actor.activity = 'idle'; actor.pose = object.auditPose?.[side] || 'idle';
@@ -172,8 +226,8 @@
         return {status:'小屋巡回行走 · 不写入 daemon', gameAction:'小屋巡回 · 不写入 daemon'};
       }
       if (demo === 'activity') {
-        const spot = params.get('spot') || 'sofa';
-        const preview = this.scene.interactions[spot] || this.scene.interactions.sofa;
+        const spot = params.get('spot') || Object.keys(this.scene.interactions)[0];
+        const preview = this.scene.interactions[spot] || Object.values(this.scene.interactions)[0];
         actor.position = [...preview.approach]; actor.posePosition = preview.posePosition ? [...preview.posePosition] : null;
         actor.path = []; actor.tourRoute = null; actor.targetFacing = null; actor.action = preview.action;
         actor.activity = preview.action; actor.pose = preview.pose; actor.facing = preview.facing;
@@ -183,7 +237,7 @@
       const route = this.scene.routes.walk;
       actor.position = [...route[0]]; actor.path = route.slice(1).map(point => [...point]);
       actor.tourRoute = null; actor.posePosition = null; actor.targetFacing = null;
-      actor.action = 'walk'; actor.activity = 'idle'; actor.pose = 'idle'; actor.scene = previewScene('sofa', 'walk_out'); actor.interaction = null;
+      actor.action = 'walk'; actor.activity = 'idle'; actor.pose = 'idle'; actor.scene = previewScene('rug', 'walk_out'); actor.interaction = null;
       return {status:'行走动画预览 · 不写入 daemon', gameAction:'绕沙发行走 · 不写入 daemon'};
     }
 
@@ -250,7 +304,8 @@
       const actor = this.actor, interactionDepth = actor.interaction?.depth;
       if (typeof interactionDepth === 'object' && interactionDepth.layer === 'above-front') {
         const object = this.scene.objects.find(item => item.id === interactionDepth.relativeTo);
-        if (object) return this.depthKey(object.tile, object.frontOccluder.depthBias + 100);
+        const front = object && this.frontLayer(object);
+        if (front) return this.depthKey(object.tile, front.depthBias + 100);
       }
       return this.depthKey(actor.action === 'walk' ? actor.position : (actor.posePosition || actor.position));
     }
@@ -258,38 +313,44 @@
     drawEntities(now) {
       const parts = [
         {depth:this.actorDepth(), order:0, draw:() => this.drawActor(now)},
-        ...this.scene.objects.map((object, order) => ({
-          depth:this.depthKey(object.tile, object.frontOccluder.depthBias), order:order + 1,
-          draw:() => this.drawOccluder(object.frontOccluder)
-        }))
+        ...this.visibleObjects().flatMap((object, objectOrder) => this.visibleLayers(object)
+          .filter(layer => layer.role === 'front')
+          .map((layer, layerOrder) => ({
+            depth:this.depthKey(object.tile, layer.depthBias), order:(objectOrder + 1) * 100 + layerOrder,
+            draw:() => this.drawLayer(layer)
+          })))
       ];
       for (const part of parts.sort((a, b) => a.depth - b.depth || a.order - b.order)) part.draw();
     }
 
-    drawOccluder(occluder) {
-      const image = this.images[occluder.image];
+    drawLayer(layer) {
+      const image = this.images[layer.image];
       if (!image) return;
-      const [x, y] = occluder.origin;
+      const [x, y] = layer.origin;
       this.ctx.save(); this.ctx.imageSmoothingEnabled = false;
       this.ctx.drawImage(image, this.stage.ox + x * this.stage.scale, this.stage.oy + y * this.stage.scale, image.width * this.stage.scale, image.height * this.stage.scale);
       this.ctx.restore();
     }
 
-    drawBackLayers() {
-      for (const object of this.scene.objects) {
-        const layer = object.backLayer;
-        if (!layer) continue;
-        const image = this.images[layer.image];
-        if (!image) continue;
-        const [x, y] = layer.origin;
-        this.ctx.save(); this.ctx.imageSmoothingEnabled = false;
-        this.ctx.drawImage(image, this.stage.ox + x * this.stage.scale, this.stage.oy + y * this.stage.scale, image.width * this.stage.scale, image.height * this.stage.scale);
-        this.ctx.restore();
-      }
+    drawObjectLayers(roles) {
+      const allowed = new Set(roles);
+      const parts = this.visibleObjects().flatMap((object, objectOrder) => this.visibleLayers(object)
+        .filter(layer => allowed.has(layer.role))
+        .map((layer, layerOrder) => ({
+          depth:this.depthKey(object.tile, layer.depthBias),
+          order:objectOrder * 100 + layerOrder,
+          layer
+        })));
+      for (const part of parts.sort((a, b) => a.depth - b.depth || a.order - b.order)) this.drawLayer(part.layer);
     }
 
     drawEffects(now) {
       const scene = this.actor.scene || {}, target = this.actor.posePosition || this.scene.anchors[scene.location] || this.scene.anchors.rug;
+      const effectObjectId = this.actor.interaction?.object;
+      if (effectObjectId && (
+        this.hiddenObjectIds.has(effectObjectId)
+        || (this.soloObjectId !== null && this.soloObjectId !== effectObjectId)
+      )) return;
       const [x, y] = this.project(target), pulse = Math.sin(now / 240);
       const effects = {
         focus:() => {
@@ -330,12 +391,13 @@
       const background = this.images[this.scene.background];
       if (background) this.drawImageContain(background, 18, 14, 964, 720);
       if (this.editor?.mode === 'master') { this.editor.draw(); return; }
-      this.drawBackLayers();
-      this.drawEffects(now);
+      this.drawObjectLayers(['shadow', 'back', 'body']);
       if ((this.actor.scene || {}).time_of_day === 'night') {
         ctx.fillStyle = 'rgba(20, 17, 30, .22)'; ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
       }
-      this.drawEntities(now); this.drawRibbon();
+      this.drawEntities(now);
+      this.drawObjectLayers(['light']);
+      this.drawEffects(now); this.drawRibbon();
       if (this.editor?.mode === 'alpha') this.editor.drawAlpha();
       if (this.editor) this.editor.draw();
     }

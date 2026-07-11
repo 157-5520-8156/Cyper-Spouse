@@ -13,12 +13,16 @@ ROOM_MANIFEST = ROOT / "assets/dashboard/rooms/zhizhi-home/room.json"
 
 def editable_manifest(tmp_path: Path) -> tuple[dict, Path]:
     manifest = json.loads(ROOM_MANIFEST.read_text())
+    manifest["inventory"] = str((ROOM_MANIFEST.parent / manifest["inventory"]).resolve())
     for image in manifest["images"].values():
         image["source"] = str((ROOM_MANIFEST.parent / image["source"]).resolve())
     for item in manifest["objects"]:
-        occluder = item["frontOccluder"]
-        source_key = "source" if "source" in occluder else "matte"
-        occluder[source_key] = str((ROOM_MANIFEST.parent / occluder[source_key]).resolve())
+        specs = item.get("layers", []) or [
+            spec for spec in (item.get("backLayer"), item.get("frontOccluder")) if spec
+        ]
+        for spec in specs:
+            source_key = "source" if "source" in spec else "matte"
+            spec[source_key] = str((ROOM_MANIFEST.parent / spec[source_key]).resolve())
     manifest_path = tmp_path / "room.json"
     return manifest, manifest_path
 
@@ -40,27 +44,37 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "divider",
         "teal-stool",
     ]
-    assert bundle["images"]["deskFront"] == (
-        "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/desk-front.png"
+    assert bundle["images"]["deskFront0"] == (
+        "/assets/dashboard/rooms/zhizhi-home/runtime/layers/desk-front.png"
     )
-    assert bundle["objects"][0]["frontOccluder"]["image"] == "deskFront"
+    assert bundle["objects"][0]["layers"][0]["image"] == "deskFront0"
     assert bundle["sprites"]["poses"]["sit"]["crop"] == [380, 620, 360, 470]
+    assert bundle["inventory"]["summary"] == {
+        "total": 64, "planned": 57, "partial": 6, "atomized": 0, "verified": 1
+    }
+    assert {item["id"]: item["status"] for item in bundle["inventory"]["items"]}["desk"] == "partial"
     assert bundle["behavior"]["actionDefinitions"]["read_phone"]["interaction"] == "phone"
     stool = next(item for item in bundle["objects"] if item["id"] == "teal-stool")
-    assert stool["footprint"] == [[7, 0]]
+    assert stool["occupancy"] == {"kind": "footprint", "tiles": [[7, 0]]}
+    assert stool["category"] == "furniture"
+    assert stool["assetMode"] == "layered"
+    assert [layer["role"] for layer in stool["layers"]] == ["front"]
+    assert stool["interactions"] == []
+    assert stool["audits"] == {"hidden": True, "solo": True, "behind": True, "front": True}
+    assert stool["provenance"]["method"] == "ai-generated-chroma"
 
     master = Image.open(ROOT / "assets/dashboard/zhizhi-room-isometric-v2.png").convert("RGBA")
     matte = Image.open(ROOT / "assets/dashboard/layers/desk-front-v1.png").convert("RGBA")
-    occluder = Image.open(tmp_path / "occluders/desk-front.png").convert("RGBA")
+    occluder = Image.open(tmp_path / "layers/desk-front.png").convert("RGBA")
     expected_rgb = master.crop((35, 445, 35 + matte.width, 445 + matte.height)).convert("RGB")
 
     assert occluder.convert("RGB").tobytes() == expected_rgb.tobytes()
     assert occluder.getchannel("A").tobytes() == matte.getchannel("A").tobytes()
-    stool_occluder = Image.open(tmp_path / "occluders/teal-stool-front.png").convert("RGBA")
+    stool_occluder = Image.open(tmp_path / "layers/teal-stool-front.png").convert("RGBA")
     assert stool_occluder.size == (120, 120)
     assert stool_occluder.getchannel("A").getextrema() == (0, 255)
     assert report.generated_assets == tuple(
-        tmp_path / f"occluders/{name}-front.png"
+        tmp_path / f"layers/{name}-front.png"
         for name in ("desk", "bed", "sofa", "table", "dining", "divider", "teal-stool")
     )
 
@@ -134,7 +148,7 @@ def test_compile_room_rejects_duplicate_object_identity_and_footprint(
         compile_room(manifest_path, tmp_path / "runtime")
 
     assert "duplicate object id 'desk'" in raised.value.errors
-    assert "duplicate occluder output 'desk-front.png'" in raised.value.errors
+    assert "duplicate layer output 'desk-front.png'" in raised.value.errors
     assert "footprint tile (1, 5) is claimed by both 'desk' and 'desk'" in raised.value.errors
 
 
@@ -164,10 +178,11 @@ def test_compile_room_supports_independent_back_and_front_layers(
     bundle = json.loads(report.bundle_path.read_text())
     compiled = bundle["objects"][0]
 
-    assert compiled["backLayer"]["image"] == "deskBack"
-    assert compiled["frontOccluder"]["image"] == "deskFront"
+    assert [layer["role"] for layer in compiled["layers"]] == ["back", "front"]
+    assert compiled["layers"][0]["image"] == "deskBack0"
+    assert compiled["layers"][1]["image"] == "deskFront1"
     assert Image.open(tmp_path / "runtime/layers/desk-back-independent.png").tobytes() == Image.open(back_source).tobytes()
-    assert Image.open(tmp_path / "runtime/occluders/desk-front-independent.png").tobytes() == Image.open(front_source).tobytes()
+    assert Image.open(tmp_path / "runtime/layers/desk-front-independent.png").tobytes() == Image.open(front_source).tobytes()
 
 
 def test_compile_room_rejects_missing_sources_and_out_of_grid_coordinates(
@@ -183,6 +198,20 @@ def test_compile_room_rejects_missing_sources_and_out_of_grid_coordinates(
 
     assert "image 'sprite' source does not exist" in raised.value.errors
     assert "anchor 'rug' is outside the room grid" in raised.value.errors
+
+
+def test_compile_room_rejects_a_shell_with_canvas_geometry_drift(tmp_path: Path) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    wrong_shell = tmp_path / "wrong-shell.png"
+    Image.new("RGBA", (100, 80), (0, 0, 0, 255)).save(wrong_shell)
+    manifest["images"]["wrong-shell"] = {
+        "source": str(wrong_shell), "url": "/wrong-shell.png"
+    }
+    manifest["shell"]["image"] = "wrong-shell"
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RoomCompileError, match="shell image size .* must match visual master"):
+        compile_room(manifest_path, tmp_path / "runtime")
 
 
 def test_compile_room_rejects_unknown_pose_and_object_references(
@@ -206,7 +235,7 @@ def test_compile_room_replaces_stale_runtime_as_one_complete_output(
     tmp_path: Path,
 ) -> None:
     output_dir = tmp_path / "runtime"
-    stale = output_dir / "occluders/stale-chair.png"
+    stale = output_dir / "layers/stale-chair.png"
     stale.parent.mkdir(parents=True)
     stale.write_bytes(b"old")
 
@@ -215,3 +244,81 @@ def test_compile_room_replaces_stale_runtime_as_one_complete_output(
     assert report.bundle_path == output_dir / "room.bundle.json"
     assert not stale.exists()
     assert len(report.generated_assets) == 7
+
+
+@pytest.mark.parametrize(
+    ("mutate", "message"),
+    [
+        (lambda item: item.pop("provenance"), "must define provenance"),
+        (lambda item: item.update(category="mystery"), "invalid category"),
+        (lambda item: item["occupancy"].update(kind="fog"), "invalid occupancy kind"),
+        (lambda item: item["layers"][0].update(role="middle"), "invalid layer role"),
+        (lambda item: item["audits"].update(hidden=False), "must support hidden/solo audits"),
+    ],
+)
+def test_compile_room_rejects_invalid_generic_object_contract(
+    tmp_path: Path, mutate, message: str
+) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    stool = next(item for item in manifest["objects"] if item["id"] == "teal-stool")
+    mutate(stool)
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RoomCompileError, match=message):
+        compile_room(manifest_path, tmp_path / "runtime")
+
+
+def test_compile_room_normalizes_legacy_objects_to_the_generic_runtime_contract(
+    tmp_path: Path,
+) -> None:
+    report = compile_room(ROOM_MANIFEST, tmp_path)
+    desk = json.loads(report.bundle_path.read_text())["objects"][0]
+
+    assert set(desk) >= {
+        "id", "category", "assetMode", "occupancy", "tile", "layers",
+        "interactions", "audits", "provenance", "audit", "auditPose",
+    }
+    assert "frontOccluder" not in desk
+    assert "backLayer" not in desk
+    assert "footprint" not in desk
+    assert desk["occupancy"] == {"kind": "footprint", "tiles": [[1, 5]]}
+    assert desk["layers"][0]["role"] == "front"
+
+
+def test_compile_room_allows_non_occluding_objects_without_actor_audit_positions(
+    tmp_path: Path,
+) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    stool = next(item for item in manifest["objects"] if item["id"] == "teal-stool")
+    stool["audits"] = {"hidden": True, "solo": True, "behind": False, "front": False}
+    stool.pop("audit")
+    manifest_path.write_text(json.dumps(manifest))
+
+    report = compile_room(manifest_path, tmp_path / "runtime")
+
+    compiled = next(
+        item for item in json.loads(report.bundle_path.read_text())["objects"]
+        if item["id"] == "teal-stool"
+    )
+    assert compiled["audit"] == {}
+
+
+def test_compile_room_rejects_invalid_inventory_and_unowned_room_object(
+    tmp_path: Path,
+) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    inventory = json.loads(Path(manifest["inventory"]).read_text())
+    inventory["items"][0]["status"] = "done-ish"
+    inventory["items"] = [
+        item for item in inventory["items"] if item["id"] != "desk"
+    ]
+    inventory_path = tmp_path / "asset-inventory.json"
+    inventory_path.write_text(json.dumps(inventory))
+    manifest["inventory"] = str(inventory_path)
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(RoomCompileError) as raised:
+        compile_room(manifest_path, tmp_path / "runtime")
+
+    assert "inventory item 'window-view' has invalid status 'done-ish'" in raised.value.errors
+    assert "room object 'desk' has no inventory owner" in raised.value.errors

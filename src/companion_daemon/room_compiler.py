@@ -34,6 +34,97 @@ class CompileReport:
     warnings: tuple[str, ...] = ()
 
 
+OBJECT_CATEGORIES = {
+    "appliance", "decor-cluster", "furniture", "lighting", "plant",
+    "soft-furnishing", "structural-sub-layer", "wall-decoration",
+}
+OCCUPANCY_KINDS = {"footprint", "wall", "none"}
+LAYER_ROLES = {"shadow", "back", "body", "front", "light"}
+ROLE_DEPTH_BIAS = {"shadow": -300, "back": -200, "body": 0, "front": 500, "light": 1000}
+
+
+def _legacy_layer_specs(item: dict[str, Any]) -> list[dict[str, Any]]:
+    layers: list[dict[str, Any]] = []
+    if back := item.get("backLayer"):
+        layers.append({"role": "back", "depthBias": -200, **back})
+    if front := item.get("frontOccluder"):
+        layers.append({"role": "front", **front})
+    return layers
+
+
+def _normalize_objects(manifest: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return one runtime-facing object model while accepting the old source seam."""
+
+    interactions_by_object: dict[str, list[str]] = {}
+    for name, interaction in manifest["interactions"].items():
+        interactions_by_object.setdefault(interaction["object"], []).append(name)
+    normalized: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for source in manifest["objects"]:
+        object_id = source.get("id", "<unknown>")
+        generic = "layers" in source or "occupancy" in source or "assetMode" in source
+        if generic:
+            if "provenance" not in source:
+                errors.append(f"object {object_id!r} must define provenance")
+            if source.get("category") not in OBJECT_CATEGORIES:
+                errors.append(f"object {object_id!r} has invalid category {source.get('category')!r}")
+            occupancy = source.get("occupancy", {})
+            if occupancy.get("kind") not in OCCUPANCY_KINDS:
+                errors.append(
+                    f"object {object_id!r} has invalid occupancy kind {occupancy.get('kind')!r}"
+                )
+            tiles = occupancy.get("tiles", [])
+            if occupancy.get("kind") == "footprint" and not tiles:
+                errors.append(f"object {object_id!r} footprint occupancy must define tiles")
+            if occupancy.get("kind") in {"wall", "none"} and tiles:
+                errors.append(f"object {object_id!r} non-footprint occupancy cannot define tiles")
+            layers = source.get("layers", [])
+            if not layers:
+                errors.append(f"object {object_id!r} must define at least one layer")
+            for layer in layers:
+                if layer.get("role") not in LAYER_ROLES:
+                    errors.append(
+                        f"object {object_id!r} has invalid layer role {layer.get('role')!r}"
+                    )
+            audits = source.get("audits", {})
+            if audits.get("hidden") is not True or audits.get("solo") is not True:
+                errors.append(f"object {object_id!r} must support hidden/solo audits")
+            provenance = source.get("provenance", {})
+            if provenance and (not provenance.get("method") or not provenance.get("reference")):
+                errors.append(f"object {object_id!r} provenance must define method/reference")
+            normalized.append({
+                **source,
+                "interactions": list(source.get("interactions", [])),
+                "auditPose": source.get("auditPose", {}),
+            })
+            continue
+
+        normalized.append({
+            "id": object_id,
+            "category": "furniture",
+            "assetMode": "legacy-master-matte",
+            "depthTile": source["depthTile"],
+            "occupancy": {"kind": "footprint", "tiles": source["footprint"]},
+            "layers": _legacy_layer_specs(source),
+            "interactions": interactions_by_object.get(object_id, []),
+            "audits": {"hidden": True, "solo": True, "behind": True, "front": True},
+            "provenance": {
+                "method": "legacy-master-matte",
+                "reference": "zhizhi-room-isometric-v2.png",
+            },
+            "audit": source["audit"],
+            "auditPose": source.get("auditPose", {}),
+        })
+    if errors:
+        raise RoomCompileError(errors)
+    return normalized
+
+
+def _image_key(object_id: str, role: str, index: int) -> str:
+    stem = "".join(part.capitalize() for part in object_id.split("-"))
+    return f"{stem[0].lower() + stem[1:]}{role.capitalize()}{index}"
+
+
 def _source_path(manifest_dir: Path, value: str) -> Path:
     return (manifest_dir / value).resolve()
 
@@ -133,14 +224,13 @@ def _build_layer(
     return target
 
 
-def _validate_occluders(
+def _validate_layers(
     *, master: Image.Image, manifest_dir: Path, objects: list[dict[str, Any]]
 ) -> None:
     errors: list[str] = []
     for item in objects:
-        for role, spec in (("occluder", item["frontOccluder"]), ("back layer", item.get("backLayer"))):
-            if spec is None:
-                continue
+        for spec in item["layers"]:
+            role = f"{spec['role']} layer"
             layer = _resolve_layer_source(manifest_dir, spec).image
             width, height = layer.size
             alpha_min, alpha_max = layer.getchannel("A").getextrema()
@@ -169,15 +259,13 @@ def _validate_identity(objects: list[dict[str, Any]]) -> None:
             errors.append(f"duplicate object id {object_id!r}")
         ids.add(object_id)
 
-        for spec in (item.get("backLayer"), item["frontOccluder"]):
-            if spec is None:
-                continue
+        for spec in item["layers"]:
             output = spec["output"]
             if output in outputs:
-                errors.append(f"duplicate occluder output {output!r}")
+                errors.append(f"duplicate layer output {output!r}")
             outputs.add(output)
 
-        for point in item["footprint"]:
+        for point in item["occupancy"].get("tiles", []):
             tile = _xy(point)
             if owner := footprint_owners.get(tile):
                 errors.append(
@@ -201,12 +289,8 @@ def _validate_sources_and_grid(
         if not _source_path(manifest_dir, image["source"]).is_file():
             errors.append(f"image {name!r} source does not exist")
     for item in manifest["objects"]:
-        for role, spec in (
-            ("back layer", item.get("backLayer")),
-            ("front occluder", item["frontOccluder"]),
-        ):
-            if spec is None:
-                continue
+        for spec in item["layers"]:
+            role = f"{spec['role']} layer"
             source_value = spec.get("source") or spec.get("matte")
             if not source_value or not _source_path(manifest_dir, source_value).is_file():
                 errors.append(f"object {item['id']!r} {role} source does not exist")
@@ -234,8 +318,15 @@ def _validate_sources_and_grid(
                 f"interaction {name!r} depth references unknown object {depth.get('relativeTo')!r}"
             )
     for item in manifest["objects"]:
-        if set(item.get("audit", {})) != {"behind", "front"}:
-            errors.append(f"object {item['id']!r} must define behind/front audit positions")
+        required_audits = {
+            side for side in ("behind", "front") if item.get("audits", {}).get(side)
+        }
+        missing_audits = required_audits - set(item.get("audit", {}))
+        if missing_audits:
+            errors.append(
+                f"object {item['id']!r} must define audit positions for "
+                f"{', '.join(sorted(missing_audits))}"
+            )
         for side, pose in item.get("auditPose", {}).items():
             if side not in item.get("audit", {}):
                 errors.append(f"object {item['id']!r} has an audit pose for unknown side {side!r}")
@@ -284,7 +375,7 @@ def _validate_sources_and_grid(
     for item in manifest["objects"]:
         if not in_grid(item["depthTile"]):
             errors.append(f"object {item['id']!r} depth tile is outside the room grid")
-        for point in item["footprint"]:
+        for point in item["occupancy"].get("tiles", []):
             if not in_grid(point):
                 errors.append(f"object {item['id']!r} footprint is outside the room grid")
     for name, interaction in manifest["interactions"].items():
@@ -305,7 +396,7 @@ def _validate_topology(manifest: dict[str, Any]) -> None:
     blocked = {
         _xy(point)
         for item in manifest["objects"]
-        for point in item["footprint"]
+        for point in item["occupancy"].get("tiles", [])
     }
     free = walkable - blocked
     entry = _xy(manifest["anchors"]["entry"])
@@ -346,62 +437,91 @@ def _validate_topology(manifest: dict[str, Any]) -> None:
         raise RoomCompileError(errors)
 
 
+def _load_inventory(
+    manifest: dict[str, Any], manifest_dir: Path
+) -> dict[str, Any]:
+    inventory_path = _source_path(manifest_dir, manifest["inventory"])
+    if not inventory_path.is_file():
+        raise RoomCompileError(["room asset inventory does not exist"])
+    inventory = json.loads(inventory_path.read_text())
+    errors: list[str] = []
+    if inventory.get("roomId") != manifest["id"]:
+        errors.append("room asset inventory belongs to a different room")
+    allowed_statuses = set(inventory.get("statusValues", ()))
+    item_ids: set[str] = set()
+    counts = {status: 0 for status in ("planned", "partial", "atomized", "verified")}
+    for item in inventory.get("items", ()):
+        item_id = item["id"]
+        if item_id in item_ids:
+            errors.append(f"duplicate inventory item {item_id!r}")
+        item_ids.add(item_id)
+        status = item.get("status")
+        if status not in allowed_statuses or status not in counts:
+            errors.append(f"inventory item {item_id!r} has invalid status {status!r}")
+        else:
+            counts[status] += 1
+    object_ids = {item["id"] for item in manifest["objects"]}
+    for object_id in sorted(object_ids - item_ids):
+        errors.append(f"room object {object_id!r} has no inventory owner")
+    for item in inventory.get("items", ()):
+        if item.get("status") in {"partial", "atomized", "verified"} and item["id"] not in object_ids:
+            errors.append(
+                f"inventory item {item['id']!r} is {item['status']} but has no room object"
+            )
+    if errors:
+        raise RoomCompileError(errors)
+    return {
+        "items": inventory["items"],
+        "shellAllowed": inventory.get("shellAllowed", []),
+        "summary": {"total": len(inventory["items"]), **counts},
+    }
+
+
 def _emit_runtime(
     *,
     manifest: dict[str, Any],
     manifest_dir: Path,
     master: Image.Image,
     build_dir: Path,
+    inventory: dict[str, Any],
 ) -> tuple[Path, ...]:
     runtime_images = {name: spec["url"] for name, spec in manifest["images"].items()}
     runtime_base_url = manifest["runtimeBaseUrl"].rstrip("/")
     runtime_objects: list[dict[str, Any]] = []
     generated_assets: list[Path] = []
     for source_object in manifest["objects"]:
-        source_occluder = source_object["frontOccluder"]
-        image_key = f"{source_object['id']}Front"
-        runtime_images[image_key] = (
-            f"{runtime_base_url}/occluders/{source_occluder['output']}"
-        )
         runtime_object: dict[str, Any] = {
             "id": source_object["id"],
+            "category": source_object["category"],
+            "assetMode": source_object["assetMode"],
             "tile": source_object["depthTile"],
-            "footprint": source_object["footprint"],
-            "frontOccluder": {
-                "image": image_key,
-                "origin": source_occluder["origin"],
-                "depthBias": source_occluder["depthBias"],
-            },
-            "audit": source_object["audit"],
+            "occupancy": source_object["occupancy"],
+            "layers": [],
+            "interactions": source_object["interactions"],
+            "audits": source_object["audits"],
+            "provenance": source_object["provenance"],
+            "audit": source_object.get("audit", {}),
             "auditPose": source_object.get("auditPose", {}),
         }
-        if source_back := source_object.get("backLayer"):
-            back_key = f"{source_object['id']}Back"
-            runtime_images[back_key] = (
-                f"{runtime_base_url}/layers/{source_back['output']}"
-            )
+        for index, source_layer in enumerate(source_object["layers"]):
+            role = source_layer["role"]
+            image_key = _image_key(source_object["id"], role, index)
+            runtime_images[image_key] = f"{runtime_base_url}/layers/{source_layer['output']}"
             generated_assets.append(
                 _build_layer(
                     master=master,
                     manifest_dir=manifest_dir,
                     output_dir=build_dir,
-                    spec=source_back,
+                    spec=source_layer,
                     subdirectory="layers",
                 )
             )
-            runtime_object["backLayer"] = {
-                "image": back_key,
-                "origin": source_back["origin"],
-            }
-        generated_assets.append(
-            _build_layer(
-                master=master,
-                manifest_dir=manifest_dir,
-                output_dir=build_dir,
-                spec=source_occluder,
-                subdirectory="occluders",
-            )
-        )
+            runtime_object["layers"].append({
+                "role": role,
+                "image": image_key,
+                "origin": source_layer["origin"],
+                "depthBias": source_layer.get("depthBias", ROLE_DEPTH_BIAS[role]),
+            })
         runtime_objects.append(runtime_object)
 
     bundle = {
@@ -413,8 +533,10 @@ def _emit_runtime(
         "images": runtime_images,
         "sprites": manifest["sprites"],
         "movement": manifest["movement"],
+        "shell": manifest["shell"],
+        "inventory": inventory,
         "behavior": manifest["behavior"],
-        "background": "room",
+        "background": manifest["shell"]["image"],
         "walkable": manifest["walkable"],
         "anchors": manifest["anchors"],
         "objects": runtime_objects,
@@ -452,11 +574,21 @@ def compile_room(manifest_path: Path | str, output_dir: Path | str) -> CompileRe
     manifest = json.loads(manifest_path.read_text())
     manifest_dir = manifest_path.parent
 
+    manifest = {**manifest, "objects": _normalize_objects(manifest)}
     _validate_identity(manifest["objects"])
+    inventory = _load_inventory(manifest, manifest_dir)
     _validate_sources_and_grid(manifest, manifest_dir)
     master_spec = manifest["images"]["room"]
     master = Image.open(_source_path(manifest_dir, master_spec["source"])).convert("RGBA")
-    _validate_occluders(
+    shell_image = manifest["shell"].get("image")
+    if shell_image not in manifest["images"]:
+        raise RoomCompileError([f"shell references unknown image {shell_image!r}"])
+    shell = Image.open(_source_path(manifest_dir, manifest["images"][shell_image]["source"]))
+    if shell.size != master.size:
+        raise RoomCompileError(
+            [f"shell image size {shell.size} must match visual master {master.size}"]
+        )
+    _validate_layers(
         master=master,
         manifest_dir=manifest_dir,
         objects=manifest["objects"],
@@ -472,6 +604,7 @@ def compile_room(manifest_path: Path | str, output_dir: Path | str) -> CompileRe
             manifest_dir=manifest_dir,
             master=master,
             build_dir=build_dir,
+            inventory=inventory,
         )
         _replace_runtime(build_dir, output_dir)
     return CompileReport(

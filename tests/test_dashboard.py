@@ -59,6 +59,12 @@ def test_dashboard_room_runtime_is_served_as_an_independent_module() -> None:
     assert "data-toggle=\"walkable\"" in editor.text
     assert "data-toggle=\"footprints\"" in editor.text
     assert "data-toggle=\"approaches\"" in editor.text
+    assert "data-field=\"inventory\"" in editor.text
+    assert "data-field=\"layer\"" in editor.text
+    assert "object.provenance.method" in editor.text
+    assert "data-action=\"hidden\"" in editor.text
+    assert "data-action=\"solo\"" in editor.text
+    assert "data-field=\"audit-status\"" in editor.text
 
 
 def test_dashboard_visual_baseline_manifest_matches_captured_files() -> None:

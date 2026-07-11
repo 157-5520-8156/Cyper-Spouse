@@ -23,13 +23,13 @@
     "room": "/assets/dashboard/zhizhi-room-isometric-v2.png",
     "sprite": "/assets/dashboard/zhizhi-iso-walk-v4.png",
     "idle": "/assets/dashboard/zhizhi-sprite-sheet-v2.png",
-    "deskFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/desk-front.png",
-    "bedFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/bed-front.png",
-    "sofaFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/sofa-front.png",
-    "tableFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/table-front.png",
-    "diningFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/dining-front.png",
-    "dividerFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/divider-front.png",
-    "teal-stoolFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/teal-stool-front.png"
+    "deskFront0": "/assets/dashboard/rooms/zhizhi-home/runtime/layers/desk-front.png",
+    "bedFront0": "/assets/dashboard/rooms/zhizhi-home/runtime/layers/bed-front.png",
+    "sofaFront0": "/assets/dashboard/rooms/zhizhi-home/runtime/layers/sofa-front.png",
+    "tableFront0": "/assets/dashboard/rooms/zhizhi-home/runtime/layers/table-front.png",
+    "diningFront0": "/assets/dashboard/rooms/zhizhi-home/runtime/layers/dining-front.png",
+    "dividerFront0": "/assets/dashboard/rooms/zhizhi-home/runtime/layers/divider-front.png",
+    "tealStoolFront0": "/assets/dashboard/rooms/zhizhi-home/runtime/layers/teal-stool-front.png"
   },
   "sprites": {
     "walk": {
@@ -91,6 +91,485 @@
   },
   "movement": {
     "walkSpeed": 1.65
+  },
+  "shell": {
+    "image": "room",
+    "status": "flattened-reference"
+  },
+  "inventory": {
+    "items": [
+      {
+        "id": "window-view",
+        "zone": "window",
+        "category": "structural-sub-layer",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "window-frame",
+        "zone": "window",
+        "category": "structural-sub-layer",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "window-curtains",
+        "zone": "window",
+        "category": "soft-furnishing",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "window-planter-left",
+        "zone": "window",
+        "category": "plant",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "window-planter-right",
+        "zone": "window",
+        "category": "plant",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "window-hanging-plant",
+        "zone": "window",
+        "category": "plant",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "window-string-lights",
+        "zone": "window",
+        "category": "lighting",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "wall-art-window-upper",
+        "zone": "window",
+        "category": "wall-decoration",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "wall-art-window-lower",
+        "zone": "window",
+        "category": "wall-decoration",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "wall-art-bedside",
+        "zone": "bedroom",
+        "category": "wall-decoration",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "desk",
+        "zone": "work",
+        "category": "furniture",
+        "status": "partial",
+        "interactive": true,
+        "note": "Logical object and front matte exist; full RGB remains in master."
+      },
+      {
+        "id": "office-chair",
+        "zone": "work",
+        "category": "furniture",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "desk-laptop",
+        "zone": "work",
+        "category": "appliance",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "desk-lamp",
+        "zone": "work",
+        "category": "lighting",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "desk-stationery-cluster",
+        "zone": "work",
+        "category": "decor-cluster",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "desk-book-cluster",
+        "zone": "work",
+        "category": "decor-cluster",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "desk-wall-shelf",
+        "zone": "work",
+        "category": "wall-decoration",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "desk-wall-books",
+        "zone": "work",
+        "category": "decor-cluster",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "desk-wall-plants",
+        "zone": "work",
+        "category": "plant",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "desk-wall-photo-cluster",
+        "zone": "work",
+        "category": "wall-decoration",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "tall-bookcase",
+        "zone": "work",
+        "category": "furniture",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "bookcase-content-cluster",
+        "zone": "work",
+        "category": "decor-cluster",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "desk-floor-plant",
+        "zone": "work",
+        "category": "plant",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "desk-rug",
+        "zone": "work",
+        "category": "soft-furnishing",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "kitchen-wall-cabinets",
+        "zone": "kitchen",
+        "category": "furniture",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "kitchen-wall-cabinet-decor",
+        "zone": "kitchen",
+        "category": "decor-cluster",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "kitchen-sink-counter",
+        "zone": "kitchen",
+        "category": "furniture",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "kitchen-stove-counter",
+        "zone": "kitchen",
+        "category": "furniture",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "oven",
+        "zone": "kitchen",
+        "category": "appliance",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "fridge",
+        "zone": "kitchen",
+        "category": "appliance",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "kitchen-shelf",
+        "zone": "kitchen",
+        "category": "wall-decoration",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "kitchen-utensil-rail",
+        "zone": "kitchen",
+        "category": "wall-decoration",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "kitchen-counter-decor",
+        "zone": "kitchen",
+        "category": "decor-cluster",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "kitchen-pendant-light",
+        "zone": "kitchen",
+        "category": "lighting",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "kitchen-bin",
+        "zone": "kitchen",
+        "category": "furniture",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "dining",
+        "zone": "dining",
+        "category": "furniture",
+        "status": "partial",
+        "interactive": true,
+        "note": "Legacy table/chairs aggregate; will split into table and chairs."
+      },
+      {
+        "id": "dining-chair-left",
+        "zone": "dining",
+        "category": "furniture",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "dining-chair-right",
+        "zone": "dining",
+        "category": "furniture",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "dining-table-setting",
+        "zone": "dining",
+        "category": "decor-cluster",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "dining-rug",
+        "zone": "dining",
+        "category": "soft-furnishing",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "dining-side-table",
+        "zone": "dining",
+        "category": "furniture",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "dining-side-plant",
+        "zone": "dining",
+        "category": "plant",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "bed",
+        "zone": "bedroom",
+        "category": "furniture",
+        "status": "partial",
+        "interactive": true,
+        "note": "Legacy bed assembly; frame and bedding will become separate layers/objects."
+      },
+      {
+        "id": "bed-bedding",
+        "zone": "bedroom",
+        "category": "soft-furnishing",
+        "status": "planned",
+        "interactive": true
+      },
+      {
+        "id": "bedside-table",
+        "zone": "bedroom",
+        "category": "furniture",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "bedside-lamp",
+        "zone": "bedroom",
+        "category": "lighting",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "bedside-decor-cluster",
+        "zone": "bedroom",
+        "category": "decor-cluster",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "teal-stool",
+        "zone": "bedroom",
+        "category": "furniture",
+        "status": "verified",
+        "interactive": false,
+        "note": "AI chroma source is normalized by Compiler and has footprint plus behind/front visual audits."
+      },
+      {
+        "id": "bed-rug",
+        "zone": "bedroom",
+        "category": "soft-furnishing",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "divider",
+        "zone": "bedroom",
+        "category": "furniture",
+        "status": "partial",
+        "interactive": false,
+        "note": "Logical object and front matte exist; full RGB remains in master."
+      },
+      {
+        "id": "bed-divider-content-cluster",
+        "zone": "bedroom",
+        "category": "decor-cluster",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "sofa",
+        "zone": "living",
+        "category": "furniture",
+        "status": "partial",
+        "interactive": true,
+        "note": "Logical object and front matte exist; full RGB remains in master."
+      },
+      {
+        "id": "sofa-cushion-green",
+        "zone": "living",
+        "category": "soft-furnishing",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "sofa-cushion-pink",
+        "zone": "living",
+        "category": "soft-furnishing",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "sofa-throw",
+        "zone": "living",
+        "category": "soft-furnishing",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "living-rug",
+        "zone": "living",
+        "category": "soft-furnishing",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "table",
+        "zone": "living",
+        "category": "furniture",
+        "status": "partial",
+        "interactive": false,
+        "note": "Legacy coffee-table id; full RGB remains in master."
+      },
+      {
+        "id": "coffee-table-setting",
+        "zone": "living",
+        "category": "decor-cluster",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "foreground-console",
+        "zone": "foreground",
+        "category": "furniture",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "foreground-console-plants",
+        "zone": "foreground",
+        "category": "plant",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "foreground-table-lamp",
+        "zone": "foreground",
+        "category": "lighting",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "foreground-ottoman",
+        "zone": "foreground",
+        "category": "furniture",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "living-floor-lamp",
+        "zone": "living",
+        "category": "lighting",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "living-large-plant",
+        "zone": "living",
+        "category": "plant",
+        "status": "planned",
+        "interactive": false
+      }
+    ],
+    "shellAllowed": [
+      "walls",
+      "wall-trim",
+      "wood-floor",
+      "kitchen-tile",
+      "room-outline",
+      "window-opening",
+      "ambient-light"
+    ],
+    "summary": {
+      "total": 64,
+      "planned": 57,
+      "partial": 6,
+      "atomized": 0,
+      "verified": 1
+    }
   },
   "behavior": {
     "locationFallbackInteractions": {
@@ -347,24 +826,45 @@
   "objects": [
     {
       "id": "desk",
+      "category": "furniture",
+      "assetMode": "legacy-master-matte",
       "tile": [
         1,
         5,
         0
       ],
-      "footprint": [
-        [
-          1,
-          5
+      "occupancy": {
+        "kind": "footprint",
+        "tiles": [
+          [
+            1,
+            5
+          ]
         ]
+      },
+      "layers": [
+        {
+          "role": "front",
+          "image": "deskFront0",
+          "origin": [
+            35,
+            445
+          ],
+          "depthBias": 500
+        }
       ],
-      "frontOccluder": {
-        "image": "deskFront",
-        "origin": [
-          35,
-          445
-        ],
-        "depthBias": 500
+      "interactions": [
+        "desk"
+      ],
+      "audits": {
+        "hidden": true,
+        "solo": true,
+        "behind": true,
+        "front": true
+      },
+      "provenance": {
+        "method": "legacy-master-matte",
+        "reference": "zhizhi-room-isometric-v2.png"
       },
       "audit": {
         "behind": [
@@ -382,24 +882,45 @@
     },
     {
       "id": "bed",
+      "category": "furniture",
+      "assetMode": "legacy-master-matte",
       "tile": [
         6,
         1,
         0
       ],
-      "footprint": [
-        [
-          6,
-          1
+      "occupancy": {
+        "kind": "footprint",
+        "tiles": [
+          [
+            6,
+            1
+          ]
         ]
+      },
+      "layers": [
+        {
+          "role": "front",
+          "image": "bedFront0",
+          "origin": [
+            885,
+            445
+          ],
+          "depthBias": 500
+        }
       ],
-      "frontOccluder": {
-        "image": "bedFront",
-        "origin": [
-          885,
-          445
-        ],
-        "depthBias": 500
+      "interactions": [
+        "bed"
+      ],
+      "audits": {
+        "hidden": true,
+        "solo": true,
+        "behind": true,
+        "front": true
+      },
+      "provenance": {
+        "method": "legacy-master-matte",
+        "reference": "zhizhi-room-isometric-v2.png"
       },
       "audit": {
         "behind": [
@@ -417,28 +938,50 @@
     },
     {
       "id": "sofa",
+      "category": "furniture",
+      "assetMode": "legacy-master-matte",
       "tile": [
         4,
         6,
         0
       ],
-      "footprint": [
-        [
-          4,
-          6
-        ],
-        [
-          5,
-          6
+      "occupancy": {
+        "kind": "footprint",
+        "tiles": [
+          [
+            4,
+            6
+          ],
+          [
+            5,
+            6
+          ]
         ]
+      },
+      "layers": [
+        {
+          "role": "front",
+          "image": "sofaFront0",
+          "origin": [
+            395,
+            565
+          ],
+          "depthBias": 500
+        }
       ],
-      "frontOccluder": {
-        "image": "sofaFront",
-        "origin": [
-          395,
-          565
-        ],
-        "depthBias": 500
+      "interactions": [
+        "sofa",
+        "phone"
+      ],
+      "audits": {
+        "hidden": true,
+        "solo": true,
+        "behind": true,
+        "front": true
+      },
+      "provenance": {
+        "method": "legacy-master-matte",
+        "reference": "zhizhi-room-isometric-v2.png"
       },
       "audit": {
         "behind": [
@@ -458,24 +1001,43 @@
     },
     {
       "id": "table",
+      "category": "furniture",
+      "assetMode": "legacy-master-matte",
       "tile": [
         5,
         6,
         0
       ],
-      "footprint": [
-        [
-          6,
-          6
+      "occupancy": {
+        "kind": "footprint",
+        "tiles": [
+          [
+            6,
+            6
+          ]
         ]
+      },
+      "layers": [
+        {
+          "role": "front",
+          "image": "tableFront0",
+          "origin": [
+            600,
+            740
+          ],
+          "depthBias": 500
+        }
       ],
-      "frontOccluder": {
-        "image": "tableFront",
-        "origin": [
-          600,
-          740
-        ],
-        "depthBias": 500
+      "interactions": [],
+      "audits": {
+        "hidden": true,
+        "solo": true,
+        "behind": true,
+        "front": true
+      },
+      "provenance": {
+        "method": "legacy-master-matte",
+        "reference": "zhizhi-room-isometric-v2.png"
       },
       "audit": {
         "behind": [
@@ -493,32 +1055,53 @@
     },
     {
       "id": "dining",
+      "category": "furniture",
+      "assetMode": "legacy-master-matte",
       "tile": [
         2,
         1,
         0
       ],
-      "footprint": [
-        [
-          1,
-          1
-        ],
-        [
-          2,
-          1
-        ],
-        [
-          2,
-          2
+      "occupancy": {
+        "kind": "footprint",
+        "tiles": [
+          [
+            1,
+            1
+          ],
+          [
+            2,
+            1
+          ],
+          [
+            2,
+            2
+          ]
         ]
+      },
+      "layers": [
+        {
+          "role": "front",
+          "image": "diningFront0",
+          "origin": [
+            680,
+            340
+          ],
+          "depthBias": 500
+        }
       ],
-      "frontOccluder": {
-        "image": "diningFront",
-        "origin": [
-          680,
-          340
-        ],
-        "depthBias": 500
+      "interactions": [
+        "dining"
+      ],
+      "audits": {
+        "hidden": true,
+        "solo": true,
+        "behind": true,
+        "front": true
+      },
+      "provenance": {
+        "method": "legacy-master-matte",
+        "reference": "zhizhi-room-isometric-v2.png"
       },
       "audit": {
         "behind": [
@@ -536,36 +1119,55 @@
     },
     {
       "id": "divider",
+      "category": "furniture",
+      "assetMode": "legacy-master-matte",
       "tile": [
         5,
         3,
         0
       ],
-      "footprint": [
-        [
-          4,
-          2
-        ],
-        [
-          4,
-          3
-        ],
-        [
-          5,
-          2
-        ],
-        [
-          5,
-          3
+      "occupancy": {
+        "kind": "footprint",
+        "tiles": [
+          [
+            4,
+            2
+          ],
+          [
+            4,
+            3
+          ],
+          [
+            5,
+            2
+          ],
+          [
+            5,
+            3
+          ]
         ]
+      },
+      "layers": [
+        {
+          "role": "front",
+          "image": "dividerFront0",
+          "origin": [
+            780,
+            520
+          ],
+          "depthBias": 500
+        }
       ],
-      "frontOccluder": {
-        "image": "dividerFront",
-        "origin": [
-          780,
-          520
-        ],
-        "depthBias": 500
+      "interactions": [],
+      "audits": {
+        "hidden": true,
+        "solo": true,
+        "behind": true,
+        "front": true
+      },
+      "provenance": {
+        "method": "legacy-master-matte",
+        "reference": "zhizhi-room-isometric-v2.png"
       },
       "audit": {
         "behind": [
@@ -583,24 +1185,44 @@
     },
     {
       "id": "teal-stool",
+      "category": "furniture",
+      "assetMode": "layered",
       "tile": [
         6.8,
         0,
         0
       ],
-      "footprint": [
-        [
-          7,
-          0
+      "occupancy": {
+        "kind": "footprint",
+        "tiles": [
+          [
+            7,
+            0
+          ]
         ]
+      },
+      "layers": [
+        {
+          "role": "front",
+          "image": "tealStoolFront0",
+          "origin": [
+            1190,
+            620
+          ],
+          "depthBias": 500
+        }
       ],
-      "frontOccluder": {
-        "image": "teal-stoolFront",
-        "origin": [
-          1190,
-          620
-        ],
-        "depthBias": 500
+      "interactions": [],
+      "audits": {
+        "hidden": true,
+        "solo": true,
+        "behind": true,
+        "front": true
+      },
+      "provenance": {
+        "method": "ai-generated-chroma",
+        "reference": "zhizhi-room-isometric-v2.png",
+        "source": "sources/teal-stool-chroma-v1.png"
       },
       "audit": {
         "behind": [

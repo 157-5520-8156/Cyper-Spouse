@@ -1,6 +1,8 @@
 {
   "schemaVersion": 1,
   "id": "zhizhi-home",
+  "inventory": "asset-inventory.json",
+  "shell": {"image": "room", "status": "flattened-reference"},
   "runtimeBaseUrl": "/assets/dashboard/rooms/zhizhi-home/runtime",
   "canvas": {"width": 1000, "height": 760},
   "grid": {"minX": 0, "maxX": 7, "minY": 0, "maxY": 7},
@@ -147,21 +149,33 @@
     },
     {
       "id": "teal-stool",
+      "category": "furniture",
+      "assetMode": "layered",
       "depthTile": [6.8, 0, 0],
-      "footprint": [[7, 0]],
-      "frontOccluder": {
-        "source": "sources/teal-stool-chroma-v1.png",
-        "sourceTransform": {
-          "crop": [227, 220, 1027, 1020],
-          "chromaKey": "#08f80b",
-          "transparentThreshold": 12,
-          "opaqueThreshold": 220,
-          "despill": true,
-          "resize": [120, 120]
-        },
-        "output": "teal-stool-front.png",
-        "origin": [1190, 620],
-        "depthBias": 500
+      "occupancy": {"kind": "footprint", "tiles": [[7, 0]]},
+      "layers": [
+        {
+          "role": "front",
+          "source": "sources/teal-stool-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [227, 220, 1027, 1020],
+            "chromaKey": "#08f80b",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [120, 120]
+          },
+          "output": "teal-stool-front.png",
+          "origin": [1190, 620],
+          "depthBias": 500
+        }
+      ],
+      "interactions": [],
+      "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+      "provenance": {
+        "method": "ai-generated-chroma",
+        "reference": "zhizhi-room-isometric-v2.png",
+        "source": "sources/teal-stool-chroma-v1.png"
       },
       "audit": {"behind": [6.5, 0, 0], "front": [7, 1, 0]}
     }

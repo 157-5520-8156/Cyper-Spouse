@@ -59,6 +59,24 @@
 - 小屋相关 Ruff、JavaScript 语法检查与 `git diff --check` 通过；Compiler 连续两次构建的 runtime 哈希完全一致。
 - 全仓 pytest 当前受并行存在的 world/engine 工作区改动影响：最近一次为 496 项通过、43 项失败，失败集中在 `engine`、`world`、scheduler 与 replay 测试，不经过小屋模块；全仓 Ruff 另有 `engine.py:968` 既有未使用变量。此处不跨范围修改。
 
+## 全资产原子化启动（2026-07-12）
+
+- 新计划见 `docs/dashboard-room-full-asset-atomization-plan.md`，目标由六个遮挡对象扩展为 clean shell 与全部可见家装对象。
+- 当前 inventory 记录 64 项：57 项 planned、六项 partial、`teal-stool` 一项 verified；现有书桌、床、沙发、茶几、餐桌和隔断没有被误标为 atomized。
+- Compiler 已验证 inventory 所有权与状态，并把 summary 编入 runtime bundle。
+- 新增 hidden/solo 删除测试入口与 Editor 资产盘点。实际隐藏 partial 书桌后，主体仍留在扁平母版，确认 clean shell 与完整 RGB 分层尚未完成。
+
+## 全资产原子化 · 波次 0（2026-07-12）
+
+- manifest 的原生对象契约扩展为 `category / assetMode / occupancy / layers / interactions / audits / provenance`；`teal-stool` 是首个不依赖旧字段的无互动对象。
+- Compiler 暂时接收六件旧家具输入，但编译后全部对象只有统一 `layers[]` 和 `occupancy` 结构；所有派生图层统一输出到 `runtime/layers/`。
+- Runtime 已移除 `footprint / frontOccluder / backLayer` 读取，按通用角色渲染；Editor 支持对象图层选择、hidden/solo、单角色视图、alpha、origin、depth 和 provenance。
+- 新增 `mode=layers&role=...` 审计入口；JS 测试确认 hidden、solo 和 layers 视图不改变寻路占地。
+- 浏览器复查 `teal-stool` front-only、`sofa/behind` 与 room-editor，控制台无错误；沙发角色切口保持斜向家具轮廓，没有重新出现横向截断。
+- clean shell 使用内置图像编辑生成，原始生成尺寸为 1419×1108；项目内仅保留对齐候选 `clean-shell-ai-aligned-v3.png`（母版尺寸 1391×1086）。候选保留空墙、木地板、厨区瓷砖、窗洞/窗景和环境光，但窗洞与瓷砖边界仍需逐像素几何复核，暂不接入 runtime。
+- 同一流程生成首批波次 1 chroma 候选：`sofa-frame`、`bed-frame`、`bed-bedding`、`coffee-table`。它们仅是待去背、缩放与 origin 校准的 `needs-art` 源，不计入 inventory 完成度。
+- Compiler 新增 shell 与视觉母版尺寸一致校验，防止未经对齐的 AI 底图进入构建。
+
 ## 后续扩展规则
 
 - 后续若新增家具或新动作，必须同时添加 `behind/front` 或动作巡检入口，不能只改 daemon 映射。
