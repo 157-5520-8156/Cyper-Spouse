@@ -74,11 +74,17 @@ def world_console() -> str:
     return WORLD_CONSOLE_HTML
 
 
-@app.post("/messages", response_model=CompanionReply)
-async def post_message(message: IncomingMessage) -> CompanionReply:
+@app.post("/messages", response_model=None)
+async def post_message(message: IncomingMessage) -> CompanionReply | JSONResponse:
     if not message.text.strip():
         raise HTTPException(status_code=400, detail="text is required")
-    return await engine.handle_message(message)
+    reply = await engine.handle_message(message)
+    if reply is None:
+        return JSONResponse(
+            status_code=202,
+            content={"status": "no_immediate_reply", "message_id": message.message_id},
+        )
+    return reply
 
 
 @app.post("/proactive/{canonical_user_id}", response_model=ProactiveDecision)
@@ -232,6 +238,7 @@ def world_enablement(world_id: str) -> dict[str, object]:
         "delivery_receipts_supported": report.delivery_receipts_supported,
         "open_action_ids": list(report.open_action_ids),
         "unknown_action_ids": list(report.unknown_action_ids),
+        "invariant_errors": list(report.invariant_errors),
         "projections": [item.__dict__ for item in report.projection_reports],
     }
 
@@ -248,6 +255,7 @@ def active_world_enablement() -> dict[str, object]:
         "enabled": True, "world_id": report.world_id, "ready": report.ready,
         "delivery_receipts_supported": report.delivery_receipts_supported,
         "open_action_ids": list(report.open_action_ids), "unknown_action_ids": list(report.unknown_action_ids),
+        "invariant_errors": list(report.invariant_errors),
         "projections": [item.__dict__ for item in report.projection_reports],
     }
 

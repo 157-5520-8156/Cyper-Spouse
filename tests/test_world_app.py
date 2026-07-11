@@ -8,6 +8,7 @@ from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.world import WorldKernel
+from companion_daemon.models import IncomingMessage
 
 
 def test_world_enablement_and_trusted_delivery_settlement(tmp_path: Path, monkeypatch) -> None:
@@ -91,6 +92,46 @@ def test_world_console_reports_disabled_runtime(monkeypatch, tmp_path: Path) -> 
 
     assert response.status_code == 200
     assert response.json() == {"enabled": False}
+
+
+def test_http_message_endpoint_represents_world_defer_without_server_error(tmp_path: Path, monkeypatch) -> None:
+    store = CompanionStore(tmp_path / "deferred-world.sqlite")
+    seed_user(store)
+    kernel = WorldKernel(store)
+    started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
+    logical_now = datetime.fromisoformat(str(kernel.snapshot(started.world_id)["clock"]["logical_at"]))
+    planned = kernel.submit(
+        {
+            "type": "plan_activity",
+            "world_id": started.world_id,
+            "activity_id": "busy-http",
+            "entity_id": "zhizhi",
+            "title": "整理资料",
+            "starts_at": logical_now.isoformat(),
+            "ends_at": (logical_now + timedelta(hours=2)).isoformat(),
+        },
+        expected_revision=started.revision,
+    )
+    kernel.advance(started.world_id, logical_now, expected_revision=planned.revision)
+    kernel.submit(
+        {"type": "change_need", "world_id": started.world_id, "need": "energy", "delta": -50},
+        expected_revision=kernel.revision(started.world_id),
+    )
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。", world_kernel=kernel, world_id=started.world_id)
+    monkeypatch.setattr(app_module, "engine", engine)
+
+    response = TestClient(app_module.app, raise_server_exceptions=False).post(
+        "/messages",
+        json=IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            text="晚点聊",
+            message_id="http-defer",
+        ).model_dump(mode="json"),
+    )
+
+    assert response.status_code == 202
+    assert response.json() == {"status": "no_immediate_reply", "message_id": "http-defer"}
 
 
 def test_world_console_keeps_unresolved_activity_visible_after_long_history(tmp_path: Path) -> None:

@@ -73,6 +73,7 @@ class WorldEnablementReport:
     open_action_ids: tuple[str, ...]
     unknown_action_ids: tuple[str, ...]
     delivery_receipts_supported: bool
+    invariant_errors: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -127,6 +128,32 @@ class WorldKernel:
                 if "world_events.world_id, world_events.revision" in str(exc):
                     raise ConcurrencyConflict("world revision changed while command was being appended") from exc
                 raise
+
+    def claim_message_turn(self, world_id: str, message_id: str) -> bool:
+        """Atomically elect one coordinator for an observed platform message."""
+        key = f"turn-claim:{message_id}"
+        with self.store.connect() as conn:
+            if self._receipt(conn, world_id, key):
+                return False
+            revision, state = self._load_state(conn, world_id)
+            try:
+                self._append_and_project(
+                    conn,
+                    world_id,
+                    revision,
+                    state,
+                    [("TurnProcessingClaimed", {"message_id": message_id})],
+                    idempotency_key=key,
+                    correlation_id=message_id,
+                    source="turn_coordinator",
+                    actor={"kind": "coordinator"},
+                    causation_id=message_id,
+                )
+            except sqlite3.IntegrityError:
+                if self._receipt(conn, world_id, key):
+                    return False
+                raise
+            return True
 
     def start_from_seed_file(self, path: Path) -> WorldDecision:
         """Start one clean world epoch from a human-reviewed YAML seed."""
@@ -580,15 +607,46 @@ class WorldKernel:
             for projection in ("world_current_state", "world_entities", "world_agenda", "world_actions", "world_experiences", "world_fact_index")
         )
         actions = _as_dict(self.snapshot(world_id)["actions"], "actions")
+        state = self.snapshot(world_id)
         open_actions = tuple(sorted(action_id for action_id, action in actions.items() if _as_dict(action, "action").get("status") in {"scheduled", "sending"}))
         unknown_actions = tuple(sorted(action_id for action_id, action in actions.items() if _as_dict(action, "action").get("status") == "unknown"))
+        invariant_errors: list[str] = []
+        outcomes = _as_dict(state.get("outcomes", {}), "outcomes")
+        for activity_id, raw in _as_dict(state.get("agenda", {}), "agenda").items():
+            activity = _as_dict(raw, "activity")
+            if (
+                activity.get("status") == "completed"
+                and activity.get("template_id")
+                and f"outcome:{activity_id}" not in outcomes
+            ):
+                invariant_errors.append(f"completed_activity_without_outcome:{activity_id}")
+        delayed_by_message: dict[str, list[str]] = {}
+        for action_id, raw in actions.items():
+            action = _as_dict(raw, "action")
+            if action.get("status") not in {"scheduled", "sending"} or action.get("kind") not in {"reply_later", "message_attention"}:
+                continue
+            payload = _as_dict(action.get("payload", {}), "action payload")
+            message_id = str(payload.get("message_id") or _as_dict(payload.get("message", {}), "deferred message").get("message_id") or "")
+            if message_id:
+                delayed_by_message.setdefault(message_id, []).append(str(action_id))
+        invariant_errors.extend(
+            f"duplicate_deferred_actions:{message_id}:{','.join(sorted(action_ids))}"
+            for message_id, action_ids in delayed_by_message.items()
+            if len(action_ids) > 1
+        )
         return WorldEnablementReport(
             world_id=world_id,
-            ready=all(report.matches_live for report in reports) and not open_actions and (not unknown_actions or delivery_receipts_supported),
+            ready=(
+                all(report.matches_live for report in reports)
+                and not open_actions
+                and (not unknown_actions or delivery_receipts_supported)
+                and not invariant_errors
+            ),
             projection_reports=reports,
             open_action_ids=open_actions,
             unknown_action_ids=unknown_actions,
             delivery_receipts_supported=delivery_receipts_supported,
+            invariant_errors=tuple(sorted(invariant_errors)),
         )
 
     def snapshot(self, world_id: str) -> dict[str, object]:
@@ -786,6 +844,13 @@ class WorldKernel:
             None,
         )
         relationship = dict(_as_dict(_as_dict(state["relationships"], "relationships").get(user_id, {}), "user relationship"))
+        user_facts = [
+            item
+            for item in _as_dict(state["facts"], "facts").values()
+            if str(_as_dict(item, "fact").get("subject") or "") == user_id
+        ]
+        goals = _as_dict(state.get("goals", {}), "goals")
+        current_scene, current_scene_source = self._current_scene_source(state)
         open_threads = [
             {
                 "thread_id": str(thread_id), "question": str(item.get("question") or ""),
@@ -796,10 +861,34 @@ class WorldKernel:
         ]
         return {
             "referencable_facts": [
-                {"fact_id": str(fact_id), "value": str(_as_dict(item, "fact").get("value") or "")}
+                {
+                    "source_id": str(fact_id),
+                    "source_type": "fact",
+                    "fact_id": str(fact_id),
+                    "value": str(_as_dict(item, "fact").get("value") or ""),
+                    "reference_state": "confirmed",
+                }
                 for fact_id, item in _as_dict(state["facts"], "facts").items()
             ],
-            "referencable_experiences": self._committed_experiences(state),
+            "referencable_experiences": [
+                {
+                    "source_id": str(item["experience_id"]),
+                    "source_type": "experience",
+                    "reference_state": "committed",
+                    **item,
+                }
+                for item in self._committed_experiences(state)
+            ],
+            "user_profile": [
+                {
+                    "source_id": str(_as_dict(item, "fact").get("fact_id") or ""),
+                    "value": str(_as_dict(item, "fact").get("value") or ""),
+                    "reference_state": "confirmed",
+                }
+                for item in user_facts[-8:]
+            ],
+            "current_scene": current_scene,
+            "current_scene_source": current_scene_source,
             "behavior": {
                 "policy": self.conversation_policy(world_id),
                 "needs": dict(_as_dict(state["needs"], "needs")),
@@ -813,11 +902,60 @@ class WorldKernel:
             "self_core": {
                 "entity_id": str(protagonist.get("id") or "zhizhi"),
                 "name": str(protagonist.get("name") or ""),
+                "stable_traits": [str(item) for item in _as_list(protagonist.get("stable_traits", []), "stable traits")][:6],
+                "values": [str(item) for item in _as_list(protagonist.get("values", []), "values")][:6],
+                "preferences": [str(item) for item in _as_list(protagonist.get("preferences", []), "preferences")][:8],
+                "relationship_principles": [str(item) for item in _as_list(protagonist.get("relationship_principles", []), "relationship principles")][:6],
+                "speech_anchors": [str(item) for item in _as_list(protagonist.get("speech_anchors", []), "speech anchors")][:4],
                 "location": str((active or protagonist).get("location") or ""),
                 "active_activity": str((active or {}).get("title") or ""),
                 "boundaries": [str(item) for item in _as_list(protagonist.get("boundaries", []), "boundaries")],
+                "continuity": {
+                    "completed_goals": [str(goal.get("title") or goal_id) for goal_id, goal in goals.items() if goal.get("status") == "completed"][:5],
+                    "active_goals": [str(goal.get("title") or goal_id) for goal_id, goal in goals.items() if goal.get("status") == "active"][:5],
+                    "user_relationship": relationship,
+                },
             },
         }
+
+    @staticmethod
+    def _current_scene_source(
+        state: dict[str, object]
+    ) -> tuple[dict[str, str], dict[str, str]]:
+        entities = _as_dict(state["entities"], "entities")
+        protagonist = _as_dict(entities.get("zhizhi"), "protagonist")
+        active = next(
+            (
+                _as_dict(item, "activity")
+                for item in _as_dict(state["agenda"], "agenda").values()
+                if _as_dict(item, "activity").get("status") == "active"
+            ),
+            None,
+        )
+        logical_at = str(_as_dict(state["clock"], "clock")["logical_at"])
+        location = str((active or protagonist).get("location") or "")
+        activity = str((active or {}).get("title") or "")
+        content = (
+            f"现在在{location}，正在{activity}。"
+            if location and activity
+            else f"现在在{location}。"
+            if location
+            else "现在没有可确认的地点记录。"
+        )
+        scene = {
+            "logical_at": logical_at,
+            "location": location,
+            "activity_id": str((active or {}).get("activity_id") or ""),
+            "activity": activity,
+            "activity_status": str((active or {}).get("status") or "available"),
+        }
+        source = {
+            "source_id": f"current-scene:{logical_at}",
+            "source_type": "current_scene",
+            "reference_state": "current",
+            "content": content,
+        }
+        return scene, source
 
     def events(self, world_id: str) -> list[WorldEvent]:
         with self.store.connect() as conn:
@@ -853,7 +991,8 @@ class WorldKernel:
         state = self.snapshot(world_id)
         experiences = _as_dict(state["experiences"], "experiences")
         facts = _as_dict(state["facts"], "facts")
-        known = set(experiences) | set(facts)
+        _, current_scene_source = self._current_scene_source(state)
+        known = set(experiences) | set(facts) | {current_scene_source["source_id"]}
         mentioned = _as_list(candidate.get("mentioned_event_ids", []), "mentioned_event_ids")
         claims = _as_list(candidate.get("claims", []), "claims")
         proposed_actions = _as_list(candidate.get("proposed_action_ids", []), "proposed_action_ids")
@@ -863,6 +1002,7 @@ class WorldKernel:
         sources = {
             **{record_id: str(_as_dict(item, "experience")["content"]) for record_id, item in experiences.items()},
             **{record_id: str(_as_dict(item, "fact")["value"]) for record_id, item in facts.items()},
+            current_scene_source["source_id"]: current_scene_source["content"],
         }
         normalized_claims: list[dict[str, str]] = []
         for raw_claim in claims:
@@ -887,12 +1027,17 @@ class WorldKernel:
         remainder = reply_text
         for claim in normalized_claims:
             remainder = remainder.replace(claim["text"], "")
-        # Questions about the user or a future choice are not claims that an
-        # off-screen world event occurred.  Treating every “今天/明天/在” as a
-        # historical assertion used to silently replace ordinary questions
-        # with the fallback reply, which in turn hid the conversation state.
-        is_question = "?" in reply_text or "？" in reply_text
-        if reply_text != "我在。" and not is_question and re.search(r"(?:了|过|刚|已经|昨天|昨晚|早上|上午|下午|今晚|今天|明天|收到|买|等|在|去|来)", remainder):
+        # A question mark only protects the actual question about the user; it
+        # must not launder a preceding first-person world claim.  Keep this
+        # deterministic and deliberately conservative: claims are either
+        # quoted from a committed source above, or use an explicitly
+        # first-person/implicit-current-world opening here and are rejected.
+        unsupported_world_claim = re.search(
+            r"(?:^|[。！!?！？；;])\s*(?:我|这边|刚|已经|昨天|昨晚|早上|上午|下午|今晚|今天|明天|现在|正在|还在|在)"
+            r"[^。！!?！？]{0,60}(?:了|过|刚|已经|收到|买|等|在|去|来|爬|看|忙|做|整理|上课|下课)",
+            remainder,
+        )
+        if reply_text != "我在。" and unsupported_world_claim:
             raise WorldError("reply contains world-time or experience text outside committed claims")
         actions = _as_dict(state["actions"], "actions")
         invalid_actions = [str(item) for item in proposed_actions if str(item) not in actions]
@@ -903,6 +1048,45 @@ class WorldKernel:
             "mentioned_event_ids": [str(item) for item in mentioned],
             "proposed_action_ids": [str(item) for item in proposed_actions],
             "claims": normalized_claims,
+        }
+
+    def grounded_reply_from_mentions(
+        self, world_id: str, candidate: dict[str, object]
+    ) -> dict[str, object] | None:
+        """Build an exact-source fallback when a model cited but misquoted it."""
+        state = self.snapshot(world_id)
+        _, scene = self._current_scene_source(state)
+        sources = {
+            **{
+                str(record_id): str(_as_dict(item, "experience")["content"])
+                for record_id, item in _as_dict(state["experiences"], "experiences").items()
+            },
+            **{
+                str(record_id): str(_as_dict(item, "fact")["value"])
+                for record_id, item in _as_dict(state["facts"], "facts").items()
+            },
+            scene["source_id"]: scene["content"],
+        }
+        requested_ids = [
+            str(item)
+            for item in _as_list(candidate.get("mentioned_event_ids", []), "mentioned_event_ids")
+        ]
+        requested_ids.extend(
+            str(_as_dict(item, "reply claim").get("source_id") or "")
+            for item in _as_list(candidate.get("claims", []), "claims")
+        )
+        mentioned = list(dict.fromkeys(source_id for source_id in requested_ids if source_id in sources))[:2]
+        if not mentioned:
+            return None
+        texts = [sources[source_id] for source_id in mentioned]
+        return {
+            "reply_text": "".join(texts),
+            "mentioned_event_ids": mentioned,
+            "proposed_action_ids": [],
+            "claims": [
+                {"source_id": source_id, "text": sources[source_id]}
+                for source_id in mentioned
+            ],
         }
 
     def action_id_for_delivery(self, world_id: str, delivery_id: int) -> str | None:
@@ -987,9 +1171,54 @@ class WorldKernel:
             current = str(_as_dict(state["clock"], "clock")["logical_at"])
             if not target or _parse_at(target) < _parse_at(current):
                 raise WorldError("logical time cannot move backwards")
-            events: list[tuple[str, dict[str, object]]] = [("ClockAdvanced", {"target_logical_at": target})]
-            agenda = _as_dict(state["agenda"], "agenda")
             target_at = _parse_at(target)
+            current_at = _parse_at(current)
+            world_id = str(state["world_id"])
+            events: list[tuple[str, dict[str, object]]] = []
+            working = json.loads(_stable_json(state))
+
+            def emit(event_type: str, payload: dict[str, object]) -> None:
+                nonlocal working
+                events.append((event_type, payload))
+                working = reduce_event(
+                    working,
+                    WorldEvent(
+                        event_id="simulation",
+                        world_id=world_id,
+                        revision=0,
+                        event_type=event_type,
+                        schema_version=1,
+                        logical_at=target,
+                        observed_at=target,
+                        actor={"kind": "simulation"},
+                        source="life_simulation",
+                        correlation_id="simulation",
+                        causation_id=None,
+                        idempotency_key=None,
+                        payload=payload,
+                        payload_hash="",
+                    ),
+                )
+
+            clock_payload: dict[str, object] = {"target_logical_at": target}
+            if command.get("observed_at"):
+                clock_payload["observed_at"] = str(command["observed_at"])
+            emit("ClockAdvanced", clock_payload)
+
+            timeline: list[tuple[datetime, datetime, dict[str, object], bool]] = []
+            for raw in _as_dict(state["agenda"], "agenda").values():
+                activity = dict(_as_dict(raw, "activity"))
+                if activity.get("status") in {"planned", "active"}:
+                    timeline.append(
+                        (
+                            _parse_at(str(activity["starts_at"])),
+                            _parse_at(str(activity["ends_at"])),
+                            activity,
+                            True,
+                        )
+                    )
+
+            known_ids = set(_as_dict(state["agenda"], "agenda"))
             local_day = _parse_at(current).date()
             while local_day <= target_at.date():
                 for template in _as_list(state.get("daily_schedule", []), "daily_schedule"):
@@ -1001,76 +1230,157 @@ class WorldKernel:
                         local_day.year, local_day.month, local_day.day, int(item["ends_hour"]), tzinfo=target_at.tzinfo
                     )
                     activity_id = f"{local_day.isoformat()}:{item['slot']}"
-                    if activity_id not in agenda and starts <= target_at:
-                        payload = {
-                            "activity_id": activity_id,
-                            "entity_id": "zhizhi",
-                            "title": str(item["title"]),
-                            "template_id": str(item.get("template_id") or ""),
-                            "location": str(item.get("location") or ""),
-                            "starts_at": starts.isoformat(),
-                            "ends_at": ends.isoformat(),
-                        }
-                        payload, substitution_reason = self.life_simulation.choose_template(
-                            state, payload, [str(value) for value in _as_list(item.get("fallback_templates", []), "fallback templates")]
-                        )
-                        if substitution_reason:
-                            payload["substitution_reason"] = substitution_reason
-                        events.append(("ActivityPlanned", payload))
-                        events.append(("ActivitySelected", {"activity_id": activity_id, "template_id": payload["template_id"], "reason": substitution_reason or "primary_template", "rule_version": self.life_simulation.RULE_VERSION}))
-                        previous = next((candidate for kind, candidate in reversed(events[:-2]) if kind == "ActivityPlanned" and str(candidate.get("ends_at", ""))[:10] == starts.date().isoformat()), None)
-                        if previous and self._travel_minutes(state, str(previous.get("location") or ""), str(payload.get("location") or "")) > int((starts - _parse_at(str(previous["ends_at"]))).total_seconds() // 60):
-                            events.append(("ActivityDeferred", {"activity_id": activity_id, "reason": "travel_time_conflict", "next_review_at": (target_at + timedelta(hours=int(item.get("review_after_hours", 2)))).isoformat()}))
-                            continue
-                        if substitution_reason == "no_eligible_template" and bool(item.get("rest_when_unavailable")):
-                            events.append(("ActivityRested", {"activity_id": activity_id, "reason": "no_eligible_seeded_activity", "energy_delta": int(item.get("rest_recovery", 8))}))
-                            continue
-                        if substitution_reason == "no_eligible_template" and bool(item.get("defer_when_unavailable")):
-                            events.append(("ActivityDeferred", {"activity_id": activity_id, "reason": "no_eligible_seeded_activity", "next_review_at": (target_at + timedelta(hours=int(item.get("review_after_hours", 4)))).isoformat()}))
-                            continue
-                        events.append(("ActivityStarted", {"activity_id": activity_id}))
-                        if ends <= target_at:
-                            events.append(("ActivityCompleted", {"activity_id": activity_id}))
+                    if activity_id not in known_ids and starts <= target_at and current_at <= ends:
+                        timeline.append((starts, ends, {**item, "activity_id": activity_id}, False))
                 local_day += timedelta(days=1)
-            for activity_id, activity in _as_dict(state["agenda"], "agenda").items():
-                item = _as_dict(activity, "activity")
-                if item["status"] == "planned" and _parse_at(str(item["starts_at"])) <= _parse_at(target):
-                    events.append(("ActivityStarted", {"activity_id": activity_id}))
-                if item["status"] in {"planned", "active"} and _parse_at(str(item["ends_at"])) <= _parse_at(target):
-                    events.append(("ActivityCompleted", {"activity_id": activity_id}))
-            for action_id, action in _as_dict(state["actions"], "actions").items():
+
+            occupied = [
+                dict(_as_dict(item, "activity"))
+                for item in _as_dict(state["agenda"], "agenda").values()
+                if item.get("status") in {"completed", "active"} and item.get("ends_at")
+                and _parse_at(str(item["ends_at"])) <= current_at
+            ]
+            previous = max(occupied, key=lambda item: str(item["ends_at"]), default=None)
+
+            for starts, ends, raw, existing in sorted(timeline, key=lambda entry: (entry[0], entry[1], str(entry[2].get("activity_id")))):
+                activity_id = str(raw["activity_id"])
+                if existing:
+                    activity = _as_dict(_as_dict(working["agenda"], "agenda")[activity_id], "activity")
+                    if activity.get("activity_kind") == "rest":
+                        if activity.get("status") == "planned":
+                            emit("ActivityStarted", {"activity_id": activity_id})
+                        if ends <= target_at:
+                            emit(
+                                "ActivityRested",
+                                {
+                                    "activity_id": activity_id,
+                                    "reason": "scheduled_rest_completed",
+                                    "energy_delta": int(activity.get("rest_recovery", 8)),
+                                },
+                            )
+                            previous = dict(
+                                _as_dict(
+                                    _as_dict(working["agenda"], "agenda")[activity_id],
+                                    "activity",
+                                )
+                            )
+                        continue
+                else:
+                    schedule_item = raw
+                    activity = {
+                        "activity_id": activity_id,
+                        "entity_id": "zhizhi",
+                        "title": str(schedule_item["title"]),
+                        "template_id": str(schedule_item.get("template_id") or ""),
+                        "location": str(schedule_item.get("location") or ""),
+                        "starts_at": starts.isoformat(),
+                        "ends_at": ends.isoformat(),
+                    }
+                    if str(schedule_item.get("kind") or "") == "rest":
+                        activity["activity_kind"] = "rest"
+                        activity["rest_recovery"] = int(schedule_item.get("rest_recovery", 8))
+                        emit("ActivityPlanned", activity)
+                        if ends <= target_at:
+                            emit("ActivityStarted", {"activity_id": activity_id})
+                            emit(
+                                "ActivityRested",
+                                {
+                                    "activity_id": activity_id,
+                                    "reason": "scheduled_rest_completed",
+                                    "energy_delta": int(schedule_item.get("rest_recovery", 8)),
+                                },
+                            )
+                            previous = dict(_as_dict(_as_dict(working["agenda"], "agenda")[activity_id], "activity"))
+                        else:
+                            emit("ActivityStarted", {"activity_id": activity_id})
+                        continue
+
+                    activity, substitution_reason = self.life_simulation.choose_template(
+                        working,
+                        activity,
+                        [str(value) for value in _as_list(schedule_item.get("fallback_templates", []), "fallback templates")],
+                    )
+                    if substitution_reason:
+                        activity["substitution_reason"] = substitution_reason
+                    emit("ActivityPlanned", activity)
+                    if substitution_reason == "no_eligible_template":
+                        if bool(schedule_item.get("rest_when_unavailable")):
+                            emit(
+                                "ActivityRested",
+                                {
+                                    "activity_id": activity_id,
+                                    "reason": "no_eligible_seeded_activity",
+                                    "energy_delta": int(schedule_item.get("rest_recovery", 8)),
+                                },
+                            )
+                        else:
+                            emit(
+                                "ActivityDeferred",
+                                {
+                                    "activity_id": activity_id,
+                                    "reason": "no_eligible_seeded_activity",
+                                    "next_review_at": (ends + timedelta(hours=int(schedule_item.get("review_after_hours", 4)))).isoformat(),
+                                },
+                            )
+                        continue
+                    emit(
+                        "ActivitySelected",
+                        {
+                            "activity_id": activity_id,
+                            "template_id": activity["template_id"],
+                            "reason": substitution_reason or "primary_template",
+                            "rule_version": self.life_simulation.RULE_VERSION,
+                        },
+                    )
+
+                if previous:
+                    gap_minutes = int((starts - _parse_at(str(previous["ends_at"]))).total_seconds() // 60)
+                    travel_minutes = self._travel_minutes(
+                        working,
+                        str(previous.get("location") or ""),
+                        str(activity.get("location") or ""),
+                    )
+                    if travel_minutes > max(0, gap_minutes):
+                        emit(
+                            "ActivityDeferred",
+                            {
+                                "activity_id": activity_id,
+                                "reason": "travel_time_conflict",
+                                "next_review_at": (ends + timedelta(hours=2)).isoformat(),
+                            },
+                        )
+                        continue
+
+                if activity.get("status") == "planned" or not existing:
+                    emit("ActivityStarted", {"activity_id": activity_id})
+                if ends <= target_at:
+                    emit("ActivityCompleted", {"activity_id": activity_id})
+                    completed = dict(_as_dict(_as_dict(working["agenda"], "agenda")[activity_id], "activity"))
+                    for outcome_type, outcome_payload in self.life_simulation.advance(working, [completed]):
+                        emit(outcome_type, outcome_payload)
+                    previous = dict(_as_dict(_as_dict(working["agenda"], "agenda")[activity_id], "activity"))
+
+            for action_id, action in _as_dict(working["actions"], "actions").items():
                 item = _as_dict(action, "action")
                 if (
                     item["status"] == "scheduled"
                     and item.get("expires_at")
-                    and _parse_at(str(item["expires_at"])) <= _parse_at(target)
+                    and _parse_at(str(item["expires_at"])) <= target_at
                 ):
-                    events.append(("ActionExpired", {"action_id": action_id, "reason": "logical_timeout"}))
-            for thread_id, thread in _as_dict(state.get("conversation_threads", {}), "conversation threads").items():
+                    emit("ActionExpired", {"action_id": action_id, "reason": "logical_timeout"})
+            for thread_id, thread in _as_dict(working.get("conversation_threads", {}), "conversation threads").items():
                 item = _as_dict(thread, "conversation thread")
                 if (
                     item.get("status") == "open"
                     and item.get("expires_at")
                     and _parse_at(str(item["expires_at"])) <= target_at
                 ):
-                    events.append(("ConversationThreadExpired", {"thread_id": thread_id, "reason": "logical_timeout"}))
-            for goal_id, goal in _as_dict(state.get("goals", {}), "goals").items():
+                    emit("ConversationThreadExpired", {"thread_id": thread_id, "reason": "logical_timeout"})
+            for goal_id, goal in list(_as_dict(working.get("goals", {}), "goals").items()):
                 if goal.get("status") == "active" and goal.get("deadline") and _parse_at(str(goal["deadline"])) <= target_at:
-                    events.append(("GoalDeferred", {"goal_id": goal_id, "reason": "deadline_reached", "next_review_at": (target_at + timedelta(days=1)).isoformat()}))
+                    emit("GoalDeferred", {"goal_id": goal_id, "reason": "deadline_reached", "next_review_at": (target_at + timedelta(days=1)).isoformat()})
                 elif goal.get("status") == "deferred" and goal.get("next_review_at") and _parse_at(str(goal["next_review_at"])) <= target_at:
-                    events.append(("GoalReviewDue", {"goal_id": goal_id}))
-            completed_activities: list[dict[str, object]] = []
-            for event_type, payload in list(events):
-                if event_type == "ActivityCompleted":
-                    activity_id = str(payload["activity_id"])
-                    activity = _as_dict(state["agenda"], "agenda").get(activity_id)
-                    if activity is None:
-                        activity = next((item for kind, item in events if kind == "ActivityPlanned" and item["activity_id"] == activity_id), None)
-                    if activity is not None:
-                        completed_activities.append(_as_dict(activity, "activity"))
-            state_for_outcomes = json.loads(_stable_json(state))
-            _as_dict(state_for_outcomes["clock"], "clock")["logical_at"] = target
-            events.extend(self.life_simulation.advance(state_for_outcomes, completed_activities))
+                    emit("GoalReviewDue", {"goal_id": goal_id})
             return events
         if command_type == "register_npc":
             npc = _as_dict(command.get("npc"), "npc")
@@ -1114,6 +1424,55 @@ class WorldKernel:
                     },
                 )
             ]
+        if command_type == "defer_message_reply":
+            message_id = str(command.get("message_id") or "")
+            action_id = str(command.get("action_id") or f"reply_later:{message_id}")
+            due_at = str(command.get("due_at") or "")
+            expires_at = str(command.get("expires_at") or "")
+            reason = str(command.get("reason") or "").strip()
+            known_message_ids = {
+                str(_as_dict(item, "recent message").get("message_id") or "")
+                for item in _as_list(state.get("recent_messages", []), "recent messages")
+            }
+            now = _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+            if (
+                not message_id
+                or message_id not in known_message_ids
+                or not reason
+                or not due_at
+                or not expires_at
+                or _parse_at(due_at) <= now
+                or _parse_at(expires_at) <= _parse_at(due_at)
+                or action_id in _as_dict(state["actions"], "actions")
+            ):
+                raise WorldError("deferred reply requires one observed message, a future due time, and a new action")
+            return [
+                (
+                    "ActionScheduled",
+                    {
+                        "action_id": action_id,
+                        "kind": "reply_later",
+                        "expires_at": expires_at,
+                        "payload": {
+                            "due_at": due_at,
+                            "message_id": message_id,
+                            "message": _as_dict(command.get("message", {}), "deferred message"),
+                            "reason": reason,
+                        },
+                    },
+                ),
+                (
+                    "MessageAttentionDecided",
+                    {
+                        "message_id": message_id,
+                        "attention": "deferred",
+                        "reason": reason,
+                        "due_at": due_at,
+                        "deferred_action_id": action_id,
+                        "rule_version": str(command.get("rule_version") or ""),
+                    },
+                ),
+            ]
         if command_type == "set_message_attention":
             message_id = str(command.get("message_id") or "")
             attention = str(command.get("attention") or "")
@@ -1129,7 +1488,8 @@ class WorldKernel:
             communication = _as_dict(state["communication"], "communication")
             prior_action_id = str(communication.get("deferred_action_id") or "")
             events: list[tuple[str, dict[str, object]]] = []
-            if prior_action_id:
+            preserve_action_id = str(command.get("preserve_action_id") or "")
+            if prior_action_id and prior_action_id != preserve_action_id:
                 prior = _as_dict(_as_dict(state["actions"], "actions").get(prior_action_id), "deferred attention action")
                 if prior.get("status") == "scheduled":
                     events.append(("ActionCancelled", {"action_id": prior_action_id, "reason": "attention_reconsidered"}))
@@ -1627,10 +1987,16 @@ class WorldKernel:
 
     @staticmethod
     def _travel_minutes(state: dict[str, object], origin: str, destination: str) -> int:
-        if not origin or origin == destination:
+        if not origin or not destination or origin == destination:
             return 0
         routes = _as_dict(state.get("location_travel_minutes", {}), "location travel minutes")
-        return int(routes.get(f"{origin}->{destination}", routes.get(f"{destination}->{origin}", 0)))
+        direct = routes.get(f"{origin}->{destination}")
+        reverse = routes.get(f"{destination}->{origin}")
+        # Different locations without a seeded route are not adjacent.  A
+        # missing route used to mean zero minutes and silently enabled
+        # teleportation; treating it as unreachable makes the planner defer
+        # until the world seed explicitly defines the transition.
+        return int(direct if direct is not None else reverse if reverse is not None else 24 * 60)
 
     @staticmethod
     def _command_world_id(command: dict[str, object]) -> str:
@@ -1664,10 +2030,16 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         protagonist = _as_dict(payload["protagonist"], "protagonist")
         next_state = _empty_state(event.world_id)
         next_state["clock"] = {"logical_at": payload["logical_at"], "mode": "paused", "rate": 0}
+        next_state["clock_observed_at"] = event.observed_at
         next_state["entities"] = {str(protagonist["id"]): {**protagonist, "status": "active"}}
         next_state["daily_schedule"] = payload.get("daily_schedule", [])
         next_state["life_outcome_templates"] = payload.get("life_outcome_templates", {})
         next_state["location_travel_minutes"] = payload.get("location_travel_minutes", {})
+        resources = _as_dict(protagonist.get("resources", {}), "protagonist resources")
+        needs = _as_dict(next_state["needs"], "needs")
+        for need in ("energy", "attention"):
+            if need in resources:
+                needs[need] = max(0, min(100, int(resources[need])))
         next_state["goals"] = {str(goal["id"]): {**goal, "progress": 0, "status": "active"} for goal in _as_list(payload.get("long_term_goals", []), "long-term goals")}
     elif event.event_type == "NpcRegistered":
         npc = dict(payload)
@@ -1678,8 +2050,21 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         _as_dict(next_state["entities"], "entities")[str(user["id"])] = user
     elif event.event_type == "ClockModeChanged":
         next_state["clock"] = {**_as_dict(next_state["clock"], "clock"), **payload}
+        next_state["clock_observed_at"] = event.observed_at
     elif event.event_type == "ClockAdvanced":
+        modulation = _as_dict(next_state["emotion_modulation"], "emotion modulation")
+        decay_anchor = _parse_at(
+            str(modulation.get("last_decay_at") or _as_dict(next_state["clock"], "clock")["logical_at"])
+        )
+        target_at = _parse_at(str(payload["target_logical_at"]))
+        elapsed_hours = max(0, int((target_at - decay_anchor).total_seconds() // 3600))
+        if elapsed_hours:
+            modulation["charge"] = max(0, int(modulation.get("charge", 0)) - elapsed_hours * 2)
+            modulation["last_decay_at"] = (decay_anchor + timedelta(hours=elapsed_hours)).isoformat()
+            if modulation["charge"] == 0:
+                modulation.update({"mode": "calm", "expression": "neutral", "reason": "logical_time_decay"})
         _as_dict(next_state["clock"], "clock")["logical_at"] = payload["target_logical_at"]
+        next_state["clock_observed_at"] = str(payload.get("observed_at") or event.observed_at)
     elif event.event_type == "ActivityPlanned":
         item = {**payload, "status": "planned"}
         _as_dict(next_state["agenda"], "agenda")[str(item["activity_id"])] = item
@@ -1745,6 +2130,7 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         next_state["emotion_modulation"] = {
             "mode": payload["mode"], "expression": payload["expression"], "reason": payload["reason"],
             "charge": max(0, min(100, int(current.get("charge", 0)) + int(payload["charge_delta"]))),
+            "last_decay_at": event.logical_at,
         }
     elif event.event_type == "NeedChanged":
         needs = _as_dict(next_state["needs"], "needs")
@@ -1867,6 +2253,8 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
             "message_id": payload.get("message_id"), "attention": "unread", "typing": "idle",
             "reason": "message_observed", "due_at": None, "deferred_action_id": None,
         }
+    elif event.event_type == "TurnProcessingClaimed":
+        pass
     elif event.event_type == "TurnAppraised":
         next_state["last_appraisal"] = dict(payload)
     elif event.event_type == "IntentCreated":
@@ -1878,6 +2266,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
     return {
         "world_id": world_id,
         "clock": {},
+        "clock_observed_at": None,
         "entities": {},
         "agenda": {},
         "actions": {},
@@ -1900,7 +2289,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
             "message_id": None, "attention": "idle", "typing": "idle", "reason": None,
             "due_at": None, "deferred_action_id": None,
         },
-        "emotion_modulation": {"mode": "calm", "expression": "neutral", "reason": "world_started", "charge": 0},
+        "emotion_modulation": {"mode": "calm", "expression": "neutral", "reason": "world_started", "charge": 0, "last_decay_at": None},
         "last_relationship_appraisal": None,
         "decisions": {},
         "conversation_threads": {},

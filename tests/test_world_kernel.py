@@ -132,7 +132,7 @@ def test_world_user_relationship_and_emotion_are_reduced_from_turn_appraisal(tmp
     assert snapshot["relationships"]["user:geoff"] == {"respect": -12, "reliability": -4}
     assert snapshot["emotion_modulation"] == {
         "mode": "guarded", "charge": 16, "reason": "boundary_violation",
-        "expression": "guarded",
+        "expression": "guarded", "last_decay_at": NOW.isoformat(),
     }
     assert {event.event_type for event in appraised.events} >= {
         "RelationshipAppraised", "RelationshipChanged", "EmotionModulated",
@@ -171,6 +171,31 @@ def test_world_conversation_context_is_rebuildable_and_keeps_plans_nonreferencab
     assert context["self_core"]["name"] == "沈知栀"
     assert context["referencable_experiences"] == []
     assert context["behavior"]["policy"]["mode"] == "available"
+
+
+def test_seeded_character_core_and_confirmed_user_profile_are_separate_projections(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
+    user = kernel.submit(
+        {"type": "register_user", "world_id": started.world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=started.revision,
+    )
+    kernel.submit(
+        {
+            "type": "confirm_fact", "world_id": started.world_id,
+            "fact_id": "user:tea", "subject": "user:geoff",
+            "value": "用户喜欢桂花乌龙。", "source": "user_message:test",
+        },
+        expected_revision=user.revision,
+    )
+
+    context = kernel.conversation_context(started.world_id, user_id="user:geoff")
+
+    assert "真诚比漂亮话重要" in context["self_core"]["values"]
+    assert "中文短句，像 QQ 或微信私聊" in context["self_core"]["speech_anchors"]
+    assert context["user_profile"] == [
+        {"source_id": "user:tea", "value": "用户喜欢桂花乌龙。", "reference_state": "confirmed"}
+    ]
 
 
 def test_world_deferred_decision_has_review_action_and_terminal_resolution(tmp_path: Path) -> None:
@@ -386,7 +411,14 @@ def test_overlapping_activity_is_rejected(tmp_path: Path) -> None:
 def test_clock_advance_materializes_seeded_daily_life_into_events(tmp_path: Path) -> None:
     seed = world_seed() | {
         "daily_schedule": [
-            {"slot": "morning", "title": "图书馆看书", "starts_hour": 9, "ends_hour": 10}
+            {
+                "slot": "morning",
+                "title": "宿舍闲聊",
+                "template_id": "dorm_chat",
+                "location": "华师大宿舍",
+                "starts_hour": 9,
+                "ends_hour": 10,
+            }
         ]
     }
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
@@ -394,7 +426,7 @@ def test_clock_advance_materializes_seeded_daily_life_into_events(tmp_path: Path
 
     advanced = kernel.advance("zhizhi-v1", NOW + timedelta(hours=2), expected_revision=started.revision)
 
-    assert [event.event_type for event in advanced.events] == [
+    assert [event.event_type for event in advanced.events][:5] == [
         "ClockAdvanced", "ActivityPlanned", "ActivitySelected", "ActivityStarted", "ActivityCompleted"
     ]
     assert kernel.snapshot("zhizhi-v1")["agenda"]["2026-07-11:morning"]["status"] == "completed"
@@ -448,6 +480,94 @@ def test_no_eligible_seeded_activity_becomes_rest_instead_of_fake_completion(tmp
     assert snapshot["needs"]["energy"] == 79
 
 
+def test_no_eligible_seeded_activity_is_deferred_by_default_and_never_started(tmp_path: Path) -> None:
+    seed = world_seed() | {
+        "daily_schedule": [
+            {
+                "slot": "impossible",
+                "title": "没有可执行模板的安排",
+                "template_id": "missing_template",
+                "location": "宿舍",
+                "starts_hour": 9,
+                "ends_hour": 10,
+            }
+        ]
+    }
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": seed}, expected_revision=0)
+
+    decision = kernel.advance("zhizhi-v1", NOW + timedelta(hours=2), expected_revision=started.revision)
+
+    assert kernel.snapshot("zhizhi-v1")["agenda"]["2026-07-11:impossible"]["status"] == "deferred"
+    assert not any(
+        event.event_type in {"ActivityStarted", "ActivityCompleted"}
+        and event.payload["activity_id"] == "2026-07-11:impossible"
+        for event in decision.events
+    )
+
+
+def test_crossing_a_completed_sleep_window_restores_energy(tmp_path: Path) -> None:
+    seed = world_seed() | {
+        "daily_schedule": [
+            {
+                "slot": "night_sleep",
+                "title": "夜间睡眠",
+                "kind": "rest",
+                "location": "华师大宿舍",
+                "starts_hour": 0,
+                "ends_hour": 8,
+                "rest_recovery": 18,
+            }
+        ]
+    }
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": seed}, expected_revision=0)
+    drained = kernel.submit(
+        {"type": "change_need", "world_id": started.world_id, "need": "energy", "delta": -30},
+        expected_revision=started.revision,
+    )
+
+    kernel.advance(started.world_id, NOW + timedelta(days=1), expected_revision=drained.revision)
+
+    snapshot = kernel.snapshot(started.world_id)
+    assert snapshot["needs"]["energy"] == 58
+    assert snapshot["agenda"]["2026-07-12:night_sleep"]["status"] == "rested"
+
+
+def test_sleep_started_and_completed_by_separate_ticks_still_restores_energy(tmp_path: Path) -> None:
+    seed = world_seed() | {
+        "daily_schedule": [
+            {
+                "slot": "night_sleep",
+                "title": "夜间睡眠",
+                "kind": "rest",
+                "location": "华师大宿舍",
+                "starts_hour": 0,
+                "ends_hour": 8,
+                "rest_recovery": 18,
+            }
+        ]
+    }
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": seed}, expected_revision=0)
+    drained = kernel.submit(
+        {"type": "change_need", "world_id": started.world_id, "need": "energy", "delta": -30},
+        expected_revision=started.revision,
+    )
+    sleeping = kernel.advance(
+        started.world_id, NOW + timedelta(hours=16), expected_revision=drained.revision
+    )
+    assert kernel.snapshot(started.world_id)["agenda"]["2026-07-12:night_sleep"]["status"] == "active"
+
+    kernel.advance(
+        started.world_id, NOW + timedelta(hours=23), expected_revision=sleeping.revision
+    )
+
+    snapshot = kernel.snapshot(started.world_id)
+    assert snapshot["agenda"]["2026-07-12:night_sleep"]["status"] == "rested"
+    assert snapshot["needs"]["energy"] == 58
+
+
 def test_unavailable_activity_can_be_deferred_then_explicitly_reviewed(tmp_path: Path) -> None:
     seed = world_seed() | {"daily_schedule": [{"slot": "defer", "title": "等待安排", "template_id": "missing_template", "location": "宿舍", "starts_hour": 9, "ends_hour": 10, "defer_when_unavailable": True, "review_after_hours": 3}]}
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
@@ -466,6 +586,30 @@ def test_seeded_location_transition_defers_impossible_second_activity(tmp_path: 
     started = kernel.submit({"type": "start_world", "seed": seed}, expected_revision=0)
     kernel.advance(started.world_id, NOW + timedelta(hours=3), expected_revision=started.revision)
     assert kernel.snapshot(started.world_id)["agenda"]["2026-07-11:second"]["status"] == "deferred"
+
+
+def test_long_jump_and_incremental_advances_produce_the_same_life_state(tmp_path: Path) -> None:
+    target = NOW + timedelta(days=3, hours=12)
+    long_kernel = WorldKernel(CompanionStore(tmp_path / "long.sqlite"))
+    long_started = long_kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    long_kernel.advance(long_started.world_id, target, expected_revision=long_started.revision)
+
+    step_kernel = WorldKernel(CompanionStore(tmp_path / "step.sqlite"))
+    step_started = step_kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    revision = step_started.revision
+    for offset in (1, 2, 3):
+        decision = step_kernel.advance(
+            step_started.world_id,
+            NOW + timedelta(days=offset),
+            expected_revision=revision,
+        )
+        revision = decision.revision
+    step_kernel.advance(step_started.world_id, target, expected_revision=revision)
+
+    long_state = long_kernel.snapshot(long_started.world_id)
+    step_state = step_kernel.snapshot(step_started.world_id)
+    for field in ("agenda", "experiences", "outcomes", "goals", "needs", "npc_interactions"):
+        assert long_state[field] == step_state[field]
 
 
 def test_external_delivery_result_is_idempotent_and_only_settled_action_can_create_experience(
@@ -905,6 +1049,22 @@ def test_reply_rejects_unreferenced_completed_experience_claim(tmp_path: Path) -
         )
 
 
+def test_reply_rejects_unsupported_experience_even_when_message_ends_with_question(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    with pytest.raises(WorldError, match="world-time or experience text"):
+        kernel.validate_reply_candidate(
+            "zhizhi-v1",
+            {
+                "reply_text": "刚爬起来，正对着课表发呆，在想要不要去图书馆。你呢？",
+                "mentioned_event_ids": [],
+                "proposed_action_ids": [],
+                "claims": [],
+            },
+        )
+
+
 def test_reply_claim_must_quote_the_specific_committed_source(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
     started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
@@ -921,6 +1081,37 @@ def test_reply_claim_must_quote_the_specific_committed_source(tmp_path: Path) ->
         kernel.validate_reply_candidate(
             started.world_id,
             {"reply_text": "我刚和林晚吃了饭。", "mentioned_event_ids": ["fact-1"], "proposed_action_ids": [], "claims": [{"source_id": "fact-1", "text": "刚和林晚吃了饭"}]},
+        )
+
+
+def test_reply_can_reference_only_the_current_scene_revision(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
+    context = kernel.conversation_context(started.world_id, user_id="user:geoff")
+    source = context["current_scene_source"]
+
+    candidate = kernel.validate_reply_candidate(
+        started.world_id,
+        {
+            "reply_text": source["content"],
+            "mentioned_event_ids": [source["source_id"]],
+            "proposed_action_ids": [],
+            "claims": [{"source_id": source["source_id"], "text": source["content"]}],
+        },
+    )
+    assert candidate["reply_text"] == source["content"]
+
+    logical_at = datetime.fromisoformat(str(kernel.snapshot(started.world_id)["clock"]["logical_at"]))
+    kernel.advance(started.world_id, logical_at + timedelta(minutes=1), expected_revision=kernel.revision(started.world_id))
+    with pytest.raises(WorldError, match="uncommitted world records"):
+        kernel.validate_reply_candidate(
+            started.world_id,
+            {
+                "reply_text": source["content"],
+                "mentioned_event_ids": [source["source_id"]],
+                "proposed_action_ids": [],
+                "claims": [{"source_id": source["source_id"], "text": source["content"]}],
+            },
         )
 
 

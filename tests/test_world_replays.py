@@ -97,3 +97,37 @@ async def test_world_appraisal_changes_behavioral_needs_and_repair_is_partial(tm
     assert hurt["boundary"] > initial["boundary"]
     assert repaired["security"] > hurt["security"]
     assert repaired["security"] < initial["security"]
+
+
+def test_seeded_week_long_jump_matches_incremental_world_life(tmp_path: Path) -> None:
+    long_world = WorldKernel(CompanionStore(tmp_path / "long.sqlite"))
+    long_id = long_world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    start = datetime.fromisoformat(str(long_world.snapshot(long_id)["clock"]["logical_at"]))
+    target = start + timedelta(days=8, hours=11, minutes=30)
+    long_world.advance(long_id, target, expected_revision=long_world.revision(long_id))
+
+    stepped_world = WorldKernel(CompanionStore(tmp_path / "stepped.sqlite"))
+    stepped_id = stepped_world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    revision = stepped_world.revision(stepped_id)
+    for offset in range(1, 9):
+        decision = stepped_world.advance(
+            stepped_id, start + timedelta(days=offset), expected_revision=revision
+        )
+        revision = decision.revision
+    stepped_world.advance(stepped_id, target, expected_revision=revision)
+
+    long_state = long_world.snapshot(long_id)
+    stepped_state = stepped_world.snapshot(stepped_id)
+    for field in (
+        "agenda", "experiences", "outcomes", "goals", "needs",
+        "npc_interactions", "relationships", "emotion_modulation",
+    ):
+        assert long_state[field] == stepped_state[field]
+    assert long_state["needs"]["energy"] > 0
+    assert not any(
+        activity["status"] == "completed"
+        and activity.get("template_id")
+        and f"outcome:{activity_id}" not in long_state["outcomes"]
+        for activity_id, activity in long_state["agenda"].items()
+        if activity.get("template_id")
+    )

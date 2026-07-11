@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -128,6 +129,43 @@ async def test_world_enabled_reply_records_input_action_and_delivery_settlement(
 
 
 @pytest.mark.asyncio
+async def test_world_reply_prompt_exposes_source_ids_and_current_scene(tmp_path: Path) -> None:
+    class GroundedModel:
+        def __init__(self) -> None:
+            self.calls: list[list[dict[str, str]]] = []
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls.append(messages)
+            return (
+                '{"reply_text":"在图书馆和范予安核对了读书会的书单。",'
+                '"mentioned_event_ids":["outcome:2026-07-11:morning_study"],'
+                '"proposed_action_ids":[],"claims":['
+                '{"source_id":"outcome:2026-07-11:morning_study",'
+                '"text":"在图书馆和范予安核对了读书会的书单。"}]}'
+            )
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    logical_start = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
+    world.advance(world_id, logical_start + timedelta(hours=3, minutes=30), expected_revision=world.revision(world_id))
+    model = GroundedModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="上午做了什么？", message_id="grounded-recall")
+    )
+
+    assert reply is not None
+    assert "范予安" in reply.text
+    prompt = "\n".join(item["content"] for item in model.calls[-1])
+    assert "outcome:2026-07-11:morning_study" in prompt
+    assert "当前场景" in prompt
+    assert "逻辑时间" in prompt
+
+
+@pytest.mark.asyncio
 async def test_world_mode_question_thread_is_opened_only_after_delivery_and_closed_by_user_turn(tmp_path: Path) -> None:
     class QuestionModel:
         async def complete(self, messages, *, temperature: float) -> str:
@@ -217,7 +255,125 @@ async def test_world_communication_policy_defers_busy_low_energy_turn_as_world_a
     assert reply is None
     assert snapshot["communication"]["attention"] == "deferred"
     assert snapshot["communication"]["rule_version"] == "world-behavior-v1"
-    assert any(item["kind"] == "reply_later" and item["status"] == "scheduled" for item in snapshot["actions"].values())
+    scheduled = [item for item in snapshot["actions"].values() if item["status"] == "scheduled"]
+    assert [item["kind"] for item in scheduled] == ["reply_later"]
+    assert snapshot["communication"]["deferred_action_id"] == scheduled[0]["action_id"]
+
+
+@pytest.mark.asyncio
+async def test_duplicate_world_message_returns_the_original_reply_without_a_second_model_call(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    model = FakeCompanionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT, world_kernel=world, world_id=world_id)
+    message = IncomingMessage(
+        platform="qq",
+        platform_user_id="geoff",
+        text="你在吗",
+        message_id="duplicate-world-message",
+    )
+
+    first = await engine.handle_message(message)
+    calls_after_first = len(model.calls)
+    second = await engine.handle_message(message)
+
+    assert first is not None
+    assert second is None
+    assert len(model.calls) == calls_after_first
+    assert sum(event.event_type == "UserMessageObserved" for event in world.events(world_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_duplicate_world_message_has_one_turn_owner_and_one_outgoing_action(tmp_path: Path) -> None:
+    class SlowModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            await asyncio.sleep(0.03)
+            return '{"reply_text":"嗯，你说。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    model = SlowModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT, world_kernel=world, world_id=world_id)
+    message = IncomingMessage(
+        platform="qq", platform_user_id="geoff", text="你在吗", message_id="concurrent-duplicate"
+    )
+
+    results = await asyncio.gather(engine.handle_message(message), engine.handle_message(message))
+
+    assert sum(reply is not None for reply in results) == 1
+    assert model.calls == 1
+    actions = world.snapshot(world_id)["actions"].values()
+    assert sum(action["kind"] == "outgoing_message" for action in actions) == 1
+    assert sum(event.event_type == "TurnProcessingClaimed" for event in world.events(world_id)) == 1
+
+
+@pytest.mark.asyncio
+async def test_invalid_world_reply_is_repaired_once_instead_of_collapsing_to_presence_fallback(tmp_path: Path) -> None:
+    class RepairModel:
+        def __init__(self) -> None:
+            self.calls = []
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls.append(messages)
+            if len(self.calls) == 1:
+                return '{"reply_text":"刚从图书馆回来。你呢？","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            return '{"reply_text":"嗯，你说。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    model = RepairModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你好呀", message_id="repair-invalid")
+    )
+
+    assert reply is not None
+    assert reply.text == "嗯，你说。"
+    assert len(model.calls) == 2
+    assert any(
+        action["kind"] == "model_call" and action["status"] == "delivered"
+        for action in world.snapshot(world_id)["actions"].values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_misquoted_current_scene_is_salvaged_as_exact_grounded_text(tmp_path: Path) -> None:
+    class SceneMentionModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"刚醒，还赖在床上。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    model = SceneMentionModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="现在在做什么？", message_id="scene-salvage")
+    )
+
+    assert reply is not None
+    assert reply.text == "现在在华东师范大学宿舍。"
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio

@@ -15,6 +15,8 @@ from companion_daemon.qq_delivery import QQDelivery
 from companion_daemon.relationship import life_event_probability, proactive_cooldown_minutes
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.life_runtime import maybe_apply_planned_life_result, synchronize_life_runtime
+from companion_daemon.world import ConcurrencyConflict
+from companion_daemon.world_clock import WorldClockDriver
 
 # The model may voice how long she wants to hold back, but the daemon caps how
 # much of that wish it honors so a bad decision cannot silence her for a day.
@@ -374,6 +376,16 @@ async def scheduler_loop(
     while True:
         engine = build_companion_engine()
         if getattr(engine, "world_kernel", None):
+            try:
+                WorldClockDriver(engine.world_kernel).tick(
+                    engine.world_id,
+                    observed_now=datetime.now().astimezone(),
+                    expected_revision=engine.world_kernel.revision(engine.world_id),
+                )
+            except ConcurrencyConflict:
+                # Another adapter advanced the world between the read and the
+                # tick.  The next scheduler pass rehydrates from that revision.
+                logger.info("world clock tick lost an optimistic race; retrying next pass")
             recover_interrupted_world_life_shares(engine)
             await recover_world_due_replies(engine, send=send, sandbox=sandbox)
             await recover_world_due_conversation_pulses(engine, send=send, sandbox=sandbox)

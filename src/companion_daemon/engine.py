@@ -226,6 +226,17 @@ class CompanionEngine:
                 }
             )
 
+    def _world_turn_already_observed(self, message_id: str) -> bool:
+        """Whether an adapter message already entered the durable world."""
+        assert self.world_kernel and self.world_id
+        state = self.world_kernel.snapshot(self.world_id)
+        return any(
+            isinstance(item, dict)
+            and item.get("direction") == "in"
+            and str(item.get("message_id") or "") == message_id
+            for item in state.get("recent_messages", [])
+        )
+
     def _submit_world_with_retry(self, command: dict[str, object]):
         if not self.world_kernel or not self.world_id:
             return
@@ -446,7 +457,13 @@ class CompanionEngine:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         if self.world_kernel and self.world_id:
             message = message.model_copy(update={"message_id": self._world_message_id(message)})
+            if not resume_action_id and self._world_turn_already_observed(str(message.message_id)):
+                return None
             self._record_world_input(message, canonical_user_id)
+            if not resume_action_id and not self.world_kernel.claim_message_turn(
+                self.world_id, str(message.message_id)
+            ):
+                return None
             return await self._handle_world_message(
                 canonical_user_id,
                 message,
@@ -886,20 +903,34 @@ class CompanionEngine:
                 text=message.text,
                 resumed_action=bool(resume_action_id),
             )
-            self._submit_world_with_retry(
-                {
-                    "type": "set_message_attention", "world_id": self.world_id,
-                    "message_id": message.message_id, "attention": communication_decision.attention,
-                    "reason": communication_decision.reason,
-                    "rule_version": self.world_behavior_policy.RULE_VERSION,
-                    **(
-                        {"due_at": (self._world_logical_now() + timedelta(minutes=communication_decision.defer_minutes)).isoformat()}
-                        if communication_decision.attention == "deferred" and communication_decision.defer_minutes
-                        else {}
-                    ),
-                    "idempotency_key": f"attention-seen:{message.message_id}",
-                }
-            )
+            if communication_decision.attention == "deferred":
+                logical_now = self._world_logical_now()
+                action_id = f"reply_later:{message.message_id}"
+                self._submit_world_with_retry(
+                    {
+                        "type": "defer_message_reply",
+                        "world_id": self.world_id,
+                        "message_id": message.message_id,
+                        "action_id": action_id,
+                        "due_at": (logical_now + timedelta(minutes=communication_decision.defer_minutes or 15)).isoformat(),
+                        "expires_at": (logical_now + timedelta(hours=12)).isoformat(),
+                        "reason": f"world_policy:{communication_decision.reason}",
+                        "message": message.model_dump(mode="json"),
+                        "rule_version": self.world_behavior_policy.RULE_VERSION,
+                        "idempotency_key": f"defer-reply:{message.message_id}",
+                    }
+                )
+            else:
+                self._submit_world_with_retry(
+                    {
+                        "type": "set_message_attention", "world_id": self.world_id,
+                        "message_id": message.message_id, "attention": communication_decision.attention,
+                        "reason": communication_decision.reason,
+                        "rule_version": self.world_behavior_policy.RULE_VERSION,
+                        **({"preserve_action_id": resume_action_id} if resume_action_id else {}),
+                        "idempotency_key": f"attention-seen:{message.message_id}:{resume_action_id or 'live'}",
+                    }
+                )
         event = interpret_interaction(message, MoodState())
         appraisal = event.kind
         history = self.world_kernel.snapshot(self.world_id).get("recent_messages", [])
@@ -946,11 +977,6 @@ class CompanionEngine:
         if skip_reply:
             return None
         if communication_decision and communication_decision.attention == "deferred":
-            self.create_deferred_reply_task(
-                message,
-                defer_minutes=float(communication_decision.defer_minutes or 15),
-                reason=f"world_policy:{communication_decision.reason}",
-            )
             return None
         if communication_decision and communication_decision.attention == "do_not_disturb":
             return None
@@ -962,8 +988,13 @@ class CompanionEngine:
         )
         snapshot = self.world_kernel.snapshot(self.world_id)
         context = self.world_kernel.conversation_context(self.world_id, user_id=user_id)
-        facts = [str(item["value"]) for item in context["referencable_facts"]]
-        experiences = [str(item["content"]) for item in context["referencable_experiences"]]
+        fact_sources = list(context["referencable_facts"])[-8:]
+        experience_sources = list(context["referencable_experiences"])[-6:]
+        facts = [str(item["value"]) for item in fact_sources]
+        current_scene = context["current_scene"]
+        current_scene_source = context["current_scene_source"]
+        self_core = context["self_core"]
+        user_profile = context["user_profile"]
         policy = (snapshot.get("last_appraisal") or {}).get("policy", "自然回应当前消息。")
         behavior = context["behavior"]
         world_policy = behavior["policy"]
@@ -974,8 +1005,14 @@ class CompanionEngine:
         context_block = (
             "世界账本授权（必须遵守）：\n"
             f"- 本轮关系判断: {appraisal}\n- 本轮表达策略: {policy}\n"
-            f"- 可引用事实: {'；'.join(facts[:8]) or '无'}\n"
-            f"- 已结算经历: {'；'.join(experiences[-6:]) or '无'}\n"
+            f"- 逻辑时间: {current_scene['logical_at']}\n"
+            f"- 当前场景: 地点={current_scene['location'] or '未知'}；活动={current_scene['activity'] or '无'}；状态={current_scene['activity_status']}。"
+            "当前场景只授权回答现在的状态，不代表活动已经完成。\n"
+            f"- 可引用当前场景来源(JSON): {json.dumps(current_scene_source, ensure_ascii=False, separators=(',', ':'))}\n"
+            f"- 角色核心投影(JSON): {json.dumps(self_core, ensure_ascii=False, separators=(',', ':'))}\n"
+            f"- 用户画像投影(JSON): {json.dumps(user_profile, ensure_ascii=False, separators=(',', ':')) if user_profile else '[]'}\n"
+            f"- 可引用事实来源(JSON): {json.dumps(fact_sources, ensure_ascii=False, separators=(',', ':')) if fact_sources else '[]'}\n"
+            f"- 已结算经历来源(JSON): {json.dumps(experience_sources, ensure_ascii=False, separators=(',', ':')) if experience_sources else '[]'}\n"
             f"- 当前可见行为调制: 安全感={needs['security']}，主动性={needs['initiative']}，边界={needs['boundary']}。\n"
             f"- 关系投影: {relationship or '尚无累计变化'}；情绪调制={modulation.get('mode', 'calm')}，表达={modulation.get('expression', 'neutral')}。\n"
             f"- 当前表达指导({expression_guidance.label}): {expression_guidance.prompt_line}\n"
@@ -991,7 +1028,8 @@ class CompanionEngine:
                     "role": "user",
                     "content": (
                         f"{context_block}\n\n用户: {message.text}\n"
-                        "WorldReplyJSON: 只返回 JSON："
+                        "WorldReplyJSON: 只返回 JSON。事实或经历声明必须逐字引用来源 content/value，"
+                        "并把该来源的 source_id 同时放入 mentioned_event_ids 和 claims.source_id："
                         '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字引用的已结算片段"}]}。'
                     ),
                 },
@@ -1002,19 +1040,114 @@ class CompanionEngine:
         self._record_world_model_output(
             purpose="reply", causation=intent_id, content=raw, action_id=model_action_id
         )
+        parsed_candidate = parse_reply_candidate(raw)
         try:
             candidate = self.world_kernel.validate_reply_candidate(
-                self.world_id, parse_reply_candidate(raw)
+                self.world_id, parsed_candidate
             )
-        except WorldError:
-            # A malformed model result must not bypass the ledger by becoming
-            # a free-text fact claim.  The conservative fallback has no claim.
-            candidate = {"reply_text": "我在。", "mentioned_event_ids": [], "proposed_action_ids": [], "claims": []}
+        except WorldError as validation_error:
+            asks_current_scene = any(
+                marker in message.text
+                for marker in ("现在", "在哪", "在做什么", "干嘛", "忙吗", "方便说话")
+            )
+            grounded_fallback = None
+            if asks_current_scene:
+                grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
+                    self.world_id,
+                    {"mentioned_event_ids": [current_scene_source["source_id"]]},
+                )
+            else:
+                time_reference = next(
+                    (
+                        reference
+                        for marker, reference in (
+                            ("昨天", "昨天"), ("今天", "今天"), ("上午", "今天"),
+                            ("下午", "今天"), ("上次", "上次"),
+                        )
+                        if marker in message.text
+                    ),
+                    None,
+                )
+                if time_reference:
+                    records = self.world_kernel.experiences_for_time_reference(
+                        self.world_id, time_reference
+                    )
+                    if "上午" in message.text:
+                        records = [
+                            item for item in records
+                            if datetime.fromisoformat(str(item["occurred_at"])).hour < 13
+                        ]
+                    elif "下午" in message.text:
+                        records = [
+                            item for item in records
+                            if 13 <= datetime.fromisoformat(str(item["occurred_at"])).hour < 19
+                        ]
+                    grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
+                        self.world_id,
+                        {"mentioned_event_ids": [item["experience_id"] for item in records[-2:]]},
+                    )
+                if grounded_fallback is None:
+                    grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
+                        self.world_id, parsed_candidate
+                    )
+            if grounded_fallback is not None:
+                candidate = grounded_fallback
+            else:
+                # One bounded repair attempt keeps a formatting/provenance
+                # mistake from erasing an otherwise useful turn.  It is a
+                # separate model action and external result, so replay never
+                # conflates two model outputs under one action id.
+                repair_action_id = self._begin_world_model_call(
+                    purpose="reply_repair", causation=intent_id
+                )
+                try:
+                    repaired_raw = await self.model.complete(
+                    [
+                        {"role": "system", "content": self.companion_system_prompt},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"{context_block}\n\n用户: {message.text}\n"
+                                f"上一次 WorldReplyJSON 未通过校验：{validation_error}。"
+                                "重新生成一次；不得补造来源，不得使用临时 event_1/exp1 标识。"
+                                "只返回规定的 WorldReplyJSON。"
+                            ),
+                        },
+                    ],
+                        temperature=0.2,
+                    )
+                except Exception as repair_error:
+                    self._fail_world_model_call(repair_action_id, str(repair_error))
+                    candidate = {
+                        "reply_text": "嗯，你说。",
+                        "mentioned_event_ids": [],
+                        "proposed_action_ids": [],
+                        "claims": [],
+                    }
+                else:
+                    self._record_world_model_output(
+                    purpose="reply_repair",
+                    causation=intent_id,
+                        content=repaired_raw,
+                        action_id=repair_action_id,
+                    )
+                    try:
+                        candidate = self.world_kernel.validate_reply_candidate(
+                            self.world_id, parse_reply_candidate(repaired_raw)
+                        )
+                    except WorldError:
+                        candidate = {
+                            "reply_text": "嗯，你说。",
+                            "mentioned_event_ids": [],
+                            "proposed_action_ids": [],
+                            "claims": [],
+                        }
         text = sanitize_chat_text(str(candidate["reply_text"]))
         question = self._world_reply_question(text)
         expires_at = self._world_logical_now() + timedelta(hours=12)
         trace: dict[str, object] = {
             "world_id": self.world_id,
+            "input_message_id": str(message.message_id or ""),
             "appraisal": appraisal,
             "expression_policy": str(policy),
             "allowed_facts": facts,

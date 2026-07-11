@@ -96,6 +96,56 @@ async def test_world_due_reply_recovery_settles_original_action(tmp_path, monkey
 
 
 @pytest.mark.asyncio
+async def test_policy_deferred_reply_recovery_does_not_cancel_itself_or_reobserve_message(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from datetime import timedelta
+
+    store = CompanionStore(tmp_path / "world.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    logical_at = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
+    planned = world.submit(
+        {
+            "type": "plan_activity", "world_id": world_id, "activity_id": "busy-recovery",
+            "entity_id": "zhizhi", "title": "整理资料", "starts_at": logical_at.isoformat(),
+            "ends_at": (logical_at + timedelta(hours=1)).isoformat(),
+        },
+        expected_revision=world.revision(world_id),
+    )
+    world.advance(world_id, logical_at, expected_revision=planned.revision)
+    world.submit(
+        {"type": "change_need", "world_id": world_id, "need": "energy", "delta": -50},
+        expected_revision=world.revision(world_id),
+    )
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。", world_kernel=world, world_id=world_id)
+    message = IncomingMessage(platform="qq", platform_user_id="openid", text="在吗", message_id="policy-recover")
+    assert await engine.handle_message(message) is None
+    action_id = str(world.snapshot(world_id)["communication"]["deferred_action_id"])
+
+    class FakeDelivery:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def send_text(self, recipient_id: str, text: str) -> None:
+            assert recipient_id == "openid"
+            assert text
+
+    monkeypatch.setattr(proactive_scheduler, "QQDelivery", FakeDelivery)
+    monkeypatch.setattr(proactive_scheduler, "get_settings", lambda: SimpleNamespace())
+    world.advance(world_id, logical_at + timedelta(minutes=21), expected_revision=world.revision(world_id))
+
+    recovered = await recover_world_due_replies(engine, send=True, sandbox=True)
+
+    events = world.events(world_id)
+    assert recovered == 1
+    assert world.snapshot(world_id)["actions"][action_id]["status"] == "delivered"
+    assert sum(event.event_type == "UserMessageObserved" and event.payload["message_id"] == "policy-recover" for event in events) == 1
+    assert not any(event.event_type == "ActionCancelled" and event.payload["action_id"] == action_id for event in events)
+
+
+@pytest.mark.asyncio
 async def test_world_conversation_pulse_recovery_uses_world_action(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     from datetime import timedelta
 
