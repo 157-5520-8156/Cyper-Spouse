@@ -602,6 +602,26 @@ class WorldKernel:
         with self.store.connect() as conn:
             return self._load_events(conn, world_id)
 
+    def export_ledger(self, world_id: str) -> list[dict[str, object]]:
+        """Portable read-only event export for archival and audit tools."""
+        return [
+            {
+                "event_id": event.event_id, "world_id": event.world_id, "revision": event.revision,
+                "event_type": event.event_type, "logical_at": event.logical_at, "observed_at": event.observed_at,
+                "source": event.source, "correlation_id": event.correlation_id, "causation_id": event.causation_id,
+                "payload": event.payload, "payload_hash": event.payload_hash,
+            }
+            for event in self.events(world_id)
+        ]
+
+    def verify_ledger(self, world_id: str) -> dict[str, object]:
+        events = self.events(world_id)
+        invalid = [event.event_id for event in events if event.payload_hash != _hash(_stable_json(event.payload))]
+        revisions = [event.revision for event in events]
+        contiguous = revisions == list(range(1, len(events) + 1))
+        rebuilt = self.rebuild_projection(world_id, "world_current_state")
+        return {"world_id": world_id, "valid": not invalid and contiguous and rebuilt.matches_live, "invalid_event_ids": invalid, "contiguous_revisions": contiguous, "state_hash": rebuilt.state_hash}
+
     def validate_reply_candidate(
         self, world_id: str, candidate: dict[str, object]
     ) -> dict[str, object]:

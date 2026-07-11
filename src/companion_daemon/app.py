@@ -136,6 +136,22 @@ def world_snapshot(world_id: str) -> dict[str, object]:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.get("/world/{world_id}/events")
+def world_events(world_id: str) -> list[dict[str, object]]:
+    try:
+        return WorldKernel(engine.store).export_ledger(world_id)
+    except WorldError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/world/{world_id}/integrity")
+def world_integrity(world_id: str) -> dict[str, object]:
+    try:
+        return WorldKernel(engine.store).verify_ledger(world_id)
+    except WorldError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/world/{world_id}/commands")
 def world_command(world_id: str, request: WorldCommandRequest) -> dict[str, object]:
     command = {**request.command, "world_id": world_id}

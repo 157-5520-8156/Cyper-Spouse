@@ -278,6 +278,15 @@ def test_enablement_audit_requires_clean_projection_and_no_unreconciled_delivery
     assert blocked.open_action_ids == ("open",)
 
 
+def test_ledger_export_and_integrity_verification_are_read_only(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    exported = kernel.export_ledger(started.world_id)
+    integrity = kernel.verify_ledger(started.world_id)
+    assert exported[0]["event_type"] == "WorldStarted"
+    assert integrity["valid"] is True
+
+
 def test_model_proposal_is_not_a_fact_until_rules_accept_it(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
     started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
