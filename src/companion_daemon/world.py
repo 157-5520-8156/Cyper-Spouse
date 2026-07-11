@@ -916,6 +916,13 @@ class WorldKernel:
             if not npc.get("id") or not npc.get("name") or npc["id"] in _as_dict(state["entities"], "entities"):
                 raise WorldError("NPC must have a new id and name")
             return [("NpcRegistered", npc)]
+        if command_type == "register_user":
+            user_id = str(command.get("user_id") or "")
+            name = str(command.get("name") or "").strip()
+            entities = _as_dict(state["entities"], "entities")
+            if not user_id or not name or user_id in entities:
+                raise WorldError("user must have a new id and name")
+            return [("UserRegistered", {"id": user_id, "name": name, "kind": "user"})]
         if command_type == "plan_activity":
             payload = {key: command[key] for key in ("activity_id", "entity_id", "title", "starts_at", "ends_at")}
             if any(not payload.get(key) for key in payload) or _parse_at(str(payload["ends_at"])) <= _parse_at(str(payload["starts_at"])):
@@ -1183,6 +1190,24 @@ class WorldKernel:
                 "availability_drop": {"initiative": -6},
                 "return_after_gap": {"security": 2, "initiative": 2},
             }
+            relationship_deltas = {
+                "boundary_violation": {"respect": -12, "reliability": -4},
+                "control_pressure": {"respect": -8},
+                "repair_attempt": {"respect": 3, "reliability": 2},
+                "warmth_received": {"closeness": 4, "reliability": 1},
+                "user_vulnerable": {"closeness": 2},
+                "availability_drop": {"reliability": -1},
+                "return_after_gap": {"closeness": 1, "reliability": 1},
+            }
+            modulation = {
+                "boundary_violation": ("guarded", "guarded", 16),
+                "control_pressure": ("guarded", "guarded", 11),
+                "repair_attempt": ("softening", "soft", -5),
+                "warmth_received": ("warm", "smile", 5),
+                "user_vulnerable": ("caring", "worry", 7),
+                "availability_drop": ("patient", "neutral", -2),
+                "return_after_gap": ("open", "soft", 3),
+            }
             events: list[tuple[str, dict[str, object]]] = [
                 ("TurnAppraised", {"appraisal": appraisal, "policy": policies.get(appraisal, "自然回应当前消息。")}),
                 ("IntentCreated", {"intent_id": str(command["intent_id"]), "kind": "reply", "status": "open"}),
@@ -1191,6 +1216,21 @@ class WorldKernel:
                 ("NeedChanged", {"need": need, "delta": delta})
                 for need, delta in need_deltas.get(appraisal, {}).items()
             )
+            user_id = str(command.get("user_id") or "")
+            if user_id:
+                user = _as_dict(_as_dict(state["entities"], "entities").get(user_id), "appraised user")
+                if user.get("kind") != "user":
+                    raise WorldError("turn appraisal user must be a registered user")
+                events.append(("RelationshipAppraised", {"user_id": user_id, "appraisal": appraisal}))
+                events.extend(
+                    ("RelationshipChanged", {"entity_id": user_id, "dimension": dimension, "delta": delta})
+                    for dimension, delta in relationship_deltas.get(appraisal, {}).items()
+                )
+            mode, expression, charge_delta = modulation.get(appraisal, ("calm", "neutral", -1))
+            events.append((
+                "EmotionModulated",
+                {"mode": mode, "expression": expression, "charge_delta": charge_delta, "reason": appraisal},
+            ))
             return events
         raise WorldError(f"unsupported command: {command_type}")
 
@@ -1403,6 +1443,9 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         npc = dict(payload)
         npc["status"] = "active"
         _as_dict(next_state["entities"], "entities")[str(npc["id"])] = npc
+    elif event.event_type == "UserRegistered":
+        user = {**payload, "status": "active"}
+        _as_dict(next_state["entities"], "entities")[str(user["id"])] = user
     elif event.event_type == "ClockModeChanged":
         next_state["clock"] = {**_as_dict(next_state["clock"], "clock"), **payload}
     elif event.event_type == "ClockAdvanced":
@@ -1448,11 +1491,19 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["status"] = "unknown"
         action["reason"] = payload.get("reason")
-    elif event.event_type == "NpcRelationshipChanged":
+    elif event.event_type in {"NpcRelationshipChanged", "RelationshipChanged"}:
         relationships = _as_dict(next_state["relationships"], "relationships")
         relation = _as_dict(relationships.setdefault(str(payload["entity_id"]), {}), "relationship")
         dimension = str(payload["dimension"])
         relation[dimension] = max(-100, min(100, int(relation.get(dimension, 0)) + int(payload["delta"])))
+    elif event.event_type == "RelationshipAppraised":
+        next_state["last_relationship_appraisal"] = dict(payload)
+    elif event.event_type == "EmotionModulated":
+        current = _as_dict(next_state["emotion_modulation"], "emotion modulation")
+        next_state["emotion_modulation"] = {
+            "mode": payload["mode"], "expression": payload["expression"], "reason": payload["reason"],
+            "charge": max(0, min(100, int(current.get("charge", 0)) + int(payload["charge_delta"]))),
+        }
     elif event.event_type == "NeedChanged":
         needs = _as_dict(next_state["needs"], "needs")
         need = str(payload["need"])
@@ -1567,6 +1618,8 @@ def _empty_state(world_id: str) -> dict[str, object]:
             "message_id": None, "attention": "idle", "typing": "idle", "reason": None,
             "due_at": None, "deferred_action_id": None,
         },
+        "emotion_modulation": {"mode": "calm", "expression": "neutral", "reason": "world_started", "charge": 0},
+        "last_relationship_appraisal": None,
     }
 
 

@@ -150,15 +150,42 @@ class CompanionEngine:
             rewrite_model=rewrite_model,
         )
 
-    def _record_world_input(self, message: IncomingMessage) -> None:
+    @staticmethod
+    def _world_message_id(message: IncomingMessage) -> str:
+        return message.message_id or sha256(
+            f"{message.platform}:{message.platform_user_id}:{message.sent_at.isoformat()}:{message.text}".encode()
+        ).hexdigest()[:24]
+
+    @staticmethod
+    def _world_user_id(canonical_user_id: str) -> str:
+        return f"user:{canonical_user_id}"
+
+    def _ensure_world_user(self, canonical_user_id: str) -> str:
+        if not self.world_kernel or not self.world_id:
+            raise RuntimeError("world user requested outside world mode")
+        user_id = self._world_user_id(canonical_user_id)
+        if user_id in self.world_kernel.snapshot(self.world_id)["entities"]:
+            return user_id
+        self._submit_world_with_retry(
+            {
+                "type": "register_user", "world_id": self.world_id,
+                "user_id": user_id, "name": canonical_user_id,
+                "idempotency_key": f"register-user:{user_id}",
+            }
+        )
+        return user_id
+
+    def _record_world_input(self, message: IncomingMessage, canonical_user_id: str) -> None:
         if not self.world_kernel or not self.world_id:
             return
-        key = message.message_id or f"{message.platform}:{message.platform_user_id}:{message.sent_at.isoformat()}:{message.text}"
+        user_id = self._ensure_world_user(canonical_user_id)
+        key = self._world_message_id(message)
         self._submit_world_with_retry(
             {
                 "type": "observe_user_message",
                 "world_id": self.world_id,
-                "message_id": message.message_id,
+                "message_id": key,
+                "user_id": user_id,
                 "text": message.text,
                 "sent_at": message.sent_at.isoformat(),
                 "source": f"{message.platform}:incoming",
@@ -260,8 +287,9 @@ class CompanionEngine:
         resume_action_id: str | None = None,
     ) -> CompanionReply | None:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
-        self._record_world_input(message)
         if self.world_kernel and self.world_id:
+            message = message.model_copy(update={"message_id": self._world_message_id(message)})
+            self._record_world_input(message, canonical_user_id)
             return await self._handle_world_message(
                 canonical_user_id,
                 message,
@@ -683,12 +711,14 @@ class CompanionEngine:
             )
         event = interpret_interaction(message, MoodState())
         intent_id = f"turn:{message.message_id or message.sent_at.isoformat()}"
+        user_id = self._world_user_id(canonical_user_id)
         self._submit_world_with_retry(
             {
                 "type": "appraise_turn",
                 "world_id": self.world_id,
                 "appraisal": event.kind,
                 "intent_id": intent_id,
+                "user_id": user_id,
                 "actor": {"kind": "companion", "id": "zhizhi"},
                 "causation_id": message.message_id,
                 "idempotency_key": f"appraise:{intent_id}",
@@ -702,12 +732,15 @@ class CompanionEngine:
         policy = (snapshot.get("last_appraisal") or {}).get("policy", "自然回应当前消息。")
         world_policy = self.world_kernel.conversation_policy(self.world_id)
         needs = snapshot["needs"]
+        relationship = snapshot.get("relationships", {}).get(user_id, {})
+        modulation = snapshot.get("emotion_modulation", {})
         context_block = (
             "世界账本授权（必须遵守）：\n"
             f"- 本轮关系判断: {event.kind}\n- 本轮表达策略: {policy}\n"
             f"- 可引用事实: {'；'.join(facts[:8]) or '无'}\n"
             f"- 已结算经历: {'；'.join(experiences[-6:]) or '无'}\n"
             f"- 当前可见行为调制: 安全感={needs['security']}，主动性={needs['initiative']}，边界={needs['boundary']}。\n"
+            f"- 关系投影: {relationship or '尚无累计变化'}；情绪调制={modulation.get('mode', 'calm')}，表达={modulation.get('expression', 'neutral')}。\n"
             f"- 世界行为策略: {world_policy['mode']}；回复长度={world_policy['reply_length']}；主动性={world_policy['initiative']}。\n"
             "- 未列入账本的计划、人物、经历和结果不得说成已经发生。"
         )

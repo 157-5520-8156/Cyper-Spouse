@@ -101,7 +101,6 @@ def test_world_communication_rejects_typing_for_unseen_or_unknown_message(tmp_pa
             {"type": "set_message_attention", "world_id": started.world_id, "message_id": "missing", "attention": "seen", "reason": "test"},
             expected_revision=started.revision,
         )
-
     observed = kernel.submit(
         {"type": "observe_user_message", "world_id": started.world_id, "message_id": "m-1", "text": "hi", "sent_at": NOW.isoformat()},
         expected_revision=started.revision,
@@ -112,6 +111,32 @@ def test_world_communication_rejects_typing_for_unseen_or_unknown_message(tmp_pa
             expected_revision=observed.revision,
         )
 
+
+def test_world_user_relationship_and_emotion_are_reduced_from_turn_appraisal(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    user = kernel.submit(
+        {"type": "register_user", "world_id": started.world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=started.revision,
+    )
+    appraised = kernel.submit(
+        {
+            "type": "appraise_turn", "world_id": started.world_id, "intent_id": "turn:1",
+            "appraisal": "boundary_violation", "user_id": "user:geoff",
+        },
+        expected_revision=user.revision,
+    )
+
+    snapshot = kernel.snapshot(started.world_id)
+    assert snapshot["entities"]["user:geoff"]["kind"] == "user"
+    assert snapshot["relationships"]["user:geoff"] == {"respect": -12, "reliability": -4}
+    assert snapshot["emotion_modulation"] == {
+        "mode": "guarded", "charge": 16, "reason": "boundary_violation",
+        "expression": "guarded",
+    }
+    assert {event.event_type for event in appraised.events} >= {
+        "RelationshipAppraised", "RelationshipChanged", "EmotionModulated",
+    }
 
 def test_world_can_start_from_the_reviewable_seed_file(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
