@@ -124,6 +124,24 @@ async def test_world_enabled_reply_records_input_action_and_delivery_settlement(
         action["kind"] == "model_call" and action["status"] == "delivered"
         for action in world.snapshot(world_id)["actions"].values()
     )
+    assert world.snapshot(world_id)["communication"]["attention"] == "seen"
+
+
+@pytest.mark.asyncio
+async def test_world_mode_typing_transitions_do_not_touch_legacy_mood(tmp_path: Path, monkeypatch) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+    message = IncomingMessage(platform="qq", platform_user_id="geoff", text="你在吗", message_id="typing-1")
+
+    await engine.handle_message(message)
+    monkeypatch.setattr(store, "save_mood_state", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy mood")))
+    engine.begin_world_typing(message)
+    assert world.snapshot(world_id)["communication"]["typing"] == "started"
+    engine.stop_world_typing(message, reason="reply_sent")
+    assert world.snapshot(world_id)["communication"]["typing"] == "idle"
 
 
 @pytest.mark.asyncio

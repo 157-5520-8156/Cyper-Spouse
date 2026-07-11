@@ -222,7 +222,11 @@ class QQMessageCoalescer:
                     )
                     return
 
-            if self.enable_reply_decision:
+            world_mode = bool(
+                getattr(self.engine, "world_kernel", None)
+                and getattr(self.engine, "world_id", None)
+            )
+            if self.enable_reply_decision and not world_mode:
                 has_unread = False
                 mood_state = None
                 try:
@@ -373,6 +377,8 @@ class QQMessageCoalescer:
             except Exception:
                 logger.exception("failed to load state for reply timing")
         try:
+            if hasattr(self.engine, "begin_world_typing"):
+                self.engine.begin_world_typing(merged)
             if self.human_timing:
                 await self.sleep(initial_reply_delay_seconds(merged, reply, state=timing_state, rng=self.rng))
             self._active_sends[key] = ActiveSend(incoming=merged, reply_target=reply_target)
@@ -394,6 +400,11 @@ class QQMessageCoalescer:
                 self.engine.fail_reply_delivery(reply, "QQ text delivery failed")
             return False
         finally:
+            if hasattr(self.engine, "stop_world_typing"):
+                self.engine.stop_world_typing(
+                    merged,
+                    reason="reply_sent" if 'sent_completely' in locals() and sent_completely else "reply_send_stopped",
+                )
             self._active_sends.pop(key, None)
         if hasattr(self.engine, "confirm_reply_delivery"):
             self.engine.confirm_reply_delivery(reply)

@@ -48,6 +48,71 @@ def test_started_world_is_append_only_and_builds_read_projection(tmp_path: Path)
     assert kernel.events("zhizhi-v1")[0].payload["protagonist"]["name"] == "沈知栀"
 
 
+def test_world_communication_attention_and_typing_are_event_sourced(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    observed = kernel.submit(
+        {
+            "type": "observe_user_message", "world_id": started.world_id,
+            "message_id": "m-1", "text": "你忙吗", "sent_at": NOW.isoformat(),
+        },
+        expected_revision=started.revision,
+    )
+    assert kernel.snapshot(started.world_id)["communication"]["attention"] == "unread"
+
+    deferred = kernel.submit(
+        {
+            "type": "set_message_attention", "world_id": started.world_id,
+            "message_id": "m-1", "attention": "deferred", "reason": "active_world_activity",
+            "due_at": (NOW + timedelta(minutes=20)).isoformat(),
+        },
+        expected_revision=observed.revision,
+    )
+    snapshot = kernel.snapshot(started.world_id)
+    assert snapshot["communication"] == {
+        "message_id": "m-1", "attention": "deferred", "typing": "idle",
+        "reason": "active_world_activity", "due_at": (NOW + timedelta(minutes=20)).isoformat(),
+        "deferred_action_id": "attention:m-1",
+    }
+    assert snapshot["actions"]["attention:m-1"]["status"] == "scheduled"
+
+    typing = kernel.submit(
+        {"type": "set_message_attention", "world_id": started.world_id, "message_id": "m-1", "attention": "seen", "reason": "ready_to_reply"},
+        expected_revision=deferred.revision,
+    )
+    typed = kernel.submit(
+        {"type": "set_typing_state", "world_id": started.world_id, "message_id": "m-1", "typing": "started", "reason": "composing_reply"},
+        expected_revision=typing.revision,
+    )
+    assert kernel.snapshot(started.world_id)["communication"]["typing"] == "started"
+    stopped = kernel.submit(
+        {"type": "set_typing_state", "world_id": started.world_id, "message_id": "m-1", "typing": "stopped", "reason": "reply_queued"},
+        expected_revision=typed.revision,
+    )
+    assert [event.event_type for event in stopped.events] == ["TypingStateChanged"]
+
+
+def test_world_communication_rejects_typing_for_unseen_or_unknown_message(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    with pytest.raises(WorldError, match="observed message"):
+        kernel.submit(
+            {"type": "set_message_attention", "world_id": started.world_id, "message_id": "missing", "attention": "seen", "reason": "test"},
+            expected_revision=started.revision,
+        )
+
+    observed = kernel.submit(
+        {"type": "observe_user_message", "world_id": started.world_id, "message_id": "m-1", "text": "hi", "sent_at": NOW.isoformat()},
+        expected_revision=started.revision,
+    )
+    with pytest.raises(WorldError, match="seen message"):
+        kernel.submit(
+            {"type": "set_typing_state", "world_id": started.world_id, "message_id": "m-1", "typing": "started", "reason": "test"},
+            expected_revision=observed.revision,
+        )
+
+
 def test_world_can_start_from_the_reviewable_seed_file(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
 

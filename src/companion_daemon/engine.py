@@ -221,6 +221,34 @@ class CompanionEngine:
             str(self.world_kernel.snapshot(self.world_id)["clock"]["logical_at"])
         )
 
+    def begin_world_typing(self, message: IncomingMessage, *, reason: str = "composing_reply") -> None:
+        """Record an observable typing transition without touching legacy mood state."""
+        if not self.world_kernel or not self.world_id or not message.message_id:
+            return
+        self._submit_world_with_retry(
+            {
+                "type": "set_typing_state", "world_id": self.world_id,
+                "message_id": message.message_id, "typing": "started", "reason": reason,
+                "idempotency_key": f"typing-start:{message.message_id}",
+            }
+        )
+
+    def stop_world_typing(self, message: IncomingMessage, *, reason: str) -> None:
+        """Set typing idle after a send attempt, regardless of its delivery result."""
+        if not self.world_kernel or not self.world_id or not message.message_id:
+            return
+        snapshot = self.world_kernel.snapshot(self.world_id)
+        communication = snapshot.get("communication", {})
+        if not isinstance(communication, dict) or communication.get("typing") != "started":
+            return
+        self._submit_world_with_retry(
+            {
+                "type": "set_typing_state", "world_id": self.world_id,
+                "message_id": message.message_id, "typing": "stopped", "reason": reason,
+                "idempotency_key": f"typing-stop:{message.message_id}:{reason}",
+            }
+        )
+
     async def handle_message(
         self,
         message: IncomingMessage,
@@ -645,6 +673,14 @@ class CompanionEngine:
                         "idempotency_key": f"supersede:{action_id}:{message.message_id or message.sent_at.isoformat()}",
                     }
                 )
+        if not skip_reply and message.message_id:
+            self._submit_world_with_retry(
+                {
+                    "type": "set_message_attention", "world_id": self.world_id,
+                    "message_id": message.message_id, "attention": "seen", "reason": "reply_turn_started",
+                    "idempotency_key": f"attention-seen:{message.message_id}",
+                }
+            )
         event = interpret_interaction(message, MoodState())
         intent_id = f"turn:{message.message_id or message.sent_at.isoformat()}"
         self._submit_world_with_retry(

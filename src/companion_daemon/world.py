@@ -946,6 +946,65 @@ class WorldKernel:
                     },
                 )
             ]
+        if command_type == "set_message_attention":
+            message_id = str(command.get("message_id") or "")
+            attention = str(command.get("attention") or "")
+            reason = str(command.get("reason") or "").strip()
+            known_message_ids = {
+                str(_as_dict(item, "recent message").get("message_id") or "")
+                for item in _as_list(state.get("recent_messages", []), "recent messages")
+            }
+            if not message_id or message_id not in known_message_ids:
+                raise WorldError("message attention requires an observed message")
+            if attention not in {"seen", "deferred", "do_not_disturb"} or not reason:
+                raise WorldError("message attention requires a supported attention state and reason")
+            communication = _as_dict(state["communication"], "communication")
+            prior_action_id = str(communication.get("deferred_action_id") or "")
+            events: list[tuple[str, dict[str, object]]] = []
+            if prior_action_id:
+                prior = _as_dict(_as_dict(state["actions"], "actions").get(prior_action_id), "deferred attention action")
+                if prior.get("status") == "scheduled":
+                    events.append(("ActionCancelled", {"action_id": prior_action_id, "reason": "attention_reconsidered"}))
+            payload: dict[str, object] = {
+                "message_id": message_id, "attention": attention, "reason": reason,
+                "due_at": None, "deferred_action_id": None,
+            }
+            if attention == "deferred":
+                due_at = str(command.get("due_at") or "")
+                now = _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+                if not due_at or _parse_at(due_at) <= now:
+                    raise WorldError("deferred message attention requires a future logical due_at")
+                action_id = f"attention:{message_id}"
+                if action_id in _as_dict(state["actions"], "actions"):
+                    raise WorldError("message attention was already deferred")
+                payload["due_at"] = due_at
+                payload["deferred_action_id"] = action_id
+                events.append((
+                    "ActionScheduled",
+                    {
+                        "action_id": action_id, "kind": "message_attention",
+                        "expires_at": ( _parse_at(due_at) + timedelta(hours=12) ).isoformat(),
+                        "payload": {"due_at": due_at, "message_id": message_id, "reason": reason},
+                    },
+                ))
+            events.append(("MessageAttentionDecided", payload))
+            return events
+        if command_type == "set_typing_state":
+            message_id = str(command.get("message_id") or "")
+            typing = str(command.get("typing") or "")
+            reason = str(command.get("reason") or "").strip()
+            communication = _as_dict(state["communication"], "communication")
+            if message_id != str(communication.get("message_id") or ""):
+                raise WorldError("typing state requires the current observed message")
+            if not reason or typing not in {"started", "stopped"}:
+                raise WorldError("typing state requires started or stopped and a reason")
+            if typing == "started" and communication.get("attention") != "seen":
+                raise WorldError("typing can start only for a seen message")
+            if typing == "started" and communication.get("typing") != "idle":
+                raise WorldError("typing is already active")
+            if typing == "stopped" and communication.get("typing") != "started":
+                raise WorldError("typing can stop only after it started")
+            return [("TypingStateChanged", {"message_id": message_id, "typing": typing, "reason": reason})]
         if command_type == "cancel_action":
             action_id = str(command.get("action_id") or "")
             action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
@@ -1398,6 +1457,16 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         needs = _as_dict(next_state["needs"], "needs")
         need = str(payload["need"])
         needs[need] = max(0, min(100, int(needs.get(need, 50)) + int(payload["delta"])))
+    elif event.event_type == "MessageAttentionDecided":
+        next_state["communication"] = {
+            "message_id": payload["message_id"], "attention": payload["attention"], "typing": "idle",
+            "reason": payload["reason"], "due_at": payload["due_at"],
+            "deferred_action_id": payload["deferred_action_id"],
+        }
+    elif event.event_type == "TypingStateChanged":
+        communication = _as_dict(next_state["communication"], "communication")
+        communication["typing"] = "started" if payload["typing"] == "started" else "idle"
+        communication["reason"] = payload["reason"]
     elif event.event_type == "ModelProposalRecorded":
         item = {**payload, "status": "recorded"}
         _as_dict(next_state["proposals"], "proposals")[str(item["proposal_id"])] = item
@@ -1461,6 +1530,10 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         history = _as_list(next_state["recent_messages"], "recent_messages")
         history.append({"direction": "in", **payload})
         next_state["recent_messages"] = history[-16:]
+        next_state["communication"] = {
+            "message_id": payload.get("message_id"), "attention": "unread", "typing": "idle",
+            "reason": "message_observed", "due_at": None, "deferred_action_id": None,
+        }
     elif event.event_type == "TurnAppraised":
         next_state["last_appraisal"] = dict(payload)
     elif event.event_type == "IntentCreated":
@@ -1490,6 +1563,10 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "share_days": {},
         "goals": {},
         "outcomes": {},
+        "communication": {
+            "message_id": None, "attention": "idle", "typing": "idle", "reason": None,
+            "due_at": None, "deferred_action_id": None,
+        },
     }
 
 
