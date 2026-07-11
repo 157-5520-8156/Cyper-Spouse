@@ -29,6 +29,7 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert "spriteCell" in response.text
     assert "downRight" in response.text
     assert "upLeft" in response.text
+    assert "downRight:0,downLeft:1,upLeft:2,upRight:3" in response.text
     assert "WALK_FRAMES = 4" in response.text
     assert "walkable" in response.text
     assert "footprint" in response.text

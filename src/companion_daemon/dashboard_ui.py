@@ -383,7 +383,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       return actor.action === 'walk' ? 'walk' : 'idle';
     }
     function spriteCell(action, facing) {
-      const columns = {downRight:0,upRight:1,upLeft:2,downLeft:3};
+      // Screen-space down means facing the viewer; screen-space up means
+      // showing her back. The four source columns follow that exact order.
+      const columns = {downRight:0,downLeft:1,upLeft:2,upRight:3};
       return {column:columns[facing] ?? 0, row:action === 'walk' ? Math.floor(actor.walked * 2.4) % WALK_FRAMES : 0};
     }
     function drawActor(ctx, now) {
