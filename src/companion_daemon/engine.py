@@ -1,4 +1,5 @@
 import asyncio
+from hashlib import sha256
 import json
 import logging
 import re
@@ -176,6 +177,24 @@ class CompanionEngine:
                 continue
         logger.warning("world command conflicted repeatedly: %s", command.get("type"))
 
+    def _record_world_model_output(self, *, purpose: str, causation: str, content: str) -> None:
+        """Persist a model return as non-factual audit input before using it."""
+        if not self.world_kernel or not self.world_id:
+            return
+        digest = sha256(f"{purpose}|{causation}|{content}".encode("utf-8")).hexdigest()[:20]
+        proposal_id = f"model:{purpose}:{digest}"
+        self._submit_world_with_retry(
+            {
+                "type": "record_model_output",
+                "world_id": self.world_id,
+                "proposal_id": proposal_id,
+                "purpose": purpose,
+                "content": content,
+                "causation_id": causation,
+                "idempotency_key": f"model-output:{proposal_id}",
+            }
+        )
+
     async def handle_message(
         self,
         message: IncomingMessage,
@@ -184,6 +203,7 @@ class CompanionEngine:
         mark_unread: bool = True,
         context_hint: str | None = None,
         defer_delivery: bool = False,
+        resume_action_id: str | None = None,
     ) -> CompanionReply | None:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         self._record_world_input(message)
@@ -193,6 +213,7 @@ class CompanionEngine:
                 message,
                 skip_reply=skip_reply,
                 defer_delivery=defer_delivery,
+                resume_action_id=resume_action_id,
             )
         # A new user turn means a previously planned check-in has been overtaken by reality.
         self.store.cancel_active_social_tasks(canonical_user_id, kind="comfort_followup")
@@ -575,11 +596,16 @@ class CompanionEngine:
         *,
         skip_reply: bool,
         defer_delivery: bool,
+        resume_action_id: str | None,
     ) -> CompanionReply | None:
         """World-mode turn path; legacy state tables are not behavioural inputs here."""
         assert self.world_kernel and self.world_id
         for action_id, action in self.world_kernel.snapshot(self.world_id)["actions"].items():
-            if action["kind"] == "reply_later" and action["status"] == "scheduled":
+            if (
+                action["kind"] in {"reply_later", "conversation_pulse"}
+                and action["status"] == "scheduled"
+                and action_id != resume_action_id
+            ):
                 self._submit_world_with_retry(
                     {
                         "type": "cancel_action",
@@ -608,11 +634,13 @@ class CompanionEngine:
         facts = [str(item["value"]) for item in snapshot["facts"].values()]
         experiences = [str(item["content"]) for item in snapshot["experiences"].values()]
         policy = (snapshot.get("last_appraisal") or {}).get("policy", "自然回应当前消息。")
+        needs = snapshot["needs"]
         context_block = (
             "世界账本授权（必须遵守）：\n"
             f"- 本轮关系判断: {event.kind}\n- 本轮表达策略: {policy}\n"
             f"- 可引用事实: {'；'.join(facts[:8]) or '无'}\n"
             f"- 已结算经历: {'；'.join(experiences[-6:]) or '无'}\n"
+            f"- 当前可见行为调制: 安全感={needs['security']}，主动性={needs['initiative']}，边界={needs['boundary']}。\n"
             "- 未列入账本的计划、人物、经历和结果不得说成已经发生。"
         )
         raw = await self.model.complete(
@@ -628,6 +656,9 @@ class CompanionEngine:
                 },
             ],
             temperature=0.75,
+        )
+        self._record_world_model_output(
+            purpose="reply", causation=intent_id, content=raw
         )
         try:
             candidate = self.world_kernel.validate_reply_candidate(
@@ -711,6 +742,11 @@ class CompanionEngine:
         """Persist a delayed reply before its in-memory timer is allowed to run."""
         now = now or utc_now()
         if self.world_kernel and self.world_id:
+            # Delays belong to the virtual clock; wall time is only an observed
+            # delivery timestamp and must not make a paused world progress.
+            logical_now = datetime.fromisoformat(
+                str(self.world_kernel.snapshot(self.world_id)["clock"]["logical_at"])
+            )
             action_id = f"reply_later:{message.message_id or message.sent_at.isoformat()}"
             self._submit_world_with_retry(
                 {
@@ -718,9 +754,9 @@ class CompanionEngine:
                     "world_id": self.world_id,
                     "action_id": action_id,
                     "kind": "reply_later",
-                    "expires_at": (now + timedelta(hours=12)).isoformat(),
+                    "expires_at": (logical_now + timedelta(hours=12)).isoformat(),
                     "payload": {
-                        "due_at": (now + timedelta(minutes=defer_minutes)).isoformat(),
+                        "due_at": (logical_now + timedelta(minutes=defer_minutes)).isoformat(),
                         "reason": reason,
                         "message": message.model_dump(mode="json"),
                     },
@@ -925,6 +961,32 @@ class CompanionEngine:
 
         Returns the afterthought text, or None if no afterthought should be sent.
         """
+        if self.world_kernel and self.world_id:
+            snapshot = self.world_kernel.snapshot(self.world_id)
+            recent = snapshot.get("recent_messages", [])
+            if any(
+                str(item.get("sent_at") or "") > reply_sent_at.isoformat()
+                for item in recent
+                if isinstance(item, dict) and item.get("direction") == "in"
+            ):
+                return None
+            prompt = (
+                "只补一条不超过 60 字的聊天余波；不得新增任何未结算经历、人物或事实。"
+                "若不该发送，返回空字符串。\n"
+                f"已结算事实: {[item['value'] for item in snapshot['facts'].values()]}\n"
+                f"已结算经历: {[item['content'] for item in snapshot['experiences'].values()][-3:]}\n"
+                f"模式: {mode}"
+            )
+            try:
+                raw = await self.model.complete([{"role": "user", "content": prompt}], temperature=0.7)
+            except Exception:
+                logger.exception("world afterthought generation failed")
+                return None
+            self._record_world_model_output(
+                purpose="afterthought", causation=f"afterthought:{reply_sent_at.isoformat()}:{mode}", content=raw
+            )
+            text = sanitize_chat_text(raw)
+            return text if text and len(text) <= 60 else None
         state = self.store.get_mood_state(canonical_user_id)
         if state.mood in {"guarded", "hurt"}:
             return None
@@ -1156,10 +1218,36 @@ class CompanionEngine:
         mode: str,
         delay_seconds: float,
         remaining: list[dict[str, object]],
-    ) -> int:
+    ) -> int | str:
         """Persist one tentative continuation bubble before its live timer runs."""
         now = utc_now()
         due_at = now + timedelta(seconds=max(1.0, delay_seconds))
+        if self.world_kernel and self.world_id:
+            logical_now = datetime.fromisoformat(
+                str(self.world_kernel.snapshot(self.world_id)["clock"]["logical_at"])
+            )
+            due_at = logical_now + timedelta(seconds=max(1.0, delay_seconds))
+            action_id = f"conversation_pulse:{canonical_user_id}:{reply_sent_at.isoformat()}:{mode}"
+            self._submit_world_with_retry(
+                {
+                    "type": "schedule_action",
+                    "world_id": self.world_id,
+                    "action_id": action_id,
+                    "kind": "conversation_pulse",
+                    "expires_at": (due_at + timedelta(minutes=35)).isoformat(),
+                    "payload": {
+                        "due_at": due_at.isoformat(),
+                        "canonical_user_id": canonical_user_id,
+                        "platform": platform,
+                        "platform_user_id": platform_user_id,
+                        "reply_sent_at": reply_sent_at.isoformat(),
+                        "mode": mode,
+                        "remaining": remaining,
+                    },
+                    "idempotency_key": f"schedule:{action_id}",
+                }
+            )
+            return action_id
         return self.store.create_social_task(
             canonical_user_id,
             kind="conversation_pulse",
@@ -1175,15 +1263,27 @@ class CompanionEngine:
             expires_at=due_at + timedelta(minutes=35),
         )
 
-    def conversation_pulse_is_active(self, task_id: int | None) -> bool:
+    def conversation_pulse_is_active(self, task_id: int | str | None) -> bool:
+        if self.world_kernel and self.world_id and isinstance(task_id, str):
+            return self.world_kernel.snapshot(self.world_id)["actions"].get(task_id, {}).get("status") == "scheduled"
         return task_id is None or self.store.social_task_is_active(task_id)
 
-    def complete_conversation_pulse(self, task_id: int | None) -> None:
+    def complete_conversation_pulse(self, task_id: int | str | None) -> None:
         if task_id is not None:
+            if self.world_kernel and self.world_id and isinstance(task_id, str):
+                self._submit_world_with_retry(
+                    {"type": "record_external_result", "world_id": self.world_id, "action_id": task_id, "result": {"kind": "pulse", "status": "delivered"}, "idempotency_key": f"complete:{task_id}"}
+                )
+                return
             self.store.resolve_social_task(task_id)
 
-    def cancel_conversation_pulse(self, task_id: int | None) -> None:
+    def cancel_conversation_pulse(self, task_id: int | str | None) -> None:
         if task_id is not None:
+            if self.world_kernel and self.world_id and isinstance(task_id, str):
+                self._submit_world_with_retry(
+                    {"type": "cancel_action", "world_id": self.world_id, "action_id": task_id, "reason": "conversation_changed"}
+                )
+                return
             self.store.cancel_social_task(task_id)
 
     async def proactive_tick(self, canonical_user_id: str) -> ProactiveDecision:
@@ -1390,6 +1490,11 @@ class CompanionEngine:
             f"经历: {[item['content'] for item in snapshot['experiences'].values()][-4:]}"
         )
         raw = await self.model.complete([{"role": "user", "content": prompt}], temperature=0.7)
+        self._record_world_model_output(
+            purpose="proactive",
+            causation=f"proactive:{self.world_kernel.revision(self.world_id)}",
+            content=raw,
+        )
         decision = self._parse_decision(canonical_user_id, raw, MoodState())
         if not decision.should_send or not decision.message or not decision.platform:
             return decision

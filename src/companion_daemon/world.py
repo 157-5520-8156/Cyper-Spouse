@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -215,6 +215,7 @@ class WorldKernel:
                         {
                             "action_id": action_id,
                             "kind": "outgoing_message",
+                            "message_kind": kind,
                             "expires_at": expires_at.isoformat(),
                             "delivery_id": delivery_id,
                             "trace_id": int(trace_row.lastrowid),
@@ -442,7 +443,16 @@ class WorldKernel:
                 "insert into worlds (world_id, revision, logical_at, seed_hash, created_at) values (?, 0, ?, ?, ?)",
                 (world_id, logical_at, _hash(_stable_json(seed)), now),
             )
-            events = [("WorldStarted", {"protagonist": protagonist, "logical_at": logical_at})]
+            events = [
+                (
+                    "WorldStarted",
+                    {
+                        "protagonist": protagonist,
+                        "logical_at": logical_at,
+                        "daily_schedule": _as_list(seed.get("daily_schedule", []), "daily_schedule"),
+                    },
+                )
+            ]
             for npc in _as_list(seed.get("npcs", []), "npcs"):
                 events.append(("NpcRegistered", _as_dict(npc, "npc")))
             state = _empty_state(world_id)
@@ -478,6 +488,32 @@ class WorldKernel:
             if not target or _parse_at(target) < _parse_at(current):
                 raise WorldError("logical time cannot move backwards")
             events: list[tuple[str, dict[str, object]]] = [("ClockAdvanced", {"target_logical_at": target})]
+            agenda = _as_dict(state["agenda"], "agenda")
+            target_at = _parse_at(target)
+            local_day = _parse_at(current).date()
+            while local_day <= target_at.date():
+                for template in _as_list(state.get("daily_schedule", []), "daily_schedule"):
+                    item = _as_dict(template, "daily schedule item")
+                    starts = datetime(
+                        local_day.year, local_day.month, local_day.day, int(item["starts_hour"]), tzinfo=target_at.tzinfo
+                    )
+                    ends = datetime(
+                        local_day.year, local_day.month, local_day.day, int(item["ends_hour"]), tzinfo=target_at.tzinfo
+                    )
+                    activity_id = f"{local_day.isoformat()}:{item['slot']}"
+                    if activity_id not in agenda and starts <= target_at:
+                        payload = {
+                            "activity_id": activity_id,
+                            "entity_id": "zhizhi",
+                            "title": str(item["title"]),
+                            "starts_at": starts.isoformat(),
+                            "ends_at": ends.isoformat(),
+                        }
+                        events.append(("ActivityPlanned", payload))
+                        events.append(("ActivityStarted", {"activity_id": activity_id}))
+                        if ends <= target_at:
+                            events.append(("ActivityCompleted", {"activity_id": activity_id}))
+                local_day += timedelta(days=1)
             for activity_id, activity in _as_dict(state["agenda"], "agenda").items():
                 item = _as_dict(activity, "activity")
                 if item["status"] == "planned" and _parse_at(str(item["starts_at"])) <= _parse_at(target):
@@ -597,6 +633,29 @@ class WorldKernel:
                     },
                 )
             ]
+        if command_type == "record_model_output":
+            # Model output is audit data, never a world fact by itself.  This
+            # separate command deliberately does not use the low-risk life
+            # event template whitelist: conversation JSON and decision JSON
+            # are external results, not proposed experiences.
+            proposal_id = str(command.get("proposal_id") or "")
+            purpose = str(command.get("purpose") or "")
+            content = str(command.get("content") or "")
+            proposals = _as_dict(state["proposals"], "proposals")
+            if not proposal_id or proposal_id in proposals or not purpose or not content or len(content) > 8192:
+                raise WorldError("model output requires a new bounded proposal id, purpose, and content")
+            return [
+                (
+                    "ModelProposalRecorded",
+                    {
+                        "proposal_id": proposal_id,
+                        "entity_id": "zhizhi",
+                        "template_id": f"model_output:{purpose}",
+                        "content": content,
+                        "audit_only": True,
+                    },
+                )
+            ]
         if command_type == "accept_model_proposal":
             proposal_id = str(command.get("proposal_id") or "")
             proposal = _as_dict(_as_dict(state["proposals"], "proposals").get(proposal_id), "proposal")
@@ -651,10 +710,24 @@ class WorldKernel:
                 "availability_drop": "收住主动性，不追发。",
                 "return_after_gap": "自然接上，不抱怨。",
             }
-            return [
+            need_deltas = {
+                "boundary_violation": {"security": -12, "boundary": 12, "initiative": -8},
+                "control_pressure": {"security": -8, "boundary": 8, "initiative": -5},
+                "repair_attempt": {"security": 5, "boundary": -3},
+                "warmth_received": {"security": 4, "initiative": 3},
+                "user_vulnerable": {"initiative": 5, "attention": -4},
+                "availability_drop": {"initiative": -6},
+                "return_after_gap": {"security": 2, "initiative": 2},
+            }
+            events: list[tuple[str, dict[str, object]]] = [
                 ("TurnAppraised", {"appraisal": appraisal, "policy": policies.get(appraisal, "自然回应当前消息。")}),
                 ("IntentCreated", {"intent_id": str(command["intent_id"]), "kind": "reply", "status": "open"}),
             ]
+            events.extend(
+                ("NeedChanged", {"need": need, "delta": delta})
+                for need, delta in need_deltas.get(appraisal, {}).items()
+            )
+            return events
         raise WorldError(f"unsupported command: {command_type}")
 
     def _append_and_project(
@@ -845,6 +918,7 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         next_state = _empty_state(event.world_id)
         next_state["clock"] = {"logical_at": payload["logical_at"], "mode": "paused", "rate": 0}
         next_state["entities"] = {str(protagonist["id"]): {**protagonist, "status": "active"}}
+        next_state["daily_schedule"] = payload.get("daily_schedule", [])
     elif event.event_type == "NpcRegistered":
         npc = dict(payload)
         npc["status"] = "active"
@@ -928,6 +1002,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "last_appraisal": None,
         "relationships": {},
         "needs": {"energy": 70, "attention": 55, "security": 50, "initiative": 20, "boundary": 0},
+        "daily_schedule": [],
     }
 
 

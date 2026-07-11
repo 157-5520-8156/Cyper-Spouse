@@ -13,8 +13,17 @@ class CompanionStore:
     def __init__(self, path: Path, *, primary_user_id: str | None = "geoff"):
         self.path = path
         self.primary_user_id = primary_user_id
+        self.world_mode_enabled = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.init()
+
+    def enable_world_mode(self) -> None:
+        """Fail closed if a world-mode path tries to mutate a legacy write model."""
+        self.world_mode_enabled = True
+
+    def _assert_legacy_behavior_write_allowed(self, operation: str) -> None:
+        if self.world_mode_enabled:
+            raise RuntimeError(f"world mode forbids legacy behaviour write: {operation}")
 
     @contextmanager
     def connect(self) -> Iterable[sqlite3.Connection]:
@@ -587,6 +596,7 @@ class CompanionStore:
         return json.loads(str(row["payload_json"]))
 
     def save_incoming(self, canonical_user_id: str, message: IncomingMessage) -> None:
+        self._assert_legacy_behavior_write_allowed("save_incoming")
         with self.connect() as conn:
             conn.execute(
                 """
@@ -615,6 +625,7 @@ class CompanionStore:
         *,
         kind: str,
     ) -> int:
+        self._assert_legacy_behavior_write_allowed("queue_outgoing")
         now = utc_now().isoformat()
         with self.connect() as conn:
             cursor = conn.execute(
@@ -641,6 +652,7 @@ class CompanionStore:
         observable_reason: str,
         direction: str = "incoming_reply",
     ) -> tuple[int, int]:
+        self._assert_legacy_behavior_write_allowed("queue_outgoing_with_turn_trace")
         """Create a proposed delivery and its audit record in one transaction."""
         now = utc_now().isoformat()
         with self.connect() as conn:
@@ -670,6 +682,7 @@ class CompanionStore:
         return delivery_id, int(trace.lastrowid)
 
     def mark_outgoing_delivered(self, delivery_id: int) -> sqlite3.Row | None:
+        self._assert_legacy_behavior_write_allowed("mark_outgoing_delivered")
         now = utc_now().isoformat()
         with self.connect() as conn:
             row = conn.execute(
@@ -694,6 +707,7 @@ class CompanionStore:
             return row
 
     def mark_outgoing_failed(self, delivery_id: int, reason: str) -> None:
+        self._assert_legacy_behavior_write_allowed("mark_outgoing_failed")
         with self.connect() as conn:
             conn.execute(
                 """
@@ -712,6 +726,7 @@ class CompanionStore:
         delivered: bool,
         failure_reason: str | None = None,
     ) -> sqlite3.Row | None:
+        self._assert_legacy_behavior_write_allowed("resolve_outgoing_and_turn_trace")
         """Set one outbox delivery and its audit trace in one transaction."""
         now = utc_now().isoformat()
         with self.connect() as conn:
@@ -783,6 +798,7 @@ class CompanionStore:
         direction: str = "incoming_reply",
         status: str = "planned",
     ) -> int:
+        self._assert_legacy_behavior_write_allowed("create_turn_trace")
         now = utc_now().isoformat()
         with self.connect() as conn:
             cursor = conn.execute(
@@ -922,6 +938,7 @@ class CompanionStore:
         return row is not None
 
     def save_mood_state(self, canonical_user_id: str, state: MoodState) -> None:
+        self._assert_legacy_behavior_write_allowed("save_mood_state")
         with self.connect() as conn:
             conn.execute(
                 """
@@ -999,6 +1016,7 @@ class CompanionStore:
         )
 
     def save_life_runtime(self, canonical_user_id: str, runtime: LifeRuntimeState) -> None:
+        self._assert_legacy_behavior_write_allowed("save_life_runtime")
         with self.connect() as conn:
             conn.execute(
                 """
@@ -1034,6 +1052,7 @@ class CompanionStore:
         source: str,
         shared_at: datetime | None = None,
     ) -> int:
+        self._assert_legacy_behavior_write_allowed("record_life_event")
         with self.connect() as conn:
             cursor = conn.execute(
                 """
@@ -1147,6 +1166,7 @@ class CompanionStore:
         memory_note: str | None = None,
         status: str = "planned",
     ) -> int:
+        self._assert_legacy_behavior_write_allowed("create_calendar_event")
         if status not in {"planned", "active", "completed", "cancelled", "postponed"}:
             raise ValueError(f"unsupported calendar status: {status}")
         if ends_at <= starts_at:
@@ -1522,6 +1542,7 @@ class CompanionStore:
         origin_turn_trace_id: int | None = None,
         reason_code: str | None = None,
     ) -> int:
+        self._assert_legacy_behavior_write_allowed("create_social_task")
         with self.connect() as conn:
             cursor = conn.execute(
                 """
@@ -1706,6 +1727,7 @@ class CompanionStore:
         platform: Platform,
         message_id: str | None,
     ) -> None:
+        self._assert_legacy_behavior_write_allowed("record_interaction_event")
         with self.connect() as conn:
             conn.execute(
                 """
@@ -1885,6 +1907,7 @@ class CompanionStore:
         source: str,
         confidence: float = 0.7,
     ) -> None:
+        self._assert_legacy_behavior_write_allowed("upsert_memory")
         now = utc_now().isoformat()
         with self.connect() as conn:
             duplicates = conn.execute(
@@ -1934,6 +1957,7 @@ class CompanionStore:
         confidence: float,
         fact_key: str | None = None,
     ) -> None:
+        self._assert_legacy_behavior_write_allowed("record_fact_observation")
         """Append a sourced fact and supersede only an explicitly conflicting key.
 
         The normal memories table is a retrieval index. This ledger is the
@@ -2228,6 +2252,7 @@ class CompanionStore:
         trigger_type: str | None,
         cooldown_minutes: int,
     ) -> None:
+        self._assert_legacy_behavior_write_allowed("save_proactive_event")
         with self.connect() as conn:
             conn.execute(
                 """

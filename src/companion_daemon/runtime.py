@@ -28,6 +28,8 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         world_kernel.import_verified_facts(world_id, store.active_fact_lines(settings.primary_user_id))
     character = load_character(str(settings.character_path))
     seed_user(store, settings.primary_user_id, initial_mood_for_character(character))
+    if settings.world_runtime_enabled:
+        store.enable_world_mode()
     stickers = load_stickers(str(settings.stickers_path))
     if settings.deepseek_api_key and not use_fake_model:
         model = DeepSeekChatModel(

@@ -1,16 +1,24 @@
 import random
+from datetime import datetime
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 import companion_daemon.proactive_scheduler as proactive_scheduler
-from companion_daemon.models import MoodState
+from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.proactive_scheduler import (
     _jittered_cooldown_minutes,
     _minutes_since,
     _next_sleep_seconds,
     scheduler_loop,
+    recover_world_due_replies,
+    recover_world_due_conversation_pulses,
 )
+from companion_daemon.db import CompanionStore
+from companion_daemon.engine import CompanionEngine, seed_user
+from companion_daemon.llm import FakeCompanionModel
+from companion_daemon.world import WorldKernel
 
 
 def test_minutes_since_none() -> None:
@@ -51,6 +59,79 @@ def test_next_sleep_seconds_adds_scheduler_jitter() -> None:
 
     assert 585 <= sleep <= 1215
     assert sleep != 900
+
+
+@pytest.mark.asyncio
+async def test_world_due_reply_recovery_settles_original_action(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import UTC
+
+    store = CompanionStore(tmp_path / "world.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。", world_kernel=world, world_id=world_id)
+    message = IncomingMessage(
+        platform="qq", platform_user_id="openid", text="晚点说", message_id="recover-1",
+        sent_at=datetime(2026, 7, 11, 9, 0, tzinfo=UTC),
+    )
+    action_id = engine.create_deferred_reply_task(
+        message, defer_minutes=1, reason="busy", now=datetime(2026, 7, 11, 9, 0, tzinfo=UTC)
+    )
+
+    class FakeDelivery:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def send_text(self, recipient_id: str, text: str) -> None:
+            assert recipient_id == "openid"
+
+    monkeypatch.setattr(proactive_scheduler, "QQDelivery", FakeDelivery)
+    monkeypatch.setattr(proactive_scheduler, "get_settings", lambda: SimpleNamespace())
+    logical_at = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
+    world.advance(world_id, logical_at.replace(minute=logical_at.minute + 2), expected_revision=world.revision(world_id))
+    recovered = await recover_world_due_replies(engine, send=True, sandbox=True)
+
+    assert recovered == 1
+    assert world.snapshot(world_id)["actions"][action_id]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_world_conversation_pulse_recovery_uses_world_action(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import timedelta
+
+    store = CompanionStore(tmp_path / "world.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。", world_kernel=world, world_id=world_id)
+    logical_at = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
+    action_id = engine.schedule_conversation_pulse(
+        canonical_user_id="geoff", platform="qq", platform_user_id="openid",
+        reply_sent_at=logical_at, mode="quick_continue", delay_seconds=1, remaining=[],
+    )
+    world.advance(world_id, logical_at + timedelta(minutes=1), expected_revision=world.revision(world_id))
+
+    class FakeDelivery:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def send_text(self, recipient_id: str, text: str) -> None:
+            assert recipient_id == "openid"
+            assert text
+
+    monkeypatch.setattr(proactive_scheduler, "QQDelivery", FakeDelivery)
+    monkeypatch.setattr(proactive_scheduler, "get_settings", lambda: SimpleNamespace())
+    recovered = await recover_world_due_conversation_pulses(engine, send=True, sandbox=True)
+
+    assert recovered == 1
+    snapshot = world.snapshot(world_id)
+    assert snapshot["actions"][str(action_id)]["status"] == "delivered"
+    assert any(
+        action["kind"] == "outgoing_message"
+        and action.get("message_kind") == "afterthought"
+        and action["status"] == "delivered"
+        for action in snapshot["actions"].values()
+    )
 
 
 @pytest.mark.asyncio

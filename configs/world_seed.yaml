@@ -19,6 +19,19 @@ protagonist:
     - dorm_routine
     - literature_society
     - photography_society
+daily_schedule:
+  - slot: morning_study
+    title: 图书馆看书
+    starts_hour: 9
+    ends_hour: 12
+  - slot: afternoon_class
+    title: 整理课程笔记或参加社团活动
+    starts_hour: 14
+    ends_hour: 17
+  - slot: evening_walk
+    title: 傍晚散步或整理照片
+    starts_hour: 19
+    ends_hour: 21
 npcs:
   - id: mother-shen
     name: 沈岚

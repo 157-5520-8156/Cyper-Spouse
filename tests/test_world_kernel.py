@@ -115,6 +115,23 @@ def test_clock_advance_completes_due_activity_and_expires_open_action(tmp_path: 
     assert snapshot["actions"]["reply-later-1"]["status"] == "expired"
 
 
+def test_clock_advance_materializes_seeded_daily_life_into_events(tmp_path: Path) -> None:
+    seed = world_seed() | {
+        "daily_schedule": [
+            {"slot": "morning", "title": "图书馆看书", "starts_hour": 9, "ends_hour": 10}
+        ]
+    }
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": seed}, expected_revision=0)
+
+    advanced = kernel.advance("zhizhi-v1", NOW + timedelta(hours=2), expected_revision=started.revision)
+
+    assert [event.event_type for event in advanced.events] == [
+        "ClockAdvanced", "ActivityPlanned", "ActivityStarted", "ActivityCompleted"
+    ]
+    assert kernel.snapshot("zhizhi-v1")["agenda"]["2026-07-11:morning"]["status"] == "completed"
+
+
 def test_external_delivery_result_is_idempotent_and_only_settled_action_can_create_experience(
     tmp_path: Path,
 ) -> None:
@@ -421,6 +438,21 @@ def test_command_hydrates_from_events_when_read_projection_is_corrupted(tmp_path
     assert kernel.snapshot(started.world_id)["needs"]["energy"] == 65
 
 
+def test_projection_rebuild_reports_mismatch_before_repair(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    kernel = WorldKernel(store)
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    with store.connect() as conn:
+        conn.execute(
+            "update world_current_state set state_hash = 'corrupted' where world_id = ?", (started.world_id,)
+        )
+
+    report = kernel.rebuild_projection(started.world_id, "world_current_state")
+
+    assert report.matches_live is False
+    assert kernel.rebuild_projection(started.world_id, "world_current_state").matches_live is True
+
+
 def test_outbox_action_transaction_rolls_back_when_projection_write_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -477,3 +509,35 @@ def test_concurrent_same_revision_allows_exactly_one_world_write(tmp_path: Path)
 
     assert sorted(outcomes) == ["accepted", "conflict"]
     assert kernel.snapshot("zhizhi-v1")["needs"]["energy"] == 69
+
+
+def test_delivery_settlement_rolls_back_outbox_history_and_trace_on_world_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.resolve_user("qq", "user")
+    kernel = WorldKernel(store)
+    kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    delivery_id, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="这条先计划。",
+        kind="reply",
+        expires_at=NOW + timedelta(hours=1),
+        trace={
+            "world_id": "zhizhi-v1", "appraisal": "ordinary_message", "expression_policy": "自然回应。",
+            "allowed_facts": [], "short_lived_constraint": None, "observable_reason": "故障注入。",
+        },
+    )
+
+    def broken_projection(*args, **kwargs):
+        raise RuntimeError("injected settlement failure")
+
+    monkeypatch.setattr(kernel, "_write_projection", broken_projection)
+    with pytest.raises(RuntimeError, match="injected settlement failure"):
+        kernel.settle_outgoing_action(delivery_id, delivered=True)
+
+    assert store.outbox_message(delivery_id)["status"] == "planned"
+    assert store.recent_messages("geoff", limit=4) == []
+    assert store.recent_turn_traces("geoff")[-1]["status"] == "planned"
+    assert kernel.snapshot("zhizhi-v1")["actions"][action_id]["status"] == "scheduled"

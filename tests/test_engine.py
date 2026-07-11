@@ -123,6 +123,24 @@ async def test_world_enabled_reply_records_input_action_and_delivery_settlement(
 
 
 @pytest.mark.asyncio
+async def test_world_mode_store_guard_rejects_legacy_writes_but_allows_world_turn(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    store.enable_world_mode()
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你在吗", message_id="guard-1")
+    )
+
+    assert reply is not None
+    with pytest.raises(RuntimeError, match="forbids legacy behaviour write"):
+        store.save_mood_state("geoff", MoodState())
+
+
+@pytest.mark.asyncio
 async def test_world_mode_does_not_call_legacy_behavior_writers(tmp_path: Path, monkeypatch) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
@@ -212,6 +230,43 @@ def test_world_afterthought_confirmation_does_not_write_legacy_mood(tmp_path: Pa
     action_id = world.action_id_for_delivery(world_id, delivery_id)
     assert action_id is not None
     assert world.snapshot(world_id)["actions"][action_id]["status"] == "delivered"
+
+
+def test_world_conversation_pulse_is_a_cancellable_world_action(tmp_path: Path, monkeypatch) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    store.enable_world_mode()
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+    monkeypatch.setattr(store, "create_social_task", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy task")))
+
+    action_id = engine.schedule_conversation_pulse(
+        canonical_user_id="geoff", platform="qq", platform_user_id="openid", reply_sent_at=utc_now(),
+        mode="quick_continue", delay_seconds=5, remaining=[],
+    )
+
+    assert isinstance(action_id, str)
+    assert engine.conversation_pulse_is_active(action_id) is True
+    engine.cancel_conversation_pulse(action_id)
+    assert engine.conversation_pulse_is_active(action_id) is False
+
+
+@pytest.mark.asyncio
+async def test_new_world_turn_cancels_pending_conversation_pulse(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+    action_id = engine.schedule_conversation_pulse(
+        canonical_user_id="geoff", platform="qq", platform_user_id="openid", reply_sent_at=utc_now(),
+        mode="quick_continue", delay_seconds=5, remaining=[],
+    )
+
+    await engine.handle_message(IncomingMessage(platform="qq", platform_user_id="geoff", text="我回来啦", message_id="cancel-pulse"))
+
+    assert world.snapshot(world_id)["actions"][action_id]["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

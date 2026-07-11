@@ -164,6 +164,63 @@ async def recover_overdue_deferred_replies(
     return recovered
 
 
+async def recover_world_due_replies(
+    engine,
+    *,
+    send: bool,
+    sandbox: bool,
+    now: datetime | None = None,
+) -> int:
+    """Recover `reply_later` actions directly from the world event ledger."""
+    if not send or not getattr(engine, "world_kernel", None) or not getattr(engine, "world_id", None):
+        return 0
+    logical_now = now or datetime.fromisoformat(
+        str(engine.world_kernel.snapshot(engine.world_id)["clock"]["logical_at"])
+    )
+    actions = [
+        action
+        for action in engine.world_kernel.due_actions(engine.world_id, now=logical_now)
+        if action["kind"] == "reply_later"
+    ]
+    if not actions:
+        return 0
+    delivery = QQDelivery(get_settings(), sandbox=sandbox)
+    recovered = 0
+    for action in actions:
+        action_id = str(action["action_id"])
+        payload = action.get("payload") or {}
+        raw_message = payload.get("message") if isinstance(payload, dict) else None
+        if not isinstance(raw_message, dict):
+            engine.cancel_deferred_reply_task(action_id)
+            continue
+        reply = None
+        try:
+            message = IncomingMessage.model_validate(raw_message)
+            reply = await engine.handle_message(
+                message,
+                context_hint=DEFERRED_RECOVERY_CONTEXT_HINT,
+                defer_delivery=True,
+                resume_action_id=action_id,
+            )
+            if reply is None:
+                engine.complete_deferred_reply_task(action_id)
+                continue
+            recipient_id = str(message.platform_user_id)
+            for index, part in enumerate(reply.text_parts or [reply.text]):
+                if index:
+                    await asyncio.sleep(between_part_delay_seconds(part))
+                await delivery.send_text(recipient_id, part)
+            engine.confirm_reply_delivery(reply)
+            engine.complete_deferred_reply_task(action_id)
+            recovered += 1
+        except Exception:
+            logger.exception("failed to recover world delayed reply %s", action_id)
+            if reply is not None:
+                engine.fail_reply_delivery(reply, "world deferred reply recovery delivery failed")
+            engine.cancel_deferred_reply_task(action_id)
+    return recovered
+
+
 async def recover_overdue_conversation_pulses(
     engine,
     *,
@@ -233,6 +290,70 @@ async def recover_overdue_conversation_pulses(
     return recovered
 
 
+async def recover_world_due_conversation_pulses(
+    engine,
+    *,
+    send: bool,
+    sandbox: bool,
+    now: datetime | None = None,
+) -> int:
+    """Settle due continuation bubbles from the world ledger after a restart."""
+    if not send or not getattr(engine, "world_kernel", None) or not getattr(engine, "world_id", None):
+        return 0
+    snapshot = engine.world_kernel.snapshot(engine.world_id)
+    logical_now = now or datetime.fromisoformat(str(snapshot["clock"]["logical_at"]))
+    due = [item for item in engine.world_kernel.due_actions(engine.world_id, now=logical_now) if item["kind"] == "conversation_pulse"]
+    if not due:
+        return 0
+    delivery = QQDelivery(get_settings(), sandbox=sandbox)
+    recovered = 0
+    for item in due:
+        action_id = str(item["action_id"])
+        payload = item.get("payload", {})
+        if not isinstance(payload, dict):
+            engine.cancel_conversation_pulse(action_id)
+            continue
+        delivery_id = None
+        try:
+            canonical_user_id = str(payload.get("canonical_user_id") or "")
+            platform = str(payload["platform"])
+            platform_user_id = str(payload["platform_user_id"])
+            reply_sent_at = datetime.fromisoformat(str(payload["reply_sent_at"]))
+            mode = str(payload.get("mode") or "quick_continue")
+            if not canonical_user_id:
+                # Compatibility for actions created before canonical_user_id
+                # became explicit world data.
+                canonical_user_id = action_id.removeprefix("conversation_pulse:").split(":", 1)[0]
+            text = await engine.generate_afterthought(canonical_user_id, reply_sent_at, mode=mode)
+            if not text:
+                engine.cancel_conversation_pulse(action_id)
+                continue
+            delivery_id = engine.queue_afterthought_delivery(canonical_user_id, platform, text)
+            await delivery.send_text(platform_user_id, text)
+            engine.confirm_afterthought_delivery(canonical_user_id, platform, text, delivery_id=delivery_id)
+            engine.complete_conversation_pulse(action_id)
+            remaining = payload.get("remaining") or []
+            if remaining:
+                next_stage = remaining[0]
+                if isinstance(next_stage, dict):
+                    engine.schedule_conversation_pulse(
+                        canonical_user_id=canonical_user_id,
+                        platform=platform,
+                        platform_user_id=platform_user_id,
+                        reply_sent_at=reply_sent_at,
+                        mode=str(next_stage.get("mode") or "topic_drift"),
+                        delay_seconds=float(next_stage.get("delay_seconds") or 60),
+                        remaining=list(remaining[1:]),
+                    )
+            recovered += 1
+        except Exception:
+            logger.exception("failed to recover world conversation pulse %s", action_id)
+            if delivery_id is not None:
+                engine.fail_afterthought_delivery(delivery_id, "world conversation pulse recovery delivery failed")
+            engine.cancel_conversation_pulse(action_id)
+    return recovered
+
+
 async def scheduler_loop(
     *,
     send: bool,
@@ -245,7 +366,10 @@ async def scheduler_loop(
     settings = get_settings()
     while True:
         engine = build_companion_engine()
-        if not getattr(engine, "world_kernel", None):
+        if getattr(engine, "world_kernel", None):
+            await recover_world_due_replies(engine, send=send, sandbox=sandbox)
+            await recover_world_due_conversation_pulses(engine, send=send, sandbox=sandbox)
+        else:
             await recover_overdue_deferred_replies(engine, send=send, sandbox=sandbox)
             await recover_overdue_conversation_pulses(engine, send=send, sandbox=sandbox)
         users = engine.store.canonical_users() or ["geoff"]

@@ -81,3 +81,19 @@ async def test_world_replay_preserves_appraisal_and_settled_action(
     actions = world.snapshot(world_id)["actions"]
     assert actions[first_reply.world_action_id]["status"] == "delivered"
     assert actions[second_reply.world_action_id]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_world_appraisal_changes_behavioral_needs_and_repair_is_partial(tmp_path: Path) -> None:
+    world, world_id, engine = world_engine(tmp_path)
+    initial = dict(world.snapshot(world_id)["needs"])
+
+    await engine.handle_message(message("滚，别烦我", 0))
+    hurt = dict(world.snapshot(world_id)["needs"])
+    await engine.handle_message(message("对不起，刚刚那样说不对", 1))
+    repaired = world.snapshot(world_id)["needs"]
+
+    assert hurt["security"] < initial["security"]
+    assert hurt["boundary"] > initial["boundary"]
+    assert repaired["security"] > hurt["security"]
+    assert repaired["security"] < initial["security"]
