@@ -12,6 +12,7 @@ from companion_daemon.image_generation import OpenAIImageGenerator
 from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel
 from companion_daemon.multimodal_analysis import MultimodalAnalyzer, OpenAIMultimodalAnalyzer
 from companion_daemon.stickers import load_stickers
+from companion_daemon.world import WorldKernel
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +20,12 @@ logger = logging.getLogger(__name__)
 def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
     settings = get_settings()
     store = CompanionStore(Path(settings.database_path), primary_user_id=settings.primary_user_id)
+    world_kernel = None
+    world_id = None
+    if settings.world_runtime_enabled:
+        world_kernel = WorldKernel(store)
+        world_id = world_kernel.ensure_seed_file(settings.world_seed_path).world_id
+        world_kernel.import_verified_facts(world_id, store.active_fact_lines(settings.primary_user_id))
     character = load_character(str(settings.character_path))
     seed_user(store, settings.primary_user_id, initial_mood_for_character(character))
     stickers = load_stickers(str(settings.stickers_path))
@@ -94,4 +101,6 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         budget_gate=budget_gate,
         visual_identity_path=settings.visual_identity_path,
         rewrite_model=rewrite_model,
+        world_kernel=world_kernel,
+        world_id=world_id,
     )

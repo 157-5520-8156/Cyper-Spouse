@@ -20,6 +20,7 @@ from companion_daemon.character import load_character
 from companion_daemon.budget import BudgetGate
 from companion_daemon.time import utc_now
 from companion_daemon.models import LifeRuntimeState
+from companion_daemon.world import WorldKernel
 
 TEST_PROMPT = "你是凛，用户的赛博女友。"
 
@@ -94,6 +95,31 @@ async def test_skipped_reply_still_leaves_an_observed_turn_trace(tmp_path: Path)
     assert trace["direction"] == "incoming_skip"
     assert trace["status"] == "observed"
     assert store.get_mood_state("geoff").has_unread is True
+
+
+@pytest.mark.asyncio
+async def test_world_enabled_reply_records_input_action_and_delivery_settlement(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        TEST_PROMPT,
+        world_kernel=world,
+        world_id=world_id,
+    )
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你在吗", message_id="world-input-1")
+    )
+
+    assert reply is not None and reply.world_action_id == f"outgoing:{reply.delivery_id}"
+    event_types = [event.event_type for event in world.events(world_id)]
+    assert "UserMessageObserved" in event_types
+    assert "ActionScheduled" in event_types
+    assert "ActionSettled" in event_types
 
 
 @pytest.mark.asyncio

@@ -53,6 +53,8 @@ class Settings(BaseSettings):
     conversation_core: str = Field(default="prompt", alias="CONVERSATION_CORE")
     sillytavern_base_url: str = Field(default="http://127.0.0.1:8000", alias="SILLYTAVERN_BASE_URL")
     database_path: Path = Path("data/companion.sqlite")
+    world_runtime_enabled: bool = Field(default=False, alias="WORLD_RUNTIME_ENABLED")
+    world_seed_path: Path = Field(default=Path("configs/world_seed.yaml"), alias="WORLD_SEED_PATH")
     character_path: Path = Path("configs/character.yaml")
     stickers_path: Path = Path("configs/stickers.yaml")
     primary_user_id: str = Field(default="geoff", alias="PRIMARY_USER_ID")

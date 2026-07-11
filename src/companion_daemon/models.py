@@ -55,6 +55,7 @@ class CompanionReply(BaseModel):
     suggested_reaction: str | None = None
     delivery_id: int | None = None
     turn_trace_id: int | None = None
+    world_action_id: str | None = None
 
 
 class ProactiveDecision(BaseModel):

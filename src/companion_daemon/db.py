@@ -365,9 +365,123 @@ class CompanionStore:
             self._ensure_column(conn, "social_tasks", "origin_turn_trace_id", "integer")
             self._ensure_column(conn, "social_tasks", "reason_code", "text")
             self._ensure_column(conn, "social_tasks", "resolution", "text")
+            self._init_world_schema(conn)
             conn.execute(
                 "update life_runtime set base_attention_demand = attention_demand where base_attention_demand is null"
             )
+
+    def _init_world_schema(self, conn: sqlite3.Connection) -> None:
+        """Install the append-only world ledger and rebuildable read models."""
+        conn.executescript(
+            """
+            create table if not exists worlds (
+              world_id text primary key,
+              revision integer not null default 0,
+              logical_at text not null,
+              seed_hash text not null,
+              created_at text not null
+            );
+            create table if not exists world_events (
+              event_id text primary key,
+              world_id text not null references worlds(world_id),
+              revision integer not null,
+              event_type text not null,
+              schema_version integer not null,
+              logical_at text not null,
+              observed_at text not null,
+              actor_json text not null,
+              source text not null,
+              correlation_id text not null,
+              causation_id text,
+              idempotency_key text,
+              payload_json text not null,
+              payload_hash text not null,
+              unique (world_id, revision),
+              unique (world_id, idempotency_key)
+            );
+            create index if not exists idx_world_events_stream on world_events(world_id, revision);
+            create table if not exists world_snapshots (
+              world_id text not null references worlds(world_id),
+              revision integer not null,
+              state_json text not null,
+              state_hash text not null,
+              created_at text not null,
+              primary key (world_id, revision)
+            );
+            create table if not exists world_projection_checkpoints (
+              world_id text not null references worlds(world_id),
+              projection_name text not null,
+              applied_revision integer not null,
+              state_hash text not null,
+              updated_at text not null,
+              primary key (world_id, projection_name)
+            );
+            create table if not exists world_current_state (
+              world_id text primary key references worlds(world_id),
+              applied_revision integer not null,
+              state_json text not null,
+              state_hash text not null,
+              updated_at text not null
+            );
+            create table if not exists world_entities (
+              world_id text not null references worlds(world_id),
+              entity_id text not null,
+              kind text not null,
+              name text not null,
+              state_json text not null,
+              primary key (world_id, entity_id)
+            );
+            create table if not exists world_agenda (
+              world_id text not null references worlds(world_id),
+              activity_id text not null,
+              entity_id text not null,
+              starts_at text not null,
+              ends_at text not null,
+              status text not null,
+              state_json text not null,
+              primary key (world_id, activity_id)
+            );
+            create table if not exists world_actions (
+              world_id text not null references worlds(world_id),
+              action_id text not null,
+              kind text not null,
+              status text not null,
+              expires_at text,
+              state_json text not null,
+              primary key (world_id, action_id)
+            );
+            create table if not exists world_experiences (
+              world_id text not null references worlds(world_id),
+              experience_id text not null,
+              action_id text,
+              content text not null,
+              state_json text not null,
+              primary key (world_id, experience_id)
+            );
+            create table if not exists world_fact_index (
+              world_id text not null references worlds(world_id),
+              fact_id text not null,
+              state_json text not null,
+              primary key (world_id, fact_id)
+            );
+            create table if not exists world_command_receipts (
+              world_id text not null references worlds(world_id),
+              idempotency_key text not null,
+              revision integer not null,
+              event_ids_json text not null,
+              created_at text not null,
+              primary key (world_id, idempotency_key)
+            );
+            create table if not exists world_projection_hashes (
+              world_id text not null references worlds(world_id),
+              projection_name text not null,
+              applied_revision integer not null,
+              state_hash text not null,
+              checked_at text not null,
+              primary key (world_id, projection_name, applied_revision)
+            );
+            """
+        )
 
     def _ensure_column(
         self,

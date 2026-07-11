@@ -1,0 +1,318 @@
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+from companion_daemon.db import CompanionStore
+from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel
+
+
+NOW = datetime(2026, 7, 11, 9, 0, tzinfo=UTC)
+
+
+def world_seed() -> dict[str, object]:
+    return {
+        "world_id": "zhizhi-v1",
+        "logical_at": NOW.isoformat(),
+        "protagonist": {"id": "zhizhi", "name": "沈知栀", "kind": "companion"},
+        "npcs": [
+            {
+                "id": "roommate-lin",
+                "name": "林晚",
+                "kind": "roommate",
+                "location": "华师大宿舍",
+                "availability": ["18:00-23:00"],
+                "templates": ["dorm_chat"],
+            }
+        ],
+    }
+
+
+def test_started_world_is_append_only_and_builds_read_projection(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    assert started.world_id == "zhizhi-v1"
+    assert started.revision == 2
+    assert [event.event_type for event in started.events] == ["WorldStarted", "NpcRegistered"]
+    snapshot = kernel.snapshot("zhizhi-v1")
+    assert snapshot["clock"]["logical_at"] == NOW.isoformat()
+    assert snapshot["entities"]["roommate-lin"]["name"] == "林晚"
+    assert kernel.events("zhizhi-v1")[0].payload["protagonist"]["name"] == "沈知栀"
+
+
+def test_world_can_start_from_the_reviewable_seed_file(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+
+    decision = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
+
+    snapshot = kernel.snapshot(decision.world_id)
+    assert snapshot["entities"]["zhizhi"]["location"] == "华东师范大学宿舍"
+    assert {"mother-shen", "roommate-lin", "literature-fan", "photography-zhou"} <= set(
+        snapshot["entities"]
+    )
+
+    resumed = kernel.ensure_seed_file(Path("configs/world_seed.yaml"))
+    assert resumed.revision == decision.revision
+
+
+def test_stale_revision_cannot_silently_overwrite_world(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    kernel.submit(
+        {"type": "set_clock_mode", "world_id": "zhizhi-v1", "mode": "accelerated", "rate": 4},
+        expected_revision=started.revision,
+    )
+
+    with pytest.raises(ConcurrencyConflict):
+        kernel.submit(
+            {"type": "set_clock_mode", "world_id": "zhizhi-v1", "mode": "paused", "rate": 0},
+            expected_revision=started.revision,
+        )
+
+
+def test_clock_advance_completes_due_activity_and_expires_open_action(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    planned = kernel.submit(
+        {
+                "type": "plan_activity",
+                "world_id": "zhizhi-v1",
+            "activity_id": "library-1",
+            "entity_id": "zhizhi",
+            "title": "图书馆看书",
+            "starts_at": NOW.isoformat(),
+            "ends_at": (NOW + timedelta(minutes=30)).isoformat(),
+        },
+        expected_revision=started.revision,
+    )
+    scheduled = kernel.submit(
+        {
+                "type": "schedule_action",
+                "world_id": "zhizhi-v1",
+            "action_id": "reply-later-1",
+            "kind": "reply_later",
+            "expires_at": (NOW + timedelta(minutes=20)).isoformat(),
+        },
+        expected_revision=planned.revision,
+    )
+
+    advanced = kernel.advance(
+        "zhizhi-v1", NOW + timedelta(minutes=40), expected_revision=scheduled.revision
+    )
+
+    assert {event.event_type for event in advanced.events} >= {
+        "ClockAdvanced",
+        "ActivityStarted",
+        "ActivityCompleted",
+        "ActionExpired",
+    }
+    snapshot = kernel.snapshot("zhizhi-v1")
+    assert snapshot["agenda"]["library-1"]["status"] == "completed"
+    assert snapshot["actions"]["reply-later-1"]["status"] == "expired"
+
+
+def test_external_delivery_result_is_idempotent_and_only_settled_action_can_create_experience(
+    tmp_path: Path,
+) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    scheduled = kernel.submit(
+        {
+                "type": "schedule_action",
+                "world_id": "zhizhi-v1",
+            "action_id": "outgoing-1",
+            "kind": "outgoing_message",
+            "expires_at": (NOW + timedelta(hours=1)).isoformat(),
+        },
+        expected_revision=started.revision,
+    )
+
+    settled = kernel.record_external_result(
+        "outgoing-1",
+        {"kind": "delivery", "status": "delivered", "external_id": "qq-42"},
+        expected_revision=scheduled.revision,
+    )
+    duplicate = kernel.record_external_result(
+        "outgoing-1",
+        {"kind": "delivery", "status": "delivered", "external_id": "qq-42"},
+        expected_revision=settled.revision,
+    )
+    committed = kernel.submit(
+        {
+            "type": "commit_experience",
+            "world_id": "zhizhi-v1",
+            "experience_id": "shared-1",
+            "action_id": "outgoing-1",
+            "content": "她把一句话成功发给了用户。",
+        },
+        expected_revision=duplicate.revision,
+    )
+
+    assert duplicate.revision == settled.revision
+    assert committed.events[-1].event_type == "ExperienceCommitted"
+    assert kernel.snapshot("zhizhi-v1")["experiences"]["shared-1"]["action_id"] == "outgoing-1"
+
+
+def test_outbox_trace_and_world_action_are_created_in_one_world_transaction(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.resolve_user("qq", "user")
+    kernel = WorldKernel(store)
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    delivery_id, trace_id, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="我刚看到。",
+        kind="reply",
+        expires_at=NOW + timedelta(hours=1),
+        trace={
+            "world_id": "zhizhi-v1",
+            "appraisal": "ordinary_message",
+            "expression_policy": "自然接话。",
+            "allowed_facts": [],
+            "short_lived_constraint": None,
+            "observable_reason": "用户发来一条普通消息。",
+        },
+    )
+
+    assert store.outbox_message(delivery_id)["status"] == "planned"
+    assert store.recent_turn_traces("geoff")[-1]["id"] == trace_id
+    assert kernel.snapshot("zhizhi-v1")["actions"][action_id]["delivery_id"] == delivery_id
+    assert kernel.revision("zhizhi-v1") == started.revision + 1
+
+
+def test_rebuilding_projection_from_the_ledger_matches_live_projection(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    kernel.submit(
+            {"type": "set_clock_mode", "world_id": "zhizhi-v1", "mode": "realtime", "rate": 1},
+        expected_revision=started.revision,
+    )
+
+    report = kernel.rebuild_projection("zhizhi-v1", "world_current_state")
+
+    assert report.applied_revision == 3
+    assert report.event_count == 3
+    assert report.matches_live is True
+
+
+def test_model_proposal_is_not_a_fact_until_rules_accept_it(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    proposed = kernel.submit(
+        {
+            "type": "record_model_proposal",
+            "world_id": "zhizhi-v1",
+            "proposal_id": "proposal-1",
+            "entity_id": "roommate-lin",
+            "template_id": "dorm_chat",
+            "content": "晚饭后在宿舍聊了几句新书。",
+        },
+        expected_revision=started.revision,
+    )
+
+    assert kernel.snapshot("zhizhi-v1")["experiences"] == {}
+    accepted = kernel.submit(
+        {
+            "type": "accept_model_proposal",
+            "world_id": "zhizhi-v1",
+            "proposal_id": "proposal-1",
+        },
+        expected_revision=proposed.revision,
+    )
+
+    assert [event.event_type for event in accepted.events] == [
+        "ModelProposalAccepted",
+        "ExperienceCommitted",
+    ]
+    assert kernel.snapshot("zhizhi-v1")["experiences"]["proposal-1"]["content"] == "晚饭后在宿舍聊了几句新书。"
+
+
+def test_model_cannot_accept_an_event_outside_the_registered_entity_templates(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    with pytest.raises(WorldError):
+        kernel.submit(
+            {
+                "type": "record_model_proposal",
+                "world_id": "zhizhi-v1",
+                "proposal_id": "proposal-1",
+                "entity_id": "roommate-lin",
+                "template_id": "unregistered_adventure",
+                "content": "去了不存在的地方。",
+            },
+            expected_revision=started.revision,
+        )
+
+
+def test_reply_candidate_can_only_reference_committed_world_records(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    with pytest.raises(WorldError):
+        kernel.validate_reply_candidate(
+            "zhizhi-v1",
+            {"reply_text": "我刚和室友去看展了。", "mentioned_event_ids": ["made-up"]},
+        )
+
+    scheduled = kernel.submit(
+        {
+            "type": "schedule_action",
+            "world_id": "zhizhi-v1",
+            "action_id": "outgoing-2",
+            "kind": "outgoing_message",
+            "expires_at": (NOW + timedelta(hours=1)).isoformat(),
+        },
+        expected_revision=started.revision,
+    )
+    settled = kernel.record_external_result(
+        "outgoing-2", {"kind": "delivery", "status": "delivered"}, expected_revision=scheduled.revision
+    )
+    kernel.submit(
+        {
+            "type": "commit_experience",
+            "world_id": "zhizhi-v1",
+            "experience_id": "shared-2",
+            "action_id": "outgoing-2",
+            "content": "她已经发出一句问候。",
+        },
+        expected_revision=settled.revision,
+    )
+
+    assert kernel.validate_reply_candidate(
+        "zhizhi-v1",
+        {"reply_text": "嗯。", "mentioned_event_ids": ["shared-2"], "proposed_action_ids": []},
+    )["reply_text"] == "嗯。"
+
+
+def test_only_explicit_fact_confirmation_enters_the_world_fact_index(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    confirmed = kernel.submit(
+        {
+            "type": "confirm_fact",
+            "world_id": "zhizhi-v1",
+            "fact_id": "user-city",
+            "subject": "user",
+            "value": "用户明确说自己在成都。",
+            "source": "verified_user_fact",
+        },
+        expected_revision=started.revision,
+    )
+
+    assert confirmed.events[-1].event_type == "FactConfirmed"
+    assert kernel.snapshot("zhizhi-v1")["facts"]["user-city"]["value"] == "用户明确说自己在成都。"
+
+
+def test_only_verified_facts_are_carried_into_a_fresh_world_epoch(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    kernel.import_verified_facts(started.world_id, ["用户明确说自己在成都。"])
+
+    assert list(kernel.snapshot(started.world_id)["facts"].values())[0]["source"] == "verified_user_fact_import"

@@ -17,6 +17,7 @@ from companion_daemon.qq_official import (
     verify_callback_signature,
 )
 from companion_daemon.runtime import build_companion_engine
+from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel
 
 
 app = FastAPI(title="Girl Agent Companion Daemon")
@@ -33,6 +34,16 @@ class MemoryPatch(BaseModel):
     content: str
     confidence: float = 0.7
     source: str = "dashboard"
+
+
+class WorldCommandRequest(BaseModel):
+    expected_revision: int
+    command: dict[str, object]
+
+
+class WorldClockRequest(BaseModel):
+    expected_revision: int
+    target_logical_at: str
 
 
 @app.get("/health")
@@ -77,6 +88,8 @@ def debug_users() -> dict[str, list[str]]:
 
 @app.post("/debug/{canonical_user_id}/state")
 def debug_update_state(canonical_user_id: str, patch: StatePatch) -> dict[str, object]:
+    if get_settings().world_runtime_enabled:
+        raise HTTPException(status_code=409, detail="world runtime forbids direct state mutation")
     current = engine.store.get_mood_state(canonical_user_id)
     allowed = set(type(current).model_fields)
     updates = {key: value for key, value in patch.updates.items() if key in allowed}
@@ -90,6 +103,8 @@ def debug_update_state(canonical_user_id: str, patch: StatePatch) -> dict[str, o
 
 @app.post("/debug/{canonical_user_id}/memories")
 def debug_upsert_memory(canonical_user_id: str, patch: MemoryPatch) -> dict[str, object]:
+    if get_settings().world_runtime_enabled:
+        raise HTTPException(status_code=409, detail="world runtime forbids direct memory mutation")
     engine.store.upsert_memory(
         canonical_user_id,
         kind=patch.kind,
@@ -106,8 +121,60 @@ def debug_delete_memory(
     kind: str = Query(...),
     content: str = Query(...),
 ) -> dict[str, object]:
+    if get_settings().world_runtime_enabled:
+        raise HTTPException(status_code=409, detail="world runtime forbids direct memory mutation")
     deleted = engine.store.delete_memory(canonical_user_id, kind=kind, content=content)
     return {"deleted": deleted}
+
+
+@app.get("/world/{world_id}")
+def world_snapshot(world_id: str) -> dict[str, object]:
+    try:
+        return WorldKernel(engine.store).snapshot(world_id)
+    except WorldError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/world/{world_id}/commands")
+def world_command(world_id: str, request: WorldCommandRequest) -> dict[str, object]:
+    command = {**request.command, "world_id": world_id}
+    try:
+        decision = WorldKernel(engine.store).submit(command, expected_revision=request.expected_revision)
+    except ConcurrencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except WorldError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "world_id": decision.world_id,
+        "revision": decision.revision,
+        "events": [event.event_type for event in decision.events],
+        "state_hash": decision.state_hash,
+    }
+
+
+@app.post("/world/{world_id}/advance")
+def world_advance(world_id: str, request: WorldClockRequest) -> dict[str, object]:
+    from datetime import datetime
+
+    try:
+        decision = WorldKernel(engine.store).advance(
+            world_id,
+            datetime.fromisoformat(request.target_logical_at),
+            expected_revision=request.expected_revision,
+        )
+    except ConcurrencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ValueError, WorldError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"world_id": decision.world_id, "revision": decision.revision, "events": [event.event_type for event in decision.events]}
+
+
+@app.post("/world/{world_id}/rebuild")
+def world_rebuild(world_id: str) -> dict[str, object]:
+    try:
+        return WorldKernel(engine.store).rebuild_projection(world_id, "world_current_state").__dict__
+    except WorldError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/qq/webhook")

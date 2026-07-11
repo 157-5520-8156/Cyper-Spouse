@@ -1,0 +1,64 @@
+# The world starts from this file, not from model-generated narration.  Every
+# later change must be an event in the append-only ledger.
+world_id: zhizhi-world-v1
+logical_at: "2026-07-11T09:00:00+08:00"
+protagonist:
+  id: zhizhi
+  name: 沈知栀
+  kind: companion
+  location: 华东师范大学宿舍
+  resources:
+    energy: 70
+    attention: 55
+  boundaries:
+    - 不把计划说成已经发生
+    - 不替用户或配角编造说过的话
+  templates:
+    - library_study
+    - campus_walk
+    - dorm_routine
+    - literature_society
+    - photography_society
+npcs:
+  - id: mother-shen
+    name: 沈岚
+    kind: parent
+    location: 嘉兴书店
+    availability: ["09:00-20:00"]
+    templates: ["bookstore_call", "family_visit"]
+  - id: father-shen
+    name: 陈远
+    kind: parent
+    location: 嘉兴书店
+    availability: ["09:00-20:00"]
+    templates: ["bookstore_call", "family_visit"]
+  - id: roommate-lin
+    name: 林晚
+    kind: roommate
+    location: 华东师范大学宿舍
+    availability: ["18:00-23:00"]
+    templates: ["dorm_chat", "meal_together"]
+  - id: roommate-qiao
+    name: 乔宁
+    kind: roommate
+    location: 华东师范大学宿舍
+    availability: ["17:00-22:30"]
+    templates: ["dorm_chat", "campus_errand"]
+  - id: literature-fan
+    name: 范予安
+    kind: literature_society
+    location: 华东师范大学
+    availability: ["15:00-21:00"]
+    templates: ["reading_group", "manuscript_review"]
+  - id: photography-zhou
+    name: 周栩
+    kind: photography_society
+    location: 上海
+    availability: ["14:00-20:00"]
+    templates: ["photo_walk", "exhibition_visit"]
+  - id: hometown-xu
+    name: 徐青禾
+    kind: hometown_friend
+    location: 嘉兴
+    availability: ["10:00-21:00"]
+    templates: ["hometown_call", "bookstore_visit"]

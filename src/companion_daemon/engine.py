@@ -86,6 +86,7 @@ from companion_daemon.unanswered_question import (
 )
 from companion_daemon.withheld_impulse import apply_withheld_impulse, build_withheld_impulse
 from companion_daemon.turns import TurnCommit, build_turn_plan
+from companion_daemon.world import ConcurrencyConflict, WorldKernel
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,8 @@ class CompanionEngine:
         visual_identity_path: Path | None = Path("configs/visual_identity.yaml"),
         image_output_dir: Path = Path("assets/life"),
         rewrite_model: ChatModel | None = None,
+        world_kernel: WorldKernel | None = None,
+        world_id: str | None = None,
     ):
         self.store = store
         self.model = model
@@ -135,6 +138,8 @@ class CompanionEngine:
         self.budget_gate = budget_gate
         self.visual_identity_path = visual_identity_path
         self.image_output_dir = image_output_dir
+        self.world_kernel = world_kernel
+        self.world_id = world_id
         # Character-card examples are style references already included in the
         # system prompt. Replaying them as fake chat history duplicates tokens
         # and makes concrete example details look like reusable live facts.
@@ -143,6 +148,33 @@ class CompanionEngine:
             companion_system_prompt,
             rewrite_model=rewrite_model,
         )
+
+    def _record_world_input(self, message: IncomingMessage) -> None:
+        if not self.world_kernel or not self.world_id:
+            return
+        key = message.message_id or f"{message.platform}:{message.platform_user_id}:{message.sent_at.isoformat()}:{message.text}"
+        self._submit_world_with_retry(
+            {
+                "type": "observe_user_message",
+                "world_id": self.world_id,
+                "message_id": message.message_id,
+                "text": message.text,
+                "source": f"{message.platform}:incoming",
+                "idempotency_key": f"incoming:{key}",
+            }
+        )
+
+    def _submit_world_with_retry(self, command: dict[str, object]) -> None:
+        if not self.world_kernel or not self.world_id:
+            return
+        for _ in range(3):
+            revision = self.world_kernel.revision(self.world_id)
+            try:
+                self.world_kernel.submit(command, expected_revision=revision)
+                return
+            except ConcurrencyConflict:
+                continue
+        logger.warning("world command conflicted repeatedly: %s", command.get("type"))
 
     async def handle_message(
         self,
@@ -154,6 +186,7 @@ class CompanionEngine:
         defer_delivery: bool = False,
     ) -> CompanionReply | None:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
+        self._record_world_input(message)
         # A new user turn means a previously planned check-in has been overtaken by reality.
         self.store.cancel_active_social_tasks(canonical_user_id, kind="comfort_followup")
         self.store.cancel_active_social_tasks(canonical_user_id, kind="promise_followup")
@@ -480,17 +513,35 @@ class CompanionEngine:
         if generated_image_path:
             sticker = None
         asyncio.create_task(self._maybe_consolidate(canonical_user_id, next_state))
-        delivery_id, turn_trace_id = self.store.queue_outgoing_with_turn_trace(
-            canonical_user_id,
-            message.platform,
-            text,
-            kind="reply",
-            appraisal=turn_plan.appraisal,
-            expression_policy=turn_plan.expression_policy,
-            allowed_facts=list(turn_plan.allowed_facts),
-            short_lived_constraint=turn_plan.short_lived_constraint,
-            observable_reason=turn_plan.observable_reason,
-        )
+        if self.world_kernel and self.world_id:
+            delivery_id, turn_trace_id, world_action_id = self.world_kernel.queue_outgoing_action(
+                canonical_user_id=canonical_user_id,
+                platform=message.platform,
+                text=text,
+                kind="reply",
+                expires_at=utc_now() + timedelta(hours=12),
+                trace={
+                    "world_id": self.world_id,
+                    "appraisal": turn_plan.appraisal,
+                    "expression_policy": turn_plan.expression_policy,
+                    "allowed_facts": list(turn_plan.allowed_facts),
+                    "short_lived_constraint": turn_plan.short_lived_constraint,
+                    "observable_reason": turn_plan.observable_reason,
+                },
+            )
+        else:
+            delivery_id, turn_trace_id = self.store.queue_outgoing_with_turn_trace(
+                canonical_user_id,
+                message.platform,
+                text,
+                kind="reply",
+                appraisal=turn_plan.appraisal,
+                expression_policy=turn_plan.expression_policy,
+                allowed_facts=list(turn_plan.allowed_facts),
+                short_lived_constraint=turn_plan.short_lived_constraint,
+                observable_reason=turn_plan.observable_reason,
+            )
+            world_action_id = None
         reply = CompanionReply(
             canonical_user_id=canonical_user_id,
             mood=next_state.mood,
@@ -504,6 +555,7 @@ class CompanionEngine:
             ),
             delivery_id=delivery_id,
             turn_trace_id=turn_trace_id,
+            world_action_id=world_action_id,
         )
         if not defer_delivery:
             self.confirm_reply_delivery(reply)
@@ -616,9 +668,12 @@ class CompanionEngine:
     def confirm_reply_delivery(self, reply: CompanionReply) -> TurnCommit | None:
         if reply.delivery_id is None:
             return None
-        delivered = self.store.resolve_outgoing_and_turn_trace(
-            reply.delivery_id, reply.turn_trace_id, delivered=True
-        )
+        if self.world_kernel and reply.world_action_id:
+            delivered = self.world_kernel.settle_outgoing_action(reply.delivery_id, delivered=True)
+        else:
+            delivered = self.store.resolve_outgoing_and_turn_trace(
+                reply.delivery_id, reply.turn_trace_id, delivered=True
+            )
         if not delivered or delivered["status"] != "planned":
             return None
         state = self.store.get_mood_state(reply.canonical_user_id)
@@ -644,9 +699,12 @@ class CompanionEngine:
     ) -> TurnCommit | None:
         committed = False
         if reply.delivery_id is not None:
-            self.store.resolve_outgoing_and_turn_trace(
-                reply.delivery_id, reply.turn_trace_id, delivered=False, failure_reason=reason
-            )
+            if self.world_kernel and reply.world_action_id:
+                self.world_kernel.settle_outgoing_action(reply.delivery_id, delivered=False, reason=reason)
+            else:
+                self.store.resolve_outgoing_and_turn_trace(
+                    reply.delivery_id, reply.turn_trace_id, delivered=False, failure_reason=reason
+                )
             committed = True
         if source_task_id is not None:
             self.store.cancel_social_task(source_task_id)
@@ -756,6 +814,24 @@ class CompanionEngine:
         return text
 
     def queue_afterthought_delivery(self, canonical_user_id: str, platform: str, text: str) -> int:
+        if self.world_kernel and self.world_id:
+            delivery_id, _, _ = self.world_kernel.queue_outgoing_action(
+                canonical_user_id=canonical_user_id,
+                platform=platform,
+                text=text,
+                kind="afterthought",
+                expires_at=utc_now() + timedelta(hours=2),
+                trace={
+                    "world_id": self.world_id,
+                    "direction": "afterthought",
+                    "appraisal": "conversation_pulse",
+                    "expression_policy": "只补一句新信息；用户回来前可取消，不复读旧话。",
+                    "allowed_facts": [],
+                    "short_lived_constraint": None,
+                    "observable_reason": "当前对话仍留有一段可取消的余韵。",
+                },
+            )
+            return delivery_id
         delivery_id, _ = self.store.queue_outgoing_with_turn_trace(
             canonical_user_id,
             platform,
@@ -780,9 +856,12 @@ class CompanionEngine:
     ) -> None:
         if delivery_id is None:
             delivery_id = self.queue_afterthought_delivery(canonical_user_id, platform, text)
-        delivered = self.store.resolve_outgoing_and_turn_trace(
-            delivery_id, self.store.turn_trace_id_for_delivery(delivery_id), delivered=True
-        )
+        if self.world_kernel and self.world_id:
+            delivered = self.world_kernel.settle_outgoing_action(delivery_id, delivered=True)
+        else:
+            delivered = self.store.resolve_outgoing_and_turn_trace(
+                delivery_id, self.store.turn_trace_id_for_delivery(delivery_id), delivered=True
+            )
         if not delivered or delivered["status"] != "planned":
             return
         state = self.store.get_mood_state(canonical_user_id)
@@ -792,12 +871,17 @@ class CompanionEngine:
 
     def fail_afterthought_delivery(self, delivery_id: int | None, reason: str) -> None:
         if delivery_id is not None:
-            self.store.resolve_outgoing_and_turn_trace(
-                delivery_id,
-                self.store.turn_trace_id_for_delivery(delivery_id),
-                delivered=False,
-                failure_reason=reason,
-            )
+            if self.world_kernel and self.world_id:
+                self.world_kernel.settle_outgoing_action(
+                    delivery_id, delivered=False, reason=reason
+                )
+            else:
+                self.store.resolve_outgoing_and_turn_trace(
+                    delivery_id,
+                    self.store.turn_trace_id_for_delivery(delivery_id),
+                    delivered=False,
+                    failure_reason=reason,
+                )
 
     def confirm_life_event_delivery(self, canonical_user_id: str, platform: str = "qq") -> None:
         self.store.record_proactive_delivery(canonical_user_id, f"{platform}:life_event")
