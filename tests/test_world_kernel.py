@@ -625,6 +625,20 @@ def test_life_share_selection_is_replayable_and_limited_per_logical_day(tmp_path
     assert again.events[-1].event_type == "LifeShareSelected"
 
 
+def test_delivered_life_share_consumes_daily_limit(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.resolve_user("qq", "geoff")
+    kernel = WorldKernel(store)
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    proposed = kernel.submit({"type": "record_model_proposal", "world_id": started.world_id, "proposal_id": "once", "entity_id": "roommate-lin", "template_id": "dorm_chat", "content": "晚饭后在宿舍聊了几句新书。"}, expected_revision=started.revision)
+    accepted = kernel.submit({"type": "accept_model_proposal", "world_id": started.world_id, "proposal_id": "once"}, expected_revision=proposed.revision)
+    delivery_id, _, action_id = kernel.queue_outgoing_action(canonical_user_id="geoff", platform="qq", text="分享。", kind="life_event", expires_at=NOW + timedelta(hours=1), trace={"world_id": started.world_id, "appraisal": "life_event_share", "expression_policy": "只分享已提交经历。", "allowed_facts": [], "short_lived_constraint": None, "observable_reason": "测试。"})
+    kernel.settle_outgoing_action(delivery_id, delivered=True)
+    kernel.submit({"type": "share_experience", "world_id": started.world_id, "experience_id": "once", "action_id": action_id}, expected_revision=kernel.revision(started.world_id))
+    decision = kernel.submit({"type": "select_life_share", "world_id": started.world_id}, expected_revision=kernel.revision(started.world_id))
+    assert decision.events[-1].payload["reason"] == "daily_limit"
+
+
 def test_goal_deadline_is_deferred_by_logical_time_advance(tmp_path: Path) -> None:
     seed = world_seed() | {"long_term_goals": [{"id": "course-notes", "title": "课程", "target": 2, "deadline": (NOW + timedelta(days=1)).isoformat()}]}
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
