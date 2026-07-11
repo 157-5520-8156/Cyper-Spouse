@@ -773,7 +773,7 @@ class WorldKernel:
             if needs["initiative"] < 20 or needs["security"] < 45:
                 return [("LifeShareDeferred", {"reason": "needs_prefer_private"})]
             day = str(_as_dict(state["clock"], "clock")["logical_at"])[:10]
-            if day in _as_dict(state.get("share_decisions", {}), "share decisions"):
+            if day in _as_dict(state.get("share_days", {}), "share days"):
                 return [("LifeShareDeferred", {"reason": "daily_limit"})]
             candidate = next((key for key, value in _as_dict(state["experiences"], "experiences").items() if not value.get("shared")), None)
             return [("LifeShareSelected", {"experience_id": candidate})] if candidate else [("LifeShareDeferred", {"reason": "no_unshared_experience"})]
@@ -1080,6 +1080,8 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "ExperienceShared":
         _as_dict(next_state["experiences"], "experiences")[str(payload["experience_id"])]["shared"] = True
         _as_dict(next_state["experiences"], "experiences")[str(payload["experience_id"])]["shared_action_id"] = payload["action_id"]
+        day = str(_as_dict(next_state["clock"], "clock")["logical_at"])[:10]
+        _as_dict(next_state.setdefault("share_days", {}), "share days")[day] = payload["experience_id"]
     elif event.event_type == "LifeShareSelected":
         day = str(_as_dict(next_state["clock"], "clock")["logical_at"])[:10]
         _as_dict(next_state.setdefault("share_decisions", {}), "share decisions")[day] = dict(payload)
@@ -1114,6 +1116,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "needs": {"energy": 70, "attention": 55, "security": 50, "initiative": 20, "boundary": 0},
         "daily_schedule": [],
         "share_decisions": {},
+        "share_days": {},
         "goals": {},
         "outcomes": {},
     }

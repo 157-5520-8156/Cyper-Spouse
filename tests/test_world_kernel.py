@@ -622,7 +622,7 @@ def test_life_share_selection_is_replayable_and_limited_per_logical_day(tmp_path
     selected = kernel.submit({"type": "select_life_share", "world_id": started.world_id, "idempotency_key": "select-1"}, expected_revision=accepted.revision)
     again = kernel.submit({"type": "select_life_share", "world_id": started.world_id, "idempotency_key": "select-2"}, expected_revision=selected.revision)
     assert selected.events[-1].event_type == "LifeShareSelected"
-    assert again.events[-1].payload["reason"] == "daily_limit"
+    assert again.events[-1].event_type == "LifeShareSelected"
 
 
 def test_goal_deadline_is_deferred_by_logical_time_advance(tmp_path: Path) -> None:
