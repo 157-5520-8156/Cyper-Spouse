@@ -1591,6 +1591,22 @@ class CompanionEngine:
         """World-only proactive decision; it never reads or writes legacy mood/tasks."""
         assert self.world_kernel and self.world_id
         snapshot = self.world_kernel.snapshot(self.world_id)
+        logical_now = self._world_logical_now()
+        for action in self.world_kernel.due_actions(self.world_id, now=logical_now):
+            if action.get("kind") != "decision_review":
+                continue
+            payload = action.get("payload", {})
+            decision_id = str(payload.get("decision_id") or "") if isinstance(payload, dict) else ""
+            if decision_id:
+                self._submit_world_with_retry(
+                    {
+                        "type": "resolve_deferred_decision", "world_id": self.world_id,
+                        "decision_id": decision_id, "outcome": "abandoned",
+                        "reason": "logical_review_elapsed_without_new_evidence",
+                        "idempotency_key": f"decision-review:{decision_id}",
+                    }
+                )
+        snapshot = self.world_kernel.snapshot(self.world_id)
         open_outgoing = [
             action
             for action in snapshot["actions"].values()
@@ -1600,6 +1616,16 @@ class CompanionEngine:
             return ProactiveDecision(
                 canonical_user_id=canonical_user_id,
                 private_thought="已有一条等待结算的外发行动，先不追加。",
+                should_send=False,
+            )
+        open_reviews = [
+            action for action in snapshot["actions"].values()
+            if action["kind"] == "decision_review" and action["status"] == "scheduled"
+        ]
+        if open_reviews:
+            return ProactiveDecision(
+                canonical_user_id=canonical_user_id,
+                private_thought="刚刚决定先收住，等复核期限到了再判断。",
                 should_send=False,
             )
         prompt = (
@@ -1621,6 +1647,15 @@ class CompanionEngine:
         )
         decision = self._parse_decision(canonical_user_id, raw, MoodState())
         if not decision.should_send or not decision.message or not decision.platform:
+            self._submit_world_with_retry(
+                {
+                    "type": "defer_decision", "world_id": self.world_id,
+                    "decision_id": f"impulse:{model_action_id}", "kind": "withheld_impulse",
+                    "reason": decision.private_thought[:160] or "当前不适合主动开口。",
+                    "review_at": (self._world_logical_now() + timedelta(minutes=45)).isoformat(),
+                    "idempotency_key": f"defer:impulse:{model_action_id}",
+                }
+            )
             return decision
         text = sanitize_chat_text(decision.message)
         delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(

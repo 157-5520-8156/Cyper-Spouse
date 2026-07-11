@@ -273,6 +273,26 @@ async def test_world_mode_proactive_uses_only_world_action(tmp_path: Path, monke
     assert world.snapshot(world_id)["actions"][decision.world_action_id]["status"] == "delivered"
 
 
+@pytest.mark.asyncio
+async def test_world_mode_withheld_proactive_is_a_reviewable_world_decision(tmp_path: Path) -> None:
+    class WithholdingModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return '{"private_thought":"他可能正在忙，先不打扰。","should_send":false}'
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, WithholdingModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    decision = await engine.proactive_tick("geoff")
+
+    assert decision.should_send is False
+    deferred = list(world.snapshot(world_id)["decisions"].values())
+    assert deferred and deferred[0]["kind"] == "withheld_impulse"
+    assert world.snapshot(world_id)["actions"][deferred[0]["action_id"]]["status"] == "scheduled"
+
+
 def test_world_mode_delayed_reply_is_a_cancellable_world_action(tmp_path: Path, monkeypatch) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)

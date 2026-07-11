@@ -154,6 +154,24 @@ def test_world_dashboard_projection_is_self_contained_and_never_needs_legacy_run
     assert projection["calendar"]["days"][0]["plans"][0]["activity"] == "图书馆看书"
     assert projection["state"]["world_id"] == started.world_id
 
+
+def test_world_deferred_decision_has_review_action_and_terminal_resolution(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    deferred = kernel.submit(
+        {"type": "defer_decision", "world_id": started.world_id, "decision_id": "impulse:1", "kind": "withheld_impulse", "reason": "用户正在忙", "review_at": (NOW + timedelta(minutes=30)).isoformat()},
+        expected_revision=started.revision,
+    )
+    snapshot = kernel.snapshot(started.world_id)
+    assert snapshot["decisions"]["impulse:1"]["status"] == "deferred"
+    assert snapshot["actions"]["decision:impulse:1"]["status"] == "scheduled"
+    resolved = kernel.submit(
+        {"type": "resolve_deferred_decision", "world_id": started.world_id, "decision_id": "impulse:1", "outcome": "abandoned", "reason": "复核后仍不适合"},
+        expected_revision=deferred.revision,
+    )
+    assert kernel.snapshot(started.world_id)["decisions"]["impulse:1"]["status"] == "abandoned"
+    assert {event.event_type for event in resolved.events} == {"DecisionResolved", "ActionCancelled"}
+
 def test_world_can_start_from_the_reviewable_seed_file(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
 

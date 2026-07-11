@@ -1081,6 +1081,33 @@ class WorldKernel:
             if typing == "stopped" and communication.get("typing") != "started":
                 raise WorldError("typing can stop only after it started")
             return [("TypingStateChanged", {"message_id": message_id, "typing": typing, "reason": reason})]
+        if command_type == "defer_decision":
+            decision_id = str(command.get("decision_id") or "")
+            kind = str(command.get("kind") or "")
+            reason = str(command.get("reason") or "").strip()
+            review_at = str(command.get("review_at") or "")
+            decisions = _as_dict(state["decisions"], "decisions")
+            now = _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+            if not decision_id or decision_id in decisions or not kind or not reason or len(reason) > 160 or not review_at or _parse_at(review_at) <= now:
+                raise WorldError("deferred decision requires a new id, bounded reason, and future review time")
+            action_id = f"decision:{decision_id}"
+            return [
+                ("DecisionDeferred", {"decision_id": decision_id, "kind": kind, "reason": reason, "review_at": review_at, "action_id": action_id}),
+                ("ActionScheduled", {"action_id": action_id, "kind": "decision_review", "expires_at": (_parse_at(review_at) + timedelta(hours=12)).isoformat(), "payload": {"due_at": review_at, "decision_id": decision_id}}),
+            ]
+        if command_type == "resolve_deferred_decision":
+            decision_id = str(command.get("decision_id") or "")
+            outcome = str(command.get("outcome") or "")
+            reason = str(command.get("reason") or "").strip()
+            decision = _as_dict(_as_dict(state["decisions"], "decisions").get(decision_id), "deferred decision")
+            if decision.get("status") != "deferred" or outcome not in {"abandoned", "resumed"} or not reason:
+                raise WorldError("only a deferred decision can be resolved as abandoned or resumed")
+            action_id = str(decision["action_id"])
+            events: list[tuple[str, dict[str, object]]] = [("DecisionResolved", {"decision_id": decision_id, "outcome": outcome, "reason": reason})]
+            action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "decision review action")
+            if action.get("status") == "scheduled":
+                events.append(("ActionCancelled", {"action_id": action_id, "reason": "decision_resolved"}))
+            return events
         if command_type == "cancel_action":
             action_id = str(command.get("action_id") or "")
             action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
@@ -1587,6 +1614,12 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         communication = _as_dict(next_state["communication"], "communication")
         communication["typing"] = "started" if payload["typing"] == "started" else "idle"
         communication["reason"] = payload["reason"]
+    elif event.event_type == "DecisionDeferred":
+        _as_dict(next_state["decisions"], "decisions")[str(payload["decision_id"])] = {**payload, "status": "deferred"}
+    elif event.event_type == "DecisionResolved":
+        decision = _as_dict(_as_dict(next_state["decisions"], "decisions")[str(payload["decision_id"])], "decision")
+        decision["status"] = payload["outcome"]
+        decision["resolution_reason"] = payload["reason"]
     elif event.event_type == "ModelProposalRecorded":
         item = {**payload, "status": "recorded"}
         _as_dict(next_state["proposals"], "proposals")[str(item["proposal_id"])] = item
@@ -1689,6 +1722,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
         },
         "emotion_modulation": {"mode": "calm", "expression": "neutral", "reason": "world_started", "charge": 0},
         "last_relationship_appraisal": None,
+        "decisions": {},
     }
 
 
