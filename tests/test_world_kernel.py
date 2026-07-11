@@ -541,3 +541,39 @@ def test_delivery_settlement_rolls_back_outbox_history_and_trace_on_world_failur
     assert store.recent_messages("geoff", limit=4) == []
     assert store.recent_turn_traces("geoff")[-1]["status"] == "planned"
     assert kernel.snapshot("zhizhi-v1")["actions"][action_id]["status"] == "scheduled"
+
+
+def test_outgoing_transport_intent_and_input_time_are_replayable(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.resolve_user("qq", "user")
+    kernel = WorldKernel(store)
+    kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    delivery_id, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff", platform="qq", text="我在。", kind="reply",
+        expires_at=NOW + timedelta(hours=1),
+        trace={"world_id": "zhizhi-v1", "appraisal": "ordinary_message", "expression_policy": "自然回应。", "allowed_facts": [], "short_lived_constraint": None, "observable_reason": "测试。"},
+    )
+    kernel.submit(
+        {"type": "observe_user_message", "world_id": "zhizhi-v1", "message_id": "in-1", "text": "回来啦", "sent_at": NOW.isoformat()},
+        expected_revision=kernel.revision("zhizhi-v1"),
+    )
+
+    with store.connect() as conn:
+        conn.execute("delete from outbox_messages where id = ?", (delivery_id,))
+    state = kernel.snapshot("zhizhi-v1")
+    action = state["actions"][action_id]
+    assert action["canonical_user_id"] == "geoff"
+    assert action["platform"] == "qq"
+    assert action["text"] == "我在。"
+    assert state["recent_messages"][-1]["sent_at"] == NOW.isoformat()
+
+
+def test_reply_rejects_unreferenced_completed_experience_claim(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    with pytest.raises(WorldError, match="without a committed source"):
+        kernel.validate_reply_candidate(
+            "zhizhi-v1",
+            {"reply_text": "我刚刚和林晚吃了饭。", "mentioned_event_ids": [], "proposed_action_ids": []},
+        )

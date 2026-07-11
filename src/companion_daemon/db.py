@@ -16,13 +16,23 @@ class CompanionStore:
         self.world_mode_enabled = False
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.init()
+        self.world_mode_enabled = self._world_mode_is_persisted()
 
     def enable_world_mode(self) -> None:
         """Fail closed if a world-mode path tries to mutate a legacy write model."""
         self.world_mode_enabled = True
+        with self.connect() as conn:
+            conn.execute(
+                "insert or replace into runtime_flags (key, value) values ('world_mode_enabled', '1')"
+            )
+
+    def _world_mode_is_persisted(self) -> bool:
+        with self.connect() as conn:
+            row = conn.execute("select value from runtime_flags where key = 'world_mode_enabled'").fetchone()
+        return bool(row and row["value"] == "1")
 
     def _assert_legacy_behavior_write_allowed(self, operation: str) -> None:
-        if self.world_mode_enabled:
+        if self.world_mode_enabled or self._world_mode_is_persisted():
             raise RuntimeError(f"world mode forbids legacy behaviour write: {operation}")
 
     @contextmanager
@@ -43,6 +53,10 @@ class CompanionStore:
                   id text primary key,
                   display_name text not null,
                   created_at text not null
+                );
+                create table if not exists runtime_flags (
+                  key text primary key,
+                  value text not null
                 );
 
                 create table if not exists platform_accounts (

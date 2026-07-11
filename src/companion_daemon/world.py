@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from hashlib import sha256
 import json
 from pathlib import Path
+import re
 import sqlite3
 from typing import Any
 from uuid import uuid4
@@ -217,6 +218,10 @@ class WorldKernel:
                             "kind": "outgoing_message",
                             "message_kind": kind,
                             "expires_at": expires_at.isoformat(),
+                            "canonical_user_id": canonical_user_id,
+                            "platform": platform,
+                            "text": text,
+                            "trace": trace,
                             "delivery_id": delivery_id,
                             "trace_id": int(trace_row.lastrowid),
                         },
@@ -350,16 +355,26 @@ class WorldKernel:
         )
 
     def rebuild_projection(self, world_id: str, projection_name: str) -> ProjectionReport:
-        if projection_name != "world_current_state":
+        projection_names = {
+            "world_current_state", "world_entities", "world_agenda",
+            "world_actions", "world_experiences", "world_fact_index",
+        }
+        if projection_name not in projection_names:
             raise WorldError(f"unsupported projection: {projection_name}")
         with self.store.connect() as conn:
             events = self._load_events(conn, world_id)
             state = reduce_events(events)
             revision = events[-1].revision if events else 0
             state_hash = _state_hash(state)
-            live = conn.execute(
-                "select state_hash from world_current_state where world_id = ?", (world_id,)
-            ).fetchone()
+            if projection_name == "world_current_state":
+                live = conn.execute(
+                    "select state_hash from world_current_state where world_id = ?", (world_id,)
+                ).fetchone()
+            else:
+                live = conn.execute(
+                    "select state_hash from world_projection_checkpoints where world_id = ? and projection_name = ?",
+                    (world_id, projection_name),
+                ).fetchone()
             matches_live = bool(live and live["state_hash"] == state_hash)
             self._write_projection(conn, world_id, revision, state)
             now = utc_now().isoformat()
@@ -398,6 +413,16 @@ class WorldKernel:
         unknown = [str(item) for item in mentioned if str(item) not in known]
         if unknown:
             raise WorldError(f"reply cites uncommitted world records: {', '.join(unknown)}")
+        # A reply without provenance may still converse, but it cannot state a
+        # completed off-screen experience.  This deliberately conservative
+        # lexical gate catches the common Chinese past-event forms; richer
+        # claims must be supplied through mentioned_event_ids.
+        event_claim = re.search(
+            r"(?:我|她).{0,18}(?:刚刚|刚才|已经|今天|昨晚|早上).{0,24}(?:去了|吃了|见了|聊了|做了|完成了|回来)",
+            reply_text,
+        )
+        if event_claim and not mentioned:
+            raise WorldError("reply states an experience without a committed source id")
         actions = _as_dict(state["actions"], "actions")
         invalid_actions = [str(item) for item in proposed_actions if str(item) not in actions]
         if invalid_actions:
@@ -699,7 +724,10 @@ class WorldKernel:
                 raise WorldError("experience sharing requires one delivered action and an unshared experience")
             return [("ExperienceShared", {"experience_id": experience_id, "action_id": action_id})]
         if command_type == "observe_user_message":
-            return [("UserMessageObserved", {"message_id": command.get("message_id"), "text": command.get("text", "")})]
+            return [(
+                "UserMessageObserved",
+                {"message_id": command.get("message_id"), "text": command.get("text", ""), "sent_at": command.get("sent_at")},
+            )]
         if command_type == "appraise_turn":
             appraisal = str(command.get("appraisal") or "ordinary_message")
             policies = {
@@ -809,10 +837,14 @@ class WorldKernel:
             "insert or replace into world_current_state (world_id, applied_revision, state_json, state_hash, updated_at) values (?, ?, ?, ?, ?)",
             (world_id, revision, _stable_json(state), state_hash, now),
         )
-        conn.execute(
-            "insert or replace into world_projection_checkpoints (world_id, projection_name, applied_revision, state_hash, updated_at) values (?, 'world_current_state', ?, ?, ?)",
-            (world_id, revision, state_hash, now),
-        )
+        for projection_name in (
+            "world_current_state", "world_entities", "world_agenda",
+            "world_actions", "world_experiences", "world_fact_index",
+        ):
+            conn.execute(
+                "insert or replace into world_projection_checkpoints (world_id, projection_name, applied_revision, state_hash, updated_at) values (?, ?, ?, ?, ?)",
+                (world_id, projection_name, revision, state_hash, now),
+            )
         for table in ("world_entities", "world_agenda", "world_actions", "world_experiences", "world_fact_index"):
             conn.execute(f"delete from {table} where world_id = ?", (world_id,))
         for entity_id, entity in _as_dict(state["entities"], "entities").items():
@@ -875,7 +907,9 @@ class WorldKernel:
     def _decision_from_receipt(self, conn, world_id: str, receipt) -> WorldDecision:
         event_ids = json.loads(receipt["event_ids_json"])
         events = [event for event in self._load_events(conn, world_id) if event.event_id in event_ids]
-        state = json.loads(conn.execute("select state_json from world_current_state where world_id = ?", (world_id,)).fetchone()["state_json"])
+        state = reduce_events(
+            [event for event in self._load_events(conn, world_id) if event.revision <= int(receipt["revision"])]
+        )
         return WorldDecision(world_id, int(receipt["revision"]), tuple(events), _state_hash(state))
 
     def _world_for_action(self, action_id: str) -> str:

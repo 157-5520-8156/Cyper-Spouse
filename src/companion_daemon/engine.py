@@ -160,22 +160,22 @@ class CompanionEngine:
                 "world_id": self.world_id,
                 "message_id": message.message_id,
                 "text": message.text,
+                "sent_at": message.sent_at.isoformat(),
                 "source": f"{message.platform}:incoming",
                 "idempotency_key": f"incoming:{key}",
             }
         )
 
-    def _submit_world_with_retry(self, command: dict[str, object]) -> None:
+    def _submit_world_with_retry(self, command: dict[str, object]):
         if not self.world_kernel or not self.world_id:
             return
         for _ in range(3):
             revision = self.world_kernel.revision(self.world_id)
             try:
-                self.world_kernel.submit(command, expected_revision=revision)
-                return
+                return self.world_kernel.submit(command, expected_revision=revision)
             except ConcurrencyConflict:
                 continue
-        logger.warning("world command conflicted repeatedly: %s", command.get("type"))
+        raise ConcurrencyConflict(f"world command conflicted repeatedly: {command.get('type')}")
 
     def _record_world_model_output(self, *, purpose: str, causation: str, content: str) -> None:
         """Persist a model return as non-factual audit input before using it."""
@@ -193,6 +193,13 @@ class CompanionEngine:
                 "causation_id": causation,
                 "idempotency_key": f"model-output:{proposal_id}",
             }
+        )
+
+    def _world_logical_now(self) -> datetime:
+        if not self.world_kernel or not self.world_id:
+            raise RuntimeError("world logical time requested outside world mode")
+        return datetime.fromisoformat(
+            str(self.world_kernel.snapshot(self.world_id)["clock"]["logical_at"])
         )
 
     async def handle_message(
@@ -674,7 +681,7 @@ class CompanionEngine:
             platform=message.platform,
             text=text,
             kind="reply",
-            expires_at=utc_now() + timedelta(hours=12),
+            expires_at=self._world_logical_now() + timedelta(hours=12),
             trace={
                 "world_id": self.world_id,
                 "appraisal": event.kind,
@@ -744,9 +751,7 @@ class CompanionEngine:
         if self.world_kernel and self.world_id:
             # Delays belong to the virtual clock; wall time is only an observed
             # delivery timestamp and must not make a paused world progress.
-            logical_now = datetime.fromisoformat(
-                str(self.world_kernel.snapshot(self.world_id)["clock"]["logical_at"])
-            )
+            logical_now = self._world_logical_now()
             action_id = f"reply_later:{message.message_id or message.sent_at.isoformat()}"
             self._submit_world_with_retry(
                 {
@@ -1037,7 +1042,7 @@ class CompanionEngine:
                 platform=platform,
                 text=text,
                 kind="afterthought",
-                expires_at=utc_now() + timedelta(hours=2),
+                expires_at=self._world_logical_now() + timedelta(hours=2),
                 trace={
                     "world_id": self.world_id,
                     "direction": "afterthought",
@@ -1223,9 +1228,7 @@ class CompanionEngine:
         now = utc_now()
         due_at = now + timedelta(seconds=max(1.0, delay_seconds))
         if self.world_kernel and self.world_id:
-            logical_now = datetime.fromisoformat(
-                str(self.world_kernel.snapshot(self.world_id)["clock"]["logical_at"])
-            )
+            logical_now = self._world_logical_now()
             due_at = logical_now + timedelta(seconds=max(1.0, delay_seconds))
             action_id = f"conversation_pulse:{canonical_user_id}:{reply_sent_at.isoformat()}:{mode}"
             self._submit_world_with_retry(
@@ -1504,7 +1507,7 @@ class CompanionEngine:
             platform=decision.platform,
             text=text,
             kind="proactive",
-            expires_at=utc_now() + timedelta(hours=4),
+            expires_at=self._world_logical_now() + timedelta(hours=4),
             trace={
                 "world_id": self.world_id,
                 "direction": "proactive",

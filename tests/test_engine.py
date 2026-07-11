@@ -139,6 +139,12 @@ async def test_world_mode_store_guard_rejects_legacy_writes_but_allows_world_tur
     with pytest.raises(RuntimeError, match="forbids legacy behaviour write"):
         store.save_mood_state("geoff", MoodState())
 
+    # A second process opening the same SQLite file must not recreate a legacy
+    # write bypass merely because its in-memory flag starts false.
+    restarted_store = CompanionStore(tmp_path / "test.sqlite")
+    with pytest.raises(RuntimeError, match="forbids legacy behaviour write"):
+        restarted_store.save_mood_state("geoff", MoodState())
+
 
 @pytest.mark.asyncio
 async def test_world_mode_does_not_call_legacy_behavior_writers(tmp_path: Path, monkeypatch) -> None:
