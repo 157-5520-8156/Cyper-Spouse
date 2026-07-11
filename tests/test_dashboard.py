@@ -24,7 +24,7 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert "activateScene" in response.text
     assert "scene_id" in response.text
     assert "zhizhi-room-isometric-v2.png" in response.text
-    assert "zhizhi-iso-walk-v3.png" in response.text
+    assert "zhizhi-iso-walk-v4.png" in response.text
     assert "characterAction" in response.text
     assert "spriteCell" in response.text
     assert "downRight" in response.text

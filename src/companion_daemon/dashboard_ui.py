@@ -277,7 +277,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     const images = {};
     const imagePaths = {
       room:'/assets/dashboard/zhizhi-room-isometric-v2.png',
-      sprite:'/assets/dashboard/zhizhi-iso-walk-v3.png'
+      sprite:'/assets/dashboard/zhizhi-iso-walk-v4.png'
     };
     const sceneDefinitions = {
       'free-bedroom': {
@@ -384,7 +384,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
     function spriteCell(action, facing) {
       const columns = {downRight:0,upRight:1,upLeft:2,downLeft:3};
-      return {column:columns[facing] ?? 0, row:action === 'walk' ? Math.floor(actor.walked * 3) % WALK_FRAMES : 0};
+      return {column:columns[facing] ?? 0, row:action === 'walk' ? Math.floor(actor.walked * 2.4) % WALK_FRAMES : 0};
     }
     function drawActor(ctx, now) {
       if (actor.action === 'sleep') { drawSleep(ctx, now); return; }
@@ -395,7 +395,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       const cell = spriteCell(action, actor.facing);
       const cw = sheet.width / 4, ch = sheet.height / 4;
       const sx = cell.column * cw, sy = cell.row * ch;
-      const dh = 112, dw = 112;
+      // Every v4 cell is baseline-aligned; never add a per-frame y offset.
+      const dh = 132, dw = 132;
       const x = px - dw / 2, y = py - dh + 6;
       ctx.save();
       ctx.imageSmoothingEnabled = false;

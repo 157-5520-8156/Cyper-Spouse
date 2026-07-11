@@ -15,6 +15,9 @@ for provenance.
 AI-generated low-density isometric walk sheet. Its chroma-key source is kept
 as `zhizhi-iso-walk-v3-source.png` for provenance.
 
+`assets/dashboard/zhizhi-iso-walk-v4.png` supersedes v3 with baseline-aligned
+front- and back-facing diagonal walk frames; its source is retained beside it.
+
 The pixel room's furniture, floor tiles, pixel font, and base animation sprite
 under `assets/pixel_agents/` are copied from
 [pixel-agents-hq/pixel-agents](https://github.com/pixel-agents-hq/pixel-agents).
