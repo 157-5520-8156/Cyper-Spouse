@@ -5,6 +5,12 @@ The dashboard's `zhizhi-q-home-evening-v1.png` and
 They are used as a unified Q-style evening-room background and the independent
 companion sprite layer, respectively.
 
+The dashboard runtime's `assets/dashboard/runtime/home-evening-base-v1.png`
+and `assets/dashboard/runtime/zhizhi-walk-directions-v1.png` are also
+project-specific AI-generated visual assets. The latter is chroma-key removed
+locally for use as an alpha sprite sheet; its source image is retained beside it
+for provenance.
+
 The pixel room's furniture, floor tiles, pixel font, and base animation sprite
 under `assets/pixel_agents/` are copied from
 [pixel-agents-hq/pixel-agents](https://github.com/pixel-agents-hq/pixel-agents).

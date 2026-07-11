@@ -276,40 +276,35 @@ DASHBOARD_HTML = r"""<!doctype html>
     const stage = {w:1000, h:760, scale:1, ox:0, oy:0};
     const images = {};
     const imagePaths = {
-      room:'/assets/dashboard/zhizhi-q-home-evening-v1.png',
-      sprite:'/assets/dashboard/zhizhi-q-sprite-sheet-v1.png'
+      room:'/assets/dashboard/runtime/home-evening-base-v1.png',
+      sprite:'/assets/dashboard/runtime/zhizhi-walk-directions-v1.png'
     };
     const sceneDefinitions = {
       'free-bedroom': {
-        source:'知栀 · Q 版雨夜小屋 · 项目视觉母版',
+        source:'知栀 · 分层 Q 版雨夜小屋 · 项目视觉母版',
         background:'room',
-        anchors:{
-          desk:[520,505], kitchen:[635,520], entry:[1490,570], sofa:[1010,700],
-          vanity:[1240,470], bed:[930,500], window:[485,300], rug:[900,655]
-        },
-        routes:{
-          desk:['rug','window'], kitchen:['rug'], entry:['rug'], sofa:['rug'],
-          vanity:['rug','bed'], bed:['vanity','rug'], window:['desk','rug'],
-          rug:['desk','kitchen','entry','sofa','vanity','bed','window']
-        },
-        foreground:{
-          desk:[282,438,420,126],
-          sofa:[720,620,500,230]
-        }
+        // Coordinates are room-space tiles, never background-image pixels.
+        tile:{width:84,height:38,origin:[550,172]},
+        walkable:['2,4','3,4','4,4','5,4','6,4','7,4','8,4','9,4','10,4','2,3','3,3','4,3','5,3','6,3','7,3','8,3','9,3','10,3','3,2','4,2','5,2','6,2','7,2','8,2','9,2','4,1','5,1','6,1','7,1','8,1','9,1','10,1','4,5','5,5','6,5','7,5','8,5','9,5','10,5','5,6','6,6','7,6','8,6'],
+        anchors:{desk:[3,4,0], kitchen:[6,4,0], entry:[10,1,0], sofa:[7,5,0], vanity:[8,2,0], bed:[4,2,0], window:[2,4,0], rug:[6,4,0]},
+        objects:[
+          {id:'desk', tile:[3,3,0], footprint:[[3,3]], frontCrop:[430,300,330,240], depthBias:35},
+          {id:'bed', tile:[5,2,0], footprint:[[5,2],[6,2]], frontCrop:[700,310,360,230], depthBias:28},
+          {id:'sofa', tile:[8,4,0], footprint:[[8,4],[9,4]], frontCrop:[680,570,480,270], depthBias:42},
+          {id:'table', tile:[6,5,0], footprint:[[6,5]], frontCrop:[500,650,300,210], depthBias:18}
+        ]
       }
     };
     let activeScene = sceneDefinitions['free-bedroom'];
-    let anchors = activeScene.anchors;
-    let routeGraph = activeScene.routes;
     let snapshot = null;
     let loading = false;
     let selectedCalendarDate = null;
     // The generated sheet contains a standing and a stepping pose for each
     // useful direction.  Keep the pace deliberately relaxed: the room is a
     // visual diary, not a game character sprinting between destinations.
-    const WALK_SPEED = 92;
-    const WALK_FRAME_MS = 260;
-    const actor = {anchor:'rug', pos:[...anchors.rug], path:[], action:'idle', expression:'neutral', scene:null, direction:'front', lastTime:0, blinkUntil:0};
+    const WALK_SPEED = 1.65; // tiles per second
+    const WALK_FRAMES = 4;
+    const actor = {position:[...activeScene.anchors.rug], target:null, path:[], action:'idle', activity:'idle', expression:'neutral', scene:null, facing:'front', walked:0, lastTime:0};
 
     function preload() {
       return Promise.all(Object.entries(imagePaths).map(([key,path]) => new Promise(resolve => {
@@ -320,57 +315,57 @@ DASHBOARD_HTML = r"""<!doctype html>
       })));
     }
     function project(point) {
-      return [stage.ox + point[0] * stage.scale, stage.oy + point[1] * stage.scale];
+      const [x,y,z=0] = point;
+      const tile = activeScene.tile;
+      return [stage.ox + (tile.origin[0] + (x-y) * tile.width) * stage.scale, stage.oy + (tile.origin[1] + (x+y) * tile.height - z * tile.height * 2) * stage.scale];
     }
-    function distance(a,b) {
-      const dx = a[0] - b[0], dy = a[1] - b[1];
-      return Math.hypot(dx, dy);
+    function key(point) { return `${point[0]},${point[1]}`; }
+    function depthKey(point, bias=0) { return ((point[0] + point[1]) * 10000) + (point[2] || 0) * 100 + bias; }
+    function tileDistance(a,b) { return Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]); }
+    function directionFor(dx,dy) {
+      if (Math.abs(dx) < .01 && Math.abs(dy) < .01) return actor.facing;
+      const angle = (Math.atan2(dy, dx) + Math.PI * 2) % (Math.PI * 2);
+      return ['right','frontRight','front','frontLeft','left','backLeft','back','backRight'][Math.round(angle / (Math.PI / 4)) % 8];
     }
-    function nearestAnchor(point) {
-      return Object.entries(anchors).sort((a,b) => distance(point,a[1]) - distance(point,b[1]))[0][0];
-    }
-    function pathfind(startAnchor, targetAnchor) {
-      if (startAnchor === targetAnchor) return [];
-      const queue = [startAnchor];
-      const came = new Map([[startAnchor, null]]);
-      for (let i = 0; i < queue.length; i++) {
-        const node = queue[i];
-        if (node === targetAnchor) break;
-        for (const next of routeGraph[node] || []) {
-          if (!came.has(next)) {
-            came.set(next, node);
-            queue.push(next);
-          }
+    function pathfind(start, target) {
+      const blocked = new Set(activeScene.objects.flatMap(object => object.footprint).map(key));
+      const allowed = new Set(activeScene.walkable.filter(tile => !blocked.has(tile)));
+      const startKey = key(start), targetKey = key(target);
+      if (!allowed.has(targetKey)) return [];
+      const open = [[start[0],start[1]]], came = new Map([[startKey,null]]), score = new Map([[startKey,0]]);
+      while (open.length) {
+        open.sort((a,b) => (score.get(key(a)) + tileDistance(a,target)) - (score.get(key(b)) + tileDistance(b,target)));
+        const current = open.shift();
+        if (key(current) === targetKey) break;
+        for (const [dx,dy] of [[1,0],[-1,0],[0,1],[0,-1]]) {
+          const next=[current[0]+dx,current[1]+dy], nextKey=key(next);
+          if (!allowed.has(nextKey)) continue;
+          const tentative=(score.get(key(current)) || 0)+1;
+          if (tentative < (score.get(nextKey) ?? Infinity)) { came.set(nextKey,current); score.set(nextKey,tentative); if (!open.some(p => key(p) === nextKey)) open.push(next); }
         }
       }
-      if (!came.has(targetAnchor)) return [anchors[targetAnchor]];
-      const names = [];
-      let cur = targetAnchor;
-      while (came.get(cur)) {
-        names.unshift(cur);
-        cur = came.get(cur);
-      }
-      return names.map(name => anchors[name]);
+      if (!came.has(targetKey)) return [];
+      const path=[]; let current=target;
+      while (key(current) !== startKey) { path.unshift([current[0],current[1],0]); current=came.get(key(current)); }
+      return path;
     }
     function activateScene(scene) {
       const nextScene = sceneDefinitions[scene.scene_id] || sceneDefinitions['free-bedroom'];
       if (nextScene === activeScene) return;
       activeScene = nextScene;
-      anchors = activeScene.anchors;
-      routeGraph = activeScene.routes;
-      actor.anchor = 'entry' in anchors ? 'entry' : 'rug';
-      actor.pos = [...anchors[actor.anchor]];
+      actor.position = [...(activeScene.anchors.entry || activeScene.anchors.rug)];
       actor.path = [];
     }
     function applyScene(scene) {
       activateScene(scene);
-      const target = scene.location in anchors ? scene.location : 'rug';
+      const target = activeScene.anchors[scene.location] || activeScene.anchors.rug;
       actor.scene = scene;
       actor.expression = scene.expression;
-      if (actor.action !== scene.action || actor.path.length || actor.anchor !== target) {
-        actor.anchor = nearestAnchor(actor.pos);
-        actor.path = pathfind(actor.anchor, target);
-        actor.action = actor.path.length ? 'walk' : scene.action;
+      actor.activity = scene.action || 'idle';
+      if (key(actor.path.at(-1) || actor.position) !== key(target)) {
+        actor.path = pathfind(actor.position, target);
+        actor.target = target;
+        actor.action = actor.path.length ? 'walk' : actor.activity;
       }
     }
     function drawImageContain(ctx, img, x, y, w, h) {
@@ -382,39 +377,29 @@ DASHBOARD_HTML = r"""<!doctype html>
       ctx.drawImage(img, stage.ox, stage.oy, iw, ih);
     }
     function characterAction() {
-      return ['walk','walk_out','tidy'].includes(actor.action) ? 'walk' : 'idle';
+      return actor.action === 'walk' ? 'walk' : 'idle';
     }
-    function spriteCell(action, direction, now) {
-      if (action !== 'walk') {
-        return ({left:[2,1], right:[2,0], front:[0,0]})[direction] || [0,0];
-      }
-      const stepping = Math.floor(now / WALK_FRAME_MS) % 2 === 1;
-      const cycle = {
-        // The top pair looks right, the lower pair looks left.  Each pair is
-        // [standing, stepping], so changing the frame really changes the pose.
-        left: [[2,1],[3,1]],
-        right: [[2,0],[3,0]],
-        front: [[0,0],[1,0]]
-      };
-      return (cycle[direction] || cycle.front)[stepping ? 1 : 0];
+    function spriteCell(action, facing) {
+      const columns = {front:0,frontRight:1,right:2,backRight:3,back:4,backLeft:5,left:6,frontLeft:1};
+      return {column:columns[facing] ?? 0, row:action === 'walk' ? Math.floor(actor.walked * 2.4) % WALK_FRAMES : 0, flip:facing === 'frontLeft'};
     }
     function drawActor(ctx, now) {
       if (actor.action === 'sleep') { drawSleep(ctx, now); return; }
       const action = characterAction();
       const sheet = images.sprite;
       if (!sheet) return;
-      const [px, py] = project(actor.pos);
-      const cells = spriteCell(action, actor.direction, now);
-      const sx = cells[0] * 443, sy = cells[1] * 443;
-      const dh = 128, dw = 128;
-      const stepLift = action === 'walk' && Math.floor(now / WALK_FRAME_MS) % 2 ? -2 : 0;
-      const x = px - dw / 2, y = py - dh + 7 + stepLift;
+      const [px, py] = project(actor.position);
+      const cell = spriteCell(action, actor.facing);
+      // The source sheet is 8 columns wide. The final front-left direction
+      // mirrors front-right so all 8 logical directions stay available.
+      const cw = sheet.width / 8, ch = sheet.height / 4;
+      const sx = cell.column * cw, sy = cell.row * ch;
+      const dh = 148, dw = 148;
+      const x = px - dw / 2, y = py - dh + 6;
       ctx.save();
       ctx.imageSmoothingEnabled = false;
-      ctx.shadowColor = 'rgba(34, 25, 20, .35)';
-      ctx.shadowBlur = 0;
-      ctx.shadowOffsetY = 3;
-      ctx.drawImage(sheet, sx, sy, 443, 443, x, y, dw, dh);
+      if (cell.flip) { ctx.translate(px,0); ctx.scale(-1,1); ctx.translate(-px,0); }
+      ctx.drawImage(sheet, sx, sy, cw, ch, x, y, dw, dh);
       ctx.restore();
       drawPhone(ctx, x, y, now);
       drawStatusMark(ctx, px, y, now);
@@ -426,7 +411,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       ctx.fillStyle = '#9cd9d4'; ctx.fillRect(x + 59, y + 53 + pulse, 5, 7); ctx.restore();
     }
     function drawSleep(ctx, now) {
-      const [px,py] = project(actor.pos);
+      const [px,py] = project(actor.position);
       ctx.save(); ctx.fillStyle = '#e9d7bf'; ctx.font = '18px Pixel, sans-serif';
       ctx.fillText('z', px + 15, py - 32 - Math.sin(now / 350) * 4); ctx.restore();
     }
@@ -469,7 +454,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
     function drawActivityLight(ctx, now) {
       const scene = actor.scene || {};
-      const target = anchors[scene.location] || anchors.rug;
+      const target = activeScene.anchors[scene.location] || activeScene.anchors.rug;
       const [x,y] = project(target);
       if (['study','read_phone','type_phone'].includes(scene.action)) {
         const pulse = 6 + Math.sin(now / 500) * 2;
@@ -484,7 +469,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     }
     function drawInteractionCue(ctx, now) {
       const scene = actor.scene || {};
-      const [x,y] = project(anchors[scene.location] || anchors.rug);
+      const [x,y] = project(activeScene.anchors[scene.location] || activeScene.anchors.rug);
       const pulse = Math.sin(now / 240);
       ctx.save();
       ctx.imageSmoothingEnabled = false;
@@ -508,15 +493,17 @@ DASHBOARD_HTML = r"""<!doctype html>
       ctx.restore();
     }
     function drawForeground(ctx) {
-      const scene = actor.scene || {};
-      const crop = activeScene.foreground?.[scene.location];
       const background = images[activeScene.background];
-      if (!crop || !background) return;
-      const [sx,sy,sw,sh] = crop;
-      ctx.save();
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(background, sx, sy, sw, sh, stage.ox + sx * stage.scale, stage.oy + sy * stage.scale, sw * stage.scale, sh * stage.scale);
-      ctx.restore();
+      if (!background) return;
+      // Data-driven furniture front layers. They are sorted against the actor,
+      // replacing location-specific "redraw this sofa" rules.
+      const actorDepth = depthKey(actor.position, 20);
+      for (const object of activeScene.objects.filter(o => depthKey(o.tile,o.depthBias) > actorDepth).sort((a,b) => depthKey(a.tile,a.depthBias)-depthKey(b.tile,b.depthBias))) {
+        const [sx,sy,sw,sh] = object.frontCrop;
+        ctx.save(); ctx.imageSmoothingEnabled = false;
+        ctx.drawImage(background, sx, sy, sw, sh, stage.ox + sx * stage.scale, stage.oy + sy * stage.scale, sw * stage.scale, sh * stage.scale);
+        ctx.restore();
+      }
     }
     function drawSceneRibbon(ctx) {
       const scene = actor.scene || {};
@@ -540,17 +527,17 @@ DASHBOARD_HTML = r"""<!doctype html>
       actor.lastTime = now;
       if (actor.path.length) {
         const target = actor.path[0];
-        const dx = target[0] - actor.pos[0], dy = target[1] - actor.pos[1];
+        const dx = target[0] - actor.position[0], dy = target[1] - actor.position[1];
         const dist = Math.hypot(dx, dy);
         const speed = WALK_SPEED;
         if (dist <= speed * dt) {
-          actor.pos = target;
-          actor.anchor = nearestAnchor(actor.pos);
+          actor.position = target;
           actor.path.shift();
-          if (!actor.path.length) actor.action = actor.scene?.action || 'idle';
+          if (!actor.path.length) actor.action = actor.activity || 'idle';
         } else {
-          actor.pos = [actor.pos[0] + dx / dist * speed * dt, actor.pos[1] + dy / dist * speed * dt];
-          actor.direction = dx < -8 ? 'left' : dx > 8 ? 'right' : 'front';
+          actor.position = [actor.position[0] + dx / dist * speed * dt, actor.position[1] + dy / dist * speed * dt, 0];
+          actor.facing = directionFor(dx,dy);
+          actor.walked += speed * dt;
         }
       }
       drawRoom(roomCanvas.getContext('2d'), now);
@@ -573,7 +560,9 @@ DASHBOARD_HTML = r"""<!doctype html>
       // A non-persistent visual check for the dashboard.  It never changes
       // daemon state and is intentionally opt-in via the URL.
       if (new URLSearchParams(location.search).get('demo') !== 'walk') return;
-      applyScene({location:'desk', action:'study', expression:'neutral', time_of_day:'day', has_notification:false, has_open_task:false});
+      // Cross the clear central floor so the visual check shows both stepping
+      // frames before the activity pose takes over at the destination.
+      applyScene({location:'entry', action:'walk_out', expression:'neutral', time_of_day:'day', has_notification:false, has_open_task:false});
       document.getElementById('updated').textContent = '行走动画预览 · 不写入 daemon';
       document.getElementById('gameAction').textContent = '走路 · 书桌';
     }
