@@ -198,7 +198,9 @@ class QQMessageCoalescer:
             if hasattr(self.engine, "phone_attention_decision"):
                 attention = self.engine.phone_attention_decision(merged)
                 if not attention.read_now and attention.defer_minutes:
-                    task_id = self._persist_deferred_reply(merged, attention.defer_minutes, attention.reason)
+                    task_id = self._persist_deferred_reply(
+                        merged, attention.defer_minutes, attention.reason, attention.turn_trace_id
+                    )
                     self._deferred[key] = DeferredReply(merged=merged, reply_target=last.reply_target, task_id=task_id)
                     self._deferred_tasks[key] = asyncio.create_task(
                         self._fire_deferred_after(
@@ -252,7 +254,9 @@ class QQMessageCoalescer:
                 if action.action == ReplyAction.DEFER and action.defer_minutes:
                     # At this point phone attention already said "read now", so this
                     # is the read-but-sidetracked case rather than an unread defer.
-                    task_id = self._persist_read_later(merged, action.defer_minutes, action.reason)
+                    task_id = self._persist_read_later(
+                        merged, action.defer_minutes, action.reason, attention.turn_trace_id if 'attention' in locals() else None
+                    )
                     self._deferred[key] = DeferredReply(merged=merged, reply_target=last.reply_target, task_id=task_id)
                     self._deferred_tasks[key] = asyncio.create_task(
                         self._fire_deferred_after(key, action.defer_minutes, action)
@@ -300,19 +304,31 @@ class QQMessageCoalescer:
         if deferred and hasattr(self.engine, "cancel_deferred_reply_task"):
             self.engine.cancel_deferred_reply_task(deferred.task_id)
 
-    def _persist_deferred_reply(self, message: IncomingMessage, minutes: float, reason: str) -> int | None:
+    def _persist_deferred_reply(
+        self, message: IncomingMessage, minutes: float, reason: str, turn_trace_id: int | None = None
+    ) -> int | None:
         if not hasattr(self.engine, "create_deferred_reply_task"):
             return None
         try:
+            return self.engine.create_deferred_reply_task(
+                message, defer_minutes=minutes, reason=reason, turn_trace_id=turn_trace_id
+            )
+        except TypeError:
             return self.engine.create_deferred_reply_task(message, defer_minutes=minutes, reason=reason)
         except Exception:
             logger.exception("failed to persist deferred reply; keeping in-memory fallback")
             return None
 
-    def _persist_read_later(self, message: IncomingMessage, minutes: float, reason: str) -> int | None:
+    def _persist_read_later(
+        self, message: IncomingMessage, minutes: float, reason: str, turn_trace_id: int | None = None
+    ) -> int | None:
         if not hasattr(self.engine, "create_read_later_task"):
-            return self._persist_deferred_reply(message, minutes, reason)
+            return self._persist_deferred_reply(message, minutes, reason, turn_trace_id)
         try:
+            return self.engine.create_read_later_task(
+                message, defer_minutes=minutes, reason=reason, turn_trace_id=turn_trace_id
+            )
+        except TypeError:
             return self.engine.create_read_later_task(message, defer_minutes=minutes, reason=reason)
         except Exception:
             logger.exception("failed to persist read-later task; keeping in-memory fallback")

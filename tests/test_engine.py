@@ -206,8 +206,40 @@ def test_engine_wakes_for_the_next_message_after_persisting_an_unread_state(tmp_
     assert store.get_mood_state("geoff").has_unread is True
     first_trace = store.recent_turn_traces("geoff")[-2]
     assert first_trace["direction"] == "attention"
-    assert first_trace["status"] == "deferred"
+    assert first_trace["status"] == "planned"
     assert second.read_now is True
+
+
+def test_cancelling_delayed_reply_closes_its_attention_trace(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+    message = IncomingMessage(platform="qq", platform_user_id="geoff", text="我晚点再说")
+    now = utc_now()
+    store.save_life_runtime(
+        "geoff",
+        LifeRuntimeState(
+            activity="正在专注看书，手机放在包里",
+            activity_kind="study",
+            attention_demand=88,
+            interruptible=False,
+            started_at=now - timedelta(minutes=5),
+            ends_at=now + timedelta(minutes=30),
+            updated_at=now,
+        ),
+    )
+    decision = engine.phone_attention_decision(message)
+
+    assert decision.read_now is False
+
+    task_id = engine.create_deferred_reply_task(
+        message, defer_minutes=5, reason="unread_during_study", turn_trace_id=decision.turn_trace_id
+    )
+    engine.cancel_deferred_reply_task(task_id)
+
+    trace = store.recent_turn_traces("geoff")[-1]
+    assert trace["id"] == decision.turn_trace_id
+    assert trace["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

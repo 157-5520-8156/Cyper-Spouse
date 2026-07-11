@@ -660,6 +660,17 @@ class CompanionStore:
                 ("delivered" if delivered else "failed", failure_reason[:500] if failure_reason else None, now, trace_id),
             )
 
+    def resolve_turn_trace(self, trace_id: int, *, status: str, reason: str | None = None) -> None:
+        """Close a non-delivery trace such as a deferred attention decision."""
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update turn_traces set status = ?, failure_reason = ?, updated_at = ?
+                where id = ? and status in ('planned', 'deferred')
+                """,
+                (status, reason[:500] if reason else None, utc_now().isoformat(), trace_id),
+            )
+
     def recent_turn_traces(self, canonical_user_id: str, limit: int = 20) -> list[sqlite3.Row]:
         with self.connect() as conn:
             rows = conn.execute(

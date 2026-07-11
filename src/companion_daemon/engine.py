@@ -522,7 +522,7 @@ class CompanionEngine:
             output_text="",
             delivery_id=None,
             direction="attention",
-            status="deferred" if not decision.read_now else "observed",
+            status="planned" if not decision.read_now else "observed",
         )
         return PhoneDecision(
             decision.read_now, decision.defer_minutes, decision.reason, turn_trace_id=trace_id
@@ -534,6 +534,7 @@ class CompanionEngine:
         *,
         defer_minutes: float,
         reason: str,
+        turn_trace_id: int | None = None,
         now: datetime | None = None,
     ) -> int:
         """Persist a delayed reply before its in-memory timer is allowed to run."""
@@ -545,7 +546,7 @@ class CompanionEngine:
             kind="reply_later",
             platform=message.platform,
             platform_user_id=message.platform_user_id,
-            payload=message.model_dump(mode="json"),
+            payload={**message.model_dump(mode="json"), "_turn_trace_id": turn_trace_id},
             reason=reason,
             due_at=now + timedelta(minutes=defer_minutes),
             expires_at=now + timedelta(hours=12),
@@ -553,11 +554,17 @@ class CompanionEngine:
 
     def cancel_deferred_reply_task(self, task_id: int | None) -> None:
         if task_id is not None:
+            trace_id = self.store.social_task_payload(task_id).get("_turn_trace_id")
             self.store.cancel_social_task(task_id)
+            if isinstance(trace_id, int):
+                self.store.resolve_turn_trace(trace_id, status="cancelled", reason="new user turn overtook delay")
 
     def complete_deferred_reply_task(self, task_id: int | None) -> None:
         if task_id is not None:
+            trace_id = self.store.social_task_payload(task_id).get("_turn_trace_id")
             self.store.resolve_social_task(task_id)
+            if isinstance(trace_id, int):
+                self.store.resolve_turn_trace(trace_id, status="resolved")
 
     def create_read_later_task(
         self,
@@ -565,6 +572,7 @@ class CompanionEngine:
         *,
         defer_minutes: float,
         reason: str,
+        turn_trace_id: int | None = None,
         now: datetime | None = None,
     ) -> int:
         """Persist a read-but-not-replied reminder without replaying the read event."""
@@ -581,7 +589,7 @@ class CompanionEngine:
             kind="reply_later",
             platform=message.platform,
             platform_user_id=message.platform_user_id,
-            payload=message.model_dump(mode="json"),
+            payload={**message.model_dump(mode="json"), "_turn_trace_id": turn_trace_id},
             reason=f"{preface}；{reason}",
             due_at=now + timedelta(minutes=defer_minutes),
             expires_at=now + timedelta(hours=10),
