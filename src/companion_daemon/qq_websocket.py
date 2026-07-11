@@ -60,7 +60,7 @@ class QueuedQQMessage:
 class DeferredReply:
     merged: IncomingMessage
     reply_target: ReplyTarget
-    task_id: int | None = None
+    task_id: int | str | None = None
 
 
 @dataclass

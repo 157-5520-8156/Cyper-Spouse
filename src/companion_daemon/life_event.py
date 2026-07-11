@@ -1,6 +1,7 @@
 import argparse
 import asyncio
 from dataclasses import dataclass
+from datetime import timedelta
 import logging
 from pathlib import Path
 import re
@@ -14,6 +15,7 @@ from companion_daemon.relationship import relationship_status_line
 from companion_daemon.social_followups import cancel_life_share_followup_for_event
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.stickers import load_stickers
+from companion_daemon.time import utc_now
 
 
 logger = logging.getLogger(__name__)
@@ -116,6 +118,8 @@ async def run(
 ) -> bool:
     settings = get_settings()
     engine = build_companion_engine()
+    if getattr(engine, "world_kernel", None) and getattr(engine, "world_id", None):
+        return await _run_world_life_event(engine, user_id=user_id, send=send, sandbox=sandbox)
     state = engine.store.get_mood_state(user_id)
     outreach_block = (
         engine.outreach_block_reason(user_id, state)
@@ -251,6 +255,64 @@ async def run(
                 logger.exception("life event sticker send failed")
                 print(f"sticker not sent: {exc}")
     _record_shared_life_event(engine, user_id, event, shared_event_id, event.messages)
+    return True
+
+
+async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bool) -> bool:
+    """Share one committed-but-private world experience without legacy life tables."""
+    snapshot = engine.world_kernel.snapshot(engine.world_id)
+    candidate = next(
+        (
+            (experience_id, experience)
+            for experience_id, experience in snapshot["experiences"].items()
+            if not experience.get("shared")
+        ),
+        None,
+    )
+    if candidate is None:
+        print("life event not shared: no unshared world experience")
+        return False
+    experience_id, experience = candidate
+    text = f"{experience['content'].rstrip('。！？!? ')}。刚想起这件小事，想跟你说一下。"
+    if not send:
+        return False
+    settings = get_settings()
+    delivery = QQDelivery(settings, sandbox=sandbox)
+    recipient_id = delivery.proactive_recipient_id() or engine.store.platform_user_id(user_id, "qq")
+    if not recipient_id:
+        print("not sent: no outbound QQ recipient configured")
+        return False
+    delivery_id, _, action_id = engine.world_kernel.queue_outgoing_action(
+        canonical_user_id=user_id,
+        platform="qq",
+        text=text,
+        kind="life_event",
+        expires_at=utc_now() + timedelta(hours=4),
+        trace={
+            "world_id": engine.world_id,
+            "direction": "life_event",
+            "appraisal": "life_event_share",
+            "expression_policy": "只分享已提交的世界经历，不补写新事实。",
+            "allowed_facts": [str(experience["content"])],
+            "short_lived_constraint": None,
+            "observable_reason": "一个已发生但尚未分享的世界经历。",
+        },
+    )
+    try:
+        await delivery.send_text(recipient_id, text)
+    except Exception as exc:
+        engine.world_kernel.settle_outgoing_action(delivery_id, delivered=False, reason=str(exc))
+        return False
+    engine.world_kernel.settle_outgoing_action(delivery_id, delivered=True)
+    engine._submit_world_with_retry(
+        {
+            "type": "share_experience",
+            "world_id": engine.world_id,
+            "experience_id": experience_id,
+            "action_id": action_id,
+            "idempotency_key": f"share-experience:{experience_id}:{action_id}",
+        }
+    )
     return True
 
 

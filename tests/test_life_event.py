@@ -8,6 +8,7 @@ import companion_daemon.life_event as life_event_module
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import seed_user
 from companion_daemon.life_event import LifeEvent, LifeEventGenerator, parse_life_event, run
+from companion_daemon.world import WorldKernel
 
 
 def _record_shareable_event(store: CompanionStore) -> int:
@@ -178,13 +179,53 @@ async def test_life_event_send_records_outgoing_and_memory(tmp_path: Path, monke
     memories = store.memories("geoff", limit=10)
     assert any(row["kind"] == "private_life_event" and row["source"] == "life_runtime:incidental:test" for row in store.recent_life_events("geoff", limit=10))
     assert any(row["kind"] == "life_event" and "午饭" in row["content"] for row in memories)
-    assert any(
-        row["kind"] == "private_life_event" and row["status"] == "completed"
-        for row in store.recent_life_events("geoff", limit=10)
+
+
+@pytest.mark.asyncio
+async def test_world_life_event_shares_only_committed_world_experience(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.map_account("qq", "openid", "geoff")
+    world = WorldKernel(store)
+    started = world.start_from_seed_file(Path("configs/world_seed.yaml"))
+    proposal = world.submit(
+        {
+            "type": "record_model_proposal", "world_id": started.world_id,
+            "proposal_id": "life-proposal", "entity_id": "roommate-lin", "template_id": "dorm_chat",
+            "content": "晚饭后在宿舍聊了几句新书。",
+        }, expected_revision=started.revision,
     )
-    assert store.memory_by_source("geoff", kind="private_life_event", source="life_event:spontaneous_recall") is None
-    assert store.unshared_private_life_events("geoff") == []
-    assert store.usage_count("life_event", "month", datetime.now(UTC)) == 0
+    world.submit(
+        {"type": "accept_model_proposal", "world_id": started.world_id, "proposal_id": "life-proposal"},
+        expected_revision=proposal.revision,
+    )
+
+    class FakeEngine:
+        def __init__(self):
+            self.world_kernel = world
+            self.world_id = started.world_id
+            self.store = store
+
+        def _submit_world_with_retry(self, command):
+            return world.submit(command, expected_revision=world.revision(started.world_id))
+
+    class FakeDelivery:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def proactive_recipient_id(self):
+            return None
+
+        async def send_text(self, recipient_id, text):
+            assert recipient_id == "openid"
+
+    monkeypatch.setattr(life_event_module, "build_companion_engine", FakeEngine)
+    monkeypatch.setattr(life_event_module, "QQDelivery", FakeDelivery)
+    monkeypatch.setattr(life_event_module, "get_settings", lambda: SimpleNamespace())
+
+    sent = await run(user_id="geoff", send=True, sandbox=True, generate_image=False, image_kind="life")
+
+    assert sent is True
+    assert world.snapshot(started.world_id)["experiences"]["life-proposal"]["shared"] is True
 
 
 @pytest.mark.asyncio

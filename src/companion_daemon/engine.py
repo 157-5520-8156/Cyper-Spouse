@@ -86,7 +86,7 @@ from companion_daemon.unanswered_question import (
 )
 from companion_daemon.withheld_impulse import apply_withheld_impulse, build_withheld_impulse
 from companion_daemon.turns import TurnCommit, build_turn_plan
-from companion_daemon.world import ConcurrencyConflict, WorldKernel
+from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel, parse_reply_candidate
 
 logger = logging.getLogger(__name__)
 
@@ -187,6 +187,13 @@ class CompanionEngine:
     ) -> CompanionReply | None:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         self._record_world_input(message)
+        if self.world_kernel and self.world_id:
+            return await self._handle_world_message(
+                canonical_user_id,
+                message,
+                skip_reply=skip_reply,
+                defer_delivery=defer_delivery,
+            )
         # A new user turn means a previously planned check-in has been overtaken by reality.
         self.store.cancel_active_social_tasks(canonical_user_id, kind="comfort_followup")
         self.store.cancel_active_social_tasks(canonical_user_id, kind="promise_followup")
@@ -561,7 +568,109 @@ class CompanionEngine:
             self.confirm_reply_delivery(reply)
         return reply
 
+    async def _handle_world_message(
+        self,
+        canonical_user_id: str,
+        message: IncomingMessage,
+        *,
+        skip_reply: bool,
+        defer_delivery: bool,
+    ) -> CompanionReply | None:
+        """World-mode turn path; legacy state tables are not behavioural inputs here."""
+        assert self.world_kernel and self.world_id
+        for action_id, action in self.world_kernel.snapshot(self.world_id)["actions"].items():
+            if action["kind"] == "reply_later" and action["status"] == "scheduled":
+                self._submit_world_with_retry(
+                    {
+                        "type": "cancel_action",
+                        "world_id": self.world_id,
+                        "action_id": action_id,
+                        "reason": "new_user_turn",
+                        "idempotency_key": f"supersede:{action_id}:{message.message_id or message.sent_at.isoformat()}",
+                    }
+                )
+        event = interpret_interaction(message, MoodState())
+        intent_id = f"turn:{message.message_id or message.sent_at.isoformat()}"
+        self._submit_world_with_retry(
+            {
+                "type": "appraise_turn",
+                "world_id": self.world_id,
+                "appraisal": event.kind,
+                "intent_id": intent_id,
+                "actor": {"kind": "companion", "id": "zhizhi"},
+                "causation_id": message.message_id,
+                "idempotency_key": f"appraise:{intent_id}",
+            }
+        )
+        if skip_reply:
+            return None
+        snapshot = self.world_kernel.snapshot(self.world_id)
+        facts = [str(item["value"]) for item in snapshot["facts"].values()]
+        experiences = [str(item["content"]) for item in snapshot["experiences"].values()]
+        policy = (snapshot.get("last_appraisal") or {}).get("policy", "自然回应当前消息。")
+        context_block = (
+            "世界账本授权（必须遵守）：\n"
+            f"- 本轮关系判断: {event.kind}\n- 本轮表达策略: {policy}\n"
+            f"- 可引用事实: {'；'.join(facts[:8]) or '无'}\n"
+            f"- 已结算经历: {'；'.join(experiences[-6:]) or '无'}\n"
+            "- 未列入账本的计划、人物、经历和结果不得说成已经发生。"
+        )
+        raw = await self.model.complete(
+            [
+                {"role": "system", "content": self.companion_system_prompt},
+                {
+                    "role": "user",
+                    "content": (
+                        f"{context_block}\n\n用户: {message.text}\n"
+                        "WorldReplyJSON: 只返回 JSON："
+                        '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[]}。'
+                    ),
+                },
+            ],
+            temperature=0.75,
+        )
+        try:
+            candidate = self.world_kernel.validate_reply_candidate(
+                self.world_id, parse_reply_candidate(raw)
+            )
+        except WorldError:
+            # A malformed model result must not bypass the ledger by becoming
+            # a free-text fact claim.  The conservative fallback has no claim.
+            candidate = {"reply_text": "我在。", "mentioned_event_ids": [], "proposed_action_ids": []}
+        text = sanitize_chat_text(str(candidate["reply_text"]))
+        delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(
+            canonical_user_id=canonical_user_id,
+            platform=message.platform,
+            text=text,
+            kind="reply",
+            expires_at=utc_now() + timedelta(hours=12),
+            trace={
+                "world_id": self.world_id,
+                "appraisal": event.kind,
+                "expression_policy": str(policy),
+                "allowed_facts": facts,
+                "short_lived_constraint": None,
+                "observable_reason": "由已结算世界账本和本轮判断决定。",
+            },
+        )
+        reply = CompanionReply(
+            canonical_user_id=canonical_user_id,
+            mood="calm",
+            text=text,
+            text_parts=[text],
+            delivery_id=delivery_id,
+            turn_trace_id=trace_id,
+            world_action_id=action_id,
+        )
+        if not defer_delivery:
+            self.confirm_reply_delivery(reply)
+        return reply
+
     def phone_attention_decision(self, message: IncomingMessage) -> PhoneDecision:
+        if self.world_kernel and self.world_id:
+            # Deferred reading is represented by a future world action only
+            # once the world policy elects it; do not touch life_runtime here.
+            return PhoneDecision(True, None, "world ledger owns this turn's attention")
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         state = self.store.get_mood_state(canonical_user_id)
         decision = decide_phone_attention(
@@ -598,9 +707,27 @@ class CompanionEngine:
         reason: str,
         turn_trace_id: int | None = None,
         now: datetime | None = None,
-    ) -> int:
+    ) -> int | str:
         """Persist a delayed reply before its in-memory timer is allowed to run."""
         now = now or utc_now()
+        if self.world_kernel and self.world_id:
+            action_id = f"reply_later:{message.message_id or message.sent_at.isoformat()}"
+            self._submit_world_with_retry(
+                {
+                    "type": "schedule_action",
+                    "world_id": self.world_id,
+                    "action_id": action_id,
+                    "kind": "reply_later",
+                    "expires_at": (now + timedelta(hours=12)).isoformat(),
+                    "payload": {
+                        "due_at": (now + timedelta(minutes=defer_minutes)).isoformat(),
+                        "reason": reason,
+                        "message": message.model_dump(mode="json"),
+                    },
+                    "idempotency_key": f"schedule:{action_id}",
+                }
+            )
+            return action_id
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         self.store.cancel_active_social_tasks(canonical_user_id, kind="reply_later")
         return self.store.create_social_task(
@@ -616,15 +743,31 @@ class CompanionEngine:
             expires_at=now + timedelta(hours=12),
         )
 
-    def cancel_deferred_reply_task(self, task_id: int | None) -> None:
+    def cancel_deferred_reply_task(self, task_id: int | str | None) -> None:
         if task_id is not None:
+            if self.world_kernel and self.world_id and isinstance(task_id, str):
+                self._submit_world_with_retry(
+                    {"type": "cancel_action", "world_id": self.world_id, "action_id": task_id, "reason": "new_user_turn"}
+                )
+                return
             trace_id = self.store.social_task_payload(task_id).get("_turn_trace_id")
             self.store.cancel_social_task(task_id)
             if isinstance(trace_id, int):
                 self.store.resolve_turn_trace(trace_id, status="cancelled", reason="new user turn overtook delay")
 
-    def complete_deferred_reply_task(self, task_id: int | None) -> None:
+    def complete_deferred_reply_task(self, task_id: int | str | None) -> None:
         if task_id is not None:
+            if self.world_kernel and self.world_id and isinstance(task_id, str):
+                self._submit_world_with_retry(
+                    {
+                        "type": "record_external_result",
+                        "world_id": self.world_id,
+                        "action_id": task_id,
+                        "result": {"kind": "delay", "status": "delivered"},
+                        "idempotency_key": f"complete:{task_id}",
+                    }
+                )
+                return
             trace_id = self.store.social_task_payload(task_id).get("_turn_trace_id")
             self.store.resolve_social_task(task_id)
             if isinstance(trace_id, int):
@@ -638,9 +781,17 @@ class CompanionEngine:
         reason: str,
         turn_trace_id: int | None = None,
         now: datetime | None = None,
-    ) -> int:
+    ) -> int | str:
         """Persist a read-but-not-replied reminder without replaying the read event."""
         now = now or utc_now()
+        if self.world_kernel and self.world_id:
+            return self.create_deferred_reply_task(
+                message,
+                defer_minutes=defer_minutes,
+                reason=f"read_later:{reason}",
+                turn_trace_id=turn_trace_id,
+                now=now,
+            )
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         self.store.cancel_active_social_tasks(canonical_user_id, kind="reply_later")
         preface = (
@@ -662,6 +813,8 @@ class CompanionEngine:
         )
 
     def mark_phone_read_for_message(self, message: IncomingMessage) -> None:
+        if self.world_kernel and self.world_id:
+            return
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         mark_phone_typing(self.store, canonical_user_id)
 
@@ -676,6 +829,8 @@ class CompanionEngine:
             )
         if not delivered or delivered["status"] != "planned":
             return None
+        if self.world_kernel and reply.world_action_id:
+            return TurnCommit(reply.turn_trace_id, reply.delivery_id, "delivered")
         state = self.store.get_mood_state(reply.canonical_user_id)
         expressed = apply_expression_after_reply(
             state,
@@ -864,6 +1019,8 @@ class CompanionEngine:
             )
         if not delivered or delivered["status"] != "planned":
             return
+        if self.world_kernel and self.world_id:
+            return
         state = self.store.get_mood_state(canonical_user_id)
         expressed = apply_expression_after_reply(state, was_proactive=True)
         self.store.save_mood_state(canonical_user_id, expressed)
@@ -884,6 +1041,8 @@ class CompanionEngine:
                 )
 
     def confirm_life_event_delivery(self, canonical_user_id: str, platform: str = "qq") -> None:
+        if self.world_kernel and self.world_id:
+            return
         self.store.record_proactive_delivery(canonical_user_id, f"{platform}:life_event")
         state = self.store.get_mood_state(canonical_user_id)
         expressed = apply_expression_after_reply(state, was_proactive=True)
@@ -1028,6 +1187,8 @@ class CompanionEngine:
             self.store.cancel_social_task(task_id)
 
     async def proactive_tick(self, canonical_user_id: str) -> ProactiveDecision:
+        if self.world_kernel and self.world_id:
+            return await self._world_proactive_tick(canonical_user_id)
         now = utc_now()
         state = self.refresh_waiting_state(canonical_user_id)
         reconcile_unshared_life_share_tasks(self.store, canonical_user_id)
@@ -1207,6 +1368,52 @@ class CompanionEngine:
             )
         return decision
 
+    async def _world_proactive_tick(self, canonical_user_id: str) -> ProactiveDecision:
+        """World-only proactive decision; it never reads or writes legacy mood/tasks."""
+        assert self.world_kernel and self.world_id
+        snapshot = self.world_kernel.snapshot(self.world_id)
+        open_outgoing = [
+            action
+            for action in snapshot["actions"].values()
+            if action["kind"] == "outgoing_message" and action["status"] == "scheduled"
+        ]
+        if open_outgoing:
+            return ProactiveDecision(
+                canonical_user_id=canonical_user_id,
+                private_thought="已有一条等待结算的外发行动，先不追加。",
+                should_send=False,
+            )
+        prompt = (
+            "基于以下已结算世界账本，决定是否轻轻主动发一句消息。"
+            "若不适合，返回 JSON 的 should_send=false；若适合，不能新增未记录事实。\n"
+            f"事实: {[item['value'] for item in snapshot['facts'].values()]}\n"
+            f"经历: {[item['content'] for item in snapshot['experiences'].values()][-4:]}"
+        )
+        raw = await self.model.complete([{"role": "user", "content": prompt}], temperature=0.7)
+        decision = self._parse_decision(canonical_user_id, raw, MoodState())
+        if not decision.should_send or not decision.message or not decision.platform:
+            return decision
+        text = sanitize_chat_text(decision.message)
+        delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(
+            canonical_user_id=canonical_user_id,
+            platform=decision.platform,
+            text=text,
+            kind="proactive",
+            expires_at=utc_now() + timedelta(hours=4),
+            trace={
+                "world_id": self.world_id,
+                "direction": "proactive",
+                "appraisal": decision.trigger_type or "proactive",
+                "expression_policy": "主动消息只轻轻开口，不索取回应。",
+                "allowed_facts": [str(item["value"]) for item in snapshot["facts"].values()],
+                "short_lived_constraint": None,
+                "observable_reason": decision.private_thought[:160],
+            },
+        )
+        return decision.model_copy(
+            update={"message": text, "delivery_id": delivery_id, "turn_trace_id": trace_id, "world_action_id": action_id}
+        )
+
     def _deterministic_life_share_decision(
         self,
         canonical_user_id: str,
@@ -1264,10 +1471,15 @@ class CompanionEngine:
     def confirm_proactive_delivery(self, decision: ProactiveDecision) -> None:
         if decision.delivery_id is None:
             return
-        delivered = self.store.resolve_outgoing_and_turn_trace(
-            decision.delivery_id, decision.turn_trace_id, delivered=True
-        )
+        if self.world_kernel and decision.world_action_id:
+            delivered = self.world_kernel.settle_outgoing_action(decision.delivery_id, delivered=True)
+        else:
+            delivered = self.store.resolve_outgoing_and_turn_trace(
+                decision.delivery_id, decision.turn_trace_id, delivered=True
+            )
         if not delivered or delivered["status"] != "planned":
+            return
+        if self.world_kernel and decision.world_action_id:
             return
         self.store.record_proactive_delivery(decision.canonical_user_id, str(delivered["platform"]))
         state = self.store.get_mood_state(decision.canonical_user_id)
@@ -1288,9 +1500,16 @@ class CompanionEngine:
 
     def fail_proactive_delivery(self, decision: ProactiveDecision, reason: str) -> None:
         if decision.delivery_id is not None:
-            self.store.resolve_outgoing_and_turn_trace(
-                decision.delivery_id, decision.turn_trace_id, delivered=False, failure_reason=reason
-            )
+            if self.world_kernel and decision.world_action_id:
+                self.world_kernel.settle_outgoing_action(
+                    decision.delivery_id, delivered=False, reason=reason
+                )
+            else:
+                self.store.resolve_outgoing_and_turn_trace(
+                    decision.delivery_id, decision.turn_trace_id, delivered=False, failure_reason=reason
+                )
+        if self.world_kernel and decision.world_action_id:
+            return
         if decision.social_task_id is not None:
             self.store.defer_social_task(decision.social_task_id, due_at=utc_now() + timedelta(minutes=20))
         elif decision.message:

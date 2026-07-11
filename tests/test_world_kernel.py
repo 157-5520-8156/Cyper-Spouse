@@ -1,10 +1,11 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
 from companion_daemon.db import CompanionStore
-from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel
+from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel, parse_reply_candidate
 
 
 NOW = datetime(2026, 7, 11, 9, 0, tzinfo=UTC)
@@ -316,3 +317,163 @@ def test_only_verified_facts_are_carried_into_a_fresh_world_epoch(tmp_path: Path
     kernel.import_verified_facts(started.world_id, ["用户明确说自己在成都。"])
 
     assert list(kernel.snapshot(started.world_id)["facts"].values())[0]["source"] == "verified_user_fact_import"
+
+
+def test_world_reply_parser_refuses_free_text() -> None:
+    with pytest.raises(WorldError):
+        parse_reply_candidate("我刚和室友吃完饭。")
+
+    assert parse_reply_candidate(
+        '{"reply_text":"嗯。","mentioned_event_ids":[],"proposed_action_ids":[]}'
+    )["reply_text"] == "嗯。"
+
+
+def test_relationship_needs_and_cancelled_commitment_are_world_events(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    changed = kernel.submit(
+        {
+            "type": "change_relationship",
+            "world_id": "zhizhi-v1",
+            "entity_id": "roommate-lin",
+            "dimension": "trust",
+            "delta": 3,
+        },
+        expected_revision=started.revision,
+    )
+    needed = kernel.submit(
+        {
+            "type": "change_need",
+            "world_id": "zhizhi-v1",
+            "need": "energy",
+            "delta": -8,
+        },
+        expected_revision=changed.revision,
+    )
+    planned = kernel.submit(
+        {
+            "type": "schedule_action",
+            "world_id": "zhizhi-v1",
+            "action_id": "comfort-1",
+            "kind": "comfort_followup",
+            "expires_at": (NOW + timedelta(hours=2)).isoformat(),
+        },
+        expected_revision=needed.revision,
+    )
+    cancelled = kernel.submit(
+        {
+            "type": "cancel_action",
+            "world_id": "zhizhi-v1",
+            "action_id": "comfort-1",
+            "reason": "user_returned",
+        },
+        expected_revision=planned.revision,
+    )
+
+    state = kernel.snapshot("zhizhi-v1")
+    assert state["relationships"]["roommate-lin"]["trust"] == 3
+    assert state["needs"]["energy"] == 62
+    assert state["actions"]["comfort-1"]["status"] == "cancelled"
+    assert cancelled.events[-1].event_type == "ActionCancelled"
+
+
+def test_experience_can_only_be_marked_shared_after_its_delivery_action(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    delivered = kernel.submit(
+        {
+            "type": "schedule_action", "world_id": "zhizhi-v1", "action_id": "share-1",
+            "kind": "life_event", "expires_at": (NOW + timedelta(hours=1)).isoformat(),
+        }, expected_revision=started.revision,
+    )
+    settled = kernel.record_external_result("share-1", {"kind": "delivery", "status": "delivered"}, expected_revision=delivered.revision)
+    committed = kernel.submit(
+        {
+            "type": "commit_experience", "world_id": "zhizhi-v1", "experience_id": "life-1",
+            "action_id": "share-1", "content": "傍晚散步时拍到一片梧桐叶。",
+        }, expected_revision=settled.revision,
+    )
+
+    shared = kernel.submit(
+        {"type": "share_experience", "world_id": "zhizhi-v1", "experience_id": "life-1", "action_id": "share-1"},
+        expected_revision=committed.revision,
+    )
+
+    assert shared.events[-1].event_type == "ExperienceShared"
+    assert kernel.snapshot("zhizhi-v1")["experiences"]["life-1"]["shared"] is True
+
+
+def test_command_hydrates_from_events_when_read_projection_is_corrupted(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    kernel = WorldKernel(store)
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    with store.connect() as conn:
+        conn.execute(
+            "update world_current_state set state_json = '{}' where world_id = ?", (started.world_id,)
+        )
+
+    decision = kernel.submit(
+        {"type": "change_need", "world_id": started.world_id, "need": "energy", "delta": -5},
+        expected_revision=started.revision,
+    )
+
+    assert decision.revision == started.revision + 1
+    assert kernel.snapshot(started.world_id)["needs"]["energy"] == 65
+
+
+def test_outbox_action_transaction_rolls_back_when_projection_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.resolve_user("qq", "user")
+    kernel = WorldKernel(store)
+    kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    def broken_projection(*args, **kwargs):
+        raise RuntimeError("injected projection failure")
+
+    monkeypatch.setattr(kernel, "_write_projection", broken_projection)
+    with pytest.raises(RuntimeError, match="injected projection failure"):
+        kernel.queue_outgoing_action(
+            canonical_user_id="geoff",
+            platform="qq",
+            text="这条不该留下。",
+            kind="reply",
+            expires_at=NOW + timedelta(hours=1),
+            trace={
+                "world_id": "zhizhi-v1",
+                "appraisal": "ordinary_message",
+                "expression_policy": "自然回应。",
+                "allowed_facts": [],
+                "short_lived_constraint": None,
+                "observable_reason": "故障注入。",
+            },
+        )
+
+    assert store.outbox_message(1) is None
+    assert store.recent_turn_traces("geoff") == []
+    assert [event.event_type for event in kernel.events("zhizhi-v1")] == ["WorldStarted", "NpcRegistered"]
+
+
+def test_concurrent_same_revision_allows_exactly_one_world_write(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    def submit(index: int) -> str:
+        try:
+            kernel.submit(
+                {
+                    "type": "change_need", "world_id": "zhizhi-v1", "need": "energy", "delta": -1,
+                    "idempotency_key": f"concurrent-{index}",
+                },
+                expected_revision=started.revision,
+            )
+            return "accepted"
+        except ConcurrencyConflict:
+            return "conflict"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(submit, range(2)))
+
+    assert sorted(outcomes) == ["accepted", "conflict"]
+    assert kernel.snapshot("zhizhi-v1")["needs"]["energy"] == 69

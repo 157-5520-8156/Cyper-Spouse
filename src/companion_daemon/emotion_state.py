@@ -69,7 +69,7 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
             "被认真对待了，心里放松一点。",
             "自然柔和一点，可以露出小小开心。",
         )
-    if _has_any(text, ["难受", "崩溃", "好累", "有点累", "撑不住", "失眠", "焦虑", "委屈", "想哭", "好烦"]):
+    if _has_any(text, ["难受", "难过", "崩溃", "好累", "有点累", "撑不住", "失眠", "焦虑", "委屈", "想哭", "好烦", "有点烦"]):
         return InteractionEvent(
             "user_vulnerable",
             3,
@@ -77,7 +77,7 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
             "用户在示弱，需要先稳住对方，而不是急着开玩笑。",
             "温柔、具体、少说教，先接住情绪。",
         )
-    if _has_any(text, ["刚在忙", "我回来了", "刚下课", "刚下班", "刚到家", "我到家了"]):
+    if _has_any(text, ["刚在忙", "我回来了", "回来啦", "刚下课", "刚下班", "刚到家", "我到家了"]):
         return InteractionEvent(
             "return_after_gap",
             1,
@@ -93,7 +93,7 @@ def interpret_interaction(message: IncomingMessage, previous: MoodState) -> Inte
             "知道对方可能在忙，想找他但不想显得黏。",
             "克制、体贴，不追问。",
         )
-    if "?" in text or "？" in text or _has_any(text, ["为什么", "怎么", "你觉得", "要不要"]):
+    if "?" in text or "？" in text or _has_any(text, ["为什么", "怎么", "干嘛", "你觉得", "要不要"]):
         return InteractionEvent(
             "curiosity_invited",
             1,

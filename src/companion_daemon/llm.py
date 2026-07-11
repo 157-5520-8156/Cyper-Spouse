@@ -62,6 +62,15 @@ class FakeCompanionModel:
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         self.calls.append(messages)
         joined = "\n".join(message["content"] for message in messages)
+        if "WorldReplyJSON" in joined:
+            return json.dumps(
+                {
+                    "reply_text": "刚看到，我在。",
+                    "mentioned_event_ids": [],
+                    "proposed_action_ids": [],
+                },
+                ensure_ascii=False,
+            )
         if "Return strict JSON" in joined:
             return json.dumps(
                 {

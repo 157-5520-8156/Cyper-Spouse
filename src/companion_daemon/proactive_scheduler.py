@@ -245,10 +245,17 @@ async def scheduler_loop(
     settings = get_settings()
     while True:
         engine = build_companion_engine()
-        await recover_overdue_deferred_replies(engine, send=send, sandbox=sandbox)
-        await recover_overdue_conversation_pulses(engine, send=send, sandbox=sandbox)
+        if not getattr(engine, "world_kernel", None):
+            await recover_overdue_deferred_replies(engine, send=send, sandbox=sandbox)
+            await recover_overdue_conversation_pulses(engine, send=send, sandbox=sandbox)
         users = engine.store.canonical_users() or ["geoff"]
         for user_id in users:
+            if getattr(engine, "world_kernel", None):
+                # World mode owns time and outstanding actions in its ledger;
+                # running legacy waiting/life projections here would recreate a
+                # second behavioural history.
+                await run_once(user_id, send=send, sandbox=sandbox)
+                continue
             # Time keeps flowing through her waiting psychology even when the
             # cooldown below skips the actual proactive decision.
             if hasattr(engine, "refresh_waiting_state"):

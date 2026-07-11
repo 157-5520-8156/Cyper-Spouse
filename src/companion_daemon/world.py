@@ -6,6 +6,7 @@ from datetime import datetime
 from hashlib import sha256
 import json
 from pathlib import Path
+import sqlite3
 from typing import Any
 from uuid import uuid4
 
@@ -80,18 +81,23 @@ class WorldKernel:
             revision, state = self._load_state(conn, world_id)
             self._check_revision(revision, expected_revision)
             events = self._events_for_command(command, state)
-            return self._append_and_project(
-                conn,
-                world_id,
-                revision,
-                state,
-                events,
-                idempotency_key=idempotency_key,
-                correlation_id=str(command.get("correlation_id") or uuid4()),
-                source=str(command.get("source") or "world_command"),
-                actor=_as_dict(command.get("actor", {"kind": "system"}), "actor"),
-                causation_id=(str(command["causation_id"]) if command.get("causation_id") else None),
-            )
+            try:
+                return self._append_and_project(
+                    conn,
+                    world_id,
+                    revision,
+                    state,
+                    events,
+                    idempotency_key=idempotency_key,
+                    correlation_id=str(command.get("correlation_id") or uuid4()),
+                    source=str(command.get("source") or "world_command"),
+                    actor=_as_dict(command.get("actor", {"kind": "system"}), "actor"),
+                    causation_id=(str(command["causation_id"]) if command.get("causation_id") else None),
+                )
+            except sqlite3.IntegrityError as exc:
+                if "world_events.world_id, world_events.revision" in str(exc):
+                    raise ConcurrencyConflict("world revision changed while command was being appended") from exc
+                raise
 
     def start_from_seed_file(self, path: Path) -> WorldDecision:
         """Start one clean world epoch from a human-reviewed YAML seed."""
@@ -407,6 +413,17 @@ class WorldKernel:
                 return action_id
         return None
 
+    def due_actions(self, world_id: str, *, now: datetime) -> list[dict[str, object]]:
+        """Return scheduled actions whose recorded due time has passed in logical time."""
+        actions = _as_dict(self.snapshot(world_id)["actions"], "actions")
+        due: list[dict[str, object]] = []
+        for action_id, action in actions.items():
+            item = _as_dict(action, "action")
+            due_at = _as_dict(item.get("payload", {}), "action payload").get("due_at")
+            if item["status"] == "scheduled" and due_at and _parse_at(str(due_at)) <= now:
+                due.append({"action_id": action_id, **item})
+        return due
+
     def _start_world(self, command: dict[str, object], expected_revision: int) -> WorldDecision:
         if expected_revision != 0:
             raise ConcurrencyConflict("a new world must start at revision 0")
@@ -498,9 +515,36 @@ class WorldKernel:
             return [
                 (
                     "ActionScheduled",
-                    {"action_id": action_id, "kind": str(command.get("kind") or "generic"), "expires_at": expires_at},
+                    {
+                        "action_id": action_id,
+                        "kind": str(command.get("kind") or "generic"),
+                        "expires_at": expires_at,
+                        "payload": _as_dict(command.get("payload", {}), "action payload"),
+                    },
                 )
             ]
+        if command_type == "cancel_action":
+            action_id = str(command.get("action_id") or "")
+            action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
+            if action["status"] != "scheduled":
+                raise WorldError("only a scheduled action can be cancelled")
+            return [("ActionCancelled", {"action_id": action_id, "reason": str(command.get("reason") or "cancelled")})]
+        if command_type == "change_relationship":
+            entity_id = str(command.get("entity_id") or "")
+            dimension = str(command.get("dimension") or "")
+            if entity_id not in _as_dict(state["entities"], "entities") or dimension not in {"trust", "closeness", "respect"}:
+                raise WorldError("relationship change requires a registered entity and supported dimension")
+            return [
+                (
+                    "NpcRelationshipChanged",
+                    {"entity_id": entity_id, "dimension": dimension, "delta": int(command.get("delta") or 0)},
+                )
+            ]
+        if command_type == "change_need":
+            need = str(command.get("need") or "")
+            if need not in {"energy", "attention", "security", "initiative", "boundary"}:
+                raise WorldError("unsupported world need")
+            return [("NeedChanged", {"need": need, "delta": int(command.get("delta") or 0)})]
         if command_type == "record_external_result":
             action_id = str(command.get("action_id") or "")
             action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
@@ -587,8 +631,30 @@ class WorldKernel:
                     },
                 )
             ]
+        if command_type == "share_experience":
+            experience_id = str(command.get("experience_id") or "")
+            action_id = str(command.get("action_id") or "")
+            experience = _as_dict(_as_dict(state["experiences"], "experiences").get(experience_id), "experience")
+            action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
+            if experience.get("shared") or action["status"] != "delivered":
+                raise WorldError("experience sharing requires one delivered action and an unshared experience")
+            return [("ExperienceShared", {"experience_id": experience_id, "action_id": action_id})]
         if command_type == "observe_user_message":
             return [("UserMessageObserved", {"message_id": command.get("message_id"), "text": command.get("text", "")})]
+        if command_type == "appraise_turn":
+            appraisal = str(command.get("appraisal") or "ordinary_message")
+            policies = {
+                "user_vulnerable": "先接住情绪，不急着追问。",
+                "boundary_violation": "短而清楚地守住边界。",
+                "control_pressure": "不讨好，平静地说明边界。",
+                "repair_attempt": "可以缓和，但不立刻翻篇。",
+                "availability_drop": "收住主动性，不追发。",
+                "return_after_gap": "自然接上，不抱怨。",
+            }
+            return [
+                ("TurnAppraised", {"appraisal": appraisal, "policy": policies.get(appraisal, "自然回应当前消息。")}),
+                ("IntentCreated", {"intent_id": str(command["intent_id"]), "kind": "reply", "status": "open"}),
+            ]
         raise WorldError(f"unsupported command: {command_type}")
 
     def _append_and_project(
@@ -707,12 +773,13 @@ class WorldKernel:
             )
 
     def _load_state(self, conn, world_id: str) -> tuple[int, dict[str, object]]:
-        row = conn.execute(
-            "select applied_revision, state_json from world_current_state where world_id = ?", (world_id,)
-        ).fetchone()
-        if not row:
+        exists = conn.execute("select 1 from worlds where world_id = ?", (world_id,)).fetchone()
+        if not exists:
             raise WorldError(f"unknown world: {world_id}")
-        return int(row["applied_revision"]), json.loads(str(row["state_json"]))
+        events = self._load_events(conn, world_id)
+        if not events:
+            raise WorldError(f"world has no event stream: {world_id}")
+        return events[-1].revision, reduce_events(events)
 
     def _load_events(self, conn, world_id: str) -> list[WorldEvent]:
         rows = conn.execute("select * from world_events where world_id = ? order by revision", (world_id,)).fetchall()
@@ -808,6 +875,19 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["status"] = "expired"
         action["reason"] = payload.get("reason")
+    elif event.event_type == "ActionCancelled":
+        action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
+        action["status"] = "cancelled"
+        action["reason"] = payload.get("reason")
+    elif event.event_type == "NpcRelationshipChanged":
+        relationships = _as_dict(next_state["relationships"], "relationships")
+        relation = _as_dict(relationships.setdefault(str(payload["entity_id"]), {}), "relationship")
+        dimension = str(payload["dimension"])
+        relation[dimension] = max(-100, min(100, int(relation.get(dimension, 0)) + int(payload["delta"])))
+    elif event.event_type == "NeedChanged":
+        needs = _as_dict(next_state["needs"], "needs")
+        need = str(payload["need"])
+        needs[need] = max(0, min(100, int(needs.get(need, 50)) + int(payload["delta"])))
     elif event.event_type == "ModelProposalRecorded":
         item = {**payload, "status": "recorded"}
         _as_dict(next_state["proposals"], "proposals")[str(item["proposal_id"])] = item
@@ -816,9 +896,20 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "ExperienceCommitted":
         item = dict(payload)
         _as_dict(next_state["experiences"], "experiences")[str(item["experience_id"])] = item
+    elif event.event_type == "ExperienceShared":
+        _as_dict(next_state["experiences"], "experiences")[str(payload["experience_id"])]["shared"] = True
+        _as_dict(next_state["experiences"], "experiences")[str(payload["experience_id"])]["shared_action_id"] = payload["action_id"]
     elif event.event_type == "FactConfirmed":
         item = dict(payload)
         _as_dict(next_state["facts"], "facts")[str(item["fact_id"])] = item
+    elif event.event_type == "UserMessageObserved":
+        history = _as_list(next_state["recent_messages"], "recent_messages")
+        history.append({"direction": "in", **payload})
+        next_state["recent_messages"] = history[-16:]
+    elif event.event_type == "TurnAppraised":
+        next_state["last_appraisal"] = dict(payload)
+    elif event.event_type == "IntentCreated":
+        _as_dict(next_state["intents"], "intents")[str(payload["intent_id"])] = dict(payload)
     return next_state
 
 
@@ -832,6 +923,11 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "experiences": {},
         "facts": {},
         "proposals": {},
+        "intents": {},
+        "recent_messages": [],
+        "last_appraisal": None,
+        "relationships": {},
+        "needs": {"energy": 70, "attention": 55, "security": 50, "initiative": 20, "boundary": 0},
     }
 
 
@@ -867,3 +963,18 @@ def _parse_at(value: str) -> datetime:
     if parsed.tzinfo is None:
         raise WorldError(f"timestamp requires an explicit timezone: {value}")
     return parsed
+
+
+def parse_reply_candidate(raw: str) -> dict[str, object]:
+    """Parse the only model output shape accepted by world-mode delivery."""
+    try:
+        candidate = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise WorldError("world reply must be JSON") from exc
+    if not isinstance(candidate, dict):
+        raise WorldError("world reply must be a JSON object")
+    return {
+        "reply_text": str(candidate.get("reply_text") or "").strip(),
+        "mentioned_event_ids": candidate.get("mentioned_event_ids", []),
+        "proposed_action_ids": candidate.get("proposed_action_ids", []),
+    }

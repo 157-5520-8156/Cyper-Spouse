@@ -123,6 +123,118 @@ async def test_world_enabled_reply_records_input_action_and_delivery_settlement(
 
 
 @pytest.mark.asyncio
+async def test_world_mode_does_not_call_legacy_behavior_writers(tmp_path: Path, monkeypatch) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    def legacy_write(*args, **kwargs):
+        raise AssertionError("world mode must not mutate legacy behaviour state")
+
+    for name in (
+        "save_mood_state",
+        "save_incoming",
+        "record_interaction_event",
+        "upsert_memory",
+        "record_fact_observation",
+        "create_social_task",
+        "save_life_runtime",
+    ):
+        monkeypatch.setattr(store, name, legacy_write)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我今天有点累", message_id="world-only-1")
+    )
+
+    assert reply is not None
+    assert world.snapshot(world_id)["last_appraisal"]["appraisal"] == "user_vulnerable"
+
+
+@pytest.mark.asyncio
+async def test_world_mode_proactive_uses_only_world_action(tmp_path: Path, monkeypatch) -> None:
+    class WorldProactiveModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return '{"private_thought":"想轻轻问候。","should_send":true,"platform":"qq","message_type":"text","message":"今天还顺利吗？","cooldown_minutes":45}'
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, WorldProactiveModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    def legacy_write(*args, **kwargs):
+        raise AssertionError("world mode proactive must not use legacy writers")
+
+    for name in ("save_mood_state", "save_proactive_event", "create_social_task", "save_life_runtime"):
+        monkeypatch.setattr(store, name, legacy_write)
+
+    decision = await engine.proactive_tick("geoff")
+
+    assert decision.should_send is True
+    assert decision.world_action_id is not None
+    engine.confirm_proactive_delivery(decision)
+    assert world.snapshot(world_id)["actions"][decision.world_action_id]["status"] == "delivered"
+
+
+def test_world_mode_delayed_reply_is_a_cancellable_world_action(tmp_path: Path, monkeypatch) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    def legacy_write(*args, **kwargs):
+        raise AssertionError("world mode must not create social_tasks")
+
+    monkeypatch.setattr(store, "create_social_task", legacy_write)
+    message = IncomingMessage(platform="qq", platform_user_id="geoff", text="晚点说", message_id="delay-1")
+    action_id = engine.create_read_later_task(message, defer_minutes=5, reason="busy")
+
+    assert isinstance(action_id, str)
+    assert world.snapshot(world_id)["actions"][action_id]["status"] == "scheduled"
+    engine.cancel_deferred_reply_task(action_id)
+    assert world.snapshot(world_id)["actions"][action_id]["status"] == "cancelled"
+
+
+def test_world_afterthought_confirmation_does_not_write_legacy_mood(tmp_path: Path, monkeypatch) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    monkeypatch.setattr(store, "save_mood_state", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy mood")))
+    delivery_id = engine.queue_afterthought_delivery("geoff", "qq", "哦对，补一句。")
+    engine.confirm_afterthought_delivery("geoff", "qq", "哦对，补一句。", delivery_id=delivery_id)
+
+    action_id = world.action_id_for_delivery(world_id, delivery_id)
+    assert action_id is not None
+    assert world.snapshot(world_id)["actions"][action_id]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_new_world_turn_supersedes_persisted_delayed_reply(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+    delayed = engine.create_deferred_reply_task(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="晚点说", message_id="old-delay"),
+        defer_minutes=5,
+        reason="busy",
+    )
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我回来了", message_id="new-turn")
+    )
+
+    assert world.snapshot(world_id)["actions"][delayed]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
 async def test_failed_reply_marks_the_same_turn_trace_failed(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
