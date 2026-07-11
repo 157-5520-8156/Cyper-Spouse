@@ -744,6 +744,7 @@ class WorldKernel:
                         "daily_schedule": _as_list(seed.get("daily_schedule", []), "daily_schedule"),
                         "long_term_goals": _as_list(seed.get("long_term_goals", []), "long-term goals"),
                         "life_outcome_templates": _as_dict(seed.get("life_outcome_templates", {}), "life outcome templates"),
+                        "location_travel_minutes": _as_dict(seed.get("location_travel_minutes", {}), "location travel minutes"),
                     },
                 )
             ]
@@ -812,6 +813,10 @@ class WorldKernel:
                             payload["substitution_reason"] = substitution_reason
                         events.append(("ActivityPlanned", payload))
                         events.append(("ActivitySelected", {"activity_id": activity_id, "template_id": payload["template_id"], "reason": substitution_reason or "primary_template", "rule_version": self.life_simulation.RULE_VERSION}))
+                        previous = next((candidate for kind, candidate in reversed(events[:-2]) if kind == "ActivityPlanned" and str(candidate.get("ends_at", ""))[:10] == starts.date().isoformat()), None)
+                        if previous and self._travel_minutes(state, str(previous.get("location") or ""), str(payload.get("location") or "")) > int((starts - _parse_at(str(previous["ends_at"]))).total_seconds() // 60):
+                            events.append(("ActivityDeferred", {"activity_id": activity_id, "reason": "travel_time_conflict", "next_review_at": (target_at + timedelta(hours=int(item.get("review_after_hours", 2)))).isoformat()}))
+                            continue
                         if substitution_reason == "no_eligible_template" and bool(item.get("rest_when_unavailable")):
                             events.append(("ActivityRested", {"activity_id": activity_id, "reason": "no_eligible_seeded_activity", "energy_delta": int(item.get("rest_recovery", 8))}))
                             continue
@@ -1240,6 +1245,13 @@ class WorldKernel:
         return str(row["world_id"])
 
     @staticmethod
+    def _travel_minutes(state: dict[str, object], origin: str, destination: str) -> int:
+        if not origin or origin == destination:
+            return 0
+        routes = _as_dict(state.get("location_travel_minutes", {}), "location travel minutes")
+        return int(routes.get(f"{origin}->{destination}", routes.get(f"{destination}->{origin}", 0)))
+
+    @staticmethod
     def _command_world_id(command: dict[str, object]) -> str:
         world_id = str(command.get("world_id") or "")
         if not world_id:
@@ -1274,6 +1286,7 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         next_state["entities"] = {str(protagonist["id"]): {**protagonist, "status": "active"}}
         next_state["daily_schedule"] = payload.get("daily_schedule", [])
         next_state["life_outcome_templates"] = payload.get("life_outcome_templates", {})
+        next_state["location_travel_minutes"] = payload.get("location_travel_minutes", {})
         next_state["goals"] = {str(goal["id"]): {**goal, "progress": 0, "status": "active"} for goal in _as_list(payload.get("long_term_goals", []), "long-term goals")}
     elif event.event_type == "NpcRegistered":
         npc = dict(payload)
@@ -1420,6 +1433,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "needs": {"energy": 70, "attention": 55, "security": 50, "initiative": 20, "boundary": 0},
         "daily_schedule": [],
         "life_outcome_templates": {},
+        "location_travel_minutes": {},
         "share_decisions": {},
         "share_days": {},
         "goals": {},

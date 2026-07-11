@@ -193,6 +193,14 @@ def test_unavailable_activity_can_be_deferred_then_explicitly_reviewed(tmp_path:
     assert kernel.snapshot(started.world_id)["agenda"]["2026-07-11:defer"]["status"] == "rested"
 
 
+def test_seeded_location_transition_defers_impossible_second_activity(tmp_path: Path) -> None:
+    seed = world_seed() | {"location_travel_minutes": {"华师大宿舍->华东师范大学": 45}, "daily_schedule": [{"slot": "first", "title": "宿舍闲聊", "template_id": "dorm_chat", "location": "华师大宿舍", "starts_hour": 9, "ends_hour": 10}, {"slot": "second", "title": "课程笔记", "template_id": "course_notes", "location": "华东师范大学", "starts_hour": 10, "ends_hour": 11}], "long_term_goals": [{"id": "course-notes", "title": "课程", "target": 2, "deadline": (NOW + timedelta(days=1)).isoformat()}]}
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": seed}, expected_revision=0)
+    kernel.advance(started.world_id, NOW + timedelta(hours=3), expected_revision=started.revision)
+    assert kernel.snapshot(started.world_id)["agenda"]["2026-07-11:second"]["status"] == "deferred"
+
+
 def test_external_delivery_result_is_idempotent_and_only_settled_action_can_create_experience(
     tmp_path: Path,
 ) -> None:

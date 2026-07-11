@@ -46,6 +46,11 @@ life_outcome_templates:
     npc_id: roommate-lin
     energy_cost: 5
     content: 和林晚在校园里走了一小段，聊了晚饭。
+location_travel_minutes:
+  华东师范大学->上海: 45
+  上海->华东师范大学: 45
+  华东师范大学->嘉兴书店: 120
+  上海->嘉兴书店: 105
 daily_schedule:
   - slot: morning_study
     title: 图书馆看书
