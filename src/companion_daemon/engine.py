@@ -580,7 +580,9 @@ class CompanionEngine:
     def confirm_reply_delivery(self, reply: CompanionReply) -> None:
         if reply.delivery_id is None:
             return
-        delivered = self.store.mark_outgoing_delivered(reply.delivery_id)
+        delivered = self.store.resolve_outgoing_and_turn_trace(
+            reply.delivery_id, reply.turn_trace_id, delivered=True
+        )
         if not delivered or delivered["status"] != "planned":
             return
         state = self.store.get_mood_state(reply.canonical_user_id)
@@ -599,14 +601,12 @@ class CompanionEngine:
             source=f"{delivered['platform']}:outgoing",
             confidence=0.65,
         )
-        if reply.turn_trace_id is not None:
-            self.store.complete_turn_trace(reply.turn_trace_id, delivered=True)
 
     def fail_reply_delivery(self, reply: CompanionReply, reason: str, *, source_task_id: int | None = None) -> None:
         if reply.delivery_id is not None:
-            self.store.mark_outgoing_failed(reply.delivery_id, reason)
-        if reply.turn_trace_id is not None:
-            self.store.complete_turn_trace(reply.turn_trace_id, delivered=False, failure_reason=reason)
+            self.store.resolve_outgoing_and_turn_trace(
+                reply.delivery_id, reply.turn_trace_id, delivered=False, failure_reason=reason
+            )
         if source_task_id is not None:
             self.store.cancel_social_task(source_task_id)
             self._create_reply_reconsider_task(reply, reason)
@@ -994,7 +994,7 @@ class CompanionEngine:
             )
         if trigger and decision.should_send:
             decision = decision.model_copy(update={"trigger_type": trigger.type})
-        elif trigger and not decision.should_send:
+        elif trigger and not decision.should_send and trigger.type != "withheld_impulse":
             impulse = build_withheld_impulse(
                 trigger_type=trigger.type,
                 private_thought=decision.private_thought,
@@ -1019,6 +1019,11 @@ class CompanionEngine:
         if social_task:
             if decision.should_send:
                 decision = decision.model_copy(update={"social_task_id": int(social_task["id"])})
+            elif social_task["kind"] == "withheld_impulse":
+                # A held-back thought gets one later reconsideration.  If that
+                # reconsideration still says no, letting it expire is a real
+                # choice, not a timer that reopens the same thought forever.
+                self.store.resolve_social_task(int(social_task["id"]))
             else:
                 self.store.defer_social_task(int(social_task["id"]), due_at=now + timedelta(minutes=45))
         decision = self._attach_sticker(decision, state)
@@ -1035,14 +1040,24 @@ class CompanionEngine:
             decision.cooldown_minutes,
         )
         if decision.should_send and decision.platform:
+            delivery_id = self.store.queue_outgoing(
+                canonical_user_id, decision.platform, decision.message or "", kind="proactive"
+            )
+            trace_id = self.store.create_turn_trace(
+                canonical_user_id,
+                appraisal=decision.trigger_type or "proactive",
+                expression_policy="主动消息只轻轻开口，不索取回应。",
+                allowed_facts=[],
+                short_lived_constraint=None,
+                observable_reason=decision.private_thought[:160],
+                output_text=decision.message or "",
+                delivery_id=delivery_id,
+                direction="proactive",
+            )
             decision = decision.model_copy(
                 update={
-                    "delivery_id": self.store.queue_outgoing(
-                        canonical_user_id,
-                        decision.platform,
-                        decision.message or "",
-                        kind="proactive",
-                    )
+                    "delivery_id": delivery_id,
+                    "turn_trace_id": trace_id,
                 }
             )
         return decision
@@ -1087,18 +1102,26 @@ class CompanionEngine:
             decision.trigger_type,
             decision.cooldown_minutes,
         )
-        return decision.model_copy(
-            update={
-                "delivery_id": self.store.queue_outgoing(
-                    canonical_user_id, "qq", decision.message or "", kind="proactive"
-                )
-            }
+        delivery_id = self.store.queue_outgoing(canonical_user_id, "qq", decision.message or "", kind="proactive")
+        trace_id = self.store.create_turn_trace(
+            canonical_user_id,
+            appraisal="life_share_followup",
+            expression_policy="仅分享已记录的生活事件，不补写新事实。",
+            allowed_facts=[content],
+            short_lived_constraint=None,
+            observable_reason=decision.private_thought,
+            output_text=decision.message or "",
+            delivery_id=delivery_id,
+            direction="proactive",
         )
+        return decision.model_copy(update={"delivery_id": delivery_id, "turn_trace_id": trace_id})
 
     def confirm_proactive_delivery(self, decision: ProactiveDecision) -> None:
         if decision.delivery_id is None:
             return
-        delivered = self.store.mark_outgoing_delivered(decision.delivery_id)
+        delivered = self.store.resolve_outgoing_and_turn_trace(
+            decision.delivery_id, decision.turn_trace_id, delivered=True
+        )
         if not delivered or delivered["status"] != "planned":
             return
         self.store.record_proactive_delivery(decision.canonical_user_id, str(delivered["platform"]))
@@ -1120,7 +1143,9 @@ class CompanionEngine:
 
     def fail_proactive_delivery(self, decision: ProactiveDecision, reason: str) -> None:
         if decision.delivery_id is not None:
-            self.store.mark_outgoing_failed(decision.delivery_id, reason)
+            self.store.resolve_outgoing_and_turn_trace(
+                decision.delivery_id, decision.turn_trace_id, delivered=False, failure_reason=reason
+            )
         if decision.social_task_id is not None:
             self.store.defer_social_task(decision.social_task_id, due_at=utc_now() + timedelta(minutes=20))
         elif decision.message:

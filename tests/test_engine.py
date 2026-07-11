@@ -97,6 +97,21 @@ async def test_failed_reply_marks_the_same_turn_trace_failed(tmp_path: Path) -> 
 
 
 @pytest.mark.asyncio
+async def test_delivery_trace_cannot_be_changed_to_failed_after_delivery(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+
+    reply = await engine.handle_message(IncomingMessage(platform="qq", platform_user_id="geoff", text="在吗"))
+
+    assert reply is not None
+    engine.fail_reply_delivery(reply, "late failure callback")
+    trace = store.recent_turn_traces("geoff")[-1]
+    assert trace["status"] == "delivered"
+    assert trace["failure_reason"] is None
+
+
+@pytest.mark.asyncio
 async def test_character_examples_are_not_replayed_as_fake_chat_history(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
@@ -754,15 +769,17 @@ async def test_proactive_tick_records_decision(tmp_path: Path) -> None:
     decision = await engine.proactive_tick("geoff")
 
     assert decision.should_send is True
+    assert decision.turn_trace_id is not None
     assert decision.platform == "qq"
     assert decision.message
     assert decision.delivery_id is not None
     state = store.get_mood_state("geoff")
     assert store.outbox_message(decision.delivery_id)["status"] == "planned"
     assert sum(row["direction"] == "out" for row in store.recent_messages("geoff", limit=20)) == outgoing_before
-
     engine.confirm_proactive_delivery(decision)
-
+    trace = store.recent_turn_traces("geoff")[-1]
+    assert trace["direction"] == "proactive"
+    assert trace["status"] == "delivered"
     state = store.get_mood_state("geoff")
     assert state.initiative < 61
     assert state.emotional_charge < 15
@@ -893,6 +910,13 @@ async def test_proactive_tick_records_withheld_impulse(tmp_path: Path) -> None:
     withheld = [task for task in tasks if task["kind"] == "withheld_impulse"]
     assert withheld and withheld[-1]["status"] == "pending"
     assert not any(row["kind"] == "withheld_proactive_impulse" for row in store.memories("geoff"))
+
+    store.defer_social_task(int(withheld[-1]["id"]), due_at=utc_now() - timedelta(minutes=1))
+    await engine.proactive_tick("geoff")
+
+    tasks = [task for task in store.recent_social_tasks("geoff", limit=10) if task["kind"] == "withheld_impulse"]
+    assert len(tasks) == 1
+    assert tasks[0]["status"] == "resolved"
 
 
 @pytest.mark.asyncio

@@ -542,6 +542,61 @@ class CompanionStore:
                 (utc_now().isoformat(), reason[:500], delivery_id),
             )
 
+    def resolve_outgoing_and_turn_trace(
+        self,
+        delivery_id: int,
+        trace_id: int | None,
+        *,
+        delivered: bool,
+        failure_reason: str | None = None,
+    ) -> sqlite3.Row | None:
+        """Set one outbox delivery and its audit trace in one transaction."""
+        now = utc_now().isoformat()
+        with self.connect() as conn:
+            row = conn.execute(
+                "select canonical_user_id, platform, text, kind, status from outbox_messages where id = ?",
+                (delivery_id,),
+            ).fetchone()
+            if not row or row["status"] != "planned":
+                return row
+            if delivered:
+                conn.execute(
+                    "update outbox_messages set status = 'delivered', delivered_at = ? where id = ?",
+                    (now, delivery_id),
+                )
+                conn.execute(
+                    """
+                    insert into messages (
+                      canonical_user_id, platform, platform_user_id, channel_id, message_id,
+                      direction, text, attachments_json, sent_at
+                    ) values (?, ?, '', null, null, 'out', ?, '[]', ?)
+                    """,
+                    (row["canonical_user_id"], row["platform"], row["text"], now),
+                )
+            else:
+                conn.execute(
+                    """
+                    update outbox_messages set status = 'failed', failed_at = ?, failure_reason = ?
+                    where id = ?
+                    """,
+                    (now, (failure_reason or "delivery failed")[:500], delivery_id),
+                )
+            if trace_id is not None:
+                conn.execute(
+                    """
+                    update turn_traces set status = ?, failure_reason = ?, updated_at = ?
+                    where id = ? and delivery_id = ? and status = 'planned'
+                    """,
+                    (
+                        "delivered" if delivered else "failed",
+                        None if delivered else (failure_reason or "delivery failed")[:500],
+                        now,
+                        trace_id,
+                        delivery_id,
+                    ),
+                )
+            return row
+
     def outbox_message(self, delivery_id: int) -> sqlite3.Row | None:
         with self.connect() as conn:
             return conn.execute(
@@ -563,6 +618,7 @@ class CompanionStore:
         observable_reason: str,
         output_text: str,
         delivery_id: int | None,
+        direction: str = "incoming_reply",
     ) -> int:
         now = utc_now().isoformat()
         with self.connect() as conn:
@@ -572,10 +628,11 @@ class CompanionStore:
                   canonical_user_id, direction, appraisal, expression_policy,
                   allowed_facts_json, short_lived_constraint, observable_reason,
                   output_text, delivery_id, status, created_at, updated_at
-                ) values (?, 'incoming_reply', ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)
                 """,
                 (
                     canonical_user_id,
+                    direction,
                     appraisal,
                     expression_policy,
                     json.dumps(allowed_facts, ensure_ascii=False),

@@ -71,6 +71,7 @@ class ProactiveDecision(BaseModel):
     cooldown_minutes: int = 30
     delivery_id: int | None = None
     social_task_id: int | None = None
+    turn_trace_id: int | None = None
 
 
 class MoodState(BaseModel):
