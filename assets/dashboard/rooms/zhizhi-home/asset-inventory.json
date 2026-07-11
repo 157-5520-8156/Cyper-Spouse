@@ -90,6 +90,17 @@
         "sources/kitchen-bin-chroma-v1.png"
       ],
       "note": "Second oven attempt removes the cooktop; shelf, rail and bin are isolated from the room master for draft assembly."
+    },
+    {
+      "id": "wave2-kitchen-counter-decor-chroma-v1",
+      "targets": ["kitchen-sink-counter-decor", "kitchen-stove-counter-decor"],
+      "status": "needs-art",
+      "method": "imagegen-background-extraction",
+      "sources": [
+        "sources/kitchen-sink-counter-decor-chroma-v1.png",
+        "sources/kitchen-stove-counter-decor-chroma-v1.png"
+      ],
+      "note": "Counter decor is split by physical parent so hiding either base cabinet cannot leave props floating."
     }
   ],
   "items": [
@@ -127,7 +138,8 @@
     {"id":"fridge","zone":"kitchen","category":"appliance","status":"planned","interactive":false},
     {"id":"kitchen-shelf","zone":"kitchen","category":"wall-decoration","status":"planned","interactive":false},
     {"id":"kitchen-utensil-rail","zone":"kitchen","category":"wall-decoration","status":"planned","interactive":false},
-    {"id":"kitchen-counter-decor","zone":"kitchen","category":"decor-cluster","status":"planned","interactive":false},
+    {"id":"kitchen-sink-counter-decor","zone":"kitchen","category":"decor-cluster","status":"planned","interactive":false},
+    {"id":"kitchen-stove-counter-decor","zone":"kitchen","category":"decor-cluster","status":"planned","interactive":false},
     {"id":"kitchen-pendant-light","zone":"kitchen","category":"lighting","status":"planned","interactive":false},
     {"id":"kitchen-bin","zone":"kitchen","category":"furniture","status":"planned","interactive":false},
 

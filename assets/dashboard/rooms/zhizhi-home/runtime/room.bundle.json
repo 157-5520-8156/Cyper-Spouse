@@ -324,7 +324,14 @@
         "interactive": false
       },
       {
-        "id": "kitchen-counter-decor",
+        "id": "kitchen-sink-counter-decor",
+        "zone": "kitchen",
+        "category": "decor-cluster",
+        "status": "planned",
+        "interactive": false
+      },
+      {
+        "id": "kitchen-stove-counter-decor",
         "zone": "kitchen",
         "category": "decor-cluster",
         "status": "planned",
@@ -564,8 +571,8 @@
       "ambient-light"
     ],
     "summary": {
-      "total": 64,
-      "planned": 57,
+      "total": 65,
+      "planned": 58,
       "partial": 6,
       "atomized": 0,
       "verified": 1
@@ -1271,13 +1278,16 @@
         0
       ],
       "posePosition": [
-        0.5,
-        0.8,
+        1,
+        1,
         0
       ],
-      "pose": "idle",
+      "pose": "sit",
       "facing": "downLeft",
-      "depth": "natural"
+      "depth": {
+        "relativeTo": "dining",
+        "layer": "above-front"
+      }
     },
     "sofa": {
       "object": "sofa",
@@ -1571,6 +1581,8 @@
       "kitchenWallCabinetDecorBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-wall-cabinet-decor-draft.png",
       "kitchenSinkCounterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-sink-counter-draft.png",
       "kitchenStoveCounterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-stove-counter-draft.png",
+      "kitchenSinkCounterDecorFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-sink-counter-decor-draft.png",
+      "kitchenStoveCounterDecorFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-stove-counter-decor-draft.png",
       "fridgeFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/fridge-draft.png",
       "ovenFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/oven-draft.png",
       "kitchenShelfBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-shelf-draft.png",
@@ -2632,6 +2644,84 @@
           ]
         },
         "auditPose": {}
+      },
+      {
+        "id": "kitchen-sink-counter-decor",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          1.5,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "kitchenSinkCounterDecorFront0Draft",
+            "origin": [
+              555,
+              270
+            ],
+            "depthBias": 50
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "kitchen-sink-counter"
+      },
+      {
+        "id": "kitchen-stove-counter-decor",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "tile": [
+          1,
+          1,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "kitchenStoveCounterDecorFront0Draft",
+            "origin": [
+              690,
+              240
+            ],
+            "depthBias": 50
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "kitchen-stove-counter"
       },
       {
         "id": "fridge",

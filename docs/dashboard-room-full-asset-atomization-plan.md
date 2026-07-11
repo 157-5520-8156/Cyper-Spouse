@@ -5,13 +5,13 @@
 ## 执行状态
 
 - [x] 计划与“完全原子化”验收定义落盘。
-- [x] 建立 64 项机器可读 inventory：57 项 `planned`、6 项 `partial`、1 项 `verified`（AI 新增 `teal-stool`）。
+- [x] 建立 65 项机器可读 inventory：58 项 `planned`、6 项 `partial`、1 项 `verified`（AI 新增 `teal-stool`；厨房台面 decor 按物理父柜拆成两项）。
 - [x] Compiler 将 inventory 状态编入 bundle，并拒绝非法状态、重复项及无 inventory 所有者的 room 对象。
 - [x] Runtime 增加 `?demo=atomization&object=<id>&mode=<hidden|solo>`；隐藏不改变 occupancy 与路径。
 - [x] Room Editor 显示 inventory 进度，并提供 hidden/solo 删除测试。
 - [x] 波次 0：通用对象 `layers / occupancy / audits / provenance` schema；`teal-stool` 已作为无互动原生对象接入，旧对象经 Compiler 归一化到同一 bundle 契约。
 - [ ] 波次 1：主要遮挡家具（进行中：clean shell 与 16 个家具/附属对象已进入可编译 `artDraft`，仍需逐件校准和删除测试）。
-- [ ] 波次 2：厨房与大型收纳（进行中：高书柜/内容、吊柜/decor、水槽柜、灶台柜、冰箱、烤箱、墙架、挂具和垃圾桶共 11 件已接入，草稿合计 27 对象、34 个构建资产）。
+- [x] 波次 2：厨房与大型收纳草稿功能闭环（29 个对象、36 个构建资产；全部厨房对象可删除，父子联动、适用遮挡与餐厨动作/路径通过；素材仍保持 `needs-art`，终稿基线在波次 6 统一批准）。
 - [ ] 波次 3–6：软装/灯/植物、decor、路径动作与最终验收。
 
 ### 波次 0 验收记录
@@ -125,7 +125,8 @@
 - `kitchen-stove-counter`：灶台与右侧台面柜。
 - `oven`、`fridge`：两个家电对象。
 - `kitchen-shelf`、`kitchen-utensil-rail`：墙面层架与挂具。
-- `kitchen-counter-decor`：瓶罐、水壶与食物 cluster。
+- `kitchen-sink-counter-decor`：附着水槽柜的瓶罐与器具 cluster。
+- `kitchen-stove-counter-decor`：附着灶台柜的水壶与食物 cluster。
 - `kitchen-pendant-light`：餐厨吊灯。
 - `kitchen-bin`：冰箱旁垃圾桶。
 
@@ -314,7 +315,7 @@ Runtime 不包含家具名称特判。层角色、depthTile、occupancy 与 inte
 
 验收：厨房区域可以逐对象隐藏；餐厨路径和人物前后关系不受影响。
 
-当前草稿进度：已装配 27 个对象、34 个 runtime 资产。高书柜/内容、吊柜/顶部 decor、水槽柜、灶台柜、冰箱、无炉面的嵌入式烤箱、墙架、挂具与垃圾桶均已进入同一对象契约；四个最新对象已通过 hidden/solo，烤箱通过 behind/front，贴墙垃圾桶仅保留真实可达的 front 审计。台面小物与厨房终稿视觉基线仍未完成，因此波次 2 尚未关闭。
+当前草稿进度：已装配 29 个对象、36 个 runtime 资产。高书柜/内容、吊柜/顶部 decor、水槽柜/台面 decor、灶台柜/台面 decor、冰箱、无炉面的嵌入式烤箱、墙架、挂具与垃圾桶均已进入同一对象契约。两个台面 cluster 分别 attached 到物理父柜，子对象 hidden/solo 和父柜 hidden 级联通过；烤箱通过 behind/front，贴墙垃圾桶仅保留真实可达的 front 审计。餐厨 tour 无新增阻塞，用餐动作改为左侧餐椅坐姿，避免角色落进厨房柜体与餐桌的复合遮挡区。波次 2 草稿功能闭环完成，全部素材仍为 `needs-art`，终稿逐像素基线留到波次 6 统一批准。
 
 ### 波次 3：地毯、灯具、植物与窗区
 

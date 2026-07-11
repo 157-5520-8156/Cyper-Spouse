@@ -115,6 +115,16 @@
 - 浏览器截图接口实际返回 JPEG 字节，即便调用方请求 PNG；直接按 PNG 展示会偶发形成黑洞式预览。视觉检查现先按真实格式解码再转无损 PNG，确认 Canvas 本身没有丢层。该现象属于审计传输层，不是房间渲染缺图。
 - 自动验证：Room Runtime JS 19 项通过，Room Compiler Python 24 项通过，`git diff --check` 通过。四件新资产仍为 `planned / needs-art`；台面 decor 和厨房最终视觉基线完成前，波次 2 不标记完成。
 
+## 全资产原子化 · 波次 2 台面小物与餐厨动作收口（2026-07-12）
+
+- 原 inventory 的单一 `kitchen-counter-decor` 跨越两组父柜，隐藏任一柜体都会产生所有权歧义；现拆为 `kitchen-sink-counter-decor` 与 `kitchen-stove-counter-decor`，inventory 增至 65 项（58 planned、6 partial、1 verified）。
+- 使用房间母版作为风格 reference，分别生成罐瓶/器具组和水壶/面包砧板组的洋红 chroma source；Compiler 依据 manifest 可复现裁切、去色键、缩放并生成两张独立 draft layer。`artDraft` 增至 29 个对象，runtime 构建资产增至 36。
+- 两个 cluster 分别 `attachedTo` 水槽柜与灶台柜。浏览器六项矩阵验证：子 hidden 只删除目标，子 solo 保留目标与唯一父柜，父柜 hidden 同时删除父体和对应 decor；另一组厨房对象不受影响。
+- 整屋装配中罐瓶组落在水槽柜后沿，水壶/面包板落在灶台上，没有侵入餐桌、冰箱或墙挂具；两组对象都使用 `occupancy.kind=none`，不会改变 tour 路径。
+- 餐厨动作复验发现旧 `posePosition=[0.5,0.8]` 会被厨房柜体与餐桌复合遮挡到完全不可见；改为左侧餐椅 `[1,1]` 的 `sit` 姿态，并使用 `above-front` 相对餐桌深度。浏览器确认角色完整坐在椅上，不再出现只剩头部或整人消失。
+- 审查发现 Compiler 的 `despill` 原先无论 key 色为何都只压绿色通道，导致洋红 chroma 素材保留细边。现改为先缩放再按实际 key 的主通道去色，并增加洋红 key 回归测试；两张台面小物及既有洋红素材重编译后没有纯洋红半透明边缘，整屋与用餐坐姿复验无回退。
+- 波次 2 的草稿数据、父子关系、删除测试、适用遮挡、tour 和用餐动作已闭环；Room Compiler Python 25 项、Room Runtime JS 19 项、Ruff 与差异检查通过，重复构建没有产生未提交差异。所有候选仍保持 `planned / needs-art`，不把功能通过误写成终稿素材完成。最终逐像素批准基线在波次 6 统一生成。
+
 ## 后续扩展规则
 
 - 后续若新增家具或新动作，必须同时添加 `behind/front` 或动作巡检入口，不能只改 daemon 映射。

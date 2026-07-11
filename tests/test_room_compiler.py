@@ -4,7 +4,11 @@ from pathlib import Path
 from PIL import Image
 import pytest
 
-from companion_daemon.room_compiler import RoomCompileError, compile_room
+from companion_daemon.room_compiler import (
+    RoomCompileError,
+    _normalize_independent_source,
+    compile_room,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -49,8 +53,14 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     )
     assert bundle["objects"][0]["layers"][0]["image"] == "deskFront0"
     assert bundle["sprites"]["poses"]["sit"]["crop"] == [380, 620, 360, 470]
+    assert bundle["interactions"]["dining"] == {
+        "object": "dining", "location": "kitchen", "action": "eat",
+        "approach": [0, 1, 0],
+        "posePosition": [1, 1, 0], "pose": "sit", "facing": "downLeft",
+        "depth": {"relativeTo": "dining", "layer": "above-front"},
+    }
     assert bundle["inventory"]["summary"] == {
-        "total": 64, "planned": 57, "partial": 6, "atomized": 0, "verified": 1
+        "total": 65, "planned": 58, "partial": 6, "atomized": 0, "verified": 1
     }
     assert {item["id"]: item["status"] for item in bundle["inventory"]["items"]}["desk"] == "partial"
     assert bundle["behavior"]["actionDefinitions"]["read_phone"]["interaction"] == "phone"
@@ -76,7 +86,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "bed-divider-content-cluster", "tall-bookcase",
         "bookcase-content-cluster", "kitchen-wall-cabinets",
         "kitchen-wall-cabinet-decor", "kitchen-sink-counter",
-        "kitchen-stove-counter", "fridge", "oven", "kitchen-shelf",
+        "kitchen-stove-counter", "kitchen-sink-counter-decor",
+        "kitchen-stove-counter-decor", "fridge", "oven", "kitchen-shelf",
         "kitchen-utensil-rail", "kitchen-bin",
     ]
     assert bundle["artDraft"]["objects"][0]["layers"][0]["image"] == "sofaFront0Draft"
@@ -112,11 +123,35 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
             "kitchen-wall-cabinets-draft.png",
             "kitchen-wall-cabinet-decor-draft.png",
             "kitchen-sink-counter-draft.png",
-            "kitchen-stove-counter-draft.png", "fridge-draft.png",
+            "kitchen-stove-counter-draft.png",
+            "kitchen-sink-counter-decor-draft.png",
+            "kitchen-stove-counter-decor-draft.png", "fridge-draft.png",
             "oven-draft.png", "kitchen-shelf-draft.png",
             "kitchen-utensil-rail-draft.png", "kitchen-bin-draft.png",
         )
     )
+
+
+def test_chroma_despill_uses_the_declared_key_channels() -> None:
+    source = Image.new("RGBA", (3, 1))
+    source.putdata([
+        (255, 0, 255, 255),
+        (255, 80, 255, 255),
+        (120, 80, 40, 255),
+    ])
+
+    result = _normalize_independent_source(source, {
+        "chromaKey": "#ff00ff",
+        "transparentThreshold": 12,
+        "opaqueThreshold": 220,
+        "despill": True,
+    })
+
+    assert result.getpixel((0, 0))[3] == 0
+    red, green, blue, alpha = result.getpixel((1, 0))
+    assert 0 < alpha < 252
+    assert red <= green and blue <= green
+    assert result.getpixel((2, 0))[3] == 255
 
 
 def test_compile_room_rejects_invalid_geometry_before_writing_outputs(
@@ -283,7 +318,7 @@ def test_compile_room_replaces_stale_runtime_as_one_complete_output(
 
     assert report.bundle_path == output_dir / "room.bundle.json"
     assert not stale.exists()
-    assert len(report.generated_assets) == 34
+    assert len(report.generated_assets) == 36
 
 
 @pytest.mark.parametrize(

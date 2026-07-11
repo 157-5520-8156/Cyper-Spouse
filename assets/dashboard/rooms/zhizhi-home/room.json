@@ -771,6 +771,60 @@
         "audit": {"behind": [0.5, 0.5, 0], "front": [1.5, 1.5, 0]}
       },
       {
+        "id": "kitchen-sink-counter-decor",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "attachedTo": "kitchen-sink-counter",
+        "depthTile": [0, 1.5, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/kitchen-sink-counter-decor-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [360, 315, 1070, 760],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 50,
+            "opaqueThreshold": 160,
+            "despill": true,
+            "resize": [95, 60]
+          },
+          "output": "kitchen-sink-counter-decor-draft.png",
+          "origin": [555, 270],
+          "depthBias": 50
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "kitchen-stove-counter-decor",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "attachedTo": "kitchen-stove-counter",
+        "depthTile": [1, 1, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/kitchen-stove-counter-decor-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [340, 275, 1110, 795],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 50,
+            "opaqueThreshold": 160,
+            "despill": true,
+            "resize": [110, 75]
+          },
+          "output": "kitchen-stove-counter-decor-draft.png",
+          "origin": [690, 240],
+          "depthBias": 50
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
         "id": "fridge",
         "category": "appliance",
         "assetMode": "layered",
@@ -911,8 +965,8 @@
     },
     "dining": {
       "object": "dining", "location": "kitchen", "action": "eat", "approach": [0, 1, 0],
-      "posePosition": [0.5, 0.8, 0], "pose": "idle", "facing": "downLeft",
-      "depth": "natural"
+      "posePosition": [1, 1, 0], "pose": "sit", "facing": "downLeft",
+      "depth": {"relativeTo": "dining", "layer": "above-front"}
     },
     "sofa": {
       "object": "sofa", "location": "sofa", "action": "relax", "approach": [5, 7, 0],

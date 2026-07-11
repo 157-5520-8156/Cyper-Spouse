@@ -146,6 +146,25 @@ def _parse_hex_color(value: str) -> tuple[int, int, int]:
         raise RoomCompileError(["sourceTransform chromaKey must be a six-digit RGB hex value"]) from exc
 
 
+def _despill_chroma(
+    color: tuple[int, int, int], key: tuple[int, int, int]
+) -> tuple[int, int, int]:
+    """Remove the key's dominant channel signature from a soft edge pixel."""
+
+    dominant = max(key)
+    keyed_channels = {index for index, value in enumerate(key) if value >= dominant - 8}
+    neutral_channels = [
+        value for index, value in enumerate(color) if index not in keyed_channels
+    ]
+    if not neutral_channels or len(keyed_channels) == 3:
+        return color
+    neutral = max(neutral_channels)
+    return tuple(
+        min(value, neutral) if index in keyed_channels else value
+        for index, value in enumerate(color)
+    )
+
+
 def _normalize_independent_source(
     image: Image.Image, transform: dict[str, Any] | None
 ) -> Image.Image:
@@ -153,6 +172,8 @@ def _normalize_independent_source(
         return image
     if crop := transform.get("crop"):
         image = image.crop(tuple(crop))
+    if resize := transform.get("resize"):
+        image = image.resize(tuple(resize), Image.Resampling.LANCZOS)
     if key_value := transform.get("chromaKey"):
         key = _parse_hex_color(key_value)
         transparent = float(transform.get("transparentThreshold", 12))
@@ -173,10 +194,8 @@ def _normalize_independent_source(
                     pixels[x, y] = (0, 0, 0, 0)
                     continue
                 if transform.get("despill") and alpha < 252:
-                    green = min(green, max(red, blue) - 1)
-                pixels[x, y] = (red, max(0, green), blue, alpha)
-    if resize := transform.get("resize"):
-        image = image.resize(tuple(resize), Image.Resampling.LANCZOS)
+                    red, green, blue = _despill_chroma((red, green, blue), key)
+                pixels[x, y] = (red, green, blue, alpha)
     return image
 
 
