@@ -151,7 +151,9 @@ def transition_emotional_state(previous: MoodState, event: InteractionEvent) -> 
         state.trust = _clamp(state.trust + 3)
         state.patience = _clamp(state.patience + 8)
         state.security = _clamp(state.security + 5)
-        state.emotional_charge = _clamp(state.emotional_charge - 12)
+        # A single apology can open the door to repair, but should not erase
+        # the immediately preceding hurt before later behavior confirms it.
+        state.emotional_charge = _clamp(state.emotional_charge - 6)
         state.boundary_level = _clamp(state.boundary_level - 1)
         state.unresolved_emotion = "缓和了一些，但还想看看对方之后怎么说。"
     elif event.kind == "warmth_received":
