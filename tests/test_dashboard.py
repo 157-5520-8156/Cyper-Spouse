@@ -23,12 +23,12 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert "sceneDefinitions" in response.text
     assert "activateScene" in response.text
     assert "scene_id" in response.text
-    assert "isometric-room-2.png" in response.text
-    assert "isometric-room-assets-3.png" in response.text
-    assert "hormelz-girl" in response.text
+    assert "zhizhi-q-home-evening-v1.png" in response.text
+    assert "zhizhi-q-sprite-sheet-v1.png" in response.text
     assert "characterAction" in response.text
     assert "drawPhone" in response.text
     assert "drawSleep" in response.text
+    assert "状态同步失败 · 可稍后重试" in response.text
     assert "zhizhi-sprite-sheet-v2.png" not in response.text
     assert "routeGraph" in response.text
     assert "/debug/users" in response.text

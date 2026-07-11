@@ -276,26 +276,22 @@ DASHBOARD_HTML = r"""<!doctype html>
     const stage = {w:1000, h:760, scale:1, ox:0, oy:0};
     const images = {};
     const imagePaths = {
-      room:'/assets/dashboard/free-bedroom/isometric-room-2.png',
-      props:'/assets/dashboard/free-bedroom/isometric-room-assets-3.png'
+      room:'/assets/dashboard/zhizhi-q-home-evening-v1.png',
+      sprite:'/assets/dashboard/zhizhi-q-sprite-sheet-v1.png'
     };
-    const girlAssetRoot = '/assets/dashboard/hormelz-girl';
-    const girlDirections = ['Down','DownLeft','Left','UpLeft','Up','UpRight','Right','DownRight'];
-    const girlFrames = {walk:12, run:8, idle:16, push:20, roll:12};
     const sceneDefinitions = {
       'free-bedroom': {
-        source:'Sweeetpotatoo · Isometric pixel bedroom · free to use anywhere',
+        source:'知栀 · Q 版雨夜小屋 · 项目视觉母版',
         background:'room',
         anchors:{
-          desk:[169,232], kitchen:[214,252], entry:[257,213], sofa:[265,281],
-          vanity:[232,273], bed:[164,276], window:[151,190], rug:[255,292]
+          desk:[520,505], kitchen:[635,520], entry:[1490,570], sofa:[1010,700],
+          vanity:[1240,470], bed:[930,500], window:[485,300], rug:[900,655]
         },
         routes:{
           desk:['rug','window'], kitchen:['rug'], entry:['rug'], sofa:['rug'],
           vanity:['rug','bed'], bed:['vanity','rug'], window:['desk','rug'],
           rug:['desk','kitchen','entry','sofa','vanity','bed','window']
-        },
-        foreground:{bed:{image:'props', crop:[204,38,122,72], at:[148,244], size:[122,72]}}
+        }
       }
     };
     let activeScene = sceneDefinitions['free-bedroom'];
@@ -307,10 +303,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     const actor = {anchor:'rug', pos:[...anchors.rug], path:[], action:'idle', expression:'neutral', scene:null, direction:'front', lastTime:0, blinkUntil:0};
 
     function preload() {
-      const characterPaths = Object.entries(girlFrames).flatMap(([action]) => girlDirections.map(direction => [
-        `hormelz-girl:${action}:${direction}`, `${girlAssetRoot}/GirlSample_${action === 'idle' ? 'ReadyIdle' : action[0].toUpperCase() + action.slice(1)}_${direction}.png`
-      ]));
-      return Promise.all([...Object.entries(imagePaths), ...characterPaths].map(([key,path]) => new Promise(resolve => {
+      return Promise.all(Object.entries(imagePaths).map(([key,path]) => new Promise(resolve => {
         const img = new Image();
         img.onload = () => { images[key] = img; resolve(); };
         img.onerror = resolve;
@@ -379,31 +372,27 @@ DASHBOARD_HTML = r"""<!doctype html>
       stage.oy = y + (h - ih) / 2;
       ctx.drawImage(img, stage.ox, stage.oy, iw, ih);
     }
-    function girlDirection() {
-      return ({left:'Left', right:'Right', front:'Down'})[actor.direction] || 'Down';
-    }
     function characterAction() {
-      if (actor.action === 'walk') return 'walk';
-      if (actor.action === 'walk_out') return 'run';
-      if (actor.action === 'tidy') return 'push';
-      return 'idle';
+      return ['walk','walk_out','tidy'].includes(actor.action) ? 'walk' : 'idle';
     }
     function drawActor(ctx, now) {
       if (actor.action === 'sleep') { drawSleep(ctx, now); return; }
       const action = characterAction();
-      const sheet = images[`hormelz-girl:${action}:${girlDirection()}`];
+      const sheet = images.sprite;
       if (!sheet) return;
       const [px, py] = project(actor.pos);
-      const frame = Math.floor(now / (action === 'idle' ? 170 : 85)) % girlFrames[action];
-      const sx = frame % 4 * 256, sy = Math.floor(frame / 4) * 256;
-      const dh = 96, dw = 96;
+      const cells = action === 'walk'
+        ? ({left:[1,0], right:[3,1], front:[1,0]})[actor.direction] || [1,0]
+        : ({left:[2,0], right:[2,1], front:[0,0]})[actor.direction] || [0,0];
+      const sx = cells[0] * 443, sy = cells[1] * 443;
+      const dh = 128, dw = 128;
       const x = px - dw / 2, y = py - dh + 7;
       ctx.save();
       ctx.imageSmoothingEnabled = false;
       ctx.shadowColor = 'rgba(34, 25, 20, .35)';
       ctx.shadowBlur = 0;
       ctx.shadowOffsetY = 3;
-      ctx.drawImage(sheet, sx, sy, 256, 256, x, y, dw, dh);
+      ctx.drawImage(sheet, sx, sy, 443, 443, x, y, dw, dh);
       ctx.restore();
       drawPhone(ctx, x, y, now);
       drawStatusMark(ctx, px, y, now);
@@ -473,15 +462,8 @@ DASHBOARD_HTML = r"""<!doctype html>
     function drawForeground(ctx) {
       const scene = actor.scene || {};
       if (scene.location !== 'bed' || scene.action !== 'sleep') return;
-      const layer = activeScene.foreground.bed;
-      const image = images[layer.image];
-      if (!image) return;
-      const [x,y] = project(layer.at);
-      const width = layer.size[0] * stage.scale, height = layer.size[1] * stage.scale;
-      ctx.save();
-      ctx.imageSmoothingEnabled = false;
-      ctx.drawImage(image, ...layer.crop, x, y, width, height);
-      ctx.restore();
+      // The bed front is part of the Q-room background.  Sleeping is represented
+      // by the actor being hidden and the breathing marker from drawSleep().
     }
     function drawSceneRibbon(ctx) {
       const scene = actor.scene || {};
@@ -538,8 +520,15 @@ DASHBOARD_HTML = r"""<!doctype html>
       loading = true;
       try {
         const user = document.getElementById('user').value || 'geoff';
-        snapshot = await fetch(`/debug/${user}/context`).then(r => r.json());
+        const response = await fetch(`/debug/${user}/context`);
+        if (!response.ok) throw new Error(`状态同步失败 (${response.status})`);
+        snapshot = await response.json();
         render();
+      } catch (error) {
+        document.getElementById('updated').textContent = '状态同步失败 · 可稍后重试';
+        document.getElementById('gameAction').textContent = '小屋待机中';
+        document.getElementById('sceneActivity').textContent = '暂时无法读取 daemon 状态。';
+        applyScene({location:'rug', action:'idle', expression:'neutral', time_of_day:'day', has_notification:false, has_open_task:false});
       } finally {
         loading = false;
       }

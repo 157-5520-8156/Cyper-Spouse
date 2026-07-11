@@ -1,14 +1,9 @@
 # Third-Party Notices
 
-The free bedroom scene assets under `assets/dashboard/free-bedroom/` are from
-[Sweeetpotatoo's Isometric pixel bedroom](https://sweeetpotatoo.itch.io/isometric-pixel-bedroom).
-The creator's asset page states: "Free to use anywhere." The files are used as
-the dashboard's free isometric-bedroom scene source.
-
-The dashboard character action sheets under `assets/dashboard/hormelz-girl/`
-are from [Hormelz's 8 Directional 2DHD Pixel Art Animated Character](https://hormelz.itch.io/8-directional-char).
-They are released under CC0 1.0 and are used for the character's idle, walk,
-run, push, and roll actions.
+The dashboard's `zhizhi-q-home-evening-v1.png` and
+`zhizhi-q-sprite-sheet-v1.png` are project-specific AI-generated visual assets.
+They are used as a unified Q-style evening-room background and the independent
+companion sprite layer, respectively.
 
 The pixel room's furniture, floor tiles, pixel font, and base animation sprite
 under `assets/pixel_agents/` are copied from
