@@ -258,6 +258,7 @@ def test_model_proposal_is_not_a_fact_until_rules_accept_it(tmp_path: Path) -> N
     )
 
     assert [event.event_type for event in accepted.events] == [
+        "LifeOutcomeValidated",
         "ModelProposalAccepted",
         "ExperienceCommitted",
     ]

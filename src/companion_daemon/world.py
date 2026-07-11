@@ -727,7 +727,11 @@ class WorldKernel:
             proposal = _as_dict(_as_dict(state["proposals"], "proposals").get(proposal_id), "proposal")
             if proposal["status"] != "recorded":
                 raise WorldError("only a recorded proposal can be accepted")
+            entity = _as_dict(_as_dict(state["entities"], "entities").get(str(proposal["entity_id"])), "proposal entity")
+            if str(proposal["template_id"]) not in _as_list(entity.get("templates", []), "entity templates"):
+                raise WorldError("proposal template is no longer permitted")
             return [
+                ("LifeOutcomeValidated", {"outcome_id": proposal_id, "validation": "registered_entity/template/content_bound", "rule_version": "life-proposal-v1"}),
                 ("ModelProposalAccepted", {"proposal_id": proposal_id}),
                 (
                     "ExperienceCommitted",
