@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from companion_daemon.config import get_settings
 from companion_daemon.dashboard_ui import DASHBOARD_HTML
+from companion_daemon.world_console_ui import WORLD_CONSOLE_HTML
 from companion_daemon.models import CompanionReply, IncomingMessage, ProactiveDecision
 from companion_daemon.life_runtime import synchronize_life_runtime
 from companion_daemon.qq_official import (
@@ -47,13 +48,6 @@ class WorldClockRequest(BaseModel):
     target_logical_at: str
 
 
-class WorldDeliveryReconcileRequest(BaseModel):
-    delivery_id: int
-    delivered: bool
-    external_receipt: str
-    reason: str | None = None
-
-
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -62,6 +56,12 @@ def health() -> dict[str, str]:
 @app.get("/dashboard", response_class=HTMLResponse)
 def dashboard() -> str:
     return DASHBOARD_HTML
+
+
+@app.get("/world-console", response_class=HTMLResponse)
+def world_console() -> str:
+    """Operator-only world view; the pixel-room projection remains separate."""
+    return WORLD_CONSOLE_HTML
 
 
 @app.post("/messages", response_model=CompanionReply)
@@ -159,25 +159,6 @@ def world_integrity(world_id: str) -> dict[str, object]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/world/{world_id}/deliveries/reconcile")
-def reconcile_world_delivery(world_id: str, request: WorldDeliveryReconcileRequest) -> dict[str, object]:
-    kernel = WorldKernel(engine.store)
-    if not kernel.action_id_for_delivery(world_id, request.delivery_id):
-        raise HTTPException(status_code=404, detail="unknown delivery for world")
-    try:
-        result = kernel.settle_outgoing_action(
-            request.delivery_id,
-            delivered=request.delivered,
-            reason=request.reason,
-            external_receipt=request.external_receipt,
-        )
-    except WorldError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if result is None:
-        raise HTTPException(status_code=404, detail="unknown delivery")
-    return {"delivery_id": request.delivery_id, "status": "delivered" if request.delivered else "failed", "external_receipt": request.external_receipt}
-
-
 @app.post("/world/{world_id}/commands")
 def world_command(world_id: str, request: WorldCommandRequest) -> dict[str, object]:
     command = {**request.command, "world_id": world_id}
@@ -253,6 +234,14 @@ def active_world_enablement() -> dict[str, object]:
         "open_action_ids": list(report.open_action_ids), "unknown_action_ids": list(report.unknown_action_ids),
         "projections": [item.__dict__ for item in report.projection_reports],
     }
+
+
+@app.get("/world-runtime/overview")
+def active_world_overview() -> dict[str, object]:
+    """Bounded console projection for the active world epoch."""
+    if not engine.world_kernel or not engine.world_id:
+        return {"enabled": False}
+    return {"enabled": True, **engine.world_kernel.dashboard_overview(engine.world_id)}
 
 
 @app.post("/qq/webhook")

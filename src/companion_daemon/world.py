@@ -581,6 +581,58 @@ class WorldKernel:
             _, state = self._load_state(conn, world_id)
         return state
 
+    def dashboard_overview(self, world_id: str) -> dict[str, object]:
+        """Return the bounded, read-only view required by the world console.
+
+        This is deliberately a single read interface: browser code never needs
+        to infer facts from event payloads, nor can it treat a visual preference
+        as world state.  The full ledger remains available through the audit
+        export endpoint when an operator needs forensic detail.
+        """
+        with self.store.connect() as conn:
+            # A console command must be planned from one coherent ledger
+            # revision.  Holding this read transaction also makes the returned
+            # state hash meaningful to an operator inspecting a busy daemon.
+            conn.execute("begin")
+            revision, state = self._load_state(conn, world_id)
+            events = self._load_events(conn, world_id)
+        agenda = [_as_dict(item, "agenda item") for item in _as_dict(state["agenda"], "agenda").values()]
+        unresolved = [item for item in agenda if str(item.get("status") or "") in {"active", "planned", "deferred"}]
+        historical = [item for item in agenda if item not in unresolved]
+        unresolved.sort(key=lambda item: (_activity_console_rank(str(item.get("status") or "")), str(item.get("starts_at") or ""), str(item.get("activity_id") or "")))
+        historical.sort(key=lambda item: (str(item.get("ends_at") or item.get("starts_at") or ""), str(item.get("activity_id") or "")), reverse=True)
+        actions = [_as_dict(item, "action") for item in _as_dict(state["actions"], "actions").values()]
+        actions.sort(key=lambda item: (_action_console_rank(str(item.get("status") or "")), str(item.get("expires_at") or ""), str(item.get("action_id") or "")))
+        goals = [_as_dict(item, "goal") for item in _as_dict(state.get("goals", {}), "goals").values()]
+        goals.sort(key=lambda item: (str(item.get("status") or ""), str(item.get("deadline") or ""), str(item.get("id") or "")))
+        outcomes = _as_dict(state.get("outcomes", {}), "outcomes")
+        experiences: list[dict[str, object]] = []
+        for experience_id, raw in _as_dict(state["experiences"], "experiences").items():
+            experience = _as_dict(raw, "experience")
+            outcome = _as_dict(outcomes.get(str(experience.get("source_outcome_id") or ""), {}), "outcome")
+            experiences.append({
+                "experience_id": experience_id,
+                "content": str(experience.get("content") or ""),
+                "occurred_at": str(outcome.get("ends_at") or ""),
+                "shared": bool(experience.get("shared")),
+            })
+        experiences.sort(key=lambda item: (str(item["occurred_at"]), str(item["experience_id"])), reverse=True)
+        return {
+            "world_id": world_id,
+            "revision": revision,
+            "state_hash": _state_hash(state),
+            "clock": dict(_as_dict(state["clock"], "clock")),
+            "protagonist": dict(_as_dict(_as_dict(state["entities"], "entities").get("zhizhi", {}), "protagonist")),
+            "needs": dict(_as_dict(state["needs"], "needs")),
+            "goals": [_console_goal(item) for item in goals],
+            # A bounded dashboard must retain what still constrains behavior;
+            # completed history fills only the remaining slots.
+            "agenda": [_console_activity(item) for item in (unresolved + historical)[:12]],
+            "actions": [_console_action(item) for item in actions[:12]],
+            "experiences": experiences[:10],
+            "timeline": [_console_event(event) for event in events[-24:]][::-1],
+        }
+
     def experiences_for_time_reference(self, world_id: str, reference: str) -> list[dict[str, object]]:
         """Return only committed experiences in a deterministic logical-time range."""
         state = self.snapshot(world_id)
@@ -1438,6 +1490,72 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "share_days": {},
         "goals": {},
         "outcomes": {},
+    }
+
+
+def _action_console_rank(status: str) -> int:
+    """Keep unresolved delivery work above historical terminal actions."""
+    return {"unknown": 0, "sending": 1, "scheduled": 2}.get(status, 3)
+
+
+def _activity_console_rank(status: str) -> int:
+    return {"active": 0, "deferred": 1, "planned": 2}.get(status, 3)
+
+
+def _console_goal(goal: dict[str, object]) -> dict[str, object]:
+    return {
+        "id": str(goal.get("id") or ""),
+        "title": str(goal.get("title") or goal.get("id") or "未命名目标"),
+        "status": str(goal.get("status") or "unknown"),
+        "progress": int(goal.get("progress") or 0),
+        "target": int(goal.get("target") or 0),
+        "deadline": str(goal.get("deadline") or ""),
+        "next_review_at": str(goal.get("next_review_at") or ""),
+    }
+
+
+def _console_activity(activity: dict[str, object]) -> dict[str, object]:
+    return {
+        "activity_id": str(activity.get("activity_id") or ""),
+        "title": str(activity.get("title") or "未命名活动"),
+        "status": str(activity.get("status") or "unknown"),
+        "location": str(activity.get("location") or ""),
+        "starts_at": str(activity.get("starts_at") or ""),
+        "ends_at": str(activity.get("ends_at") or ""),
+        "reason": str(activity.get("reason") or activity.get("substitution_reason") or ""),
+        "next_review_at": str(activity.get("next_review_at") or ""),
+    }
+
+
+def _console_action(action: dict[str, object]) -> dict[str, object]:
+    """Expose delivery state, never private outgoing text or trace prompts."""
+    return {
+        "action_id": str(action.get("action_id") or ""),
+        "kind": str(action.get("kind") or ""),
+        "message_kind": str(action.get("message_kind") or ""),
+        "status": str(action.get("status") or "unknown"),
+        "expires_at": str(action.get("expires_at") or ""),
+        "delivery_id": action.get("delivery_id"),
+        "reason": str(action.get("reason") or ""),
+    }
+
+
+def _console_event(event: WorldEvent) -> dict[str, object]:
+    payload = event.payload
+    subject = (
+        payload.get("title")
+        or payload.get("content")
+        or payload.get("activity_id")
+        or payload.get("goal_id")
+        or payload.get("action_id")
+        or payload.get("fact_id")
+        or ""
+    )
+    return {
+        "revision": event.revision,
+        "event_type": event.event_type,
+        "logical_at": event.logical_at,
+        "subject": str(subject),
     }
 
 
