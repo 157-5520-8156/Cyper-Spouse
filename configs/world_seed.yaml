@@ -32,6 +32,16 @@ daily_schedule:
     title: 傍晚散步或整理照片
     starts_hour: 19
     ends_hour: 21
+long_term_goals:
+  - id: course-notes
+    title: 整理课程笔记
+    target: 4
+  - id: photo-portfolio
+    title: 整理摄影作品
+    target: 3
+  - id: literature-reading
+    title: 文学社读书会准备
+    target: 3
 npcs:
   - id: mother-shen
     name: 沈岚

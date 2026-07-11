@@ -14,6 +14,7 @@ from uuid import uuid4
 import yaml
 
 from companion_daemon.db import CompanionStore
+from companion_daemon.life_simulation import LifeSimulation
 from companion_daemon.time import utc_now
 
 
@@ -68,6 +69,7 @@ class WorldKernel:
 
     def __init__(self, store: CompanionStore):
         self.store = store
+        self.life_simulation = LifeSimulation()
 
     def submit(self, command: dict[str, object], *, expected_revision: int) -> WorldDecision:
         command_type = str(command.get("type") or "")
@@ -496,6 +498,7 @@ class WorldKernel:
                         "protagonist": protagonist,
                         "logical_at": logical_at,
                         "daily_schedule": _as_list(seed.get("daily_schedule", []), "daily_schedule"),
+                        "long_term_goals": _as_list(seed.get("long_term_goals", []), "long-term goals"),
                     },
                 )
             ]
@@ -574,6 +577,14 @@ class WorldKernel:
                     and _parse_at(str(item["expires_at"])) <= _parse_at(target)
                 ):
                     events.append(("ActionExpired", {"action_id": action_id, "reason": "logical_timeout"}))
+            for event_type, payload in list(events):
+                if event_type == "ActivityCompleted":
+                    activity_id = str(payload["activity_id"])
+                    activity = _as_dict(state["agenda"], "agenda").get(activity_id)
+                    if activity is None:
+                        activity = next((item for kind, item in events if kind == "ActivityPlanned" and item["activity_id"] == activity_id), None)
+                    if activity is not None:
+                        events.extend(self.life_simulation.outcomes_for(state, _as_dict(activity, "activity")))
             return events
         if command_type == "register_npc":
             npc = _as_dict(command.get("npc"), "npc")
@@ -977,6 +988,7 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         next_state["clock"] = {"logical_at": payload["logical_at"], "mode": "paused", "rate": 0}
         next_state["entities"] = {str(protagonist["id"]): {**protagonist, "status": "active"}}
         next_state["daily_schedule"] = payload.get("daily_schedule", [])
+        next_state["goals"] = {str(goal["id"]): {**goal, "progress": 0, "status": "active"} for goal in _as_list(payload.get("long_term_goals", []), "long-term goals")}
     elif event.event_type == "NpcRegistered":
         npc = dict(payload)
         npc["status"] = "active"
@@ -1028,6 +1040,16 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "ExperienceCommitted":
         item = dict(payload)
         _as_dict(next_state["experiences"], "experiences")[str(item["experience_id"])] = item
+    elif event.event_type == "LifeOutcomeProposed":
+        _as_dict(next_state["proposals"], "proposals")[str(payload["outcome_id"])] = {**payload, "status": "proposed"}
+    elif event.event_type == "LifeOutcomeCommitted":
+        _as_dict(next_state.setdefault("outcomes", {}), "outcomes")[str(payload["outcome_id"])] = {**payload, "status": "committed"}
+        _as_dict(next_state["proposals"], "proposals")[str(payload["outcome_id"])] ["status"] = "committed"
+    elif event.event_type == "GoalProgressed":
+        goal = _as_dict(_as_dict(next_state["goals"], "goals").get(str(payload["goal_id"])), "goal")
+        goal["progress"] = min(int(goal["target"]), int(goal["progress"]) + int(payload["delta"]))
+        if goal["progress"] >= int(goal["target"]):
+            goal["status"] = "completed"
     elif event.event_type == "ExperienceShared":
         _as_dict(next_state["experiences"], "experiences")[str(payload["experience_id"])]["shared"] = True
         _as_dict(next_state["experiences"], "experiences")[str(payload["experience_id"])]["shared_action_id"] = payload["action_id"]
@@ -1061,6 +1083,8 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "relationships": {},
         "needs": {"energy": 70, "attention": 55, "security": 50, "initiative": 20, "boundary": 0},
         "daily_schedule": [],
+        "goals": {},
+        "outcomes": {},
     }
 
 

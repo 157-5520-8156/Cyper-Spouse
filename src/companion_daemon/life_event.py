@@ -1,7 +1,7 @@
 import argparse
 import asyncio
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 import re
@@ -15,7 +15,6 @@ from companion_daemon.relationship import relationship_status_line
 from companion_daemon.social_followups import cancel_life_share_followup_for_event
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.stickers import load_stickers
-from companion_daemon.time import utc_now
 
 
 logger = logging.getLogger(__name__)
@@ -261,6 +260,13 @@ async def run(
 async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bool) -> bool:
     """Share one committed-but-private world experience without legacy life tables."""
     snapshot = engine.world_kernel.snapshot(engine.world_id)
+    needs = snapshot["needs"]
+    if needs["initiative"] < 20 or needs["security"] < 45:
+        print("life event not shared: current world needs prefer keeping it private")
+        return False
+    if any(action["kind"] == "outgoing_message" and action["status"] == "scheduled" for action in snapshot["actions"].values()):
+        print("life event not shared: an outgoing world action is already pending")
+        return False
     candidate = next(
         (
             (experience_id, experience)
@@ -287,7 +293,7 @@ async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bo
         platform="qq",
         text=text,
         kind="life_event",
-        expires_at=utc_now() + timedelta(hours=4),
+        expires_at=(engine._world_logical_now() if hasattr(engine, "_world_logical_now") else datetime.fromisoformat(str(snapshot["clock"]["logical_at"]))) + timedelta(hours=4),
         trace={
             "world_id": engine.world_id,
             "direction": "life_event",

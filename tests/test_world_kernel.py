@@ -132,6 +132,21 @@ def test_clock_advance_materializes_seeded_daily_life_into_events(tmp_path: Path
     assert kernel.snapshot("zhizhi-v1")["agenda"]["2026-07-11:morning"]["status"] == "completed"
 
 
+def test_completed_activity_creates_deterministic_outcome_goal_and_experience(tmp_path: Path) -> None:
+    seed = world_seed() | {
+        "daily_schedule": [{"slot": "notes", "title": "整理课程笔记", "starts_hour": 9, "ends_hour": 10}],
+        "long_term_goals": [{"id": "course-notes", "title": "课程笔记", "target": 2}],
+    }
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": seed}, expected_revision=0)
+    advanced = kernel.advance("zhizhi-v1", NOW + timedelta(hours=2), expected_revision=started.revision)
+
+    assert {event.event_type for event in advanced.events} >= {"LifeOutcomeProposed", "LifeOutcomeCommitted", "GoalProgressed", "ExperienceCommitted"}
+    snapshot = kernel.snapshot("zhizhi-v1")
+    assert snapshot["goals"]["course-notes"]["progress"] == 1
+    assert snapshot["experiences"]["outcome:2026-07-11:notes"]["source_outcome_id"] == "outcome:2026-07-11:notes"
+
+
 def test_external_delivery_result_is_idempotent_and_only_settled_action_can_create_experience(
     tmp_path: Path,
 ) -> None:
