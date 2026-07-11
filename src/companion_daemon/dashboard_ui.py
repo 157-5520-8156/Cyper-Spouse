@@ -277,9 +277,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     const images = {};
     const imagePaths = {
       room:'/assets/dashboard/free-bedroom/isometric-room-2.png',
-      props:'/assets/dashboard/free-bedroom/isometric-room-assets-3.png',
-      sprite:'/assets/dashboard/zhizhi-sprite-sheet-v2.png'
+      props:'/assets/dashboard/free-bedroom/isometric-room-assets-3.png'
     };
+    const girlAssetRoot = '/assets/dashboard/hormelz-girl';
+    const girlDirections = ['Down','DownLeft','Left','UpLeft','Up','UpRight','Right','DownRight'];
+    const girlFrames = {walk:12, run:8, idle:16, push:20, roll:12};
     const sceneDefinitions = {
       'free-bedroom': {
         source:'Sweeetpotatoo · Isometric pixel bedroom · free to use anywhere',
@@ -299,21 +301,16 @@ DASHBOARD_HTML = r"""<!doctype html>
     let activeScene = sceneDefinitions['free-bedroom'];
     let anchors = activeScene.anchors;
     let routeGraph = activeScene.routes;
-    const sprites = {
-      front:{x:100,y:70,w:250,h:500,dh:108},
-      left:{x:455,y:70,w:260,h:500,dh:108},
-      right:{x:820,y:70,w:265,h:500,dh:108},
-      walk:{x:70,y:650,w:305,h:470,dh:106},
-      phone:{x:430,y:700,w:330,h:405,dh:94},
-      sleep:{x:760,y:735,w:405,h:310,dh:72}
-    };
     let snapshot = null;
     let loading = false;
     let selectedCalendarDate = null;
     const actor = {anchor:'rug', pos:[...anchors.rug], path:[], action:'idle', expression:'neutral', scene:null, direction:'front', lastTime:0, blinkUntil:0};
 
     function preload() {
-      return Promise.all(Object.entries(imagePaths).map(([key,path]) => new Promise(resolve => {
+      const characterPaths = Object.entries(girlFrames).flatMap(([action]) => girlDirections.map(direction => [
+        `hormelz-girl:${action}:${direction}`, `${girlAssetRoot}/GirlSample_${action === 'idle' ? 'ReadyIdle' : action[0].toUpperCase() + action.slice(1)}_${direction}.png`
+      ]));
+      return Promise.all([...Object.entries(imagePaths), ...characterPaths].map(([key,path]) => new Promise(resolve => {
         const img = new Image();
         img.onload = () => { images[key] = img; resolve(); };
         img.onerror = resolve;
@@ -382,34 +379,45 @@ DASHBOARD_HTML = r"""<!doctype html>
       stage.oy = y + (h - ih) / 2;
       ctx.drawImage(img, stage.ox, stage.oy, iw, ih);
     }
-    function spriteForAction() {
-      if (actor.action === 'sleep') return sprites.sleep;
-      if (['notice_phone','glance_phone','read_phone','type_phone'].includes(actor.action)) return sprites.phone;
-      if (['social','relax'].includes(actor.action)) return sprites.phone;
-      if (actor.action === 'walk') return sprites.walk;
-      if (actor.direction === 'left') return sprites.left;
-      if (actor.direction === 'right') return sprites.right;
-      return sprites.front;
+    function girlDirection() {
+      return ({left:'Left', right:'Right', front:'Down'})[actor.direction] || 'Down';
+    }
+    function characterAction() {
+      if (actor.action === 'walk') return 'walk';
+      if (actor.action === 'walk_out') return 'run';
+      if (actor.action === 'tidy') return 'push';
+      return 'idle';
     }
     function drawActor(ctx, now) {
-      const sprite = spriteForAction();
+      if (actor.action === 'sleep') { drawSleep(ctx, now); return; }
+      const action = characterAction();
+      const sheet = images[`hormelz-girl:${action}:${girlDirection()}`];
+      if (!sheet) return;
       const [px, py] = project(actor.pos);
-      const walkBob = actor.action === 'walk' ? Math.round(Math.sin(now / 80) * 2) : 0;
-      const dh = sprite.dh;
-      const dw = sprite.w / sprite.h * dh;
-      let x = px - dw / 2, y = py - dh + 4 + walkBob;
-      if (actor.action === 'sleep') {
-        x = px - dw * .55;
-        y = py - dh * .78;
-      }
+      const frame = Math.floor(now / (action === 'idle' ? 170 : 85)) % girlFrames[action];
+      const sx = frame % 4 * 256, sy = Math.floor(frame / 4) * 256;
+      const dh = 96, dw = 96;
+      const x = px - dw / 2, y = py - dh + 7;
       ctx.save();
       ctx.imageSmoothingEnabled = false;
       ctx.shadowColor = 'rgba(34, 25, 20, .35)';
       ctx.shadowBlur = 0;
       ctx.shadowOffsetY = 3;
-      ctx.drawImage(images.sprite, sprite.x, sprite.y, sprite.w, sprite.h, x, y, dw, dh);
+      ctx.drawImage(sheet, sx, sy, 256, 256, x, y, dw, dh);
       ctx.restore();
+      drawPhone(ctx, x, y, now);
       drawStatusMark(ctx, px, y, now);
+    }
+    function drawPhone(ctx, x, y, now) {
+      if (!['notice_phone','glance_phone','read_phone','type_phone'].includes(actor.action)) return;
+      const pulse = actor.action === 'type_phone' ? Math.sin(now / 90) * 2 : 0;
+      ctx.save(); ctx.fillStyle = '#25343d'; ctx.fillRect(x + 57, y + 50 + pulse, 9, 15);
+      ctx.fillStyle = '#9cd9d4'; ctx.fillRect(x + 59, y + 53 + pulse, 5, 7); ctx.restore();
+    }
+    function drawSleep(ctx, now) {
+      const [px,py] = project(actor.pos);
+      ctx.save(); ctx.fillStyle = '#e9d7bf'; ctx.font = '18px Pixel, sans-serif';
+      ctx.fillText('z', px + 15, py - 32 - Math.sin(now / 350) * 4); ctx.restore();
     }
     function drawStatusMark(ctx, x, y, now) {
       const scene = actor.scene || {};
