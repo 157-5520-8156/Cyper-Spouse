@@ -90,6 +90,25 @@ class CompanionStore:
                   failure_reason text
                 );
 
+                create table if not exists turn_traces (
+                  id integer primary key autoincrement,
+                  canonical_user_id text not null references users(id),
+                  direction text not null,
+                  appraisal text not null,
+                  expression_policy text not null,
+                  allowed_facts_json text not null,
+                  short_lived_constraint text,
+                  observable_reason text not null,
+                  output_text text,
+                  delivery_id integer references outbox_messages(id),
+                  status text not null,
+                  failure_reason text,
+                  created_at text not null,
+                  updated_at text not null
+                );
+                create index if not exists idx_turn_traces_user
+                  on turn_traces (canonical_user_id, id desc);
+
                 create table if not exists mood_state (
                   canonical_user_id text primary key references users(id),
                   mood text not null,
@@ -532,6 +551,68 @@ class CompanionStore:
                 """,
                 (delivery_id,),
             ).fetchone()
+
+    def create_turn_trace(
+        self,
+        canonical_user_id: str,
+        *,
+        appraisal: str,
+        expression_policy: str,
+        allowed_facts: list[str],
+        short_lived_constraint: str | None,
+        observable_reason: str,
+        output_text: str,
+        delivery_id: int | None,
+    ) -> int:
+        now = utc_now().isoformat()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                insert into turn_traces (
+                  canonical_user_id, direction, appraisal, expression_policy,
+                  allowed_facts_json, short_lived_constraint, observable_reason,
+                  output_text, delivery_id, status, created_at, updated_at
+                ) values (?, 'incoming_reply', ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)
+                """,
+                (
+                    canonical_user_id,
+                    appraisal,
+                    expression_policy,
+                    json.dumps(allowed_facts, ensure_ascii=False),
+                    short_lived_constraint,
+                    observable_reason,
+                    output_text,
+                    delivery_id,
+                    now,
+                    now,
+                ),
+            )
+        return int(cursor.lastrowid)
+
+    def complete_turn_trace(self, trace_id: int, *, delivered: bool, failure_reason: str | None = None) -> None:
+        now = utc_now().isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                update turn_traces
+                set status = ?, failure_reason = ?, updated_at = ?
+                where id = ? and status = 'planned'
+                """,
+                ("delivered" if delivered else "failed", failure_reason[:500] if failure_reason else None, now, trace_id),
+            )
+
+    def recent_turn_traces(self, canonical_user_id: str, limit: int = 20) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select id, direction, appraisal, expression_policy, allowed_facts_json,
+                       short_lived_constraint, observable_reason, output_text, delivery_id,
+                       status, failure_reason, created_at, updated_at
+                from turn_traces where canonical_user_id = ? order by id desc limit ?
+                """,
+                (canonical_user_id, limit),
+            ).fetchall()
+        return list(reversed(rows))
 
     def save_outgoing(self, canonical_user_id: str, platform: Platform, text: str) -> None:
         with self.connect() as conn:

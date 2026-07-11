@@ -85,6 +85,7 @@ from companion_daemon.unanswered_question import (
     last_unanswered_own_question,
 )
 from companion_daemon.withheld_impulse import apply_withheld_impulse, build_withheld_impulse
+from companion_daemon.turns import build_turn_plan
 
 logger = logging.getLogger(__name__)
 
@@ -157,6 +158,7 @@ class CompanionEngine:
         self.store.cancel_active_social_tasks(canonical_user_id, kind="comfort_followup")
         self.store.cancel_active_social_tasks(canonical_user_id, kind="promise_followup")
         self.store.cancel_active_social_tasks(canonical_user_id, kind="contradiction_followup")
+        self.store.cancel_active_social_tasks(canonical_user_id, kind="withheld_impulse")
         # A real new turn, regardless of its platform, overtakes any delayed
         # continuation.  This is the shared cancellation point used by QQ
         # official, NapCat, and future adapters.
@@ -299,14 +301,6 @@ class CompanionEngine:
                 confidence=0.86,
             )
         subtext = infer_inner_subtext(next_state)
-        if subtext:
-            self.store.upsert_memory(
-                canonical_user_id,
-                kind="inner_subtext",
-                content=subtext.memory,
-                source=f"{message.platform}:{message.message_id or 'turn'}",
-                confidence=0.74,
-            )
         if proactive_feedback:
             self.store.upsert_memory(
                 canonical_user_id,
@@ -441,6 +435,15 @@ class CompanionEngine:
                 self.store, canonical_user_id, next_state, message.text
             ),
         )
+        turn_plan = build_turn_plan(
+            event=event,
+            context_package=context_package,
+            allowed_facts=[
+                *context_package.verified_user_fact_lines,
+                *context_package.self_fact_lines,
+            ],
+            subtext=subtext.memory if subtext else None,
+        )
         text = sanitize_chat_text(await self.conversation_core.reply(
             message,
             next_state,
@@ -462,6 +465,22 @@ class CompanionEngine:
         if generated_image_path:
             sticker = None
         asyncio.create_task(self._maybe_consolidate(canonical_user_id, next_state))
+        delivery_id = self.store.queue_outgoing(
+            canonical_user_id,
+            message.platform,
+            text,
+            kind="reply",
+        )
+        turn_trace_id = self.store.create_turn_trace(
+            canonical_user_id,
+            appraisal=turn_plan.appraisal,
+            expression_policy=turn_plan.expression_policy,
+            allowed_facts=turn_plan.allowed_facts,
+            short_lived_constraint=turn_plan.short_lived_constraint,
+            observable_reason=turn_plan.observable_reason,
+            output_text=text,
+            delivery_id=delivery_id,
+        )
         reply = CompanionReply(
             canonical_user_id=canonical_user_id,
             mood=next_state.mood,
@@ -473,12 +492,8 @@ class CompanionEngine:
             suggested_reaction=(
                 suggested_reaction.reaction_id if suggested_reaction and suggested_reaction.probability >= 0.25 else None
             ),
-            delivery_id=self.store.queue_outgoing(
-                canonical_user_id,
-                message.platform,
-                text,
-                kind="reply",
-            ),
+            delivery_id=delivery_id,
+            turn_trace_id=turn_trace_id,
         )
         if not defer_delivery:
             self.confirm_reply_delivery(reply)
@@ -584,10 +599,14 @@ class CompanionEngine:
             source=f"{delivered['platform']}:outgoing",
             confidence=0.65,
         )
+        if reply.turn_trace_id is not None:
+            self.store.complete_turn_trace(reply.turn_trace_id, delivered=True)
 
     def fail_reply_delivery(self, reply: CompanionReply, reason: str, *, source_task_id: int | None = None) -> None:
         if reply.delivery_id is not None:
             self.store.mark_outgoing_failed(reply.delivery_id, reason)
+        if reply.turn_trace_id is not None:
+            self.store.complete_turn_trace(reply.turn_trace_id, delivered=False, failure_reason=reason)
         if source_task_id is not None:
             self.store.cancel_social_task(source_task_id)
             self._create_reply_reconsider_task(reply, reason)
@@ -876,6 +895,7 @@ class CompanionEngine:
                 "reply_reconsider",
                 "life_share_followup",
                 "contradiction_followup",
+                "withheld_impulse",
             ),
             now=now,
         )
@@ -980,12 +1000,16 @@ class CompanionEngine:
                 private_thought=decision.private_thought,
             )
             if impulse:
-                self.store.upsert_memory(
+                self.store.cancel_active_social_tasks(canonical_user_id, kind="withheld_impulse")
+                self.store.create_social_task(
                     canonical_user_id,
-                    kind="withheld_proactive_impulse",
-                    content=impulse.memory_content,
-                    source="proactive_tick",
-                    confidence=0.76,
+                    kind="withheld_impulse",
+                    platform="qq",
+                    platform_user_id=self.store.platform_user_id(canonical_user_id, "qq") or "",
+                    payload={"trigger_type": impulse.reason, "thought": decision.private_thought[:120]},
+                    reason="有一句主动的话暂时忍住了，等一会儿再重新判断。",
+                    due_at=utc_now() + timedelta(minutes=45),
+                    expires_at=utc_now() + timedelta(hours=4),
                 )
                 state = apply_withheld_impulse(state, impulse)
                 self.store.save_mood_state(canonical_user_id, state)
@@ -1314,6 +1338,7 @@ class CompanionEngine:
             "recent_life_events": [dict(row) for row in self.store.recent_life_events(canonical_user_id)],
             "calendar": calendar_ledger(self.store, canonical_user_id, state, past_days=15, future_days=15),
             "recent_social_tasks": [dict(row) for row in self.store.recent_social_tasks(canonical_user_id)],
+            "recent_turn_traces": [dict(row) for row in self.store.recent_turn_traces(canonical_user_id)],
             "recent_tool_proposals": [dict(row) for row in self.store.recent_tool_proposals(canonical_user_id)],
             "dashboard": _dashboard_view(
                 state,
@@ -1738,6 +1763,14 @@ def _social_task_trigger(task) -> ProactiveTrigger | None:
             ),
             66,
             "life_share",
+        )
+    if task["kind"] == "withheld_impulse":
+        return ProactiveTrigger(
+            "withheld_impulse",
+            "刚才有一句主动的话选择忍住了。现在只重新判断是否仍值得轻轻开口；"
+            "不要说自己一直在等、不要把没发出的念头当成已经说过，也不要追问用户。",
+            58,
+            "anxious_reach",
         )
     if task["kind"] == "contradiction_followup":
         payload = social_task_payload(task)

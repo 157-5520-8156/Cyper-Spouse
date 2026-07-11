@@ -57,6 +57,44 @@ async def test_handle_message_updates_mood_and_replies(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_reply_has_a_delivered_turn_trace_with_its_behavioral_contract(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我今天真的有点撑不住")
+    )
+
+    assert reply is not None
+    trace = store.recent_turn_traces("geoff")[-1]
+    assert trace["id"] == reply.turn_trace_id
+    assert trace["appraisal"] == "user_vulnerable"
+    assert trace["status"] == "delivered"
+    assert "优先接住情绪" in trace["observable_reason"]
+    assert trace["output_text"] == reply.text
+
+
+@pytest.mark.asyncio
+async def test_failed_reply_marks_the_same_turn_trace_failed(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT)
+
+    reply = await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="你在吗"),
+        defer_delivery=True,
+    )
+
+    assert reply is not None
+    engine.fail_reply_delivery(reply, "network failed")
+    trace = store.recent_turn_traces("geoff")[-1]
+    assert trace["id"] == reply.turn_trace_id
+    assert trace["status"] == "failed"
+    assert trace["failure_reason"] == "network failed"
+
+
+@pytest.mark.asyncio
 async def test_character_examples_are_not_replayed_as_fake_chat_history(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
@@ -849,7 +887,10 @@ async def test_proactive_tick_records_withheld_impulse(tmp_path: Path) -> None:
     state = store.get_mood_state("geoff")
     assert state.initiative > before_tick.initiative
     assert state.emotional_charge > before_tick.emotional_charge
-    assert any(row["kind"] == "withheld_proactive_impulse" for row in store.memories("geoff"))
+    tasks = store.recent_social_tasks("geoff", limit=10)
+    withheld = [task for task in tasks if task["kind"] == "withheld_impulse"]
+    assert withheld and withheld[-1]["status"] == "pending"
+    assert not any(row["kind"] == "withheld_proactive_impulse" for row in store.memories("geoff"))
 
 
 @pytest.mark.asyncio
