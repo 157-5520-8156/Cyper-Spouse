@@ -276,22 +276,22 @@ DASHBOARD_HTML = r"""<!doctype html>
     const stage = {w:1000, h:760, scale:1, ox:0, oy:0};
     const images = {};
     const imagePaths = {
-      room:'/assets/dashboard/runtime/home-evening-base-v1.png',
-      sprite:'/assets/dashboard/runtime/zhizhi-walk-directions-v1.png'
+      room:'/assets/dashboard/zhizhi-room-isometric-v2.png',
+      sprite:'/assets/dashboard/zhizhi-iso-walk-v3.png'
     };
     const sceneDefinitions = {
       'free-bedroom': {
-        source:'知栀 · 分层 Q 版雨夜小屋 · 项目视觉母版',
+        source:'知栀 · 原始暖色等距小屋 · 项目视觉母版',
         background:'room',
         // Coordinates are room-space tiles, never background-image pixels.
-        tile:{width:84,height:38,origin:[550,172]},
-        walkable:['2,4','3,4','4,4','5,4','6,4','7,4','8,4','9,4','10,4','2,3','3,3','4,3','5,3','6,3','7,3','8,3','9,3','10,3','3,2','4,2','5,2','6,2','7,2','8,2','9,2','4,1','5,1','6,1','7,1','8,1','9,1','10,1','4,5','5,5','6,5','7,5','8,5','9,5','10,5','5,6','6,6','7,6','8,6'],
-        anchors:{desk:[3,4,0], kitchen:[6,4,0], entry:[10,1,0], sofa:[7,5,0], vanity:[8,2,0], bed:[4,2,0], window:[2,4,0], rug:[6,4,0]},
+        tile:{width:85,height:42,origin:[714,393]},
+        walkable:['1,6','2,6','3,6','4,6','5,6','6,6','7,6','2,5','3,5','4,5','5,5','6,5','7,5','3,4','4,4','5,4','6,4','7,4','4,3','5,3','6,3','7,3','5,2','6,2','7,2','6,1','7,7','6,7','5,7'],
+        anchors:{desk:[1,6,0], kitchen:[2,2,0], entry:[7,7,0], sofa:[4,7,0], vanity:[6,3,0], bed:[5,2,0], window:[6,2,0], rug:[5,5,0]},
         objects:[
-          {id:'desk', tile:[3,3,0], footprint:[[3,3]], frontCrop:[430,300,330,240], depthBias:35},
-          {id:'bed', tile:[5,2,0], footprint:[[5,2],[6,2]], frontCrop:[700,310,360,230], depthBias:28},
-          {id:'sofa', tile:[8,4,0], footprint:[[8,4],[9,4]], frontCrop:[680,570,480,270], depthBias:42},
-          {id:'table', tile:[6,5,0], footprint:[[6,5]], frontCrop:[500,650,300,210], depthBias:18}
+          {id:'desk', tile:[1,5,0], footprint:[[1,5]], frontCrop:[80,560,360,300], depthBias:35},
+          {id:'bed', tile:[6,1,0], footprint:[[6,1],[7,1]], frontCrop:[880,540,420,300], depthBias:28},
+          {id:'sofa', tile:[4,6,0], footprint:[[4,6],[5,6]], frontCrop:[380,700,430,280], depthBias:42},
+          {id:'table', tile:[5,6,0], footprint:[[5,6]], frontCrop:[600,800,300,220], depthBias:18}
         ]
       }
     };
@@ -323,9 +323,12 @@ DASHBOARD_HTML = r"""<!doctype html>
     function depthKey(point, bias=0) { return ((point[0] + point[1]) * 10000) + (point[2] || 0) * 100 + bias; }
     function tileDistance(a,b) { return Math.abs(a[0]-b[0]) + Math.abs(a[1]-b[1]); }
     function directionFor(dx,dy) {
-      if (Math.abs(dx) < .01 && Math.abs(dy) < .01) return actor.facing;
-      const angle = (Math.atan2(dy, dx) + Math.PI * 2) % (Math.PI * 2);
-      return ['right','frontRight','front','frontLeft','left','backLeft','back','backRight'][Math.round(angle / (Math.PI / 4)) % 8];
+      // Logical grid axes project to screen-space 45° diagonals.
+      if (dx > .01) return 'downRight';
+      if (dx < -.01) return 'upLeft';
+      if (dy > .01) return 'downLeft';
+      if (dy < -.01) return 'upRight';
+      return actor.facing;
     }
     function pathfind(start, target) {
       const blocked = new Set(activeScene.objects.flatMap(object => object.footprint).map(key));
@@ -380,8 +383,8 @@ DASHBOARD_HTML = r"""<!doctype html>
       return actor.action === 'walk' ? 'walk' : 'idle';
     }
     function spriteCell(action, facing) {
-      const columns = {front:0,frontRight:1,right:2,backRight:3,back:4,backLeft:5,left:6,frontLeft:1};
-      return {column:columns[facing] ?? 0, row:action === 'walk' ? Math.floor(actor.walked * 2.4) % WALK_FRAMES : 0, flip:facing === 'frontLeft'};
+      const columns = {downRight:0,upRight:1,upLeft:2,downLeft:3};
+      return {column:columns[facing] ?? 0, row:action === 'walk' ? Math.floor(actor.walked * 3) % WALK_FRAMES : 0};
     }
     function drawActor(ctx, now) {
       if (actor.action === 'sleep') { drawSleep(ctx, now); return; }
@@ -390,15 +393,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       if (!sheet) return;
       const [px, py] = project(actor.position);
       const cell = spriteCell(action, actor.facing);
-      // The source sheet is 8 columns wide. The final front-left direction
-      // mirrors front-right so all 8 logical directions stay available.
-      const cw = sheet.width / 8, ch = sheet.height / 4;
+      const cw = sheet.width / 4, ch = sheet.height / 4;
       const sx = cell.column * cw, sy = cell.row * ch;
-      const dh = 148, dw = 148;
+      const dh = 112, dw = 112;
       const x = px - dw / 2, y = py - dh + 6;
       ctx.save();
       ctx.imageSmoothingEnabled = false;
-      if (cell.flip) { ctx.translate(px,0); ctx.scale(-1,1); ctx.translate(-px,0); }
       ctx.drawImage(sheet, sx, sy, cw, ch, x, y, dw, dh);
       ctx.restore();
       drawPhone(ctx, x, y, now);

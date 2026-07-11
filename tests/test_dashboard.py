@@ -23,11 +23,12 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert "sceneDefinitions" in response.text
     assert "activateScene" in response.text
     assert "scene_id" in response.text
-    assert "home-evening-base-v1.png" in response.text
-    assert "zhizhi-walk-directions-v1.png" in response.text
+    assert "zhizhi-room-isometric-v2.png" in response.text
+    assert "zhizhi-iso-walk-v3.png" in response.text
     assert "characterAction" in response.text
     assert "spriteCell" in response.text
-    assert "WALK_SPEED = 1.65" in response.text
+    assert "downRight" in response.text
+    assert "upLeft" in response.text
     assert "WALK_FRAMES = 4" in response.text
     assert "walkable" in response.text
     assert "footprint" in response.text
