@@ -127,6 +127,8 @@ class LifeSimulation:
         day = starts_at.date().isoformat()
         if npc_id and any(item.get("npc_id") == npc_id and str(item.get("starts_at", ""))[:10] == day for item in state.get("outcomes", {}).values()):
             return False, "npc_daily_frequency_limit", None
+        if sum(1 for item in state.get("outcomes", {}).values() if item.get("template_id") == template and str(item.get("starts_at", ""))[:10] == day) >= int(spec.get("max_per_day", 1)):
+            return False, "template_daily_frequency_limit", None
         goal_id = spec.get("goal_id")
         if goal_id:
             goal = state.get("goals", {}).get(goal_id)

@@ -18,6 +18,8 @@ protagonist:
     - course_notes
     - photo_portfolio
     - campus_walk
+    - independent_sort
+    - family_bookstore_call
     - library_study
     - campus_walk
     - dorm_routine
@@ -30,22 +32,37 @@ life_outcome_templates:
     goal_id: literature-reading
     energy_cost: 6
     content: 在图书馆和范予安核对了读书会的书单。
+    max_per_day: 1
   course_notes:
     location: 华东师范大学
     goal_id: course-notes
     energy_cost: 7
     content: 整理完了今天的课程笔记。
+    max_per_day: 1
   photo_portfolio:
     location: 上海
     npc_id: photography-zhou
     goal_id: photo-portfolio
     energy_cost: 8
     content: 整理了摄影社活动要用的照片。
+    max_per_day: 1
   campus_walk:
     location: 华东师范大学
     npc_id: roommate-lin
     energy_cost: 5
     content: 和林晚在校园里走了一小段，聊了晚饭。
+    max_per_day: 1
+  independent_sort:
+    location: 华东师范大学宿舍
+    energy_cost: 3
+    content: 在宿舍把照片和笔记分门别类整理了一下。
+    max_per_day: 1
+  family_bookstore_call:
+    location: 嘉兴书店
+    npc_id: mother-shen
+    energy_cost: 4
+    content: 和妈妈通了电话，问了问书店今天的情况。
+    max_per_day: 1
 location_travel_minutes:
   华东师范大学->上海: 45
   上海->华东师范大学: 45
@@ -64,6 +81,7 @@ daily_schedule:
     ends_hour: 17
     template_id: course_notes
     location: 华东师范大学
+    fallback_templates: [independent_sort]
   - slot: photo_work
     title: 整理摄影作品
     starts_hour: 17
