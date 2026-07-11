@@ -606,6 +606,11 @@ class WorldKernel:
                 raise WorldError("activity entity is not registered")
             if payload["activity_id"] in _as_dict(state["agenda"], "agenda"):
                 raise WorldError("activity id already exists")
+            for existing in _as_dict(state["agenda"], "agenda").values():
+                if existing["entity_id"] == payload["entity_id"] and existing["status"] in {"planned", "active"}:
+                    overlaps = _parse_at(str(payload["starts_at"])) < _parse_at(str(existing["ends_at"])) and _parse_at(str(existing["starts_at"])) < _parse_at(str(payload["ends_at"]))
+                    if overlaps:
+                        raise WorldError("activity conflicts with an existing world commitment")
             return [("ActivityPlanned", payload)]
         if command_type == "schedule_action":
             action_id = str(command.get("action_id") or "")

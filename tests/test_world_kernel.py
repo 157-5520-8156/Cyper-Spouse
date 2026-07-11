@@ -115,6 +115,14 @@ def test_clock_advance_completes_due_activity_and_expires_open_action(tmp_path: 
     assert snapshot["actions"]["reply-later-1"]["status"] == "expired"
 
 
+def test_overlapping_activity_is_rejected(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    first = kernel.submit({"type": "plan_activity", "world_id": "zhizhi-v1", "activity_id": "one", "entity_id": "zhizhi", "title": "读书", "starts_at": NOW.isoformat(), "ends_at": (NOW + timedelta(hours=2)).isoformat()}, expected_revision=started.revision)
+    with pytest.raises(WorldError, match="conflicts"):
+        kernel.submit({"type": "plan_activity", "world_id": "zhizhi-v1", "activity_id": "two", "entity_id": "zhizhi", "title": "散步", "starts_at": (NOW + timedelta(hours=1)).isoformat(), "ends_at": (NOW + timedelta(hours=3)).isoformat()}, expected_revision=first.revision)
+
+
 def test_clock_advance_materializes_seeded_daily_life_into_events(tmp_path: Path) -> None:
     seed = world_seed() | {
         "daily_schedule": [
