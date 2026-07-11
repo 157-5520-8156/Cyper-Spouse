@@ -42,6 +42,15 @@ class QQDelivery:
             return self.settings.onebot_proactive_user_id
         return None
 
+    def supports_delivery_receipts(self) -> bool:
+        """Whether this adapter can later prove an interrupted outbound send.
+
+        Current official and OneBot send APIs return a synchronous acceptance
+        response, not a durable delivery-query capability.  Keep this false
+        until an adapter implements a real receipt lookup instead of guessing.
+        """
+        return False
+
     def _uses_onebot(self) -> bool:
         return self.settings.qq_adapter.lower() in {"napcat", "onebot"}
 

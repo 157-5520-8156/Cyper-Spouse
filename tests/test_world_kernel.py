@@ -254,6 +254,17 @@ def test_rebuilding_projection_from_the_ledger_matches_live_projection(tmp_path:
     assert report.matches_live is True
 
 
+def test_enablement_audit_requires_clean_projection_and_no_unreconciled_delivery(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    report = kernel.audit_enablement(started.world_id, delivery_receipts_supported=False)
+    assert report.ready is True
+    kernel.submit({"type": "schedule_action", "world_id": started.world_id, "action_id": "open", "kind": "test", "expires_at": (NOW + timedelta(hours=1)).isoformat()}, expected_revision=started.revision)
+    blocked = kernel.audit_enablement(started.world_id, delivery_receipts_supported=False)
+    assert blocked.ready is False
+    assert blocked.open_action_ids == ("open",)
+
+
 def test_model_proposal_is_not_a_fact_until_rules_accept_it(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
     started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)

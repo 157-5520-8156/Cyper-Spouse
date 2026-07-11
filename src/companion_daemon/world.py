@@ -63,6 +63,18 @@ class ProjectionReport:
 
 
 @dataclass(frozen=True)
+class WorldEnablementReport:
+    """Evidence required before routing real chat traffic into a world epoch."""
+
+    world_id: str
+    ready: bool
+    projection_reports: tuple[ProjectionReport, ...]
+    open_action_ids: tuple[str, ...]
+    unknown_action_ids: tuple[str, ...]
+    delivery_receipts_supported: bool
+
+
+@dataclass(frozen=True)
 class LifeShareDelivery:
     """A selected experience and its atomically-created external action."""
 
@@ -524,6 +536,24 @@ class WorldKernel:
                 (world_id, projection_name, revision, state_hash, now),
             )
         return ProjectionReport(world_id, projection_name, revision, len(events), state_hash, matches_live)
+
+    def audit_enablement(self, world_id: str, *, delivery_receipts_supported: bool) -> WorldEnablementReport:
+        """Rebuild every read model and state whether real chat may safely enable."""
+        reports = tuple(
+            self.rebuild_projection(world_id, projection)
+            for projection in ("world_current_state", "world_entities", "world_agenda", "world_actions", "world_experiences", "world_fact_index")
+        )
+        actions = _as_dict(self.snapshot(world_id)["actions"], "actions")
+        open_actions = tuple(sorted(action_id for action_id, action in actions.items() if _as_dict(action, "action").get("status") in {"scheduled", "sending"}))
+        unknown_actions = tuple(sorted(action_id for action_id, action in actions.items() if _as_dict(action, "action").get("status") == "unknown"))
+        return WorldEnablementReport(
+            world_id=world_id,
+            ready=all(report.matches_live for report in reports) and not open_actions and (not unknown_actions or delivery_receipts_supported),
+            projection_reports=reports,
+            open_action_ids=open_actions,
+            unknown_action_ids=unknown_actions,
+            delivery_receipts_supported=delivery_receipts_supported,
+        )
 
     def snapshot(self, world_id: str) -> dict[str, object]:
         with self.store.connect() as conn:

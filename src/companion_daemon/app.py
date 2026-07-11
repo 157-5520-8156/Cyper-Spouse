@@ -18,6 +18,7 @@ from companion_daemon.qq_official import (
 )
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel
+from companion_daemon.qq_delivery import QQDelivery
 
 
 app = FastAPI(title="Girl Agent Companion Daemon")
@@ -175,6 +176,25 @@ def world_rebuild(world_id: str) -> dict[str, object]:
         return WorldKernel(engine.store).rebuild_projection(world_id, "world_current_state").__dict__
     except WorldError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/world/{world_id}/enablement")
+def world_enablement(world_id: str) -> dict[str, object]:
+    try:
+        report = WorldKernel(engine.store).audit_enablement(
+            world_id,
+            delivery_receipts_supported=QQDelivery(get_settings()).supports_delivery_receipts(),
+        )
+    except WorldError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "world_id": report.world_id,
+        "ready": report.ready,
+        "delivery_receipts_supported": report.delivery_receipts_supported,
+        "open_action_ids": list(report.open_action_ids),
+        "unknown_action_ids": list(report.unknown_action_ids),
+        "projections": [item.__dict__ for item in report.projection_reports],
+    }
 
 
 @app.post("/qq/webhook")
