@@ -24,6 +24,11 @@ from companion_daemon.qq_delivery import QQDelivery
 
 app = FastAPI(title="Girl Agent Companion Daemon")
 app.mount("/assets", StaticFiles(directory=Path(__file__).resolve().parents[2] / "assets"), name="assets")
+app.mount(
+    "/dashboard-static",
+    StaticFiles(directory=Path(__file__).resolve().parent / "static"),
+    name="dashboard-static",
+)
 engine = build_companion_engine()
 
 

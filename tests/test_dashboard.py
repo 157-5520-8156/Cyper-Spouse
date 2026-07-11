@@ -1,6 +1,9 @@
+import hashlib
+import json
 from pathlib import Path
 
 from fastapi.testclient import TestClient
+from PIL import Image
 
 import companion_daemon.app as app_module
 from companion_daemon.db import CompanionStore
@@ -17,35 +20,66 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert "知栀的小屋" in response.text
     assert "为什么是这个动作" in response.text
     assert 'id="roomCanvas"' in response.text
-    assert "pathfind" in response.text
-    assert "applyScene" in response.text
-    assert "free-bedroom" in response.text
-    assert "sceneDefinitions" in response.text
-    assert "activateScene" in response.text
-    assert "scene_id" in response.text
-    assert "zhizhi-room-isometric-v2.png" in response.text
-    assert "zhizhi-iso-walk-v4.png" in response.text
-    assert "zhizhi-sprite-sheet-v2.png" in response.text
-    assert "characterAction" in response.text
-    assert "spriteCell" in response.text
-    assert "downRight" in response.text
-    assert "upLeft" in response.text
-    assert "downRight:0,downLeft:1,upLeft:2,upRight:3" in response.text
-    assert "WALK_FRAMES = 4" in response.text
-    assert "walkable" in response.text
-    assert "footprint" in response.text
-    assert "depthKey" in response.text
-    assert "directionFor" in response.text
-    assert "walkSheet = action === 'walk'" in response.text
+    assert "loadRoomBundle" in response.text
+    assert "/assets/dashboard/rooms/zhizhi-home/runtime/room.bundle.json" in response.text
+    assert '/dashboard-static/room/runtime.js' in response.text
+    assert '/dashboard-static/room/editor.js' in response.text
+    assert "DashboardRoomRuntime.load" in response.text
+    assert "roomRuntime.setActor" in response.text
+    assert "roomRuntime.activatePreview" in response.text
+    assert "get('freeze') === '1'" in response.text
+    assert "get('view') === 'canvas'" in response.text
     assert "applyPreviewMode" in response.text
-    assert "demo !== 'walk' && demo !== 'audit'" in response.text
-    assert "auditPaths" in response.text
-    assert "drawPhone" in response.text
-    assert "drawSleep" in response.text
-    assert "drawInteractionCue" in response.text
+    assert "用户列表读取失败" in response.text
+    assert "The visual home remains usable" in response.text
     assert "状态同步失败 · 可稍后重试" in response.text
-    assert "routeGraph" not in response.text
     assert "/debug/users" in response.text
+
+
+def test_dashboard_room_runtime_is_served_as_an_independent_module() -> None:
+    client = TestClient(app_module.app)
+
+    response = client.get("/dashboard-static/room/runtime.js")
+
+    assert response.status_code == 200
+    assert "class DashboardRoomRuntime" in response.text
+    assert "static async load" in response.text
+    assert "setActor(scene)" in response.text
+    assert "activatePreview(params)" in response.text
+    assert "start()" in response.text
+    assert "interactionDepth.relativeTo" in response.text
+    assert "小屋巡回行走 · 不写入 daemon" in response.text
+    assert "动作巡检 · ${spot} · 不写入 daemon" in response.text
+
+    editor = client.get("/dashboard-static/room/editor.js")
+    assert editor.status_code == 200
+    assert "class DashboardRoomEditor" in editor.text
+    assert "manifestSnippet()" in editor.text
+    assert "pointerMove(event)" in editor.text
+    assert "data-toggle=\"walkable\"" in editor.text
+    assert "data-toggle=\"footprints\"" in editor.text
+    assert "data-toggle=\"approaches\"" in editor.text
+
+
+def test_dashboard_visual_baseline_manifest_matches_captured_files() -> None:
+    root = Path(__file__).resolve().parents[1]
+    baseline_dir = root / "docs/visual-baselines/dashboard-room"
+    manifest = json.loads((baseline_dir / "baseline.json").read_text())
+    bundle = json.loads(
+        (root / "assets/dashboard/rooms/zhizhi-home/runtime/room.bundle.json").read_text()
+    )
+
+    capture_names = {item["name"] for item in manifest["captures"]}
+    expected_audits = {
+        f"{item['id']}-{side}"
+        for item in bundle["objects"]
+        for side in ("behind", "front")
+    }
+    assert capture_names == {"tour-start", *expected_audits}
+    for capture in manifest["captures"]:
+        path = baseline_dir / capture["file"]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == capture["sha256"]
+        assert Image.open(path).format == "JPEG"
 
 
 def test_debug_state_and_memory_controls(tmp_path: Path, monkeypatch) -> None:

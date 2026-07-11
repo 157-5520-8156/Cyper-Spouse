@@ -1,0 +1,24 @@
+{
+  "capturedAt": "2026-07-12",
+  "baseUrl": "http://127.0.0.1:8765/dashboard",
+  "captureSurface": "Dashboard room canvas-only viewport",
+  "deterministicMode": "freeze=1",
+  "note": "The view=canvas route removes dashboard chrome so every baseline measures only the room rendering surface.",
+  "captures": [
+    {"name": "tour-start", "query": "demo=tour&freeze=1&view=canvas", "file": "tour-start.jpg", "sha256": "85cc9f9d2be56f741836f2dad9b33f178cbfb70a142ea0211293566137f92a94"},
+    {"name": "sofa-behind", "query": "demo=audit&object=sofa&side=behind&freeze=1&view=canvas", "file": "sofa-behind.jpg", "sha256": "23d78939c6a92425ba5a2b90e89561365b6bc52f6d78dcdb359103a7e615c409"},
+    {"name": "sofa-front", "query": "demo=audit&object=sofa&side=front&freeze=1&view=canvas", "file": "sofa-front.jpg", "sha256": "abd1a9653905fb0fa92bb5b4760333824b16d6443e56c36b9b880bfbb46e7e86"},
+    {"name": "desk-behind", "query": "demo=audit&object=desk&side=behind&freeze=1&view=canvas", "file": "desk-behind.jpg", "sha256": "d458badeb44babdd33e08f0cfedf7a16be0827cf7bdac17f60a8c78d6681b647"},
+    {"name": "desk-front", "query": "demo=audit&object=desk&side=front&freeze=1&view=canvas", "file": "desk-front.jpg", "sha256": "c85959777542e2ad8a37f03f95f1640c9377eb6af259eeeb5e61a9d7b38162f0"},
+    {"name": "bed-behind", "query": "demo=audit&object=bed&side=behind&freeze=1&view=canvas", "file": "bed-behind.jpg", "sha256": "5ce4379410639b95c94d5e5d5c976cf2243d8217e775c6ca50713fb6009069f2"},
+    {"name": "bed-front", "query": "demo=audit&object=bed&side=front&freeze=1&view=canvas", "file": "bed-front.jpg", "sha256": "e79c4d90b2ef99a2c7d97d59be45bdf4d3fb4eb7041d1cc2ee161cc294e5d786"},
+    {"name": "table-behind", "query": "demo=audit&object=table&side=behind&freeze=1&view=canvas", "file": "table-behind.jpg", "sha256": "acbeb7c889445f832420e566aaf76e917b685e48e280fc792e928e036fc44932"},
+    {"name": "table-front", "query": "demo=audit&object=table&side=front&freeze=1&view=canvas", "file": "table-front.jpg", "sha256": "58f63c77e08bf04c87c92a5b9840732ee672f0128491dfa28e2efb4b79204715"},
+    {"name": "dining-behind", "query": "demo=audit&object=dining&side=behind&freeze=1&view=canvas", "file": "dining-behind.jpg", "sha256": "8b4083d71f3e2ad46acb260fb413ce8b00ac68f83e77051099e69b176d310918"},
+    {"name": "dining-front", "query": "demo=audit&object=dining&side=front&freeze=1&view=canvas", "file": "dining-front.jpg", "sha256": "b1ac86b2df5f20736cb747fd32542f98101d221145031dceff89438988c1f741"},
+    {"name": "divider-behind", "query": "demo=audit&object=divider&side=behind&freeze=1&view=canvas", "file": "divider-behind.jpg", "sha256": "0499d156e75baf9655f309cc2ad8b145f9419ca620aae0e96bc7202b37ba0c4f"},
+    {"name": "divider-front", "query": "demo=audit&object=divider&side=front&freeze=1&view=canvas", "file": "divider-front.jpg", "sha256": "da3534641dcf6a8a04a71d4bf690bb6663fa3e3bc7fcc7541e518f70cc814081"},
+    {"name": "teal-stool-behind", "query": "demo=audit&object=teal-stool&side=behind&freeze=1&view=canvas", "file": "teal-stool-behind.jpg", "sha256": "ee98700572cd4ac41bef45e7e3d3588154afe3da8c35dca565ed13da817d31e8"},
+    {"name": "teal-stool-front", "query": "demo=audit&object=teal-stool&side=front&freeze=1&view=canvas", "file": "teal-stool-front.jpg", "sha256": "d436971e6e77e60a30b09e459bcac58f6fd67f2342f2897b157d5010ea1e6955"}
+  ]
+}

@@ -1,0 +1,922 @@
+{
+  "schemaVersion": 1,
+  "id": "zhizhi-home",
+  "canvas": {
+    "width": 1000,
+    "height": 760
+  },
+  "grid": {
+    "minX": 0,
+    "maxX": 7,
+    "minY": 0,
+    "maxY": 7
+  },
+  "tile": {
+    "width": 85,
+    "height": 42,
+    "origin": [
+      714,
+      393
+    ]
+  },
+  "images": {
+    "room": "/assets/dashboard/zhizhi-room-isometric-v2.png",
+    "sprite": "/assets/dashboard/zhizhi-iso-walk-v4.png",
+    "idle": "/assets/dashboard/zhizhi-sprite-sheet-v2.png",
+    "deskFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/desk-front.png",
+    "bedFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/bed-front.png",
+    "sofaFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/sofa-front.png",
+    "tableFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/table-front.png",
+    "diningFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/dining-front.png",
+    "dividerFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/divider-front.png",
+    "teal-stoolFront": "/assets/dashboard/rooms/zhizhi-home/runtime/occluders/teal-stool-front.png"
+  },
+  "sprites": {
+    "walk": {
+      "image": "sprite",
+      "columns": {
+        "downRight": 0,
+        "downLeft": 1,
+        "upLeft": 2,
+        "upRight": 3
+      },
+      "frames": 4,
+      "frameRate": 2.4,
+      "display": [
+        132,
+        132
+      ]
+    },
+    "poses": {
+      "idle": {
+        "image": "idle",
+        "crop": [
+          100,
+          70,
+          250,
+          500
+        ],
+        "display": [
+          58,
+          116
+        ]
+      },
+      "sit": {
+        "image": "idle",
+        "crop": [
+          380,
+          620,
+          360,
+          470
+        ],
+        "display": [
+          96,
+          102
+        ]
+      },
+      "sleep": {
+        "image": "idle",
+        "crop": [
+          690,
+          720,
+          520,
+          390
+        ],
+        "display": [
+          170,
+          112
+        ]
+      }
+    }
+  },
+  "movement": {
+    "walkSpeed": 1.65
+  },
+  "behavior": {
+    "locationFallbackInteractions": {
+      "sofa": "sofa"
+    },
+    "locationFacing": {
+      "window": "upRight"
+    },
+    "actionDefinitions": {
+      "study": {
+        "effect": "focus"
+      },
+      "eat": {
+        "effect": "steam"
+      },
+      "walk_out": {
+        "effect": "exit-glow"
+      },
+      "social": {
+        "effect": "social-spark"
+      },
+      "relax": {
+        "effect": "social-spark"
+      },
+      "tidy": {
+        "effect": "tidy-sparkles"
+      },
+      "notice_phone": {
+        "interaction": "phone",
+        "phoneProp": true
+      },
+      "glance_phone": {
+        "interaction": "phone",
+        "phoneProp": true
+      },
+      "read_phone": {
+        "interaction": "phone",
+        "phoneProp": true,
+        "effect": "focus"
+      },
+      "type_phone": {
+        "interaction": "phone",
+        "phoneProp": true,
+        "phoneAnimation": "typing",
+        "effect": "focus"
+      }
+    }
+  },
+  "background": "room",
+  "walkable": [
+    [
+      0,
+      1
+    ],
+    [
+      0,
+      2
+    ],
+    [
+      1,
+      2
+    ],
+    [
+      1,
+      3
+    ],
+    [
+      1,
+      6
+    ],
+    [
+      2,
+      6
+    ],
+    [
+      3,
+      6
+    ],
+    [
+      4,
+      6
+    ],
+    [
+      5,
+      6
+    ],
+    [
+      6,
+      6
+    ],
+    [
+      7,
+      6
+    ],
+    [
+      2,
+      5
+    ],
+    [
+      3,
+      5
+    ],
+    [
+      4,
+      5
+    ],
+    [
+      5,
+      5
+    ],
+    [
+      6,
+      5
+    ],
+    [
+      7,
+      5
+    ],
+    [
+      2,
+      4
+    ],
+    [
+      3,
+      4
+    ],
+    [
+      4,
+      4
+    ],
+    [
+      5,
+      4
+    ],
+    [
+      6,
+      4
+    ],
+    [
+      7,
+      4
+    ],
+    [
+      2,
+      3
+    ],
+    [
+      3,
+      3
+    ],
+    [
+      4,
+      3
+    ],
+    [
+      5,
+      3
+    ],
+    [
+      6,
+      3
+    ],
+    [
+      7,
+      3
+    ],
+    [
+      3,
+      2
+    ],
+    [
+      4,
+      2
+    ],
+    [
+      5,
+      2
+    ],
+    [
+      6,
+      2
+    ],
+    [
+      7,
+      2
+    ],
+    [
+      3,
+      1
+    ],
+    [
+      6,
+      1
+    ],
+    [
+      7,
+      1
+    ],
+    [
+      7,
+      7
+    ],
+    [
+      6,
+      7
+    ],
+    [
+      5,
+      7
+    ]
+  ],
+  "anchors": {
+    "desk": [
+      1,
+      6,
+      0
+    ],
+    "kitchen": [
+      0,
+      1,
+      0
+    ],
+    "entry": [
+      7,
+      3,
+      0
+    ],
+    "sofa": [
+      5,
+      7,
+      0
+    ],
+    "vanity": [
+      7,
+      2,
+      0
+    ],
+    "bed": [
+      7,
+      1,
+      0
+    ],
+    "window": [
+      7,
+      2,
+      0
+    ],
+    "rug": [
+      7,
+      4,
+      0
+    ]
+  },
+  "objects": [
+    {
+      "id": "desk",
+      "tile": [
+        1,
+        5,
+        0
+      ],
+      "footprint": [
+        [
+          1,
+          5
+        ]
+      ],
+      "frontOccluder": {
+        "image": "deskFront",
+        "origin": [
+          35,
+          445
+        ],
+        "depthBias": 500
+      },
+      "audit": {
+        "behind": [
+          0,
+          6,
+          0
+        ],
+        "front": [
+          1,
+          7,
+          0
+        ]
+      },
+      "auditPose": {}
+    },
+    {
+      "id": "bed",
+      "tile": [
+        6,
+        1,
+        0
+      ],
+      "footprint": [
+        [
+          6,
+          1
+        ]
+      ],
+      "frontOccluder": {
+        "image": "bedFront",
+        "origin": [
+          885,
+          445
+        ],
+        "depthBias": 500
+      },
+      "audit": {
+        "behind": [
+          5,
+          1,
+          0
+        ],
+        "front": [
+          5,
+          3,
+          0
+        ]
+      },
+      "auditPose": {}
+    },
+    {
+      "id": "sofa",
+      "tile": [
+        4,
+        6,
+        0
+      ],
+      "footprint": [
+        [
+          4,
+          6
+        ],
+        [
+          5,
+          6
+        ]
+      ],
+      "frontOccluder": {
+        "image": "sofaFront",
+        "origin": [
+          395,
+          565
+        ],
+        "depthBias": 500
+      },
+      "audit": {
+        "behind": [
+          2.5,
+          4.5,
+          0
+        ],
+        "front": [
+          5,
+          7,
+          0
+        ]
+      },
+      "auditPose": {
+        "behind": "sit"
+      }
+    },
+    {
+      "id": "table",
+      "tile": [
+        5,
+        6,
+        0
+      ],
+      "footprint": [
+        [
+          6,
+          6
+        ]
+      ],
+      "frontOccluder": {
+        "image": "tableFront",
+        "origin": [
+          600,
+          740
+        ],
+        "depthBias": 500
+      },
+      "audit": {
+        "behind": [
+          6,
+          5,
+          0
+        ],
+        "front": [
+          6,
+          7,
+          0
+        ]
+      },
+      "auditPose": {}
+    },
+    {
+      "id": "dining",
+      "tile": [
+        2,
+        1,
+        0
+      ],
+      "footprint": [
+        [
+          1,
+          1
+        ],
+        [
+          2,
+          1
+        ],
+        [
+          2,
+          2
+        ]
+      ],
+      "frontOccluder": {
+        "image": "diningFront",
+        "origin": [
+          680,
+          340
+        ],
+        "depthBias": 500
+      },
+      "audit": {
+        "behind": [
+          1,
+          0,
+          0
+        ],
+        "front": [
+          2,
+          3,
+          0
+        ]
+      },
+      "auditPose": {}
+    },
+    {
+      "id": "divider",
+      "tile": [
+        5,
+        3,
+        0
+      ],
+      "footprint": [
+        [
+          4,
+          2
+        ],
+        [
+          4,
+          3
+        ],
+        [
+          5,
+          2
+        ],
+        [
+          5,
+          3
+        ]
+      ],
+      "frontOccluder": {
+        "image": "dividerFront",
+        "origin": [
+          780,
+          520
+        ],
+        "depthBias": 500
+      },
+      "audit": {
+        "behind": [
+          4,
+          2,
+          0
+        ],
+        "front": [
+          6,
+          4,
+          0
+        ]
+      },
+      "auditPose": {}
+    },
+    {
+      "id": "teal-stool",
+      "tile": [
+        6.8,
+        0,
+        0
+      ],
+      "footprint": [
+        [
+          7,
+          0
+        ]
+      ],
+      "frontOccluder": {
+        "image": "teal-stoolFront",
+        "origin": [
+          1190,
+          620
+        ],
+        "depthBias": 500
+      },
+      "audit": {
+        "behind": [
+          6.5,
+          0,
+          0
+        ],
+        "front": [
+          7,
+          1,
+          0
+        ]
+      },
+      "auditPose": {}
+    }
+  ],
+  "interactions": {
+    "desk": {
+      "object": "desk",
+      "location": "desk",
+      "action": "study",
+      "approach": [
+        1,
+        6,
+        0
+      ],
+      "posePosition": [
+        0.2,
+        4.8,
+        0
+      ],
+      "pose": "idle",
+      "facing": "upRight",
+      "depth": "natural"
+    },
+    "dining": {
+      "object": "dining",
+      "location": "kitchen",
+      "action": "eat",
+      "approach": [
+        0,
+        1,
+        0
+      ],
+      "posePosition": [
+        0.5,
+        0.8,
+        0
+      ],
+      "pose": "idle",
+      "facing": "downLeft",
+      "depth": "natural"
+    },
+    "sofa": {
+      "object": "sofa",
+      "location": "sofa",
+      "action": "relax",
+      "approach": [
+        5,
+        7,
+        0
+      ],
+      "posePosition": [
+        2.5,
+        4.5,
+        0
+      ],
+      "pose": "sit",
+      "facing": "downLeft",
+      "depth": {
+        "relativeTo": "sofa",
+        "layer": "above-front"
+      }
+    },
+    "bed": {
+      "object": "bed",
+      "location": "bed",
+      "action": "sleep",
+      "approach": [
+        7,
+        1,
+        0
+      ],
+      "posePosition": [
+        5,
+        0.65,
+        0
+      ],
+      "pose": "sleep",
+      "facing": "upLeft",
+      "depth": {
+        "relativeTo": "bed",
+        "layer": "above-front"
+      }
+    },
+    "phone": {
+      "object": "sofa",
+      "location": "sofa",
+      "action": "read_phone",
+      "approach": [
+        5,
+        7,
+        0
+      ],
+      "posePosition": [
+        2.5,
+        4.5,
+        0
+      ],
+      "pose": "sit",
+      "facing": "downLeft",
+      "depth": {
+        "relativeTo": "sofa",
+        "layer": "above-front"
+      }
+    }
+  },
+  "routes": {
+    "walk": [
+      [
+        3,
+        4,
+        0
+      ],
+      [
+        3,
+        5,
+        0
+      ],
+      [
+        4,
+        5,
+        0
+      ]
+    ],
+    "tour": [
+      [
+        0,
+        1,
+        0
+      ],
+      [
+        0,
+        2,
+        0
+      ],
+      [
+        1,
+        2,
+        0
+      ],
+      [
+        1,
+        3,
+        0
+      ],
+      [
+        2,
+        3,
+        0
+      ],
+      [
+        2,
+        4,
+        0
+      ],
+      [
+        2,
+        5,
+        0
+      ],
+      [
+        2,
+        6,
+        0
+      ],
+      [
+        3,
+        6,
+        0
+      ],
+      [
+        3,
+        5,
+        0
+      ],
+      [
+        3,
+        4,
+        0
+      ],
+      [
+        4,
+        4,
+        0
+      ],
+      [
+        5,
+        4,
+        0
+      ],
+      [
+        6,
+        4,
+        0
+      ],
+      [
+        7,
+        4,
+        0
+      ],
+      [
+        7,
+        3,
+        0
+      ],
+      [
+        7,
+        2,
+        0
+      ],
+      [
+        7,
+        1,
+        0
+      ],
+      [
+        7,
+        2,
+        0
+      ],
+      [
+        7,
+        3,
+        0
+      ],
+      [
+        7,
+        4,
+        0
+      ],
+      [
+        7,
+        5,
+        0
+      ],
+      [
+        7,
+        6,
+        0
+      ],
+      [
+        7,
+        7,
+        0
+      ],
+      [
+        6,
+        7,
+        0
+      ],
+      [
+        5,
+        7,
+        0
+      ]
+    ]
+  },
+  "axisAudits": {
+    "downRight": [
+      [
+        3,
+        3,
+        0
+      ],
+      [
+        4,
+        3,
+        0
+      ]
+    ],
+    "downLeft": [
+      [
+        3,
+        3,
+        0
+      ],
+      [
+        3,
+        4,
+        0
+      ]
+    ],
+    "upLeft": [
+      [
+        4,
+        3,
+        0
+      ],
+      [
+        3,
+        3,
+        0
+      ]
+    ],
+    "upRight": [
+      [
+        3,
+        4,
+        0
+      ],
+      [
+        3,
+        3,
+        0
+      ]
+    ]
+  }
+}
