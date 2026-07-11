@@ -26,6 +26,11 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert "zhizhi-q-home-evening-v1.png" in response.text
     assert "zhizhi-q-sprite-sheet-v1.png" in response.text
     assert "characterAction" in response.text
+    assert "spriteCell" in response.text
+    assert "WALK_SPEED = 92" in response.text
+    assert "WALK_FRAME_MS = 260" in response.text
+    assert "applyPreviewMode" in response.text
+    assert "demo') !== 'walk'" in response.text
     assert "drawPhone" in response.text
     assert "drawSleep" in response.text
     assert "drawInteractionCue" in response.text

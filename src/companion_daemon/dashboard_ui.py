@@ -304,6 +304,11 @@ DASHBOARD_HTML = r"""<!doctype html>
     let snapshot = null;
     let loading = false;
     let selectedCalendarDate = null;
+    // The generated sheet contains a standing and a stepping pose for each
+    // useful direction.  Keep the pace deliberately relaxed: the room is a
+    // visual diary, not a game character sprinting between destinations.
+    const WALK_SPEED = 92;
+    const WALK_FRAME_MS = 260;
     const actor = {anchor:'rug', pos:[...anchors.rug], path:[], action:'idle', expression:'neutral', scene:null, direction:'front', lastTime:0, blinkUntil:0};
 
     function preload() {
@@ -379,18 +384,31 @@ DASHBOARD_HTML = r"""<!doctype html>
     function characterAction() {
       return ['walk','walk_out','tidy'].includes(actor.action) ? 'walk' : 'idle';
     }
+    function spriteCell(action, direction, now) {
+      if (action !== 'walk') {
+        return ({left:[2,1], right:[2,0], front:[0,0]})[direction] || [0,0];
+      }
+      const stepping = Math.floor(now / WALK_FRAME_MS) % 2 === 1;
+      const cycle = {
+        // The top pair looks right, the lower pair looks left.  Each pair is
+        // [standing, stepping], so changing the frame really changes the pose.
+        left: [[2,1],[3,1]],
+        right: [[2,0],[3,0]],
+        front: [[0,0],[1,0]]
+      };
+      return (cycle[direction] || cycle.front)[stepping ? 1 : 0];
+    }
     function drawActor(ctx, now) {
       if (actor.action === 'sleep') { drawSleep(ctx, now); return; }
       const action = characterAction();
       const sheet = images.sprite;
       if (!sheet) return;
       const [px, py] = project(actor.pos);
-      const cells = action === 'walk'
-        ? ({left:[1,0], right:[3,1], front:[1,0]})[actor.direction] || [1,0]
-        : ({left:[2,0], right:[2,1], front:[0,0]})[actor.direction] || [0,0];
+      const cells = spriteCell(action, actor.direction, now);
       const sx = cells[0] * 443, sy = cells[1] * 443;
       const dh = 128, dw = 128;
-      const x = px - dw / 2, y = py - dh + 7;
+      const stepLift = action === 'walk' && Math.floor(now / WALK_FRAME_MS) % 2 ? -2 : 0;
+      const x = px - dw / 2, y = py - dh + 7 + stepLift;
       ctx.save();
       ctx.imageSmoothingEnabled = false;
       ctx.shadowColor = 'rgba(34, 25, 20, .35)';
@@ -524,7 +542,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         const target = actor.path[0];
         const dx = target[0] - actor.pos[0], dy = target[1] - actor.pos[1];
         const dist = Math.hypot(dx, dy);
-        const speed = 210;
+        const speed = WALK_SPEED;
         if (dist <= speed * dt) {
           actor.pos = target;
           actor.anchor = nearestAnchor(actor.pos);
@@ -547,8 +565,17 @@ DASHBOARD_HTML = r"""<!doctype html>
       select.innerHTML = (users.users.length ? users.users : ['geoff']).map(u => `<option value="${esc(u)}">${esc(u)}</option>`).join('');
       select.onchange = loadContext;
       await loadContext();
+      applyPreviewMode();
       setInterval(loadContext, 20000);
       requestAnimationFrame(loop);
+    }
+    function applyPreviewMode() {
+      // A non-persistent visual check for the dashboard.  It never changes
+      // daemon state and is intentionally opt-in via the URL.
+      if (new URLSearchParams(location.search).get('demo') !== 'walk') return;
+      applyScene({location:'desk', action:'study', expression:'neutral', time_of_day:'day', has_notification:false, has_open_task:false});
+      document.getElementById('updated').textContent = '行走动画预览 · 不写入 daemon';
+      document.getElementById('gameAction').textContent = '走路 · 书桌';
     }
     async function loadContext() {
       if (loading) return;
