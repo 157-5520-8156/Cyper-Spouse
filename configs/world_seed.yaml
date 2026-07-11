@@ -66,6 +66,7 @@ daily_schedule:
     template_id: photo_portfolio
     location: 上海
     fallback_templates: [course_notes]
+    rest_recovery: 8
   - slot: evening_walk
     title: 傍晚散步或整理照片
     starts_hour: 19

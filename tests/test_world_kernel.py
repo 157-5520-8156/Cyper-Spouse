@@ -170,6 +170,16 @@ def test_seeded_fallback_template_replaces_an_unavailable_activity(tmp_path: Pat
     assert activity["substitution_reason"] == "primary_unavailable"
 
 
+def test_no_eligible_seeded_activity_becomes_rest_instead_of_fake_completion(tmp_path: Path) -> None:
+    seed = world_seed() | {"daily_schedule": [{"slot": "rest", "title": "安排休息", "template_id": "missing_template", "location": "宿舍", "starts_hour": 9, "ends_hour": 10, "rest_when_unavailable": True, "rest_recovery": 9}]}
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": seed}, expected_revision=0)
+    kernel.advance("zhizhi-v1", NOW + timedelta(hours=2), expected_revision=started.revision)
+    snapshot = kernel.snapshot("zhizhi-v1")
+    assert snapshot["agenda"]["2026-07-11:rest"]["status"] == "rested"
+    assert snapshot["needs"]["energy"] == 79
+
+
 def test_external_delivery_result_is_idempotent_and_only_settled_action_can_create_experience(
     tmp_path: Path,
 ) -> None:

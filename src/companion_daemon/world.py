@@ -702,6 +702,9 @@ class WorldKernel:
                         if substitution_reason:
                             payload["substitution_reason"] = substitution_reason
                         events.append(("ActivityPlanned", payload))
+                        if substitution_reason == "no_eligible_template" and bool(item.get("rest_when_unavailable")):
+                            events.append(("ActivityRested", {"activity_id": activity_id, "reason": "no_eligible_seeded_activity", "energy_delta": int(item.get("rest_recovery", 8))}))
+                            continue
                         events.append(("ActivityStarted", {"activity_id": activity_id}))
                         if ends <= target_at:
                             events.append(("ActivityCompleted", {"activity_id": activity_id}))
@@ -1157,12 +1160,17 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "ActivityPlanned":
         item = {**payload, "status": "planned"}
         _as_dict(next_state["agenda"], "agenda")[str(item["activity_id"])] = item
-    elif event.event_type in {"ActivityStarted", "ActivityCompleted", "ActivityInterrupted", "ActivityCancelled"}:
+    elif event.event_type in {"ActivityStarted", "ActivityCompleted", "ActivityInterrupted", "ActivityCancelled", "ActivityRested"}:
         activity = _as_dict(next_state["agenda"], "agenda")[str(payload["activity_id"])]
         activity["status"] = {
             "ActivityStarted": "active", "ActivityCompleted": "completed",
             "ActivityInterrupted": "interrupted", "ActivityCancelled": "cancelled",
+            "ActivityRested": "rested",
         }[event.event_type]
+        if event.event_type == "ActivityRested":
+            activity["reason"] = payload["reason"]
+            needs = _as_dict(next_state["needs"], "needs")
+            needs["energy"] = max(0, min(100, int(needs.get("energy", 50)) + int(payload["energy_delta"])))
     elif event.event_type == "ActionScheduled":
         item = {**payload, "status": "scheduled"}
         _as_dict(next_state["actions"], "actions")[str(item["action_id"])] = item
