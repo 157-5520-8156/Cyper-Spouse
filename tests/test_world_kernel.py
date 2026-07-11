@@ -577,3 +577,22 @@ def test_reply_rejects_unreferenced_completed_experience_claim(tmp_path: Path) -
             "zhizhi-v1",
             {"reply_text": "我刚刚和林晚吃了饭。", "mentioned_event_ids": [], "proposed_action_ids": []},
         )
+
+
+def test_reply_claim_must_quote_the_specific_committed_source(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    kernel.submit(
+        {"type": "confirm_fact", "world_id": started.world_id, "fact_id": "fact-1", "value": "下午在图书馆看书", "idempotency_key": "fact-1"},
+        expected_revision=kernel.revision(started.world_id),
+    )
+    candidate = kernel.validate_reply_candidate(
+        started.world_id,
+        {"reply_text": "我下午在图书馆看书。", "mentioned_event_ids": ["fact-1"], "proposed_action_ids": [], "claims": [{"source_id": "fact-1", "text": "下午在图书馆看书"}]},
+    )
+    assert candidate["claims"] == [{"source_id": "fact-1", "text": "下午在图书馆看书"}]
+    with pytest.raises(WorldError, match="quoted from"):
+        kernel.validate_reply_candidate(
+            started.world_id,
+            {"reply_text": "我刚和林晚吃了饭。", "mentioned_event_ids": ["fact-1"], "proposed_action_ids": [], "claims": [{"source_id": "fact-1", "text": "刚和林晚吃了饭"}]},
+        )

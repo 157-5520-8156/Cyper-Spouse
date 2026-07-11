@@ -183,6 +183,27 @@ class CompanionEngine:
             return
         digest = sha256(f"{purpose}|{causation}|{content}".encode("utf-8")).hexdigest()[:20]
         proposal_id = f"model:{purpose}:{digest}"
+        action_id = f"model_call:{digest}"
+        self._submit_world_with_retry(
+            {
+                "type": "schedule_action",
+                "world_id": self.world_id,
+                "action_id": action_id,
+                "kind": "model_call",
+                "expires_at": (self._world_logical_now() + timedelta(minutes=5)).isoformat(),
+                "payload": {"purpose": purpose, "causation": causation},
+                "idempotency_key": f"schedule:{action_id}",
+            }
+        )
+        self._submit_world_with_retry(
+            {
+                "type": "record_external_result",
+                "world_id": self.world_id,
+                "action_id": action_id,
+                "result": {"kind": "model_call", "status": "delivered", "output_hash": sha256(content.encode("utf-8")).hexdigest()},
+                "idempotency_key": f"settle:{action_id}",
+            }
+        )
         self._submit_world_with_retry(
             {
                 "type": "record_model_output",
@@ -190,6 +211,7 @@ class CompanionEngine:
                 "proposal_id": proposal_id,
                 "purpose": purpose,
                 "content": content,
+                "action_id": action_id,
                 "causation_id": causation,
                 "idempotency_key": f"model-output:{proposal_id}",
             }
@@ -658,7 +680,7 @@ class CompanionEngine:
                     "content": (
                         f"{context_block}\n\n用户: {message.text}\n"
                         "WorldReplyJSON: 只返回 JSON："
-                        '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[]}。'
+                        '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字引用的已结算片段"}]}。'
                     ),
                 },
             ],
@@ -674,7 +696,7 @@ class CompanionEngine:
         except WorldError:
             # A malformed model result must not bypass the ledger by becoming
             # a free-text fact claim.  The conservative fallback has no claim.
-            candidate = {"reply_text": "我在。", "mentioned_event_ids": [], "proposed_action_ids": []}
+            candidate = {"reply_text": "我在。", "mentioned_event_ids": [], "proposed_action_ids": [], "claims": []}
         text = sanitize_chat_text(str(candidate["reply_text"]))
         delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(
             canonical_user_id=canonical_user_id,

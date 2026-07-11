@@ -409,19 +409,34 @@ class WorldKernel:
         facts = _as_dict(state["facts"], "facts")
         known = set(experiences) | set(facts)
         mentioned = _as_list(candidate.get("mentioned_event_ids", []), "mentioned_event_ids")
+        claims = _as_list(candidate.get("claims", []), "claims")
         proposed_actions = _as_list(candidate.get("proposed_action_ids", []), "proposed_action_ids")
         unknown = [str(item) for item in mentioned if str(item) not in known]
         if unknown:
             raise WorldError(f"reply cites uncommitted world records: {', '.join(unknown)}")
-        # A reply without provenance may still converse, but it cannot state a
-        # completed off-screen experience.  This deliberately conservative
-        # lexical gate catches the common Chinese past-event forms; richer
-        # claims must be supplied through mentioned_event_ids.
+        sources = {
+            **{record_id: str(_as_dict(item, "experience")["content"]) for record_id, item in experiences.items()},
+            **{record_id: str(_as_dict(item, "fact")["value"]) for record_id, item in facts.items()},
+        }
+        normalized_claims: list[dict[str, str]] = []
+        for raw_claim in claims:
+            claim = _as_dict(raw_claim, "reply claim")
+            source_id = str(claim.get("source_id") or "")
+            text = str(claim.get("text") or "").strip()
+            if source_id not in sources or source_id not in mentioned or not text:
+                raise WorldError("each reply claim needs a mentioned committed source id and text")
+            if text not in reply_text or text not in sources[source_id]:
+                raise WorldError("reply claim text must be quoted from its committed source")
+            normalized_claims.append({"source_id": source_id, "text": text})
+        # A reply without claims may still converse, but it cannot state a
+        # completed off-screen experience.  Claim text is intentionally quoted
+        # from its source, making provenance deterministic rather than a model
+        # assertion that merely names an arbitrary id.
         event_claim = re.search(
-            r"(?:我|她).{0,18}(?:刚刚|刚才|已经|今天|昨晚|早上).{0,24}(?:去了|吃了|见了|聊了|做了|完成了|回来)",
+            r"(?:我|她).{0,24}(?:去了|吃了|见了|聊了|做了|完成了|回来|逛了|看了|参加了|上了)",
             reply_text,
         )
-        if event_claim and not mentioned:
+        if event_claim and not normalized_claims:
             raise WorldError("reply states an experience without a committed source id")
         actions = _as_dict(state["actions"], "actions")
         invalid_actions = [str(item) for item in proposed_actions if str(item) not in actions]
@@ -431,6 +446,7 @@ class WorldKernel:
             "reply_text": reply_text,
             "mentioned_event_ids": [str(item) for item in mentioned],
             "proposed_action_ids": [str(item) for item in proposed_actions],
+            "claims": normalized_claims,
         }
 
     def action_id_for_delivery(self, world_id: str, delivery_id: int) -> str | None:
@@ -667,7 +683,9 @@ class WorldKernel:
             purpose = str(command.get("purpose") or "")
             content = str(command.get("content") or "")
             proposals = _as_dict(state["proposals"], "proposals")
-            if not proposal_id or proposal_id in proposals or not purpose or not content or len(content) > 8192:
+            action_id = str(command.get("action_id") or "")
+            action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "model action")
+            if not proposal_id or proposal_id in proposals or not purpose or not content or len(content) > 8192 or action.get("status") != "delivered":
                 raise WorldError("model output requires a new bounded proposal id, purpose, and content")
             return [
                 (
@@ -677,6 +695,7 @@ class WorldKernel:
                         "entity_id": "zhizhi",
                         "template_id": f"model_output:{purpose}",
                         "content": content,
+                        "action_id": action_id,
                         "audit_only": True,
                     },
                 )
@@ -1086,4 +1105,5 @@ def parse_reply_candidate(raw: str) -> dict[str, object]:
         "reply_text": str(candidate.get("reply_text") or "").strip(),
         "mentioned_event_ids": candidate.get("mentioned_event_ids", []),
         "proposed_action_ids": candidate.get("proposed_action_ids", []),
+        "claims": candidate.get("claims", []),
     }

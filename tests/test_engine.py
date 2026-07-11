@@ -120,6 +120,10 @@ async def test_world_enabled_reply_records_input_action_and_delivery_settlement(
     assert "UserMessageObserved" in event_types
     assert "ActionScheduled" in event_types
     assert "ActionSettled" in event_types
+    assert any(
+        action["kind"] == "model_call" and action["status"] == "delivered"
+        for action in world.snapshot(world_id)["actions"].values()
+    )
 
 
 @pytest.mark.asyncio
