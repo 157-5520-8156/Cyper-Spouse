@@ -502,6 +502,7 @@ def apply_life_event_result(
         note=future_note,
         attention_delta=future_delta,
     )
+    _apply_calendar_event_impact(store, canonical_user_id, event_kind=event_kind, now=now)
     return synchronize_life_runtime(store, canonical_user_id, state, now=now)
 
 
@@ -701,6 +702,25 @@ def _nudge_future_plan(store, canonical_user_id: str, *, event_kind: str, now: d
         activity, note, delta = nudge
         store.adjust_next_life_day_plan_item(
             canonical_user_id, now=now, activity=activity, note=note, attention_delta=delta
+        )
+
+
+def _apply_calendar_event_impact(store, canonical_user_id: str, *, event_kind: str, now: datetime) -> None:
+    """Let an actual interruption adjust one compatible named plan, never history."""
+    impacts = {
+        "weather_shift": ("postpone", ("creative_plan", "trip"), "天气变化，不适合按原定时间进行，改期"),
+        "friend_invite": ("postpone", ("creative_plan", "personal_plan"), "临时邀约占用了原时段，改期"),
+        "fatigue": ("cancel", ("creative_plan", "personal_plan"), "身体状态不适合继续按原计划进行，先取消"),
+    }
+    impact = impacts.get(event_kind)
+    if not impact:
+        return
+    action, event_types, reason = impact
+    if action == "cancel":
+        store.cancel_next_calendar_event(canonical_user_id, now=now, event_types=event_types, reason=reason)
+    else:
+        store.postpone_next_calendar_event(
+            canonical_user_id, now=now, event_types=event_types, reason=reason, delay=timedelta(days=1)
         )
 
 

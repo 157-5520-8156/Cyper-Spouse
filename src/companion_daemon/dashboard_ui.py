@@ -472,6 +472,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       requestAnimationFrame(loop);
     }
     const fmtTime = value => { try { return new Intl.DateTimeFormat('zh-CN',{hour:'2-digit',minute:'2-digit'}).format(new Date(value)); } catch { return ''; } };
+    const fmtRange = event => `${fmtTime(event.starts_at || event.started_at)} - ${fmtTime(event.ends_at)}`;
     async function init() {
       await preload();
       const users = await fetch('/debug/users').then(r => r.json());
@@ -529,12 +530,12 @@ DASHBOARD_HTML = r"""<!doctype html>
       const plans = (day.plans || []).map(event => ({event:{...event,title:event.activity,details:event.adjustment_note}, kind:'日程'}));
       const lived = (day.events || []).map(event => ({event:{...event,title:event.content,details:event.content}, kind:'生活记录'}));
       const rows = [...special, ...plans, ...lived].sort((a,b) => new Date(a.event.starts_at) - new Date(b.event.starts_at));
-      const label = status => ({planned:'计划中',active:'进行中',completed:'已发生',cancelled:'已取消'})[status] || status;
+      const label = status => ({planned:'计划中',active:'进行中',completed:'已发生',cancelled:'已取消',postponed:'已推迟'})[status] || status;
       document.getElementById('calendar').innerHTML = rows.map(({event,kind}) => {
         const note = event.memory_content || event.details || event.memory_note || '没有额外说明';
         const reason = event.changed_reason ? `；原因：${event.changed_reason}` : '';
         const linked = event.memory_id ? ' · 已关联记忆' : '';
-        return `<article class="calendar-row"><time>${esc(kind)}</time><div><strong>${esc(event.title)}</strong><small>${esc(note + reason + linked)}</small></div><small>${esc(label(event.status))}</small></article>`;
+        return `<article class="calendar-row"><time>${esc(fmtRange(event))}<br>${esc(kind)}</time><div><strong>${esc(event.title)}</strong><small>${esc(note + reason + linked)}</small></div><small>${esc(label(event.status))}</small></article>`;
       }).join('') || '<span class="result">这一天没有计划或已发生记录。</span>';
     }
     document.getElementById('calendarDays').onclick = event => {

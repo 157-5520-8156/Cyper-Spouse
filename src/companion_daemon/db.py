@@ -827,7 +827,7 @@ class CompanionStore:
         memory_note: str | None = None,
         status: str = "planned",
     ) -> int:
-        if status not in {"planned", "active", "completed", "cancelled"}:
+        if status not in {"planned", "active", "completed", "cancelled", "postponed"}:
             raise ValueError(f"unsupported calendar status: {status}")
         if ends_at <= starts_at:
             raise ValueError("calendar event must end after it starts")
@@ -861,7 +861,7 @@ class CompanionStore:
                 left join calendar_event_memories link on link.calendar_event_id = event.id
                 left join memories memory on memory.id = link.memory_id
                 where event.canonical_user_id = ? and event.starts_at < ? and event.ends_at > ?
-                order by importance desc, starts_at asc
+                order by event.starts_at asc, event.importance desc
                 """,
                 (canonical_user_id, ends_at.astimezone(UTC).isoformat(), starts_at.astimezone(UTC).isoformat()),
             ).fetchall()
@@ -894,8 +894,9 @@ class CompanionStore:
 
     def update_calendar_event_status(self, event_id: int, *, status: str, changed_reason: str | None = None) -> None:
         allowed = {
-            "planned": {"active", "completed", "cancelled"},
-            "active": {"completed", "cancelled"},
+            "planned": {"active", "completed", "cancelled", "postponed"},
+            "active": {"completed", "cancelled", "postponed"},
+            "postponed": {"active", "completed", "cancelled"},
             "completed": set(),
             "cancelled": set(),
         }
@@ -929,13 +930,75 @@ class CompanionStore:
                 (event_id,),
             ).fetchall())
 
+    def postpone_next_calendar_event(
+        self,
+        canonical_user_id: str,
+        *,
+        now: datetime,
+        event_types: tuple[str, ...],
+        reason: str,
+        delay: timedelta = timedelta(days=1),
+    ) -> int | None:
+        """Move one compatible unfinished named plan and preserve why it changed."""
+        placeholders = ", ".join("?" for _ in event_types)
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                select id, status, starts_at, ends_at from calendar_events
+                where canonical_user_id = ? and status in ('planned', 'active')
+                  and ends_at > ? and event_type in ({placeholders})
+                order by starts_at asc limit 1
+                """,
+                (canonical_user_id, now.astimezone(UTC).isoformat(), *event_types),
+            ).fetchone()
+            if not row:
+                return None
+            event_id = int(row["id"])
+            starts_at = datetime.fromisoformat(str(row["starts_at"]))
+            ends_at = datetime.fromisoformat(str(row["ends_at"]))
+            shift = delay if starts_at >= now else now - starts_at + delay
+            conn.execute(
+                "update calendar_events set starts_at = ?, ends_at = ?, status = 'postponed', changed_reason = ?, updated_at = ? where id = ?",
+                ((starts_at + shift).isoformat(), (ends_at + shift).isoformat(), reason, utc_now().isoformat(), event_id),
+            )
+        self._record_calendar_transition(event_id, from_status=str(row["status"]), to_status="postponed", reason=reason)
+        self.sync_calendar_event_memory(canonical_user_id, event_id)
+        return event_id
+
+    def cancel_next_calendar_event(
+        self,
+        canonical_user_id: str,
+        *,
+        now: datetime,
+        event_types: tuple[str, ...],
+        reason: str,
+    ) -> int | None:
+        """Cancel one compatible unfinished named plan without erasing its record."""
+        placeholders = ", ".join("?" for _ in event_types)
+        with self.connect() as conn:
+            row = conn.execute(
+                f"""
+                select id from calendar_events
+                where canonical_user_id = ? and status in ('planned', 'active', 'postponed')
+                  and ends_at > ? and event_type in ({placeholders})
+                order by starts_at asc limit 1
+                """,
+                (canonical_user_id, now.astimezone(UTC).isoformat(), *event_types),
+            ).fetchone()
+        if not row:
+            return None
+        event_id = int(row["id"])
+        self.update_calendar_event_status(event_id, status="cancelled", changed_reason=reason)
+        return event_id
+
     def sync_calendar_event_memory(self, canonical_user_id: str, event_id: int) -> None:
         """Give every calendar event one stable, queryable memory record."""
         with self.connect() as conn:
             event = conn.execute("select * from calendar_events where id = ? and canonical_user_id = ?", (event_id, canonical_user_id)).fetchone()
             if not event:
                 return
-            content = f"{event['title']}（{event['status']}）"
+            status_label = {"planned": "计划中", "active": "进行中", "completed": "已发生", "cancelled": "已取消", "postponed": "已推迟"}.get(str(event["status"]), str(event["status"]))
+            content = f"{event['title']}（{status_label}）"
             detail = event["memory_note"] or event["details"]
             if detail:
                 content += f"：{detail}"
@@ -961,7 +1024,7 @@ class CompanionStore:
 
     def cancel_elapsed_calendar_plans(self, canonical_user_id: str, *, now: datetime) -> None:
         with self.connect() as conn:
-            rows = conn.execute("select id from calendar_events where canonical_user_id = ? and status in ('planned', 'active') and ends_at < ?", (canonical_user_id, now.astimezone(UTC).isoformat())).fetchall()
+            rows = conn.execute("select id from calendar_events where canonical_user_id = ? and status in ('planned', 'active', 'postponed') and ends_at < ?", (canonical_user_id, now.astimezone(UTC).isoformat())).fetchall()
         reason = "该计划时段已过去，但没有完成凭据；不能把它伪装成已发生。"
         for row in rows:
             self.update_calendar_event_status(int(row["id"]), status="cancelled", changed_reason=reason)

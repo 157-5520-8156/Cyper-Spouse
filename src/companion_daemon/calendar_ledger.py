@@ -30,7 +30,11 @@ def calendar_ledger(store, canonical_user_id: str, state: MoodState, *, now: dat
         by_day[day] = {"date": day, "relative": _relative_day(offset), "plans": [], "events": [], "special_events": []}
     for row in plans:
         day = str(row["local_date"])
-        if day in by_day:
+        is_past_or_current = day < now.astimezone().date().isoformat() or (
+            day == now.astimezone().date().isoformat()
+            and datetime.fromisoformat(str(row["starts_at"])) <= now
+        )
+        if day in by_day and is_past_or_current:
             by_day[day]["plans"].append(dict(row))
     for row in events:
         day = datetime.fromisoformat(str(row["started_at"])).astimezone().date().isoformat()
@@ -45,6 +49,10 @@ def calendar_ledger(store, canonical_user_id: str, state: MoodState, *, now: dat
             if day in by_day:
                 by_day[day]["special_events"].append(dict(row))
             cursor += timedelta(days=1)
+    for day in by_day.values():
+        day["plans"].sort(key=lambda item: str(item["starts_at"]))
+        day["events"].sort(key=lambda item: str(item["started_at"]))
+        day["special_events"].sort(key=lambda item: str(item["starts_at"]))
     return {"now": now.isoformat(), "days": list(by_day.values())}
 
 
@@ -134,7 +142,7 @@ def calendar_context_for_message(store, canonical_user_id: str, state: MoodState
         return None
     asks_future = target.date() > now.astimezone().date()
     if asks_future:
-        special = [item for item in day["special_events"] if item["status"] in {"planned", "active"}]
+        special = [item for item in day["special_events"] if item["status"] in {"planned", "active", "postponed"}]
         plans = special or day["plans"]
         if not plans:
             return f"时间账本：{day['relative']}没有已排定的计划；不能把它说成已经发生。"

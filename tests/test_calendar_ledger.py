@@ -6,6 +6,7 @@ import pytest
 from companion_daemon.calendar_ledger import calendar_context_for_message, calendar_ledger
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import seed_user
+from companion_daemon.life_runtime import apply_life_event_result
 from companion_daemon.models import MoodState
 
 
@@ -17,7 +18,7 @@ def test_calendar_ledger_materializes_future_plans_without_lived_events(tmp_path
     ledger = calendar_ledger(store, "geoff", MoodState(), now=now, past_days=1, future_days=2)
 
     tomorrow = next(day for day in ledger["days"] if day["relative"] == "明天")
-    assert tomorrow["plans"]
+    assert tomorrow["plans"] == []
     assert tomorrow["events"] == []
     assert any(day["special_events"] for day in ledger["days"])
 
@@ -187,3 +188,73 @@ def test_calendar_projection_can_supply_fifteen_days_on_each_side(tmp_path: Path
 
     assert len(ledger["days"]) == 31
     assert ledger["days"][15]["relative"] == "今天"
+
+
+def test_future_calendar_hides_hourly_life_plan_but_keeps_named_planning(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "calendar.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 4, 0, tzinfo=UTC)
+    store.create_calendar_event(
+        "geoff", title="朋友约的周末小展", event_type="social_plan", starts_at=now + timedelta(days=1, hours=8),
+        ends_at=now + timedelta(days=1, hours=10), source="test:future-plan",
+    )
+
+    ledger = calendar_ledger(store, "geoff", MoodState(), now=now, past_days=0, future_days=2)
+    tomorrow = next(day for day in ledger["days"] if day["relative"] == "明天")
+
+    assert tomorrow["plans"] == []
+    assert "朋友约的周末小展" in [event["title"] for event in tomorrow["special_events"]]
+
+
+def test_calendar_events_are_projected_in_time_order_not_importance_order(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "calendar.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 4, 0, tzinfo=UTC)
+    for title, hour, importance in (("晚一点的安排", 11, 95), ("早一点的安排", 10, 10)):
+        store.create_calendar_event(
+            "geoff", title=title, event_type="personal_plan", starts_at=now + timedelta(days=1, hours=hour),
+            ends_at=now + timedelta(days=1, hours=hour + 1), importance=importance, source=f"test:order:{hour}",
+        )
+
+    ledger = calendar_ledger(store, "geoff", MoodState(), now=now, past_days=0, future_days=2)
+    tomorrow = next(day for day in ledger["days"] if day["relative"] == "明天")
+
+    titles = [event["title"] for event in tomorrow["special_events"]]
+    assert titles.index("早一点的安排") < titles.index("晚一点的安排")
+
+
+def test_weather_event_postpones_matching_future_calendar_plan_and_memory(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "calendar.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 4, 0, tzinfo=UTC)
+    event_id = store.create_calendar_event(
+        "geoff", title="傍晚拍光", event_type="creative_plan", starts_at=now + timedelta(hours=12),
+        ends_at=now + timedelta(hours=14), source="test:weather-impact", details="想去附近拍一段傍晚的光",
+    )
+
+    apply_life_event_result(store, "geoff", event_kind="weather_shift", state=MoodState(), now=now)
+    events = store.calendar_events_between("geoff", starts_at=now, ends_at=now + timedelta(days=3))
+    affected = next(event for event in events if event["id"] == event_id)
+
+    assert affected["status"] == "postponed"
+    assert "天气" in affected["changed_reason"]
+    assert affected["memory_kind"] == "calendar_event"
+    assert "已推迟" in affected["memory_content"]
+
+
+def test_fatigue_event_cancels_matching_future_calendar_plan_and_memory(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "calendar.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 4, 0, tzinfo=UTC)
+    event_id = store.create_calendar_event(
+        "geoff", title="下午整理照片", event_type="creative_plan", starts_at=now + timedelta(hours=12),
+        ends_at=now + timedelta(hours=14), source="test:fatigue-impact",
+    )
+
+    apply_life_event_result(store, "geoff", event_kind="fatigue", state=MoodState(), now=now)
+    events = store.calendar_events_between("geoff", starts_at=now, ends_at=now + timedelta(days=2))
+    affected = next(event for event in events if event["id"] == event_id)
+
+    assert affected["status"] == "cancelled"
+    assert "身体状态" in affected["changed_reason"]
+    assert "已取消" in affected["memory_content"]
