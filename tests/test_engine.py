@@ -128,6 +128,22 @@ async def test_world_enabled_reply_records_input_action_and_delivery_settlement(
 
 
 @pytest.mark.asyncio
+async def test_world_mode_turn_confirms_durable_user_fact_in_world_ledger(tmp_path: Path, monkeypatch) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
+    monkeypatch.setattr(store, "upsert_memory", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy memory")))
+
+    await engine.handle_message(
+        IncomingMessage(platform="qq", platform_user_id="geoff", text="我喜欢桂花乌龙", message_id="fact-1")
+    )
+
+    assert any("桂花乌龙" in str(item["value"]) for item in world.snapshot(world_id)["facts"].values())
+
+
+@pytest.mark.asyncio
 async def test_world_mode_typing_transitions_do_not_touch_legacy_mood(tmp_path: Path, monkeypatch) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)

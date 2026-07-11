@@ -192,6 +192,23 @@ class CompanionEngine:
                 "idempotency_key": f"incoming:{key}",
             }
         )
+        # The extractor is only a parser in world mode.  A direct user
+        # statement may become a fact with its message as provenance; no
+        # legacy memory row is written and no model-proposed fact is accepted.
+        for extracted in extract_memories(message):
+            if not is_durable_user_fact(extracted):
+                continue
+            digest = sha256(
+                f"{user_id}|{extracted.kind}|{extracted.content}".encode()
+            ).hexdigest()[:20]
+            self._submit_world_with_retry(
+                {
+                    "type": "confirm_fact", "world_id": self.world_id,
+                    "fact_id": f"user-fact:{digest}", "subject": user_id,
+                    "value": extracted.content, "source": f"user_message:{key}",
+                    "idempotency_key": f"user-fact:{digest}",
+                }
+            )
 
     def _submit_world_with_retry(self, command: dict[str, object]):
         if not self.world_kernel or not self.world_id:
