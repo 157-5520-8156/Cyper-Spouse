@@ -221,6 +221,13 @@ async def recover_world_due_replies(
     return recovered
 
 
+def recover_interrupted_world_life_shares(engine) -> int:
+    """Resolve ambiguous proactive sends conservatively after a process restart."""
+    if not getattr(engine, "world_kernel", None) or not getattr(engine, "world_id", None):
+        return 0
+    return engine.world_kernel.recover_interrupted_life_share_deliveries(engine.world_id)
+
+
 async def recover_overdue_conversation_pulses(
     engine,
     *,
@@ -367,6 +374,7 @@ async def scheduler_loop(
     while True:
         engine = build_companion_engine()
         if getattr(engine, "world_kernel", None):
+            recover_interrupted_world_life_shares(engine)
             await recover_world_due_replies(engine, send=send, sandbox=sandbox)
             await recover_world_due_conversation_pulses(engine, send=send, sandbox=sandbox)
         else:

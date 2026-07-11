@@ -260,31 +260,6 @@ async def run(
 async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bool) -> bool:
     """Share one committed-but-private world experience without legacy life tables."""
     snapshot = engine.world_kernel.snapshot(engine.world_id)
-    decision = engine._submit_world_with_retry({"type": "select_life_share", "world_id": engine.world_id, "idempotency_key": f"life-share:{snapshot['clock']['logical_at']}"})
-    selected = next((event.payload.get("experience_id") for event in (decision.events if decision else ()) if event.event_type == "LifeShareSelected"), None)
-    if not selected:
-        print("life event not shared: world policy deferred it")
-        return False
-    needs = snapshot["needs"]
-    if needs["initiative"] < 20 or needs["security"] < 45:
-        print("life event not shared: current world needs prefer keeping it private")
-        return False
-    if any(action["kind"] == "outgoing_message" and action["status"] == "scheduled" for action in snapshot["actions"].values()):
-        print("life event not shared: an outgoing world action is already pending")
-        return False
-    candidate = next(
-        (
-            (experience_id, experience)
-            for experience_id, experience in snapshot["experiences"].items()
-            if experience_id == selected and not experience.get("shared")
-        ),
-        None,
-    )
-    if candidate is None:
-        print("life event not shared: no unshared world experience")
-        return False
-    experience_id, experience = candidate
-    text = f"{experience['content'].rstrip('。！？!? ')}。刚想起这件小事，想跟你说一下。"
     if not send:
         return False
     settings = get_settings()
@@ -293,30 +268,21 @@ async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bo
     if not recipient_id:
         print("not sent: no outbound QQ recipient configured")
         return False
-    delivery_id, _, action_id = engine.world_kernel.queue_outgoing_action(
-        canonical_user_id=user_id,
-        platform="qq",
-        text=text,
-        kind="life_event",
+    scheduled = engine.world_kernel.schedule_life_share_delivery(
+        world_id=engine.world_id, canonical_user_id=user_id, platform="qq",
         expires_at=(engine._world_logical_now() if hasattr(engine, "_world_logical_now") else datetime.fromisoformat(str(snapshot["clock"]["logical_at"]))) + timedelta(hours=4),
-        trace={
-            "world_id": engine.world_id,
-            "direction": "life_event",
-            "appraisal": "life_event_share",
-            "expression_policy": "只分享已提交的世界经历，不补写新事实。",
-            "allowed_facts": [str(experience["content"])],
-            "experience_id": experience_id,
-            "selection_id": f"life-share:{snapshot['clock']['logical_at']}:{experience_id}",
-            "short_lived_constraint": None,
-            "observable_reason": "一个已发生但尚未分享的世界经历。",
-        },
     )
-    try:
-        await delivery.send_text(recipient_id, text)
-    except Exception as exc:
-        engine.world_kernel.settle_outgoing_action(delivery_id, delivered=False, reason=str(exc))
+    if not scheduled:
+        print("life event not shared: world policy deferred it")
         return False
-    engine.world_kernel.settle_outgoing_action(delivery_id, delivered=True)
+    if not engine.world_kernel.begin_outgoing_action(scheduled.delivery_id):
+        return False
+    try:
+        await delivery.send_text(recipient_id, scheduled.text)
+    except Exception as exc:
+        engine.world_kernel.settle_outgoing_action(scheduled.delivery_id, delivered=False, reason=str(exc))
+        return False
+    engine.world_kernel.settle_outgoing_action(scheduled.delivery_id, delivered=True)
     return True
 
 

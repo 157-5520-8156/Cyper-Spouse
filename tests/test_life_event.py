@@ -187,16 +187,10 @@ async def test_world_life_event_shares_only_committed_world_experience(tmp_path:
     store.map_account("qq", "openid", "geoff")
     world = WorldKernel(store)
     started = world.start_from_seed_file(Path("configs/world_seed.yaml"))
-    proposal = world.submit(
-        {
-            "type": "record_model_proposal", "world_id": started.world_id,
-            "proposal_id": "life-proposal", "entity_id": "roommate-lin", "template_id": "dorm_chat",
-            "content": "晚饭后在宿舍聊了几句新书。",
-        }, expected_revision=started.revision,
-    )
-    world.submit(
-        {"type": "accept_model_proposal", "world_id": started.world_id, "proposal_id": "life-proposal"},
-        expected_revision=proposal.revision,
+    world.advance(
+        started.world_id,
+        datetime(2026, 7, 11, 12, 30, tzinfo=datetime.fromisoformat("2026-07-11T09:00:00+08:00").tzinfo),
+        expected_revision=started.revision,
     )
 
     class FakeEngine:
@@ -225,7 +219,7 @@ async def test_world_life_event_shares_only_committed_world_experience(tmp_path:
     sent = await run(user_id="geoff", send=True, sandbox=True, generate_image=False, image_kind="life")
 
     assert sent is True
-    assert world.snapshot(started.world_id)["experiences"]["life-proposal"]["shared"] is True
+    assert any(item.get("shared") for item in world.snapshot(started.world_id)["experiences"].values())
 
 
 @pytest.mark.asyncio

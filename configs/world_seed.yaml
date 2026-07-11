@@ -14,11 +14,38 @@ protagonist:
     - 不把计划说成已经发生
     - 不替用户或配角编造说过的话
   templates:
+    - literature_reading
+    - course_notes
+    - photo_portfolio
+    - campus_walk
     - library_study
     - campus_walk
     - dorm_routine
     - literature_society
     - photography_society
+life_outcome_templates:
+  literature_reading:
+    location: 华东师范大学
+    npc_id: literature-fan
+    goal_id: literature-reading
+    energy_cost: 6
+    content: 在图书馆和范予安核对了读书会的书单。
+  course_notes:
+    location: 华东师范大学
+    goal_id: course-notes
+    energy_cost: 7
+    content: 整理完了今天的课程笔记。
+  photo_portfolio:
+    location: 上海
+    npc_id: photography-zhou
+    goal_id: photo-portfolio
+    energy_cost: 8
+    content: 整理了摄影社活动要用的照片。
+  campus_walk:
+    location: 华东师范大学
+    npc_id: roommate-lin
+    energy_cost: 5
+    content: 和林晚在校园里走了一小段，聊了晚饭。
 daily_schedule:
   - slot: morning_study
     title: 图书馆看书

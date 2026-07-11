@@ -62,6 +62,17 @@ class ProjectionReport:
     matches_live: bool
 
 
+@dataclass(frozen=True)
+class LifeShareDelivery:
+    """A selected experience and its atomically-created external action."""
+
+    experience_id: str
+    delivery_id: int
+    trace_id: int
+    action_id: str
+    text: str
+
+
 class WorldKernel:
     """The sole write seam for virtual-world facts, plans, and settled actions."""
 
@@ -237,6 +248,117 @@ class WorldKernel:
             )
         return delivery_id, int(trace_row.lastrowid), action_id
 
+    def schedule_life_share_delivery(
+        self, *, world_id: str, canonical_user_id: str, platform: str, expires_at: datetime
+    ) -> LifeShareDelivery | None:
+        """Atomically select one experience and create its outbox/action trace.
+
+        Selection is not a separate mutable decision.  A restart therefore sees
+        either no selection or a concrete action that can be delivered, cancelled,
+        failed, or marked uncertain.
+        """
+        with self.store.connect() as conn:
+            revision, state = self._load_state(conn, world_id)
+            uncertain_experiences: set[str] = set()
+            for action_id, action in _as_dict(state["actions"], "actions").items():
+                item = _as_dict(action, "action")
+                trace = _as_dict(item.get("trace", {}), "action trace")
+                if item.get("kind") == "outgoing_message" and trace.get("life_share") and item.get("status") in {"scheduled", "sending"}:
+                    return LifeShareDelivery(str(trace["experience_id"]), int(item["delivery_id"]), int(item["trace_id"]), action_id, str(item["text"]))
+                if trace.get("life_share") and item.get("status") == "unknown":
+                    uncertain_experiences.add(str(trace.get("experience_id") or ""))
+            needs = _as_dict(state["needs"], "needs")
+            day = str(_as_dict(state["clock"], "clock")["logical_at"])[:10]
+            if needs["initiative"] < 20 or needs["security"] < 45 or day in _as_dict(state.get("share_days", {}), "share days"):
+                return None
+            candidate = next(((key, value) for key, value in _as_dict(state["experiences"], "experiences").items() if not value.get("shared")), None)
+            if not candidate:
+                return None
+            experience_id, experience = candidate
+            if experience_id in uncertain_experiences:
+                return None
+            text = f"{str(experience['content']).rstrip('。！？!? ')}。刚想起这件小事，想跟你说一下。"
+            now = utc_now().isoformat()
+            delivery = conn.execute("insert into outbox_messages (canonical_user_id, platform, text, kind, status, created_at) values (?, ?, ?, 'life_event', 'planned', ?)", (canonical_user_id, platform, text, now))
+            delivery_id = int(delivery.lastrowid)
+            trace = {
+                "world_id": world_id, "direction": "life_event", "appraisal": "life_event_share",
+                "expression_policy": "只分享已提交的世界经历，不补写新事实。", "allowed_facts": [str(experience["content"])],
+                "experience_id": experience_id, "life_share": True, "selection_id": f"life-share:{day}:{experience_id}",
+                "short_lived_constraint": None, "observable_reason": "一个已发生但尚未分享的世界经历。",
+            }
+            trace_row = conn.execute("""insert into turn_traces (canonical_user_id, direction, appraisal, expression_policy, allowed_facts_json, short_lived_constraint, observable_reason, output_text, delivery_id, status, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)""", (canonical_user_id, trace["direction"], trace["appraisal"], trace["expression_policy"], _stable_json(trace["allowed_facts"]), None, trace["observable_reason"], text, delivery_id, now, now))
+            action_id = f"outgoing:{delivery_id}"
+            self._append_and_project(conn, world_id, revision, state, [
+                ("LifeShareSelected", {"experience_id": experience_id, "selection_id": trace["selection_id"]}),
+                ("ActionScheduled", {"action_id": action_id, "kind": "outgoing_message", "message_kind": "life_event", "expires_at": expires_at.isoformat(), "canonical_user_id": canonical_user_id, "platform": platform, "text": text, "trace": trace, "delivery_id": delivery_id, "trace_id": int(trace_row.lastrowid)}),
+            ], idempotency_key=f"life-share-delivery:{day}:{experience_id}", correlation_id=str(uuid4()), source="life_share", actor={"kind": "companion"}, causation_id=None)
+            return LifeShareDelivery(experience_id, delivery_id, int(trace_row.lastrowid), action_id, text)
+
+    def begin_outgoing_action(self, delivery_id: int) -> bool:
+        """Durably claim an outbox delivery before calling an unreliable adapter."""
+        with self.store.connect() as conn:
+            row = conn.execute("select status from outbox_messages where id = ?", (delivery_id,)).fetchone()
+            if not row or row["status"] != "planned":
+                return False
+            action_row = conn.execute("select world_id from world_actions where json_extract(state_json, '$.delivery_id') = ?", (delivery_id,)).fetchone()
+            if not action_row:
+                raise WorldError(f"outbox delivery {delivery_id} has no world action")
+            world_id = str(action_row["world_id"])
+            revision, state = self._load_state(conn, world_id)
+            action_id = self.action_id_for_delivery(world_id, delivery_id)
+            if not action_id or _as_dict(state["actions"], "actions")[action_id]["status"] != "scheduled":
+                return False
+            now = utc_now().isoformat()
+            conn.execute("update outbox_messages set status = 'sending' where id = ? and status = 'planned'", (delivery_id,))
+            conn.execute("update turn_traces set status = 'sending', updated_at = ? where delivery_id = ? and status = 'planned'", (now, delivery_id))
+            self._append_and_project(conn, world_id, revision, state, [("ActionAttempted", {"action_id": action_id}), ("ActionDispatchClaimed", {"action_id": action_id})], idempotency_key=f"begin:{delivery_id}", correlation_id=str(uuid4()), source="delivery", actor={"kind": "transport"}, causation_id=None)
+            return True
+
+    def mark_outgoing_unknown(self, delivery_id: int, *, reason: str) -> bool:
+        """Close an interrupted send without risking an unprovable duplicate retry."""
+        with self.store.connect() as conn:
+            row = conn.execute("select status from outbox_messages where id = ?", (delivery_id,)).fetchone()
+            if not row or row["status"] != "sending":
+                return False
+            action_row = conn.execute("select world_id from world_actions where json_extract(state_json, '$.delivery_id') = ?", (delivery_id,)).fetchone()
+            if not action_row:
+                raise WorldError(f"outbox delivery {delivery_id} has no world action")
+            world_id = str(action_row["world_id"])
+            revision, state = self._load_state(conn, world_id)
+            action_id = self.action_id_for_delivery(world_id, delivery_id)
+            now = utc_now().isoformat()
+            conn.execute("update outbox_messages set status = 'unknown', failed_at = ?, failure_reason = ? where id = ?", (now, reason[:500], delivery_id))
+            conn.execute("update turn_traces set status = 'unknown', failure_reason = ?, updated_at = ? where delivery_id = ?", (reason[:500], now, delivery_id))
+            self._append_and_project(conn, world_id, revision, state, [("ActionDeliveryUncertain", {"action_id": action_id, "reason": reason})], idempotency_key=f"unknown:{delivery_id}", correlation_id=str(uuid4()), source="delivery_recovery", actor={"kind": "system"}, causation_id=None)
+            return True
+
+    def recover_interrupted_life_share_deliveries(self, world_id: str) -> int:
+        """Mark process-interrupted life shares uncertain; never blindly resend them."""
+        snapshot = self.snapshot(world_id)
+        delivery_ids = [
+            int(action["delivery_id"])
+            for action in _as_dict(snapshot["actions"], "actions").values()
+            if _as_dict(action, "action").get("status") == "sending"
+            and _as_dict(_as_dict(action, "action").get("trace", {}), "action trace").get("life_share")
+        ]
+        return sum(self.mark_outgoing_unknown(item, reason="process restarted during adapter delivery") for item in delivery_ids)
+
+    def cancel_life_share_delivery(self, world_id: str, action_id: str, *, reason: str) -> bool:
+        """Cancel a still-planned share and its outbox record in one transaction."""
+        with self.store.connect() as conn:
+            revision, state = self._load_state(conn, world_id)
+            action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
+            trace = _as_dict(action.get("trace", {}), "action trace")
+            if action.get("status") != "scheduled" or not trace.get("life_share"):
+                return False
+            delivery_id = int(action["delivery_id"])
+            now = utc_now().isoformat()
+            conn.execute("update outbox_messages set status = 'cancelled', failed_at = ?, failure_reason = ? where id = ? and status = 'planned'", (now, reason[:500], delivery_id))
+            conn.execute("update turn_traces set status = 'cancelled', failure_reason = ?, updated_at = ? where delivery_id = ? and status = 'planned'", (reason[:500], now, delivery_id))
+            self._append_and_project(conn, world_id, revision, state, [("ActionCancelled", {"action_id": action_id, "reason": reason})], idempotency_key=f"cancel-life-share:{action_id}", correlation_id=str(uuid4()), source="life_share", actor={"kind": "companion"}, causation_id=None)
+            return True
+
     def settle_outgoing_action(
         self, delivery_id: int, *, delivered: bool, reason: str | None = None
     ) -> dict[str, object] | None:
@@ -249,7 +371,7 @@ class WorldKernel:
             if not row:
                 return None
             result = dict(row)
-            if row["status"] != "planned":
+            if row["status"] not in {"planned", "sending"}:
                 return result
             action_row = conn.execute(
                 "select world_id from world_actions where json_extract(state_json, '$.delivery_id') = ?",
@@ -292,7 +414,7 @@ class WorldKernel:
             conn.execute(
                 """
                 update turn_traces set status = ?, failure_reason = ?, updated_at = ?
-                where delivery_id = ? and status = 'planned'
+                where delivery_id = ? and status in ('planned', 'sending')
                 """,
                 ("delivered" if delivered else "failed", None if delivered else (reason or "delivery failed")[:500], now, delivery_id),
             )
@@ -503,6 +625,7 @@ class WorldKernel:
                         "logical_at": logical_at,
                         "daily_schedule": _as_list(seed.get("daily_schedule", []), "daily_schedule"),
                         "long_term_goals": _as_list(seed.get("long_term_goals", []), "long-term goals"),
+                        "life_outcome_templates": _as_dict(seed.get("life_outcome_templates", {}), "life outcome templates"),
                     },
                 )
             ]
@@ -586,6 +709,8 @@ class WorldKernel:
             for goal_id, goal in _as_dict(state.get("goals", {}), "goals").items():
                 if goal.get("status") == "active" and goal.get("deadline") and _parse_at(str(goal["deadline"])) <= target_at:
                     events.append(("GoalDeferred", {"goal_id": goal_id, "reason": "deadline_reached", "next_review_at": (target_at + timedelta(days=1)).isoformat()}))
+                elif goal.get("status") == "deferred" and goal.get("next_review_at") and _parse_at(str(goal["next_review_at"])) <= target_at:
+                    events.append(("GoalReviewDue", {"goal_id": goal_id}))
             completed_activities: list[dict[str, object]] = []
             for event_type, payload in list(events):
                 if event_type == "ActivityCompleted":
@@ -595,7 +720,9 @@ class WorldKernel:
                         activity = next((item for kind, item in events if kind == "ActivityPlanned" and item["activity_id"] == activity_id), None)
                     if activity is not None:
                         completed_activities.append(_as_dict(activity, "activity"))
-            events.extend(self.life_simulation.advance(state, completed_activities))
+            state_for_outcomes = json.loads(_stable_json(state))
+            _as_dict(state_for_outcomes["clock"], "clock")["logical_at"] = target
+            events.extend(self.life_simulation.advance(state_for_outcomes, completed_activities))
             return events
         if command_type == "register_npc":
             npc = _as_dict(command.get("npc"), "npc")
@@ -654,6 +781,20 @@ class WorldKernel:
             if need not in {"energy", "attention", "security", "initiative", "boundary"}:
                 raise WorldError("unsupported world need")
             return [("NeedChanged", {"need": need, "delta": int(command.get("delta") or 0)})]
+        if command_type == "review_goal":
+            goal_id = str(command.get("goal_id") or "")
+            decision = str(command.get("decision") or "")
+            goal = _as_dict(_as_dict(state.get("goals", {}), "goals").get(goal_id), "goal")
+            if goal.get("status") not in {"deferred", "review_due"}:
+                raise WorldError("only a deferred goal can be reviewed")
+            if decision == "resume":
+                deadline = str(command.get("deadline") or "")
+                if not deadline or _parse_at(deadline) <= _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"])):
+                    raise WorldError("resumed goal needs a future logical deadline")
+                return [("GoalResumed", {"goal_id": goal_id, "deadline": deadline})]
+            if decision == "abandon":
+                return [("GoalAbandoned", {"goal_id": goal_id, "reason": str(command.get("reason") or "review_abandoned")}), ("GoalCompensated", {"goal_id": goal_id, "need": "security", "delta": int(command.get("security_delta") or 2)})]
+            raise WorldError("goal review decision must be resume or abandon")
         if command_type == "record_external_result":
             action_id = str(command.get("action_id") or "")
             action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
@@ -693,6 +834,10 @@ class WorldKernel:
                 or template_id not in templates
                 or not content
                 or len(content) > 160
+                or not str(command.get("activity_id") or "")
+                or not str(command.get("location") or "")
+                or not str(command.get("starts_at") or "")
+                or not str(command.get("ends_at") or "")
             ):
                 raise WorldError("model proposal is outside the registered low-risk template set")
             return [
@@ -703,6 +848,11 @@ class WorldKernel:
                         "entity_id": entity_id,
                         "template_id": template_id,
                         "content": content,
+                        "activity_id": str(command["activity_id"]),
+                        "location": str(command["location"]),
+                        "starts_at": str(command["starts_at"]),
+                        "ends_at": str(command["ends_at"]),
+                        "npc_id": command.get("npc_id"),
                     },
                 )
             ]
@@ -737,22 +887,10 @@ class WorldKernel:
             proposal = _as_dict(_as_dict(state["proposals"], "proposals").get(proposal_id), "proposal")
             if proposal["status"] != "recorded":
                 raise WorldError("only a recorded proposal can be accepted")
-            accepted, reason = self.life_simulation.validate_candidate(state, proposal)
+            accepted, reason, specs = self.life_simulation.events_for_candidate(state, proposal)
             if not accepted:
                 return [("LifeOutcomeRejected", {"outcome_id": proposal_id, "reason": reason, "rule_version": "life-sim-v2"})]
-            return [
-                ("LifeOutcomeValidated", {"outcome_id": proposal_id, "validation": reason, "rule_version": "life-sim-v2"}),
-                ("ModelProposalAccepted", {"proposal_id": proposal_id}),
-                (
-                    "ExperienceCommitted",
-                    {
-                        "experience_id": proposal_id,
-                        "action_id": None,
-                        "content": proposal["content"],
-                        "source_proposal_id": proposal_id,
-                    },
-                ),
-            ]
+            return specs
         if command_type == "confirm_fact":
             fact_id = str(command.get("fact_id") or "")
             value = str(command.get("value") or "").strip()
@@ -771,22 +909,9 @@ class WorldKernel:
                 )
             ]
         if command_type == "share_experience":
-            experience_id = str(command.get("experience_id") or "")
-            action_id = str(command.get("action_id") or "")
-            experience = _as_dict(_as_dict(state["experiences"], "experiences").get(experience_id), "experience")
-            action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
-            if experience.get("shared") or action["status"] != "delivered":
-                raise WorldError("experience sharing requires one delivered action and an unshared experience")
-            return [("ExperienceShared", {"experience_id": experience_id, "action_id": action_id})]
+            raise WorldError("life sharing must settle through its scheduled delivery action")
         if command_type == "select_life_share":
-            needs = _as_dict(state["needs"], "needs")
-            if needs["initiative"] < 20 or needs["security"] < 45:
-                return [("LifeShareDeferred", {"reason": "needs_prefer_private"})]
-            day = str(_as_dict(state["clock"], "clock")["logical_at"])[:10]
-            if day in _as_dict(state.get("share_days", {}), "share days"):
-                return [("LifeShareDeferred", {"reason": "daily_limit"})]
-            candidate = next((key for key, value in _as_dict(state["experiences"], "experiences").items() if not value.get("shared")), None)
-            return [("LifeShareSelected", {"experience_id": candidate})] if candidate else [("LifeShareDeferred", {"reason": "no_unshared_experience"})]
+            raise WorldError("life sharing must use schedule_life_share_delivery")
         if command_type == "observe_user_message":
             return [(
                 "UserMessageObserved",
@@ -1017,6 +1142,7 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         next_state["clock"] = {"logical_at": payload["logical_at"], "mode": "paused", "rate": 0}
         next_state["entities"] = {str(protagonist["id"]): {**protagonist, "status": "active"}}
         next_state["daily_schedule"] = payload.get("daily_schedule", [])
+        next_state["life_outcome_templates"] = payload.get("life_outcome_templates", {})
         next_state["goals"] = {str(goal["id"]): {**goal, "progress": 0, "status": "active"} for goal in _as_list(payload.get("long_term_goals", []), "long-term goals")}
     elif event.event_type == "NpcRegistered":
         npc = dict(payload)
@@ -1040,6 +1166,8 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         _as_dict(next_state["actions"], "actions")[str(item["action_id"])] = item
     elif event.event_type == "ActionAttempted":
         _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]["attempted"] = True
+    elif event.event_type == "ActionDispatchClaimed":
+        _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]["status"] = "sending"
     elif event.event_type == "ActionSettled":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["status"] = str(_as_dict(payload["result"], "result")["status"])
@@ -1051,6 +1179,10 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "ActionCancelled":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["status"] = "cancelled"
+        action["reason"] = payload.get("reason")
+    elif event.event_type == "ActionDeliveryUncertain":
+        action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
+        action["status"] = "unknown"
         action["reason"] = payload.get("reason")
     elif event.event_type == "NpcRelationshipChanged":
         relationships = _as_dict(next_state["relationships"], "relationships")
@@ -1092,6 +1224,23 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
             goal["status"] = "deferred"
             goal["deferred_reason"] = payload["reason"]
             goal["next_review_at"] = payload["next_review_at"]
+    elif event.event_type == "GoalReviewDue":
+        goal = _as_dict(_as_dict(next_state["goals"], "goals").get(str(payload["goal_id"])), "goal")
+        if goal["status"] == "deferred":
+            goal["status"] = "review_due"
+    elif event.event_type == "GoalResumed":
+        goal = _as_dict(_as_dict(next_state["goals"], "goals").get(str(payload["goal_id"])), "goal")
+        goal["status"] = "active"
+        goal["deadline"] = payload["deadline"]
+        goal.pop("next_review_at", None)
+    elif event.event_type == "GoalAbandoned":
+        goal = _as_dict(_as_dict(next_state["goals"], "goals").get(str(payload["goal_id"])), "goal")
+        goal["status"] = "abandoned"
+        goal["abandoned_reason"] = payload["reason"]
+    elif event.event_type == "GoalCompensated":
+        needs = _as_dict(next_state["needs"], "needs")
+        need = str(payload["need"])
+        needs[need] = max(0, min(100, int(needs.get(need, 50)) + int(payload["delta"])))
     elif event.event_type == "ExperienceShared":
         _as_dict(next_state["experiences"], "experiences")[str(payload["experience_id"])]["shared"] = True
         _as_dict(next_state["experiences"], "experiences")[str(payload["experience_id"])]["shared_action_id"] = payload["action_id"]
@@ -1130,6 +1279,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "relationships": {},
         "needs": {"energy": 70, "attention": 55, "security": 50, "initiative": 20, "boundary": 0},
         "daily_schedule": [],
+        "life_outcome_templates": {},
         "share_decisions": {},
         "share_days": {},
         "goals": {},

@@ -627,11 +627,15 @@ class CompanionEngine:
         """World-mode turn path; legacy state tables are not behavioural inputs here."""
         assert self.world_kernel and self.world_id
         for action_id, action in self.world_kernel.snapshot(self.world_id)["actions"].items():
+            is_life_share = bool(action.get("trace", {}).get("life_share"))
             if (
-                action["kind"] in {"reply_later", "conversation_pulse"}
+                (action["kind"] in {"reply_later", "conversation_pulse"} or is_life_share)
                 and action["status"] == "scheduled"
                 and action_id != resume_action_id
             ):
+                if is_life_share:
+                    self.world_kernel.cancel_life_share_delivery(self.world_id, action_id, reason="new_user_turn")
+                    continue
                 self._submit_world_with_retry(
                     {
                         "type": "cancel_action",
