@@ -85,7 +85,7 @@ from companion_daemon.unanswered_question import (
     last_unanswered_own_question,
 )
 from companion_daemon.withheld_impulse import apply_withheld_impulse, build_withheld_impulse
-from companion_daemon.turns import build_turn_plan
+from companion_daemon.turns import TurnCommit, build_turn_plan
 
 logger = logging.getLogger(__name__)
 
@@ -599,14 +599,14 @@ class CompanionEngine:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         mark_phone_typing(self.store, canonical_user_id)
 
-    def confirm_reply_delivery(self, reply: CompanionReply) -> None:
+    def confirm_reply_delivery(self, reply: CompanionReply) -> TurnCommit | None:
         if reply.delivery_id is None:
-            return
+            return None
         delivered = self.store.resolve_outgoing_and_turn_trace(
             reply.delivery_id, reply.turn_trace_id, delivered=True
         )
         if not delivered or delivered["status"] != "planned":
-            return
+            return None
         state = self.store.get_mood_state(reply.canonical_user_id)
         expressed = apply_expression_after_reply(
             state,
@@ -623,15 +623,23 @@ class CompanionEngine:
             source=f"{delivered['platform']}:outgoing",
             confidence=0.65,
         )
+        return TurnCommit(reply.turn_trace_id, reply.delivery_id, "delivered")
 
-    def fail_reply_delivery(self, reply: CompanionReply, reason: str, *, source_task_id: int | None = None) -> None:
+    def fail_reply_delivery(
+        self, reply: CompanionReply, reason: str, *, source_task_id: int | None = None
+    ) -> TurnCommit | None:
+        committed = False
         if reply.delivery_id is not None:
             self.store.resolve_outgoing_and_turn_trace(
                 reply.delivery_id, reply.turn_trace_id, delivered=False, failure_reason=reason
             )
+            committed = True
         if source_task_id is not None:
             self.store.cancel_social_task(source_task_id)
             self._create_reply_reconsider_task(reply, reason)
+        if not committed:
+            return None
+        return TurnCommit(reply.turn_trace_id, reply.delivery_id, "failed", reason)
 
     def _create_reply_reconsider_task(self, reply: CompanionReply, reason: str) -> int | None:
         if reply.delivery_id is None:

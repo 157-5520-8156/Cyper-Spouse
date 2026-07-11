@@ -32,6 +32,16 @@ class TurnPlan:
         )
 
 
+@dataclass(frozen=True)
+class TurnCommit:
+    """The persisted outcome of an authorized turn after delivery settles."""
+
+    trace_id: int | None
+    delivery_id: int | None
+    status: str
+    reason: str | None = None
+
+
 _OBSERVABLE_REASONS = {
     "user_vulnerable": "用户在示弱，优先接住情绪。",
     "boundary_violation": "用户越过边界，保持短而清楚。",

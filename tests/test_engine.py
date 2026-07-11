@@ -89,7 +89,8 @@ async def test_failed_reply_marks_the_same_turn_trace_failed(tmp_path: Path) -> 
     )
 
     assert reply is not None
-    engine.fail_reply_delivery(reply, "network failed")
+    commit = engine.fail_reply_delivery(reply, "network failed")
+    assert commit is not None and commit.status == "failed"
     trace = store.recent_turn_traces("geoff")[-1]
     assert trace["id"] == reply.turn_trace_id
     assert trace["status"] == "failed"

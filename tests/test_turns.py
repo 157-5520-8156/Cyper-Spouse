@@ -1,7 +1,7 @@
 from companion_daemon.context_orchestrator import build_context_package
 from companion_daemon.emotion_state import InteractionEvent
 from companion_daemon.models import IncomingMessage, MoodState
-from companion_daemon.turns import TurnPlan, build_turn_plan
+from companion_daemon.turns import TurnCommit, TurnPlan, build_turn_plan
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
@@ -48,6 +48,13 @@ def test_turn_plan_keeps_subtext_as_a_short_lived_constraint_not_a_fact() -> Non
     assert plan.short_lived_constraint == "想被认真对待，但嘴上会硬一点。"
     assert plan.short_lived_constraint not in plan.allowed_facts
     assert "回合授权" in plan.prompt_block()
+
+
+def test_turn_commit_is_a_small_delivery_outcome_contract() -> None:
+    commit = TurnCommit(trace_id=4, delivery_id=8, status="delivered")
+
+    assert commit.trace_id == 4
+    assert commit.delivery_id == 8
 
 
 @pytest.mark.asyncio
