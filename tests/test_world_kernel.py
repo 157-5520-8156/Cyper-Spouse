@@ -134,7 +134,7 @@ def test_clock_advance_materializes_seeded_daily_life_into_events(tmp_path: Path
 
 def test_completed_activity_creates_deterministic_outcome_goal_and_experience(tmp_path: Path) -> None:
     seed = world_seed() | {
-        "daily_schedule": [{"slot": "notes", "title": "整理课程笔记", "template_id": "course_notes", "starts_hour": 9, "ends_hour": 10}],
+        "daily_schedule": [{"slot": "notes", "title": "整理课程笔记", "template_id": "course_notes", "location": "华东师范大学", "starts_hour": 9, "ends_hour": 10}],
         "long_term_goals": [{"id": "course-notes", "title": "课程笔记", "target": 2}],
     }
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))

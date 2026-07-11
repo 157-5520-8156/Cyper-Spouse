@@ -556,6 +556,7 @@ class WorldKernel:
                             "entity_id": "zhizhi",
                             "title": str(item["title"]),
                             "template_id": str(item.get("template_id") or ""),
+                            "location": str(item.get("location") or ""),
                             "starts_at": starts.isoformat(),
                             "ends_at": ends.isoformat(),
                         }

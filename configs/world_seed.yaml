@@ -25,21 +25,25 @@ daily_schedule:
     starts_hour: 9
     ends_hour: 12
     template_id: literature_reading
+    location: 华东师范大学
   - slot: afternoon_class
     title: 整理课程笔记或参加社团活动
     starts_hour: 14
     ends_hour: 17
     template_id: course_notes
+    location: 华东师范大学
   - slot: photo_work
     title: 整理摄影作品
     starts_hour: 17
     ends_hour: 18
     template_id: photo_portfolio
+    location: 上海
   - slot: evening_walk
     title: 傍晚散步或整理照片
     starts_hour: 19
     ends_hour: 21
     template_id: campus_walk
+    location: 华东师范大学
 long_term_goals:
   - id: course-notes
     title: 整理课程笔记

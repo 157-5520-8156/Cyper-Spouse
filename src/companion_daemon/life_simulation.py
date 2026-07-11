@@ -36,6 +36,9 @@ class LifeSimulation:
         if activity.get("entity_id") != "zhizhi" or f"outcome:{activity['activity_id']}" in state.get("outcomes", {}) or state["needs"].get("energy", 0) < 15:
             return None
         template = str(activity.get("template_id") or "")
+        expected_locations = {"literature_reading": "华东师范大学", "course_notes": "华东师范大学", "photo_portfolio": "上海", "campus_walk": "华东师范大学"}
+        if activity.get("location") != expected_locations.get(template):
+            return None
         specs = {"literature_reading": ("literature-fan", "在图书馆和范予安核对了读书会的书单。", "literature-reading", 6), "course_notes": (None, "整理完了今天的课程笔记。", "course-notes", 7), "photo_portfolio": ("photography-zhou", "整理了摄影社活动要用的照片。", "photo-portfolio", 8), "campus_walk": ("roommate-lin", "和林晚在校园里走了一小段，聊了晚饭。", None, 5)}
         spec = specs.get(template)
         if not spec:
