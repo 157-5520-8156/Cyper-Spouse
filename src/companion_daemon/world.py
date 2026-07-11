@@ -285,10 +285,10 @@ class WorldKernel:
             day = str(_as_dict(state["clock"], "clock")["logical_at"])[:10]
             if needs["initiative"] < 20 or needs["security"] < 45 or day in _as_dict(state.get("share_days", {}), "share days"):
                 return None
-            candidate = next(((key, value) for key, value in _as_dict(state["experiences"], "experiences").items() if not value.get("shared")), None)
+            candidate = self._select_shareable_experience(state)
             if not candidate:
                 return None
-            experience_id, experience = candidate
+            experience_id, experience, share_score = candidate
             if experience_id in uncertain_experiences:
                 return None
             text = f"{str(experience['content']).rstrip('。！？!? ')}。刚想起这件小事，想跟你说一下。"
@@ -298,16 +298,37 @@ class WorldKernel:
             trace = {
                 "world_id": world_id, "direction": "life_event", "appraisal": "life_event_share",
                 "expression_policy": "只分享已提交的世界经历，不补写新事实。", "allowed_facts": [str(experience["content"])],
-                "experience_id": experience_id, "life_share": True, "selection_id": f"life-share:{day}:{experience_id}",
+                "experience_id": experience_id, "life_share": True, "selection_id": f"life-share:{day}:{experience_id}", "share_score": share_score,
                 "short_lived_constraint": None, "observable_reason": "一个已发生但尚未分享的世界经历。",
             }
             trace_row = conn.execute("""insert into turn_traces (canonical_user_id, direction, appraisal, expression_policy, allowed_facts_json, short_lived_constraint, observable_reason, output_text, delivery_id, status, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)""", (canonical_user_id, trace["direction"], trace["appraisal"], trace["expression_policy"], _stable_json(trace["allowed_facts"]), None, trace["observable_reason"], text, delivery_id, now, now))
             action_id = f"outgoing:{delivery_id}"
             decision = self._append_and_project(conn, world_id, revision, state, [
-                ("LifeShareSelected", {"experience_id": experience_id, "selection_id": trace["selection_id"]}),
+                ("LifeShareSelected", {"experience_id": experience_id, "selection_id": trace["selection_id"], "score": share_score, "reason": "freshness_and_initiative"}),
                 ("ActionScheduled", {"action_id": action_id, "kind": "outgoing_message", "message_kind": "life_event", "expires_at": expires_at.isoformat(), "canonical_user_id": canonical_user_id, "platform": platform, "text": text, "trace": trace, "delivery_id": delivery_id, "trace_id": int(trace_row.lastrowid)}),
             ], idempotency_key=f"life-share-delivery:{delivery_id}", correlation_id=str(uuid4()), source="life_share", actor={"kind": "companion"}, causation_id=None)
             return LifeShareDelivery(experience_id, delivery_id, int(trace_row.lastrowid), action_id, text, decision.revision)
+
+    @staticmethod
+    def _select_shareable_experience(state: dict[str, object]) -> tuple[str, dict[str, object], int] | None:
+        logical_at = _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+        outcomes = _as_dict(state.get("outcomes", {}), "outcomes")
+        candidates: list[tuple[int, str, dict[str, object]]] = []
+        for experience_id, raw in _as_dict(state["experiences"], "experiences").items():
+            experience = _as_dict(raw, "experience")
+            if experience.get("shared"):
+                continue
+            outcome = _as_dict(outcomes.get(str(experience.get("source_outcome_id") or ""), {}), "outcome")
+            occurred_at = outcome.get("ends_at")
+            if not occurred_at:
+                continue
+            age_hours = max(0, int((logical_at - _parse_at(str(occurred_at))).total_seconds() // 3600))
+            freshness = max(0, 168 - age_hours)
+            candidates.append((freshness, experience_id, experience))
+        if not candidates:
+            return None
+        score, experience_id, experience = max(candidates, key=lambda item: (item[0], item[1]))
+        return experience_id, experience, score
 
     def begin_outgoing_action(self, delivery_id: int, *, expected_revision: int) -> bool:
         """Durably claim an outbox delivery before calling an unreliable adapter."""
