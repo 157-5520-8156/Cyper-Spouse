@@ -188,6 +188,9 @@ DASHBOARD_HTML = r"""<!doctype html>
     .timeline-copy span,.timeline time { color:#80685b; font-size:11px; }
     .timeline time { white-space:nowrap; }
     .calendar-list { display:grid; gap:6px; }
+    .calendar-nav { display:flex; align-items:center; gap:7px; margin-bottom:9px; }
+    .calendar-nav button { padding:5px 8px; color:#fff8ea; background:#6f8e84; border:1px solid #4d665f; }
+    .calendar-nav select { flex:1; padding:5px; font-size:11px; }
     .calendar-row { display:grid; grid-template-columns:78px 1fr auto; gap:8px; align-items:center; padding:8px; border:2px solid #cfb48f; background:#fff9ed; }
     .calendar-row time,.calendar-row small { color:#80685b; font-size:10px; }
     .calendar-row strong { display:block; color:#4c3d36; font-size:12px; font-weight:400; }
@@ -258,7 +261,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <section class="panel"><h2>现在</h2><div class="stats"><div class="stat"><b id="attention">-</b><span>注意力占用</span></div><div class="stat"><b id="taskCount">-</b><span>社交余波</span></div><div class="stat"><b id="phoneState">-</b><span>手机状态</span></div></div></section>
       <section class="panel wide"><h2>为什么是这个动作</h2><ul class="reason-list" id="reasons"></ul></section>
       <section class="panel wide"><h2>今天的轨迹</h2><div class="timeline" id="timeline"></div></section>
-      <section class="panel wide"><h2>时间账本</h2><div class="calendar-list" id="calendar"></div></section>
+      <section class="panel wide"><h2>时间账本</h2><div class="calendar-nav"><button id="calendarPrev" aria-label="前一天">←</button><select id="calendarDay" aria-label="选择查看日期"></select><button id="calendarNext" aria-label="后一天">→</button></div><div class="calendar-list" id="calendar"></div></section>
       <section class="panel wide"><h2>还没收住的事</h2><div id="tasks"></div></section>
       <details class="wide"><summary>查看原始 daemon 状态</summary><pre id="state"></pre></details>
     </aside>
@@ -304,6 +307,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     };
     let snapshot = null;
     let loading = false;
+    let selectedCalendarDate = null;
     const actor = {anchor:'rug', pos:[725,830], path:[], action:'idle', expression:'neutral', scene:null, direction:'front', lastTime:0, blinkUntil:0};
 
     function preload() {
@@ -503,13 +507,41 @@ DASHBOARD_HTML = r"""<!doctype html>
       document.getElementById('phoneState').textContent = d.phone_label;
       document.getElementById('reasons').innerHTML = d.reasons.map(x => `<li>${esc(x)}</li>`).join('');
       document.getElementById('timeline').innerHTML = d.next_plan.map((p,i) => `<div class="timeline-item ${i === 0 ? 'current' : ''}"><i class="dot"></i><div class="timeline-copy"><strong>${esc(p.activity)}</strong><span>${p.adjustment_note ? esc(p.adjustment_note) : (p.interruptible ? '偶尔会看手机' : '不适合被打断')}</span></div><time>${fmtTime(p.starts_at)}</time></div>`).join('') || '<span>今天还没有后续安排。</span>';
-      const calendarRows = (snapshot.calendar?.days || []).flatMap(day => (day.special_events || []).map(event => ({day,event}))).filter(({event}, index, rows) => rows.findIndex(row => row.event.id === event.id) === index).sort((a,b) => new Date(a.event.starts_at) - new Date(b.event.starts_at));
-      document.getElementById('calendar').innerHTML = calendarRows.map(({day,event}) => `<article class="calendar-row"><time>${esc(day.relative)} ${esc(day.date.slice(5))}</time><div><strong>${esc(event.title)}</strong><small>${esc(event.details || event.memory_note || '已写入时间账本')}</small></div><small>${esc(event.status === 'planned' ? '计划中' : event.status === 'completed' ? '已发生' : event.status)}</small></article>`).join('') || '<span class="result">近期没有重要安排或事件。</span>';
+      renderCalendar();
       const tasks = snapshot.recent_social_tasks.filter(t => ['pending','claimed'].includes(t.status));
       document.getElementById('tasks').innerHTML = tasks.length ? tasks.map(t => `<div class="task">${esc(t.reason)}<small>${esc(t.status)} · 到 ${fmtTime(t.due_at)}</small></div>`).join('') : '<span class="result">没有挂起的社交事务。</span>';
       document.getElementById('state').textContent = JSON.stringify({life_runtime:runtime, scene, state:snapshot.state}, null, 2);
       applyScene(scene);
     }
+    function renderCalendar() {
+      const days = snapshot.calendar?.days || [];
+      if (!days.length) return;
+      const picker = document.getElementById('calendarDay');
+      if (!selectedCalendarDate || !days.some(day => day.date === selectedCalendarDate)) selectedCalendarDate = days.find(day => day.relative === '今天')?.date || days[0].date;
+      picker.innerHTML = days.map(day => `<option value="${esc(day.date)}">${esc(day.relative)} ${esc(day.date)}</option>`).join('');
+      picker.value = selectedCalendarDate;
+      const day = days.find(item => item.date === selectedCalendarDate) || days[0];
+      const special = (day.special_events || []).map(event => ({event, kind:'日历事件'}));
+      const plans = (day.plans || []).map(event => ({event:{...event,title:event.activity,details:event.adjustment_note}, kind:'日程'}));
+      const lived = (day.events || []).map(event => ({event:{...event,title:event.content,details:event.content}, kind:'生活记录'}));
+      const rows = [...special, ...plans, ...lived].sort((a,b) => new Date(a.event.starts_at) - new Date(b.event.starts_at));
+      const label = status => ({planned:'计划中',active:'进行中',completed:'已发生',cancelled:'已取消'})[status] || status;
+      document.getElementById('calendar').innerHTML = rows.map(({event,kind}) => {
+        const note = event.memory_content || event.details || event.memory_note || '没有额外说明';
+        const reason = event.changed_reason ? `；原因：${event.changed_reason}` : '';
+        const linked = event.memory_id ? ' · 已关联记忆' : '';
+        return `<article class="calendar-row"><time>${esc(kind)}</time><div><strong>${esc(event.title)}</strong><small>${esc(note + reason + linked)}</small></div><small>${esc(label(event.status))}</small></article>`;
+      }).join('') || '<span class="result">这一天没有计划或已发生记录。</span>';
+    }
+    document.getElementById('calendarDay').onchange = event => { selectedCalendarDate = event.target.value; renderCalendar(); };
+    function moveCalendar(offset) {
+      const days = snapshot?.calendar?.days || [];
+      const index = days.findIndex(day => day.date === selectedCalendarDate);
+      const target = days[index + offset];
+      if (target) { selectedCalendarDate = target.date; renderCalendar(); }
+    }
+    document.getElementById('calendarPrev').onclick = () => moveCalendar(-1);
+    document.getElementById('calendarNext').onclick = () => moveCalendar(1);
     async function runProactive() {
       const user = document.getElementById('user').value || 'geoff';
       const res = await fetch(`/proactive/${user}`, {method:'POST'}).then(r => r.json());

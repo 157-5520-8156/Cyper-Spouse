@@ -260,6 +260,23 @@ class CompanionStore:
                 create index if not exists idx_calendar_events_window
                   on calendar_events (canonical_user_id, starts_at, ends_at, status);
 
+                create table if not exists calendar_event_history (
+                  id integer primary key autoincrement,
+                  calendar_event_id integer not null references calendar_events(id),
+                  from_status text,
+                  to_status text not null,
+                  reason text,
+                  changed_at text not null
+                );
+                create index if not exists idx_calendar_event_history_event
+                  on calendar_event_history (calendar_event_id, id);
+
+                create table if not exists calendar_event_memories (
+                  calendar_event_id integer primary key references calendar_events(id),
+                  memory_id integer not null unique references memories(id),
+                  linked_at text not null
+                );
+
                 create table if not exists calendar_weeks (
                   canonical_user_id text not null references users(id),
                   week_start text not null,
@@ -810,6 +827,10 @@ class CompanionStore:
         memory_note: str | None = None,
         status: str = "planned",
     ) -> int:
+        if status not in {"planned", "active", "completed", "cancelled"}:
+            raise ValueError(f"unsupported calendar status: {status}")
+        if ends_at <= starts_at:
+            raise ValueError("calendar event must end after it starts")
         now = utc_now().isoformat()
         with self.connect() as conn:
             cursor = conn.execute(
@@ -823,15 +844,23 @@ class CompanionStore:
                  ends_at.astimezone(UTC).isoformat(), status, max(0, min(100, importance)), source,
                  details, memory_note, now, now),
             )
-        return int(cursor.lastrowid)
+        event_id = int(cursor.lastrowid)
+        self._record_calendar_transition(event_id, from_status=None, to_status=status, reason="创建事件")
+        self.sync_calendar_event_memory(canonical_user_id, event_id)
+        return event_id
 
     def calendar_events_between(self, canonical_user_id: str, *, starts_at: datetime, ends_at: datetime) -> list[sqlite3.Row]:
         with self.connect() as conn:
             rows = conn.execute(
                 """
-                select id,title,event_type,starts_at,ends_at,status,importance,source,details,
-                       memory_note,share_state,changed_reason
-                from calendar_events where canonical_user_id = ? and starts_at < ? and ends_at > ?
+                select event.id,event.title,event.event_type,event.starts_at,event.ends_at,event.status,
+                       event.importance,event.source,event.details,event.memory_note,event.share_state,
+                       event.changed_reason, memory.id as memory_id, memory.kind as memory_kind,
+                       memory.content as memory_content
+                from calendar_events event
+                left join calendar_event_memories link on link.calendar_event_id = event.id
+                left join memories memory on memory.id = link.memory_id
+                where event.canonical_user_id = ? and event.starts_at < ? and event.ends_at > ?
                 order by importance desc, starts_at asc
                 """,
                 (canonical_user_id, ends_at.astimezone(UTC).isoformat(), starts_at.astimezone(UTC).isoformat()),
@@ -864,11 +893,64 @@ class CompanionStore:
             ).fetchone()
 
     def update_calendar_event_status(self, event_id: int, *, status: str, changed_reason: str | None = None) -> None:
+        allowed = {
+            "planned": {"active", "completed", "cancelled"},
+            "active": {"completed", "cancelled"},
+            "completed": set(),
+            "cancelled": set(),
+        }
         with self.connect() as conn:
+            row = conn.execute("select canonical_user_id, status from calendar_events where id = ?", (event_id,)).fetchone()
+            if not row:
+                raise ValueError(f"calendar event {event_id} does not exist")
+            previous = str(row["status"])
+            if status not in allowed.get(previous, set()):
+                raise ValueError(f"invalid calendar transition: {previous} -> {status}")
+            if status == "cancelled" and not (changed_reason or "").strip():
+                raise ValueError("a cancelled calendar event requires a reason")
             conn.execute(
                 "update calendar_events set status = ?, changed_reason = ?, updated_at = ? where id = ?",
                 (status, changed_reason, utc_now().isoformat(), event_id),
             )
+        self._record_calendar_transition(event_id, from_status=previous, to_status=status, reason=changed_reason)
+        self.sync_calendar_event_memory(str(row["canonical_user_id"]), event_id)
+
+    def _record_calendar_transition(self, event_id: int, *, from_status: str | None, to_status: str, reason: str | None) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "insert into calendar_event_history (calendar_event_id,from_status,to_status,reason,changed_at) values (?, ?, ?, ?, ?)",
+                (event_id, from_status, to_status, reason, utc_now().isoformat()),
+            )
+
+    def calendar_event_history(self, event_id: int) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            return list(conn.execute(
+                "select from_status,to_status,reason,changed_at from calendar_event_history where calendar_event_id = ? order by id asc",
+                (event_id,),
+            ).fetchall())
+
+    def sync_calendar_event_memory(self, canonical_user_id: str, event_id: int) -> None:
+        """Give every calendar event one stable, queryable memory record."""
+        with self.connect() as conn:
+            event = conn.execute("select * from calendar_events where id = ? and canonical_user_id = ?", (event_id, canonical_user_id)).fetchone()
+            if not event:
+                return
+            content = f"{event['title']}（{event['status']}）"
+            detail = event["memory_note"] or event["details"]
+            if detail:
+                content += f"：{detail}"
+            if event["changed_reason"]:
+                content += f"；变更原因：{event['changed_reason']}"
+            source = f"calendar:event:{event_id}"
+            existing = conn.execute("select id from memories where canonical_user_id = ? and kind = 'calendar_event' and source = ?", (canonical_user_id, source)).fetchone()
+            now = utc_now().isoformat()
+            if existing:
+                memory_id = int(existing["id"])
+                conn.execute("update memories set content = ?, confidence = 1.0, updated_at = ? where id = ?", (content, now, memory_id))
+            else:
+                cursor = conn.execute("insert into memories (canonical_user_id,kind,content,source,confidence,created_at,updated_at) values (?, 'calendar_event', ?, ?, 1.0, ?, ?)", (canonical_user_id, content, source, now, now))
+                memory_id = int(cursor.lastrowid)
+            conn.execute("insert into calendar_event_memories (calendar_event_id,memory_id,linked_at) values (?, ?, ?) on conflict(calendar_event_id) do update set memory_id=excluded.memory_id, linked_at=excluded.linked_at", (event_id, memory_id, now))
 
     def delete_calendar_events_by_source_prefix(self, canonical_user_id: str, prefix: str) -> None:
         with self.connect() as conn:
@@ -879,14 +961,10 @@ class CompanionStore:
 
     def cancel_elapsed_calendar_plans(self, canonical_user_id: str, *, now: datetime) -> None:
         with self.connect() as conn:
-            conn.execute(
-                """
-                update calendar_events set status = 'cancelled',
-                  changed_reason = '首次生成周计划时该时段已经过去，未将其伪装成已发生。', updated_at = ?
-                where canonical_user_id = ? and status in ('planned', 'active') and ends_at < ?
-                """,
-                (utc_now().isoformat(), canonical_user_id, now.astimezone(UTC).isoformat()),
-            )
+            rows = conn.execute("select id from calendar_events where canonical_user_id = ? and status in ('planned', 'active') and ends_at < ?", (canonical_user_id, now.astimezone(UTC).isoformat())).fetchall()
+        reason = "该计划时段已过去，但没有完成凭据；不能把它伪装成已发生。"
+        for row in rows:
+            self.update_calendar_event_status(int(row["id"]), status="cancelled", changed_reason=reason)
 
     def unshared_private_life_events(self, canonical_user_id: str, limit: int = 4) -> list[sqlite3.Row]:
         with self.connect() as conn:

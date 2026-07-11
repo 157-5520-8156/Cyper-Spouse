@@ -20,6 +20,10 @@ def calendar_ledger(store, canonical_user_id: str, state: MoodState, *, now: dat
     events = store.life_events_between(canonical_user_id, starts_at=start, ends_at=end)
     _backfill_memorable_events(store, canonical_user_id, events)
     special_events = store.calendar_events_between(canonical_user_id, starts_at=start, ends_at=end)
+    for event in special_events:
+        store.sync_calendar_event_memory(canonical_user_id, int(event["id"]))
+    # Re-read after synchronization so the projection exposes the linked memory.
+    special_events = store.calendar_events_between(canonical_user_id, starts_at=start, ends_at=end)
     by_day: dict[str, dict[str, object]] = {}
     for offset in range(-past_days, future_days + 1):
         day = (now.astimezone() + timedelta(days=offset)).date().isoformat()
@@ -139,7 +143,7 @@ def calendar_context_for_message(store, canonical_user_id: str, state: MoodState
     events = special_done or [item for item in day["events"] if item["status"] == "completed"]
     if not events:
         return f"时间账本：{day['relative']}没有已发生记录。不要编具体经历；可以坦白记不清或只说没有留到记录。"
-    lines = "；".join(str(item.get("memory_note") or item.get("title") or item.get("content")) for item in events[:4])
+    lines = "；".join(str(item.get("memory_content") or item.get("memory_note") or item.get("title") or item.get("content")) for item in events[:4])
     return f"时间账本：用户在问{day['relative']}已经发生的事。仅可依据已发生记录回答：{lines}。"
 
 

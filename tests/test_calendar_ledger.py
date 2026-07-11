@@ -1,6 +1,8 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from companion_daemon.calendar_ledger import calendar_context_for_message, calendar_ledger
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import seed_user
@@ -79,6 +81,44 @@ def test_elapsed_planned_event_is_cancelled_not_presented_as_future(tmp_path: Pa
     row = next(event for event in store.calendar_events_between("geoff", starts_at=now - timedelta(days=3), ends_at=now) if event["id"] == event_id)
     assert row["status"] == "cancelled"
     assert row["changed_reason"]
+    history = store.calendar_event_history(event_id)
+    assert history[-1]["to_status"] == "cancelled"
+    assert history[-1]["reason"] == row["changed_reason"]
+
+
+def test_calendar_event_has_exactly_one_linked_memory_and_carries_cancellation_reason(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "calendar.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 4, 0, tzinfo=UTC)
+    event_id = store.create_calendar_event(
+        "geoff", title="临时取消的看展", event_type="social_plan", starts_at=now + timedelta(days=1),
+        ends_at=now + timedelta(days=1, hours=2), source="test:cancelled",
+    )
+    store.update_calendar_event_status(event_id, status="cancelled", changed_reason="朋友临时发烧，改天再约")
+
+    ledger = calendar_ledger(store, "geoff", MoodState(), now=now, past_days=0, future_days=2)
+    event = next(event for day in ledger["days"] for event in day["special_events"] if event["id"] == event_id)
+
+    assert event["memory_id"]
+    assert event["memory_kind"] == "calendar_event"
+    assert "朋友临时发烧" in event["memory_content"]
+    assert event["changed_reason"] == "朋友临时发烧，改天再约"
+
+
+def test_calendar_status_transitions_are_guarded(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "calendar.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 4, 0, tzinfo=UTC)
+    event_id = store.create_calendar_event(
+        "geoff", title="待确认安排", event_type="personal_plan", starts_at=now + timedelta(days=1),
+        ends_at=now + timedelta(days=1, hours=1), source="test:transition",
+    )
+
+    with pytest.raises(ValueError, match="requires a reason"):
+        store.update_calendar_event_status(event_id, status="cancelled")
+    store.update_calendar_event_status(event_id, status="completed")
+    with pytest.raises(ValueError, match="invalid calendar transition"):
+        store.update_calendar_event_status(event_id, status="active")
 
 
 def test_calendar_context_keeps_future_plans_and_past_events_separate(tmp_path: Path) -> None:
