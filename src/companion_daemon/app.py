@@ -47,6 +47,13 @@ class WorldClockRequest(BaseModel):
     target_logical_at: str
 
 
+class WorldDeliveryReconcileRequest(BaseModel):
+    delivery_id: int
+    delivered: bool
+    external_receipt: str
+    reason: str | None = None
+
+
 @app.get("/health")
 def health() -> dict[str, str]:
     return {"status": "ok"}
@@ -152,6 +159,25 @@ def world_integrity(world_id: str) -> dict[str, object]:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/world/{world_id}/deliveries/reconcile")
+def reconcile_world_delivery(world_id: str, request: WorldDeliveryReconcileRequest) -> dict[str, object]:
+    kernel = WorldKernel(engine.store)
+    if not kernel.action_id_for_delivery(world_id, request.delivery_id):
+        raise HTTPException(status_code=404, detail="unknown delivery for world")
+    try:
+        result = kernel.settle_outgoing_action(
+            request.delivery_id,
+            delivered=request.delivered,
+            reason=request.reason,
+            external_receipt=request.external_receipt,
+        )
+    except WorldError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result is None:
+        raise HTTPException(status_code=404, detail="unknown delivery")
+    return {"delivery_id": request.delivery_id, "status": "delivered" if request.delivered else "failed", "external_receipt": request.external_receipt}
+
+
 @app.post("/world/{world_id}/commands")
 def world_command(world_id: str, request: WorldCommandRequest) -> dict[str, object]:
     command = {**request.command, "world_id": world_id}
@@ -213,7 +239,7 @@ def world_enablement(world_id: str) -> dict[str, object]:
     }
 
 
-@app.get("/world/active/enablement")
+@app.get("/world-runtime/enablement")
 def active_world_enablement() -> dict[str, object]:
     if not engine.world_kernel or not engine.world_id:
         return {"enabled": False}
