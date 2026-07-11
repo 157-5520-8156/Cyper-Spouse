@@ -1067,6 +1067,9 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "ExperienceShared":
         _as_dict(next_state["experiences"], "experiences")[str(payload["experience_id"])]["shared"] = True
         _as_dict(next_state["experiences"], "experiences")[str(payload["experience_id"])]["shared_action_id"] = payload["action_id"]
+    elif event.event_type == "LifeShareSelected":
+        day = str(_as_dict(next_state["clock"], "clock")["logical_at"])[:10]
+        _as_dict(next_state.setdefault("share_decisions", {}), "share decisions")[day] = dict(payload)
     elif event.event_type == "FactConfirmed":
         item = dict(payload)
         _as_dict(next_state["facts"], "facts")[str(item["fact_id"])] = item
@@ -1097,6 +1100,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "relationships": {},
         "needs": {"energy": 70, "attention": 55, "security": 50, "initiative": 20, "boundary": 0},
         "daily_schedule": [],
+        "share_decisions": {},
         "goals": {},
         "outcomes": {},
     }

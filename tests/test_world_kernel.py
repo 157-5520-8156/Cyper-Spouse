@@ -611,3 +611,14 @@ def test_reply_claim_must_quote_the_specific_committed_source(tmp_path: Path) ->
             started.world_id,
             {"reply_text": "我刚和林晚吃了饭。", "mentioned_event_ids": ["fact-1"], "proposed_action_ids": [], "claims": [{"source_id": "fact-1", "text": "刚和林晚吃了饭"}]},
         )
+
+
+def test_life_share_selection_is_replayable_and_limited_per_logical_day(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    proposed = kernel.submit({"type": "record_model_proposal", "world_id": started.world_id, "proposal_id": "shareable", "entity_id": "roommate-lin", "template_id": "dorm_chat", "content": "晚饭后在宿舍聊了几句新书。"}, expected_revision=started.revision)
+    accepted = kernel.submit({"type": "accept_model_proposal", "world_id": started.world_id, "proposal_id": "shareable"}, expected_revision=proposed.revision)
+    selected = kernel.submit({"type": "select_life_share", "world_id": started.world_id, "idempotency_key": "select-1"}, expected_revision=accepted.revision)
+    again = kernel.submit({"type": "select_life_share", "world_id": started.world_id, "idempotency_key": "select-2"}, expected_revision=selected.revision)
+    assert selected.events[-1].event_type == "LifeShareSelected"
+    assert again.events[-1].payload["reason"] == "daily_limit"
