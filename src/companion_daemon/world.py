@@ -438,6 +438,11 @@ class WorldKernel:
         )
         if event_claim and not normalized_claims:
             raise WorldError("reply states an experience without a committed source id")
+        remainder = reply_text
+        for claim in normalized_claims:
+            remainder = remainder.replace(claim["text"], "")
+        if re.search(r"(?:我|她|和).{0,28}(?:去了|吃了|见了|聊了|做了|完成了|回来|逛了|看了|参加了|上了)", remainder):
+            raise WorldError("reply contains an experience clause outside its committed claim")
         actions = _as_dict(state["actions"], "actions")
         invalid_actions = [str(item) for item in proposed_actions if str(item) not in actions]
         if invalid_actions:

@@ -177,24 +177,18 @@ class CompanionEngine:
                 continue
         raise ConcurrencyConflict(f"world command conflicted repeatedly: {command.get('type')}")
 
-    def _record_world_model_output(self, *, purpose: str, causation: str, content: str) -> None:
+    def _begin_world_model_call(self, *, purpose: str, causation: str) -> str:
+        digest = sha256(f"{purpose}|{causation}".encode("utf-8")).hexdigest()[:20]
+        action_id = f"model_call:{digest}"
+        self._submit_world_with_retry({"type": "schedule_action", "world_id": self.world_id, "action_id": action_id, "kind": "model_call", "expires_at": (self._world_logical_now() + timedelta(minutes=5)).isoformat(), "payload": {"purpose": purpose, "causation": causation}, "idempotency_key": f"schedule:{action_id}"})
+        return action_id
+
+    def _record_world_model_output(self, *, purpose: str, causation: str, content: str, action_id: str) -> None:
         """Persist a model return as non-factual audit input before using it."""
         if not self.world_kernel or not self.world_id:
             return
         digest = sha256(f"{purpose}|{causation}|{content}".encode("utf-8")).hexdigest()[:20]
         proposal_id = f"model:{purpose}:{digest}"
-        action_id = f"model_call:{digest}"
-        self._submit_world_with_retry(
-            {
-                "type": "schedule_action",
-                "world_id": self.world_id,
-                "action_id": action_id,
-                "kind": "model_call",
-                "expires_at": (self._world_logical_now() + timedelta(minutes=5)).isoformat(),
-                "payload": {"purpose": purpose, "causation": causation},
-                "idempotency_key": f"schedule:{action_id}",
-            }
-        )
         self._submit_world_with_retry(
             {
                 "type": "record_external_result",
@@ -672,6 +666,7 @@ class CompanionEngine:
             f"- 当前可见行为调制: 安全感={needs['security']}，主动性={needs['initiative']}，边界={needs['boundary']}。\n"
             "- 未列入账本的计划、人物、经历和结果不得说成已经发生。"
         )
+        model_action_id = self._begin_world_model_call(purpose="reply", causation=intent_id)
         raw = await self.model.complete(
             [
                 {"role": "system", "content": self.companion_system_prompt},
@@ -687,7 +682,7 @@ class CompanionEngine:
             temperature=0.75,
         )
         self._record_world_model_output(
-            purpose="reply", causation=intent_id, content=raw
+            purpose="reply", causation=intent_id, content=raw, action_id=model_action_id
         )
         try:
             candidate = self.world_kernel.validate_reply_candidate(
@@ -1004,13 +999,15 @@ class CompanionEngine:
                 f"已结算经历: {[item['content'] for item in snapshot['experiences'].values()][-3:]}\n"
                 f"模式: {mode}"
             )
+            causation = f"afterthought:{reply_sent_at.isoformat()}:{mode}"
+            model_action_id = self._begin_world_model_call(purpose="afterthought", causation=causation)
             try:
                 raw = await self.model.complete([{"role": "user", "content": prompt}], temperature=0.7)
             except Exception:
                 logger.exception("world afterthought generation failed")
                 return None
             self._record_world_model_output(
-                purpose="afterthought", causation=f"afterthought:{reply_sent_at.isoformat()}:{mode}", content=raw
+                purpose="afterthought", causation=causation, content=raw, action_id=model_action_id
             )
             text = sanitize_chat_text(raw)
             return text if text and len(text) <= 60 else None
@@ -1514,11 +1511,12 @@ class CompanionEngine:
             f"事实: {[item['value'] for item in snapshot['facts'].values()]}\n"
             f"经历: {[item['content'] for item in snapshot['experiences'].values()][-4:]}"
         )
+        causation = f"proactive:{self.world_kernel.revision(self.world_id)}"
+        model_action_id = self._begin_world_model_call(purpose="proactive", causation=causation)
         raw = await self.model.complete([{"role": "user", "content": prompt}], temperature=0.7)
         self._record_world_model_output(
             purpose="proactive",
-            causation=f"proactive:{self.world_kernel.revision(self.world_id)}",
-            content=raw,
+            causation=causation, content=raw, action_id=model_action_id,
         )
         decision = self._parse_decision(canonical_user_id, raw, MoodState())
         if not decision.should_send or not decision.message or not decision.platform:
