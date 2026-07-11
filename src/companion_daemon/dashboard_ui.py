@@ -274,7 +274,7 @@ DASHBOARD_HTML = r"""<!doctype html>
     </aside>
   </main>
   <script src="/dashboard-static/room/editor.js"></script>
-  <script src="/dashboard-static/room/runtime.js"></script>
+  <script src="/dashboard-static/room/runtime.js?v=3"></script>
   <script>
     const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     const labels = {desk:'书桌', kitchen:'餐桌', entry:'门口', sofa:'沙发', vanity:'梳妆台', bed:'床边', window:'窗前', rug:'地毯', study:'看书', eat:'吃饭', walk_out:'出门', social:'和同学待着', relax:'放松', tidy:'收拾', sleep:'睡着', gaze:'发呆', idle:'发会儿呆', notice_phone:'收到提醒', glance_phone:'瞄到消息', read_phone:'看消息', type_phone:'组织回复', withdraw:'先不看手机'};

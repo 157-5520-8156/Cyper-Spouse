@@ -481,12 +481,14 @@ def _load_inventory(
         errors.append("room asset inventory belongs to a different room")
     allowed_statuses = set(inventory.get("statusValues", ()))
     item_ids: set[str] = set()
+    inventory_by_id: dict[str, dict[str, Any]] = {}
     counts = {status: 0 for status in ("planned", "partial", "atomized", "verified")}
     for item in inventory.get("items", ()):
         item_id = item["id"]
         if item_id in item_ids:
             errors.append(f"duplicate inventory item {item_id!r}")
         item_ids.add(item_id)
+        inventory_by_id[item_id] = item
         status = item.get("status")
         if status not in allowed_statuses or status not in counts:
             errors.append(f"inventory item {item_id!r} has invalid status {status!r}")
@@ -495,6 +497,13 @@ def _load_inventory(
     object_ids = {item["id"] for item in manifest["objects"]}
     for object_id in sorted(object_ids - item_ids):
         errors.append(f"room object {object_id!r} has no inventory owner")
+    for item in [*manifest["objects"], *manifest.get("_draftObjects", [])]:
+        owner = inventory_by_id.get(item["id"])
+        if owner and owner.get("category") != item["category"]:
+            errors.append(
+                f"object {item['id']!r} category {item['category']!r} does not match "
+                f"inventory category {owner.get('category')!r}"
+            )
     for item in inventory.get("items", ()):
         if item.get("status") in {"partial", "atomized", "verified"} and item["id"] not in object_ids:
             errors.append(

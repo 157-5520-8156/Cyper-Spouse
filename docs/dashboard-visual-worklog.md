@@ -105,6 +105,16 @@
 - 浏览器完成三件对象各自 hidden/solo/behind/front 共 12 项矩阵：hidden 只移除目标，solo 在 clean shell 上独立显示，behind/front 均按家具不规则轮廓切换角色深度；全部页面无破图，console 无 warning/error。
 - 三件资产仍为 `planned / needs-art`：删除与深度矩阵已通过，但逐像素风格终稿、嵌入式烤箱、墙架、挂具、台面 decor、垃圾桶和厨房最终视觉基线尚未补齐。
 
+## 全资产原子化 · 波次 2 厨房固定物补齐（2026-07-12）
+
+- 第二版烤箱候选去掉了错误的炉面，作为独立嵌入式烤箱接入；同时新增墙架、挂具和窄垃圾桶。`artDraft` 从 23 增至 27 个对象，runtime 构建资产从 30 增至 34。
+- 四件候选全部保留原始 chroma source，并由 manifest 记录 crop、chroma key、resize、origin、category、occupancy、depth、provenance 与 audits；没有把一次性导出图当成事实来源。
+- 浏览器完成四件对象的 hidden/solo 删除矩阵：每个 hidden 均为 26 个可见对象且不含目标，每个 solo 均只保留目标，27 个对象和 38 张预加载图的审计元数据一致，无破图。
+- 烤箱完成 behind/front：角色后站时由烤箱不规则 alpha 轮廓自然遮挡，前站时完整绘于烤箱前。垃圾桶夹在高书柜与冰箱之间，没有真实的后侧可达空间，因此不伪造 behind 路径，只保留 front 审计。
+- Runtime bundle 请求改为 `cache: no-store`，冻结预览暴露 `roomObjectCount / roomVisibleObjects / roomLoadedImageCount / roomRenderReady`，用于浏览器等待确定性首帧；静态 runtime URL 增加版本参数，避免 WebView 延用旧脚本。
+- 浏览器截图接口实际返回 JPEG 字节，即便调用方请求 PNG；直接按 PNG 展示会偶发形成黑洞式预览。视觉检查现先按真实格式解码再转无损 PNG，确认 Canvas 本身没有丢层。该现象属于审计传输层，不是房间渲染缺图。
+- 自动验证：Room Runtime JS 19 项通过，Room Compiler Python 24 项通过，`git diff --check` 通过。四件新资产仍为 `planned / needs-art`；台面 decor 和厨房最终视觉基线完成前，波次 2 不标记完成。
+
 ## 后续扩展规则
 
 - 后续若新增家具或新动作，必须同时添加 `behind/front` 或动作巡检入口，不能只改 daemon 映射。

@@ -15,8 +15,50 @@ const bundle = JSON.parse(fs.readFileSync(
 
 function fakeCanvas() {
   const context = new Proxy({}, {get: (target, key) => target[key] || (() => {})});
-  return {width:1000, height:760, getContext:() => context};
+  return {width:1000, height:760, dataset:{}, getContext:() => context};
 }
+
+test('runtime loader bypasses stale generated bundle caches', async () => {
+  const originalFetch = global.fetch, originalImage = global.Image;
+  let requestOptions = null;
+  global.fetch = async (_url, options) => {
+    requestOptions = options;
+    return {ok:true, json:async () => structuredClone(bundle)};
+  };
+  global.Image = class {
+    set src(_value) { this.width = 1; this.height = 1; queueMicrotask(() => this.onload()); }
+  };
+  try {
+    await DashboardRoomRuntime.load({canvas:fakeCanvas(), bundleUrl:'/room.bundle.json', labels:{}});
+    assert.deepEqual(requestOptions, {cache:'no-store'});
+  } finally {
+    global.fetch = originalFetch;
+    global.Image = originalImage;
+  }
+});
+
+test('draw exposes deterministic browser audit readiness metadata', () => {
+  const canvas = fakeCanvas();
+  const runtime = new DashboardRoomRuntime(canvas, bundle, {});
+  runtime.hiddenObjectIds.add('sofa');
+  const originalRequestAnimationFrame = global.requestAnimationFrame;
+  let nextFrame = null;
+  global.requestAnimationFrame = callback => { nextFrame = callback; return 1; };
+
+  try {
+    runtime.draw(0);
+
+    assert.equal(canvas.dataset.roomObjectCount, String(bundle.objects.length));
+    assert.equal(canvas.dataset.roomRenderReady, 'false');
+    assert.equal(JSON.parse(canvas.dataset.roomVisibleObjects).includes('sofa'), false);
+    assert.equal(canvas.dataset.roomLoadedImageCount, '0');
+    nextFrame();
+    assert.equal(canvas.dataset.roomRenderReady, 'true');
+  } finally {
+    if (originalRequestAnimationFrame === undefined) delete global.requestAnimationFrame;
+    else global.requestAnimationFrame = originalRequestAnimationFrame;
+  }
+});
 
 test('runtime paths to manifest interactions without furniture-specific dashboard data', () => {
   const runtime = new DashboardRoomRuntime(fakeCanvas(), bundle, {});

@@ -76,7 +76,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "bed-divider-content-cluster", "tall-bookcase",
         "bookcase-content-cluster", "kitchen-wall-cabinets",
         "kitchen-wall-cabinet-decor", "kitchen-sink-counter",
-        "kitchen-stove-counter", "fridge",
+        "kitchen-stove-counter", "fridge", "oven", "kitchen-shelf",
+        "kitchen-utensil-rail", "kitchen-bin",
     ]
     assert bundle["artDraft"]["objects"][0]["layers"][0]["image"] == "sofaFront0Draft"
     bookcase = next(item for item in bundle["artDraft"]["objects"] if item["id"] == "tall-bookcase")
@@ -112,6 +113,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
             "kitchen-wall-cabinet-decor-draft.png",
             "kitchen-sink-counter-draft.png",
             "kitchen-stove-counter-draft.png", "fridge-draft.png",
+            "oven-draft.png", "kitchen-shelf-draft.png",
+            "kitchen-utensil-rail-draft.png", "kitchen-bin-draft.png",
         )
     )
 
@@ -280,7 +283,7 @@ def test_compile_room_replaces_stale_runtime_as_one_complete_output(
 
     assert report.bundle_path == output_dir / "room.bundle.json"
     assert not stale.exists()
-    assert len(report.generated_assets) == 30
+    assert len(report.generated_assets) == 34
 
 
 @pytest.mark.parametrize(
@@ -352,6 +355,22 @@ def test_compile_room_rejects_an_unowned_art_draft_object(tmp_path: Path) -> Non
     with pytest.raises(
         RoomCompileError,
         match="draft object 'untracked-office-chair-draft' has no inventory owner",
+    ):
+        compile_room(manifest_path, tmp_path / "runtime")
+
+
+def test_compile_room_rejects_inventory_category_drift(tmp_path: Path) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    shelf = next(
+        item for item in manifest["artDraft"]["objects"]
+        if item["id"] == "kitchen-shelf"
+    )
+    shelf["category"] = "furniture"
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(
+        RoomCompileError,
+        match="object 'kitchen-shelf' category 'furniture' does not match inventory category 'wall-decoration'",
     ):
         compile_room(manifest_path, tmp_path / "runtime")
 

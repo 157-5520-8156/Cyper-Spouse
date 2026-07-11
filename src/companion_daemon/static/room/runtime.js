@@ -3,7 +3,7 @@
 
   class DashboardRoomRuntime {
     static async load({canvas, bundleUrl, labels}) {
-      const response = await fetch(bundleUrl);
+      const response = await fetch(bundleUrl, {cache:'no-store'});
       if (!response.ok) throw new Error(`房间资源读取失败 (${response.status})`);
       const runtime = new DashboardRoomRuntime(canvas, await response.json(), labels);
       await runtime.preload();
@@ -453,6 +453,17 @@
       this.drawEffects(now); this.drawRibbon();
       if (this.editor?.mode === 'alpha') this.editor.drawAlpha();
       if (this.editor) this.editor.draw();
+      if (this.canvas.dataset) {
+        this.canvas.dataset.roomObjectCount = String(this.scene.objects.length);
+        this.canvas.dataset.roomVisibleObjects = JSON.stringify(
+          this.visibleObjects().map(object => object.id)
+        );
+        this.canvas.dataset.roomLoadedImageCount = String(Object.keys(this.images).length);
+        if (!this.running && typeof requestAnimationFrame === 'function') {
+          this.canvas.dataset.roomRenderReady = 'false';
+          requestAnimationFrame(() => { this.canvas.dataset.roomRenderReady = 'true'; });
+        } else this.canvas.dataset.roomRenderReady = 'true';
+      }
     }
 
     loop(now) {

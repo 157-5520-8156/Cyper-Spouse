@@ -77,6 +77,19 @@
       "method": "imagegen-background-extraction",
       "sources": ["sources/oven-chroma-v1.png"],
       "note": "Rejected: generated a freestanding range with cooktop instead of the reference room's under-counter oven."
+    },
+    {
+      "id": "wave2-kitchen-fixtures-chroma-v1",
+      "targets": ["oven", "kitchen-shelf", "kitchen-utensil-rail", "kitchen-bin"],
+      "status": "needs-art",
+      "method": "imagegen-background-extraction",
+      "sources": [
+        "sources/oven-chroma-v2.png",
+        "sources/kitchen-shelf-chroma-v1.png",
+        "sources/kitchen-utensil-rail-chroma-v1.png",
+        "sources/kitchen-bin-chroma-v1.png"
+      ],
+      "note": "Second oven attempt removes the cooktop; shelf, rail and bin are isolated from the room master for draft assembly."
     }
   ],
   "items": [
