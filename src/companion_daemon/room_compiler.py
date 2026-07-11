@@ -277,6 +277,28 @@ def _validate_identity(objects: list[dict[str, Any]]) -> None:
         raise RoomCompileError(errors)
 
 
+def _validate_attachments(objects: list[dict[str, Any]], label: str = "") -> None:
+    errors: list[str] = []
+    by_id = {item["id"]: item for item in objects}
+    for item in objects:
+        parent = item.get("attachedTo")
+        if parent and parent not in by_id:
+            errors.append(f"{label}object {item['id']!r} attaches to unknown object {parent!r}")
+    for item in objects:
+        seen: set[str] = set()
+        current = item
+        while parent := current.get("attachedTo"):
+            if parent in seen or parent == item["id"]:
+                errors.append(f"{label}attachment cycle contains {item['id']!r}")
+                break
+            seen.add(parent)
+            if parent not in by_id:
+                break
+            current = by_id[parent]
+    if errors:
+        raise RoomCompileError(errors)
+
+
 def _xy(point: list[int | float]) -> tuple[int | float, int | float]:
     return point[0], point[1]
 
@@ -297,6 +319,7 @@ def _validate_sources_and_grid(
                 errors.append(f"object {item['id']!r} {role} source does not exist")
 
     object_ids = {item["id"] for item in manifest["objects"]}
+    all_object_ids = {item["id"] for item in all_objects}
     pose_names = set(manifest["sprites"]["poses"])
     facing_names = set(manifest["sprites"]["walk"]["columns"])
     interaction_names = set(manifest["interactions"])
@@ -313,6 +336,9 @@ def _validate_sources_and_grid(
             errors.append(
                 f"interaction {name!r} references unknown facing {interaction['facing']!r}"
             )
+        for object_id in interaction.get("allowOccupiedBy", []):
+            if object_id not in all_object_ids:
+                errors.append(f"interaction {name!r} allows unknown occupancy object {object_id!r}")
         depth = interaction.get("depth")
         if isinstance(depth, dict) and depth.get("relativeTo") not in object_ids:
             errors.append(
@@ -391,14 +417,12 @@ def _validate_sources_and_grid(
         raise RoomCompileError(errors)
 
 
-def _validate_topology(manifest: dict[str, Any]) -> None:
+def _validate_topology(manifest: dict[str, Any], objects: list[dict[str, Any]] | None = None, label: str = "") -> None:
     errors: list[str] = []
+    objects = manifest["objects"] if objects is None else objects
     walkable = {_xy(point) for point in manifest["walkable"]}
-    blocked = {
-        _xy(point)
-        for item in manifest["objects"]
-        for point in item["occupancy"].get("tiles", [])
-    }
+    blocked_owners = {_xy(point): item["id"] for item in objects for point in item["occupancy"].get("tiles", [])}
+    blocked = set(blocked_owners)
     free = walkable - blocked
     entry = _xy(manifest["anchors"]["entry"])
     reachable: set[tuple[int | float, int | float]] = set()
@@ -417,21 +441,28 @@ def _validate_topology(manifest: dict[str, Any]) -> None:
 
     for name, interaction in manifest["interactions"].items():
         approach = _xy(interaction["approach"])
-        if approach not in free:
-            errors.append(
-                f"interaction {name!r} approach is not on a free walkable tile"
-            )
+        owner = blocked_owners.get(approach)
+        allowed = set(interaction.get("allowOccupiedBy", []))
+        if owner and owner not in allowed:
+            errors.append(f"{label}interaction {name!r} approach is occupied by {owner!r}")
+        elif approach not in walkable:
+            errors.append(f"{label}interaction {name!r} approach is not on a free walkable tile")
+        elif owner:
+            x, y = approach
+            neighbors = ((x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1))
+            if approach != entry and not any(point in reachable for point in neighbors):
+                errors.append(f"{label}interaction {name!r} is unreachable from entry")
         elif approach not in reachable:
-            errors.append(f"interaction {name!r} is unreachable from entry")
+            errors.append(f"{label}interaction {name!r} is unreachable from entry")
 
     for name, route in manifest["routes"].items():
         for point in route:
             if _xy(point) not in free:
-                errors.append(f"route {name!r} crosses a blocked or non-walkable tile")
+                errors.append(f"{label}route {name!r} crosses a blocked or non-walkable tile")
                 break
         for previous, current in zip(route, route[1:], strict=False):
             if abs(previous[0] - current[0]) + abs(previous[1] - current[1]) != 1:
-                errors.append(f"route {name!r} has a non-adjacent step")
+                errors.append(f"{label}route {name!r} has a non-adjacent step")
                 break
 
     if errors:
@@ -519,6 +550,8 @@ def _emit_runtime(
                 "audit": source_object.get("audit", {}),
                 "auditPose": source_object.get("auditPose", {}),
             }
+            if attached_to := source_object.get("attachedTo"):
+                runtime_object["attachedTo"] = attached_to
             for index, source_layer in enumerate(source_object["layers"]):
                 role = source_layer["role"]
                 image_key = f"{_image_key(source_object['id'], role, index)}{key_suffix}"
@@ -612,8 +645,10 @@ def compile_room(manifest_path: Path | str, output_dir: Path | str) -> CompileRe
         )
         manifest = {**manifest, "_draftObjects": draft_objects}
     _validate_identity(manifest["objects"])
+    _validate_attachments(manifest["objects"])
     if manifest.get("_draftObjects"):
         _validate_identity(manifest["_draftObjects"])
+        _validate_attachments(manifest["_draftObjects"], "art draft ")
     inventory = _load_inventory(manifest, manifest_dir)
     inventory_ids = {item["id"] for item in inventory["items"]}
     missing_draft_owners = {
@@ -655,6 +690,8 @@ def compile_room(manifest_path: Path | str, output_dir: Path | str) -> CompileRe
         objects=[*manifest["objects"], *manifest.get("_draftObjects", [])],
     )
     _validate_topology(manifest)
+    if manifest.get("_draftObjects"):
+        _validate_topology(manifest, objects=manifest["_draftObjects"], label="art draft ")
     output_dir.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=f".{output_dir.name}.build-", dir=output_dir.parent

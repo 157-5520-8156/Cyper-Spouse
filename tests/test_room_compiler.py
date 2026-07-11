@@ -73,9 +73,14 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "sofa-cushion-green", "sofa-cushion-pink", "sofa-throw",
         "coffee-table-setting", "dining", "dining-chair-left",
         "dining-chair-right", "dining-table-setting", "divider",
-        "bed-divider-content-cluster",
+        "bed-divider-content-cluster", "tall-bookcase",
+        "bookcase-content-cluster", "kitchen-wall-cabinets",
+        "kitchen-wall-cabinet-decor",
     ]
     assert bundle["artDraft"]["objects"][0]["layers"][0]["image"] == "sofaFront0Draft"
+    bookcase = next(item for item in bundle["artDraft"]["objects"] if item["id"] == "tall-bookcase")
+    assert [layer["role"] for layer in bookcase["layers"]] == ["front"]
+    assert bookcase["audits"]["behind"] and bookcase["audits"]["front"]
 
     master = Image.open(ROOT / "assets/dashboard/zhizhi-room-isometric-v2.png").convert("RGBA")
     matte = Image.open(ROOT / "assets/dashboard/layers/desk-front-v1.png").convert("RGBA")
@@ -101,6 +106,9 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
             "dining-table-draft.png", "dining-chair-left-draft.png",
             "dining-chair-right-draft.png", "dining-table-setting-draft.png",
             "bed-divider-draft.png", "bed-divider-content-draft.png",
+            "tall-bookcase-draft.png", "bookcase-content-draft.png",
+            "kitchen-wall-cabinets-draft.png",
+            "kitchen-wall-cabinet-decor-draft.png",
         )
     )
 
@@ -269,7 +277,7 @@ def test_compile_room_replaces_stale_runtime_as_one_complete_output(
 
     assert report.bundle_path == output_dir / "room.bundle.json"
     assert not stale.exists()
-    assert len(report.generated_assets) == 23
+    assert len(report.generated_assets) == 27
 
 
 @pytest.mark.parametrize(
@@ -331,12 +339,16 @@ def test_compile_room_allows_non_occluding_objects_without_actor_audit_positions
 
 def test_compile_room_rejects_an_unowned_art_draft_object(tmp_path: Path) -> None:
     manifest, manifest_path = editable_manifest(tmp_path)
-    manifest["artDraft"]["objects"][0]["id"] = "untracked-sofa-draft"
+    office_chair = next(
+        item for item in manifest["artDraft"]["objects"]
+        if item["id"] == "office-chair"
+    )
+    office_chair["id"] = "untracked-office-chair-draft"
     manifest_path.write_text(json.dumps(manifest))
 
     with pytest.raises(
         RoomCompileError,
-        match="draft object 'untracked-sofa-draft' has no inventory owner",
+        match="draft object 'untracked-office-chair-draft' has no inventory owner",
     ):
         compile_room(manifest_path, tmp_path / "runtime")
 
@@ -352,6 +364,29 @@ def test_compile_room_rejects_art_draft_shell_geometry_drift(tmp_path: Path) -> 
         RoomCompileError,
         match="art draft shell image size .* must match visual master",
     ):
+        compile_room(manifest_path, tmp_path / "runtime")
+
+
+def test_compile_room_emits_and_validates_attachment_dag(tmp_path: Path) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    bedding = next(item for item in manifest["artDraft"]["objects"] if item["id"] == "bed-bedding")
+    bedding["attachedTo"] = "bed"
+    manifest_path.write_text(json.dumps(manifest))
+    report = compile_room(manifest_path, tmp_path / "runtime")
+    compiled = next(item for item in json.loads(report.bundle_path.read_text())["artDraft"]["objects"] if item["id"] == "bed-bedding")
+    assert compiled["attachedTo"] == "bed"
+    next(item for item in manifest["artDraft"]["objects"] if item["id"] == "bed")["attachedTo"] = "bed-bedding"
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(RoomCompileError, match="art draft attachment cycle"):
+        compile_room(manifest_path, tmp_path / "cycle-runtime")
+
+
+def test_compile_room_validates_draft_topology_against_draft_occupancy(tmp_path: Path) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    sofa = next(item for item in manifest["artDraft"]["objects"] if item["id"] == "sofa")
+    sofa["occupancy"] = {"kind": "footprint", "tiles": [[0, 1]]}
+    manifest_path.write_text(json.dumps(manifest))
+    with pytest.raises(RoomCompileError, match="art draft interaction 'dining' approach is occupied by 'sofa'"):
         compile_room(manifest_path, tmp_path / "runtime")
 
 

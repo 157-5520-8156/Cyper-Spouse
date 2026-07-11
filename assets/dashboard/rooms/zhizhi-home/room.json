@@ -243,6 +243,7 @@
       },
       {
         "id": "bed-bedding",
+        "attachedTo": "bed",
         "category": "soft-furnishing",
         "assetMode": "layered",
         "depthTile": [6.1, 1, 0],
@@ -347,6 +348,7 @@
       },
       {
         "id": "sofa-cushion-green",
+        "attachedTo": "sofa",
         "category": "soft-furnishing",
         "assetMode": "layered",
         "depthTile": [4.05, 6, 0],
@@ -373,6 +375,7 @@
       },
       {
         "id": "sofa-cushion-pink",
+        "attachedTo": "sofa",
         "category": "soft-furnishing",
         "assetMode": "layered",
         "depthTile": [4.1, 6, 0],
@@ -399,6 +402,7 @@
       },
       {
         "id": "sofa-throw",
+        "attachedTo": "sofa",
         "category": "soft-furnishing",
         "assetMode": "layered",
         "depthTile": [4.15, 6, 0],
@@ -425,6 +429,7 @@
       },
       {
         "id": "coffee-table-setting",
+        "attachedTo": "table",
         "category": "decor-cluster",
         "assetMode": "layered",
         "depthTile": [5.05, 6, 0],
@@ -529,6 +534,7 @@
       },
       {
         "id": "dining-table-setting",
+        "attachedTo": "dining",
         "category": "decor-cluster",
         "assetMode": "layered",
         "depthTile": [2.05, 1, 0],
@@ -581,6 +587,7 @@
       },
       {
         "id": "bed-divider-content-cluster",
+        "attachedTo": "divider",
         "category": "decor-cluster",
         "assetMode": "layered",
         "depthTile": [5.05, 3, 0],
@@ -604,12 +611,119 @@
         "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
         "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
         "audit": {}
+      },
+      {
+        "id": "tall-bookcase",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [1.5, 3.5, 0],
+        "occupancy": {"kind": "footprint", "tiles": [[1, 4]]},
+        "layers": [{
+          "role": "front",
+          "source": "sources/tall-bookcase-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [344, 69, 826, 1165],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [155, 353]
+          },
+          "output": "tall-bookcase-draft.png",
+          "origin": [345, 245],
+          "depthBias": 0
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {"behind": [0, 3, 0], "front": [2, 5, 0]}
+      },
+      {
+        "id": "bookcase-content-cluster",
+        "attachedTo": "tall-bookcase",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "depthTile": [1.55, 3.5, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/bookcase-content-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [209, 55, 793, 1488],
+            "chromaKey": "#00ff00",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [132, 324]
+          },
+          "output": "bookcase-content-draft.png",
+          "origin": [355, 255],
+          "depthBias": 50
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": true, "front": true},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {"behind": [0, 3, 0], "front": [2, 5, 0]}
+      },
+      {
+        "id": "kitchen-wall-cabinets",
+        "category": "furniture",
+        "assetMode": "layered",
+        "depthTile": [1, 1, 1],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "sources/kitchen-wall-cabinets-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [179, 68, 1284, 909],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [280, 213]
+          },
+          "output": "kitchen-wall-cabinets-draft.png",
+          "origin": [485, 75],
+          "depthBias": 0
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "kitchen-wall-cabinet-decor",
+        "attachedTo": "kitchen-wall-cabinets",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "depthTile": [1.05, 1, 1],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "sources/kitchen-wall-cabinet-decor-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [80, 301, 1464, 719],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 12,
+            "opaqueThreshold": 220,
+            "despill": true,
+            "resize": [270, 82]
+          },
+          "output": "kitchen-wall-cabinet-decor-draft.png",
+          "origin": [480, 40],
+          "depthBias": 50
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
       }
     ]
   },
   "interactions": {
     "desk": {
       "object": "desk", "location": "desk", "action": "study", "approach": [1, 6, 0],
+      "allowOccupiedBy": ["office-chair"],
       "posePosition": [0.2, 4.8, 0], "pose": "idle", "facing": "upRight",
       "depth": "natural"
     },

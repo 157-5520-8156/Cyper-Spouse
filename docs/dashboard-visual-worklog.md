@@ -86,6 +86,16 @@
 - Compiler 已验证草稿对象 inventory 所有权、统一 id/output/footprint、source、alpha 轮廓、母版边界、审计能力与 clean shell 尺寸；runtime 整体替换会同时清除过期 draft layers。
 - 代码审查发现默认 preload 曾包含草稿图片；现已将候选 URL 隔离到 `artDraft.images` 并按需加载。自动测试确认 production/draft 图片集合不相交，浏览器重新检查默认 sofa behind 画面无错误。
 
+## 全资产原子化 · 波次 2 首批收纳与吊柜（2026-07-12）
+
+- 新增高书柜、书柜内容 cluster、厨房吊柜与吊柜顶部 decor 四件 chroma source；Compiler 依据 manifest 的 crop、chroma key、resize、origin 生成四张 draft layer，`artDraft` 从 16 增至 20 个对象。
+- 内容物通过通用 `attachedTo` 归属父家具：书柜内容归属高书柜，吊柜 decor 归属吊柜；床品、沙发软装、桌面摆件和隔断内容也迁入同一依赖契约。
+- Runtime 的 hidden 会递归关闭依赖后代，solo 子物件则保留祖先；JS 测试覆盖多级依赖，不以家具 id 写特判。Compiler 同时校验未知父 id 与 attachment cycle。
+- `artDraft` 现在和 production 分别验证路径拓扑；书桌交互点被办公椅占用的真实结构使用 `allowOccupiedBy: ["office-chair"]` 显式建模，寻路只在前往该交互点时忽略该椅占地。
+- 浏览器检查 `tall-bookcase hidden`、`bookcase-content-cluster solo`、`kitchen-wall-cabinets hidden`、`kitchen-wall-cabinet-decor solo`：两组父子联动正确，其他对象未被误隐藏，页面没有破图。
+- 代码审查发现局部 effect 原先未复用父子可见性，以及高书柜 `body` 角色无法参与人物前后排序；现已统一 effect 判断，并将柜体/内容放入共享 `front` 深度队列。浏览器复核高书柜 behind 时角色被柜体轮廓遮住、front 时角色完整位于柜前。
+- 自动验证：Room Runtime JS 17 项通过，Room Compiler Python 23 项通过，小屋相关 Ruff 与 `git diff --check` 通过。四件新对象仍处于 `planned / needs-art`，等待厨房剩余对象组合后做 origin、删除测试和视觉基线统一校准。
+
 ## 后续扩展规则
 
 - 后续若新增家具或新动作，必须同时添加 `behind/front` 或动作巡检入口，不能只改 daemon 映射。

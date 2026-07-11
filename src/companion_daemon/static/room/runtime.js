@@ -86,8 +86,10 @@
       return this.actor.facing;
     }
 
-    pathfind(start, target) {
+    pathfind(start, target, allowOccupiedBy=[]) {
+      const allowedObjects = new Set(allowOccupiedBy);
       const blocked = new Set(this.scene.objects
+        .filter(object => !allowedObjects.has(object.id))
         .flatMap(object => object.occupancy?.tiles || [])
         .map(point => this.key(point)));
       const allowed = new Set([...this.walkable].filter(tile => !blocked.has(tile)));
@@ -118,11 +120,26 @@
       return path;
     }
 
+    visibleObjectIds() {
+      const byId = new Map(this.scene.objects.map(object => [object.id, object]));
+      const ancestors = object => {
+        const result = new Set(); let current = object;
+        while (current?.attachedTo && byId.has(current.attachedTo)) {
+          result.add(current.attachedTo); current = byId.get(current.attachedTo);
+        }
+        return result;
+      };
+      const soloAncestors = this.soloObjectId === null ? new Set() : ancestors(byId.get(this.soloObjectId));
+      return new Set(this.scene.objects.filter(object => {
+        const hiddenByAncestor = [...ancestors(object)].some(id => this.hiddenObjectIds.has(id));
+        const inSolo = this.soloObjectId === null || object.id === this.soloObjectId || soloAncestors.has(object.id);
+        return !this.hiddenObjectIds.has(object.id) && !hiddenByAncestor && inSolo;
+      }).map(object => object.id));
+    }
+
     visibleObjects() {
-      return this.scene.objects.filter(object => (
-        !this.hiddenObjectIds.has(object.id)
-        && (this.soloObjectId === null || object.id === this.soloObjectId)
-      ));
+      const visibleIds = this.visibleObjectIds();
+      return this.scene.objects.filter(object => visibleIds.has(object.id));
     }
 
     visibleLayers(object) {
@@ -176,7 +193,7 @@
       actor.targetFacing = interaction?.facing || this.scene.behavior.locationFacing[scene.location] || actor.facing;
       actor.tourRoute = null;
       if (this.key(actor.path.at(-1) || actor.position) !== this.key(target)) {
-        actor.path = this.pathfind(actor.position, target);
+        actor.path = this.pathfind(actor.position, target, interaction?.allowOccupiedBy || []);
         actor.target = target;
         actor.action = actor.path.length ? 'walk' : actor.activity;
       } else actor.action = actor.activity;
@@ -386,10 +403,7 @@
     drawEffects(now) {
       const scene = this.actor.scene || {}, target = this.actor.posePosition || this.scene.anchors[scene.location] || this.scene.anchors.rug;
       const effectObjectId = this.actor.interaction?.object;
-      if (effectObjectId && (
-        this.hiddenObjectIds.has(effectObjectId)
-        || (this.soloObjectId !== null && this.soloObjectId !== effectObjectId)
-      )) return;
+      if (effectObjectId && !this.visibleObjectIds().has(effectObjectId)) return;
       const [x, y] = this.project(target), pulse = Math.sin(now / 240);
       const effects = {
         focus:() => {

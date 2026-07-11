@@ -11,7 +11,8 @@
 - [x] Room Editor 显示 inventory 进度，并提供 hidden/solo 删除测试。
 - [x] 波次 0：通用对象 `layers / occupancy / audits / provenance` schema；`teal-stool` 已作为无互动原生对象接入，旧对象经 Compiler 归一化到同一 bundle 契约。
 - [ ] 波次 1：主要遮挡家具（进行中：clean shell 与 16 个家具/附属对象已进入可编译 `artDraft`，仍需逐件校准和删除测试）。
-- [ ] 波次 2–6：厨房/收纳、软装/灯/植物、decor、路径动作与最终验收。
+- [ ] 波次 2：厨房与大型收纳（进行中：高书柜/内容 cluster、厨房吊柜/顶部 decor 共 4 件已接入，草稿合计 20 对象）。
+- [ ] 波次 3–6：软装/灯/植物、decor、路径动作与最终验收。
 
 ### 波次 0 验收记录
 
@@ -29,6 +30,15 @@
 - 所有原始 AI 输出保留为 flat chroma source；裁切、key color、despill、resize、origin 与 depthBias 均由 `room.json` 声明并由 Compiler 可复现构建。
 - 草稿 URL 位于独立 `artDraft.images`；默认 dashboard 不下载也不依赖任何 `needs-art` 文件，只有显式草稿入口会先懒加载再切换场景。
 - 浏览器已实际装配 16 个对象，未出现资源或控制台错误；目前仍存在隔断内容与柜体的局部校准、clean shell 瓷砖/窗洞几何复核及逐对象 hidden/solo/behind/front 证据缺口，因此不提升 inventory 状态。
+
+### 波次 2 收纳与厨房草稿记录
+
+- `tall-bookcase`、`bookcase-content-cluster`、`kitchen-wall-cabinets`、`kitchen-wall-cabinet-decor` 已按同一 `artDraft` 契约接入；草稿现有 20 个对象，没有新增专用渲染分支。
+- 新增通用 `attachedTo` 依赖：隐藏父对象会关闭全部后代图层；solo 子对象会自动保留完整祖先链。Compiler 拒绝未知父对象和循环依赖。
+- Compiler 对 production 与 `artDraft` 分别执行 topology 校验，不允许草稿家具占住 interaction approach；确有座椅占位的交互必须通过 `allowOccupiedBy` 明确列出对象 id，Runtime 寻路只为该次目标排除此占地。
+- 浏览器实际验证高书柜与吊柜两组父子对象：父对象 hidden 后主体和附属内容同时消失；内容 cluster solo 时父体保留；高书柜 behind/front 会按角色深度切换完整柜体与内容层；无破图，整屋其余对象不受影响。
+- 双轴检查点审查补出一处依赖遗漏：局部 effect 现在与对象图层复用同一可见性集合，隐藏父对象不会残留子对象光效；高书柜也从永远位于角色后的 `body` 改为共享深度队列中的 `front`，并补齐前后审计点。
+- 这四件素材仍为 `planned / needs-art`：hidden/solo 的依赖逻辑已通过，但 origin、与母版的逐像素删除测试、厨房完整组合和最终视觉基线尚未完成，不能据此升级 inventory 状态。
 
 ## 用户目标
 
@@ -204,6 +214,13 @@
 - footprint；不占地时必须明确写 `none`，不能省略后让 Runtime 猜。
 - `interactions: []`。
 - `hidden/solo` 审计；可能遮人时还需 `behind/front`。
+
+### 对象依赖与占用例外
+
+- 放在家具上的软装或 decor cluster 使用 `attachedTo` 指向直接承载对象；依赖必须构成无环图，不能靠 id 命名约定推断。
+- hidden 审计按依赖向下级联；solo 审计按依赖保留祖先链。该规则只控制可见图层，不改变房间的事实占地。
+- interaction approach 默认不能位于任何 footprint 内。若动作天然需要走到一个可移动座椅所在格，interaction 通过 `allowOccupiedBy` 精确声明允许忽略的对象；禁止全局放宽碰撞。
+- production 与 `artDraft` 使用各自对象集合做 topology 校验，避免正式场景通过而草稿装配实际不可走。
 
 ## 美术重建策略
 

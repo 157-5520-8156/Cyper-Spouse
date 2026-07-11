@@ -1249,6 +1249,9 @@
         6,
         0
       ],
+      "allowOccupiedBy": [
+        "office-chair"
+      ],
       "posePosition": [
         0.2,
         4.8,
@@ -1561,7 +1564,11 @@
       "diningChairRightFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/dining-chair-right-draft.png",
       "diningTableSettingFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/dining-table-setting-draft.png",
       "dividerFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-divider-draft.png",
-      "bedDividerContentClusterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-divider-content-draft.png"
+      "bedDividerContentClusterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-divider-content-draft.png",
+      "tallBookcaseFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/tall-bookcase-draft.png",
+      "bookcaseContentClusterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bookcase-content-draft.png",
+      "kitchenWallCabinetsBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-wall-cabinets-draft.png",
+      "kitchenWallCabinetDecorBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-wall-cabinet-decor-draft.png"
     },
     "objects": [
       {
@@ -1732,7 +1739,8 @@
             0
           ]
         },
-        "auditPose": {}
+        "auditPose": {},
+        "attachedTo": "bed"
       },
       {
         "id": "table",
@@ -1923,7 +1931,8 @@
           "reference": "zhizhi-room-isometric-v2.png"
         },
         "audit": {},
-        "auditPose": {}
+        "auditPose": {},
+        "attachedTo": "sofa"
       },
       {
         "id": "sofa-cushion-pink",
@@ -1961,7 +1970,8 @@
           "reference": "zhizhi-room-isometric-v2.png"
         },
         "audit": {},
-        "auditPose": {}
+        "auditPose": {},
+        "attachedTo": "sofa"
       },
       {
         "id": "sofa-throw",
@@ -1999,7 +2009,8 @@
           "reference": "zhizhi-room-isometric-v2.png"
         },
         "audit": {},
-        "auditPose": {}
+        "auditPose": {},
+        "attachedTo": "sofa"
       },
       {
         "id": "coffee-table-setting",
@@ -2037,7 +2048,8 @@
           "reference": "zhizhi-room-isometric-v2.png"
         },
         "audit": {},
-        "auditPose": {}
+        "auditPose": {},
+        "attachedTo": "table"
       },
       {
         "id": "dining",
@@ -2217,7 +2229,8 @@
           "reference": "zhizhi-room-isometric-v2.png"
         },
         "audit": {},
-        "auditPose": {}
+        "auditPose": {},
+        "attachedTo": "dining"
       },
       {
         "id": "divider",
@@ -2321,7 +2334,189 @@
           "reference": "zhizhi-room-isometric-v2.png"
         },
         "audit": {},
+        "auditPose": {},
+        "attachedTo": "divider"
+      },
+      {
+        "id": "tall-bookcase",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          1.5,
+          3.5,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              1,
+              4
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "tallBookcaseFront0Draft",
+            "origin": [
+              345,
+              245
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            0,
+            3,
+            0
+          ],
+          "front": [
+            2,
+            5,
+            0
+          ]
+        },
         "auditPose": {}
+      },
+      {
+        "id": "bookcase-content-cluster",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "tile": [
+          1.55,
+          3.5,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "bookcaseContentClusterFront0Draft",
+            "origin": [
+              355,
+              255
+            ],
+            "depthBias": 50
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            0,
+            3,
+            0
+          ],
+          "front": [
+            2,
+            5,
+            0
+          ]
+        },
+        "auditPose": {},
+        "attachedTo": "tall-bookcase"
+      },
+      {
+        "id": "kitchen-wall-cabinets",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          1,
+          1,
+          1
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "kitchenWallCabinetsBody0Draft",
+            "origin": [
+              485,
+              75
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "kitchen-wall-cabinet-decor",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "tile": [
+          1.05,
+          1,
+          1
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "kitchenWallCabinetDecorBody0Draft",
+            "origin": [
+              480,
+              40
+            ],
+            "depthBias": 50
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "kitchen-wall-cabinets"
       }
     ]
   }

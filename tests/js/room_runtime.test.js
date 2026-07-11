@@ -130,6 +130,24 @@ test('atomization preview hides or solos rendering without changing occupancy', 
   assert.deepEqual(runtime.pathfind([7, 4, 0], [5, 7, 0]), beforePath);
 });
 
+test('attached objects follow parent hiding while solo keeps required ancestors', () => {
+  const configuredBundle = structuredClone(bundle);
+  configuredBundle.objects.find(item => item.id === 'table').attachedTo = 'sofa';
+  const runtime = new DashboardRoomRuntime(fakeCanvas(), configuredBundle, {});
+  runtime.hiddenObjectIds.add('sofa');
+  assert.equal(runtime.visibleObjects().some(item => ['sofa', 'table'].includes(item.id)), false);
+  runtime.hiddenObjectIds.clear(); runtime.soloObjectId = 'table';
+  assert.deepEqual(runtime.visibleObjects().map(item => item.id), ['sofa', 'table']);
+});
+
+test('pathfinding only enters occupied interaction tiles declared by object id', () => {
+  const configuredBundle = structuredClone(bundle);
+  configuredBundle.objects.find(item => item.id === 'desk').occupancy = {kind:'footprint', tiles:[[5, 7]]};
+  const runtime = new DashboardRoomRuntime(fakeCanvas(), configuredBundle, {});
+  assert.deepEqual(runtime.pathfind([7, 4, 0], [5, 7, 0]), []);
+  assert.notDeepEqual(runtime.pathfind([7, 4, 0], [5, 7, 0], ['desk']), []);
+});
+
 test('runtime path occupancy uses the generic occupancy contract', () => {
   const configuredBundle = structuredClone(bundle);
   assert.equal(configuredBundle.objects.some(item => 'footprint' in item), false);
@@ -191,6 +209,21 @@ test('hiding an interaction object also suppresses its local effect', () => {
   const runtime = new DashboardRoomRuntime({width:1000, height:760, getContext:() => context}, bundle, {});
   runtime.setActor({location:'sofa', action:'read_phone', expression:'neutral', time_of_day:'day'});
   runtime.hiddenObjectIds.add(runtime.actor.interaction.object);
+
+  runtime.drawEffects(0);
+
+  assert.deepEqual(calls, []);
+});
+
+test('hiding an interaction object ancestor also suppresses the child effect', () => {
+  const configuredBundle = structuredClone(bundle);
+  configuredBundle.objects.find(item => item.id === 'table').attachedTo = 'sofa';
+  configuredBundle.interactions.phone.object = 'table';
+  const calls = [];
+  const context = new Proxy({ellipse:() => calls.push('focus')}, {get:(target, key) => target[key] || (() => {})});
+  const runtime = new DashboardRoomRuntime({width:1000, height:760, getContext:() => context}, configuredBundle, {});
+  runtime.setActor({location:'sofa', action:'read_phone', expression:'neutral', time_of_day:'day'});
+  runtime.hiddenObjectIds.add('sofa');
 
   runtime.drawEffects(0);
 

@@ -41,6 +41,22 @@
         "sources/bed-divider-content-chroma-v1.png"
       ],
       "note": "Raw flat-green candidates; not compiled until chroma, scale and origin audits pass."
+    },
+    {
+      "id": "wave2-storage-kitchen-chroma-v1",
+      "targets": [
+        "tall-bookcase", "bookcase-content-cluster",
+        "kitchen-wall-cabinets", "kitchen-wall-cabinet-decor"
+      ],
+      "status": "needs-art",
+      "method": "imagegen-background-extraction",
+      "sources": [
+        "sources/tall-bookcase-chroma-v1.png",
+        "sources/bookcase-content-chroma-v1.png",
+        "sources/kitchen-wall-cabinets-chroma-v1.png",
+        "sources/kitchen-wall-cabinet-decor-chroma-v1.png"
+      ],
+      "note": "Wave 2 draft sources compiled with attachment ownership; origin and deletion audits remain."
     }
   ],
   "items": [
