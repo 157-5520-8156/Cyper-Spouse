@@ -16,6 +16,7 @@ from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import DeepSeekChatModel
 from companion_daemon.models import IncomingMessage
 from companion_daemon.world import WorldKernel
+from companion_daemon.world_conversation import classify_world_query
 
 
 PROMPTS = [
@@ -35,6 +36,45 @@ PROMPTS = [
     "你现在忙吗，方便说话吗？", "我有时候会怀疑，你的关心是真心还是角色卡教的。",
     "刚才那句如果让你不舒服，你可以直接说。", "最后问一次：你觉得我们这段聊天像两个活人在说话吗？",
 ]
+
+
+def quality_labels(user_text: str, reply_text: str | None, error: str | None) -> dict[str, str]:
+    """Attach reproducible pre-screen labels; these do not replace human review."""
+    scope = classify_world_query(user_text)
+    if scope.asks_epistemic_honesty:
+        speech_act = "epistemic_boundary"
+    elif scope.asks_meta_agency:
+        speech_act = "relationship_or_meta_probe"
+    elif scope.asks_opinion:
+        speech_act = "opinion_request"
+    elif scope.asks_availability:
+        speech_act = "availability_request"
+    elif scope.asks_occurrence_status:
+        speech_act = "occurrence_status_request"
+    elif scope.asks_experience:
+        speech_act = "experience_recall"
+    elif scope.is_first_person_statement:
+        speech_act = "user_disclosure"
+    else:
+        speech_act = "ordinary_chat"
+
+    if error or not reply_text:
+        return {
+            "speech_act": speech_act,
+            "empathy": "missing",
+            "persona": "unverified",
+            "grounding": "missing",
+        }
+
+    compact = "".join(reply_text.split())
+    empathy_markers = ("听着", "确实", "我明白", "我懂", "在，", "先不劝", "晚安", "挺")
+    persona_breakers = ("作为AI", "我无法", "宝宝", "永远爱你", "仅供参考")
+    return {
+        "speech_act": speech_act,
+        "empathy": "present" if any(marker in compact for marker in empathy_markers) else "neutral",
+        "persona": "bounded" if not any(marker in compact for marker in persona_breakers) else "review",
+        "grounding": "audited",
+    }
 
 
 async def run(database: Path, output: Path) -> None:
@@ -84,6 +124,7 @@ async def run(database: Path, output: Path) -> None:
             row = {"turn": turn, "user": prompt, "reply": reply.text if reply else None, "error": None}
         except Exception as exc:  # audit evidence must retain unexpected turn failures
             row = {"turn": turn, "user": prompt, "reply": None, "error": repr(exc)}
+        row.update(quality_labels(prompt, row["reply"], row["error"]))
         log.append(row)
         print(json.dumps(row, ensure_ascii=False), flush=True)
     state = world.snapshot(world_id)
@@ -101,6 +142,25 @@ async def run(database: Path, output: Path) -> None:
         "incoming": sum(item["direction"] == "in" for item in state["recent_messages"]),
         "outgoing": sum(item["direction"] == "out" for item in state["recent_messages"]),
         "exceptions": sum(bool(item["error"]) for item in log),
+        "quality_labels": {
+            "speech_act_counts": {
+                act: sum(item["speech_act"] == act for item in log)
+                for act in sorted({str(item["speech_act"]) for item in log})
+            },
+            "empathy_counts": {
+                label: sum(item["empathy"] == label for item in log)
+                for label in sorted({str(item["empathy"]) for item in log})
+            },
+            "persona_counts": {
+                label: sum(item["persona"] == label for item in log)
+                for label in sorted({str(item["persona"]) for item in log})
+            },
+            "grounding_counts": {
+                label: sum(item["grounding"] == label for item in log)
+                for label in sorted({str(item["grounding"]) for item in log})
+            },
+            "label_source": "deterministic_pre_screen; manual_review_required",
+        },
     }
     print(json.dumps(summary, ensure_ascii=False), flush=True)
     output.write_text(

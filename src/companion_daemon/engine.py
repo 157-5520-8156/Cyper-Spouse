@@ -92,9 +92,12 @@ from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel,
 from companion_daemon.world_behavior import WorldBehaviorPolicy
 from companion_daemon.world_conversation import (
     asks_for_source_detail,
+    best_matching_grounded_source,
     build_safe_failure_candidate,
     classify_world_query,
     conversation_fact_candidate,
+    denies_known_npc_interaction,
+    human_reply_contract_violation,
     only_echoes_user_message,
     only_recites_irrelevant_sources,
     only_repeats_claimed_sources,
@@ -1139,7 +1142,15 @@ class CompanionEngine:
             f"- 当前表达指导({expression_guidance.label}): {expression_guidance.prompt_line}\n"
             f"- 世界行为策略: {world_policy['mode']}；回复长度={world_policy['reply_length']}；主动性={world_policy['initiative']}。\n"
             f"- 多媒体处理: {media_reason or '本轮未请求'}；不得声称媒体已经发送，除非投递 Action 已结算。\n"
-            "- 未列入账本的计划、人物、经历和结果不得说成已经发生。"
+            "- 未列入账本的计划、人物、经历和结果不得说成已经发生。\n"
+            "- 对话顺序：先回应用户当前的言语行为（倾诉、吐槽、纠正、求陪伴、追问或关系试探），"
+            "再按需引用与它直接相关的事实；不要让旧事实抢走当前话题。\n"
+            "- 共情不得靠编造共同经历、心理、环境或替用户下结论；保持一两句手机私聊，"
+            "符合沈知栀慢热、有判断、不过度亲密的关系边界。\n"
+            "- 不猜测用户未说过的过去经历或心理成因；角色自己的内心因果也需要世界来源。"
+            "面对角色卡/设定问题，承认设定会影响表达，不做绝对自主性保证。"
+            "任何代用户点单、下单、购买、联系或对外发送的提议，都必须对应已调度 Action。"
+            "用户要求没依据就直说时，必须明确承认依据不足，不得用泛化接话回避。"
         )
         model_action_id = self._begin_world_model_call(purpose="reply", causation=intent_id)
         try:
@@ -1168,12 +1179,57 @@ class CompanionEngine:
             "proposed_action_ids": [],
             "claims": [],
         }
+        fallback_needs_audit = False
         query_scope = classify_world_query(message.text)
+        related_npc_experiences: list[dict[str, object]] = []
+        urgent_turn = bool(
+            communication_decision
+            and communication_decision.reason == "resumed_or_urgent_turn"
+            and not resume_action_id
+        )
+        occurrence_source = (
+            best_matching_grounded_source(message.text, experience_sources)
+            if query_scope.asks_occurrence_status
+            else None
+        )
+        occurrence_candidate = None
+        if occurrence_source:
+            occurrence_content = str(occurrence_source.get("content") or "").strip()
+            occurrence_source_id = str(occurrence_source.get("source_id") or "")
+            if occurrence_content and occurrence_source_id:
+                occurrence_candidate = {
+                    "reply_text": f"是真的发生了，不是计划。{occurrence_content}",
+                    "mentioned_event_ids": [occurrence_source_id],
+                    "proposed_action_ids": [],
+                    "claims": [{
+                        "source_id": occurrence_source_id,
+                        "text": occurrence_content,
+                    }],
+                }
+        mentioned_npc_names = {
+            str(entity.get("name") or "")
+            for entity in snapshot.get("entities", {}).values()
+            if isinstance(entity, dict)
+            and entity.get("kind") not in {"companion", "user"}
+            and str(entity.get("name") or "") in message.text
+        }
+        related_npc_experiences = [
+            item
+            for item in experience_sources
+            if any(
+                name and name in str(item.get("content") or "")
+                for name in mentioned_npc_names
+            )
+        ]
         try:
             parsed_candidate = parse_reply_candidate(raw)
             candidate = self.world_kernel.validate_reply_candidate(
                 self.world_id, parsed_candidate, user_id=user_id
             )
+            if occurrence_candidate:
+                candidate = self.world_kernel.validate_reply_candidate(
+                    self.world_id, occurrence_candidate, user_id=user_id
+                )
             if query_scope.asks_availability:
                 previous = [
                     str(item.get("text") or "")
@@ -1197,21 +1253,30 @@ class CompanionEngine:
                 raise WorldError("reply only recites sources unrelated to the current turn")
             if repeats_recent_companion_reply(candidate, list(snapshot.get("recent_messages", []))):
                 raise WorldError("reply repeats one of the last two companion replies")
-            mentioned_npc_names = {
-                str(entity.get("name") or "")
-                for entity in snapshot.get("entities", {}).values()
-                if isinstance(entity, dict)
-                and entity.get("kind") not in {"companion", "user"}
-                and str(entity.get("name") or "") in message.text
-            }
-            related_npc_experiences = [
-                item
-                for item in experience_sources
-                if any(
-                    name and name in str(item.get("content") or "")
-                    for name in mentioned_npc_names
-                )
-            ]
+            human_violation = human_reply_contract_violation(
+                message.text,
+                candidate,
+                relationship,
+                urgent_turn=urgent_turn,
+                meta_agency_query=query_scope.asks_meta_agency,
+                single_experience_requested=query_scope.asks_single_experience,
+                current_first_person_statement=query_scope.is_first_person_statement,
+                epistemic_honesty_requested=query_scope.asks_epistemic_honesty,
+                opinion_requested=query_scope.asks_opinion,
+                recent_user_texts=[
+                    str(item.get("text") or "")
+                    for item in snapshot.get("recent_messages", [])
+                    if item.get("direction") == "in" and str(item.get("text") or "").strip()
+                ],
+            )
+            if human_violation:
+                raise WorldError(f"human reply contract rejected: {human_violation}")
+            if (
+                asks_for_source_detail(message.text)
+                and related_npc_experiences
+                and denies_known_npc_interaction(str(candidate.get("reply_text") or ""))
+            ):
+                raise WorldError("reply denies a known NPC interaction")
             if (
                 asks_for_source_detail(message.text)
                 and mentioned_npc_names
@@ -1229,8 +1294,10 @@ class CompanionEngine:
                 grounding_context=audit_context,
             )
         except WorldError as validation_error:
-            grounded_fallback = None
-            if query_scope.asks_current_scene:
+            grounded_fallback = occurrence_candidate
+            if occurrence_candidate:
+                pass
+            elif query_scope.asks_current_scene:
                 if query_scope.asks_availability:
                     grounded_fallback = {
                         "reply_text": "这会儿可以说话。",
@@ -1262,19 +1329,29 @@ class CompanionEngine:
                         ]
                     grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
                         self.world_id,
-                        {"mentioned_event_ids": [item["experience_id"] for item in records[-2:]]},
+                        {
+                            "mentioned_event_ids": [
+                                item["experience_id"]
+                                for item in records[
+                                    -1 if query_scope.asks_single_experience else -2:
+                                ]
+                            ]
+                        },
                         user_id=user_id,
                     )
             elif query_scope.target in {"user", "conversation"} and retrieved_sources:
+                recall_source = best_matching_grounded_source(
+                    message.text, retrieved_sources
+                )
                 grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
                     self.world_id,
                     {
                         "mentioned_event_ids": [
-                            str(item["source_id"]) for item in retrieved_sources[:2]
+                            str(recall_source["source_id"])
                         ]
                     },
                     user_id=user_id,
-                )
+                ) if recall_source else None
             elif asks_for_source_detail(message.text):
                 mentioned_names = {
                     str(entity.get("name") or "")
@@ -1293,6 +1370,11 @@ class CompanionEngine:
                     {"mentioned_event_ids": [str(item["source_id"]) for item in related[-2:]]},
                     user_id=user_id,
                 )
+            elif query_scope.is_first_person_statement:
+                # The current statement itself is already in the ledger.  Do
+                # not turn a rejected mixed-claim candidate into a quotation
+                # of the same unrelated old claims.
+                grounded_fallback = None
             else:
                 if grounded_fallback is None:
                     grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
@@ -1300,8 +1382,12 @@ class CompanionEngine:
                     )
             # Current-scene questions have one complete authoritative answer;
             # do not spend another external call after a hallucinated scene.
-            if query_scope.asks_current_scene and grounded_fallback is not None:
+            if (
+                (query_scope.asks_current_scene or occurrence_candidate)
+                and grounded_fallback is not None
+            ):
                 candidate = grounded_fallback
+                fallback_needs_audit = True
                 repaired_raw = None
             else:
                 repaired_raw = ""
@@ -1325,6 +1411,8 @@ class CompanionEngine:
                                     f"上一次候选(JSON): {json.dumps(parsed_candidate, ensure_ascii=False, separators=(',', ':'))}\n"
                                     f"未通过校验：{validation_error}。"
                                     "只修复无依据的声明，保留用户问题的语义和自然接话；"
+                                    "先回应用户当前的言语行为，再引用直接相关事实；"
+                                    "不得用建议替代用户明确要求的陪伴或吐槽，不得突然升级关系口径；"
                                     "资料没有回答的细节要明确说不知道。不得补造来源，"
                                     "不得使用临时 event_1/exp1 标识。claims.text 是逐字来源证据，"
                                     "claims.assertion 是 reply_text 中对应的自然陈述；猜测/建议不创建 claim。"
@@ -1337,6 +1425,7 @@ class CompanionEngine:
                 except Exception as repair_error:
                     self._fail_world_model_call(repair_action_id, str(repair_error))
                     candidate = build_safe_failure_candidate(message.text, grounded_fallback)
+                    fallback_needs_audit = True
                 else:
                     self._record_world_model_output(
                         purpose="reply_repair",
@@ -1364,6 +1453,40 @@ class CompanionEngine:
                             candidate, list(snapshot.get("recent_messages", []))
                         ):
                             raise WorldError("reply repeats one of the last two companion replies")
+                        human_violation = human_reply_contract_violation(
+                            message.text,
+                            candidate,
+                            relationship,
+                            urgent_turn=urgent_turn,
+                            meta_agency_query=query_scope.asks_meta_agency,
+                            single_experience_requested=query_scope.asks_single_experience,
+                            current_first_person_statement=query_scope.is_first_person_statement,
+                            epistemic_honesty_requested=query_scope.asks_epistemic_honesty,
+                            opinion_requested=query_scope.asks_opinion,
+                            recent_user_texts=[
+                                str(item.get("text") or "")
+                                for item in snapshot.get("recent_messages", [])
+                                if item.get("direction") == "in" and str(item.get("text") or "").strip()
+                            ],
+                        )
+                        if human_violation:
+                            raise WorldError(
+                                f"human reply contract rejected: {human_violation}"
+                            )
+                        related_npc_experiences = [
+                            item
+                            for item in experience_sources
+                            if any(
+                                name and name in str(item.get("content") or "")
+                                for name in mentioned_npc_names
+                            )
+                        ]
+                        if (
+                            asks_for_source_detail(message.text)
+                            and related_npc_experiences
+                            and denies_known_npc_interaction(str(candidate.get("reply_text") or ""))
+                        ):
+                            raise WorldError("reply denies a known NPC interaction")
                         await self._audit_world_reply(
                             purpose="reply_repair_audit",
                             causation=intent_id,
@@ -1373,6 +1496,18 @@ class CompanionEngine:
                         )
                     except WorldError:
                         candidate = build_safe_failure_candidate(message.text, grounded_fallback)
+                        fallback_needs_audit = True
+        if fallback_needs_audit:
+            candidate = self.world_kernel.validate_reply_candidate(
+                self.world_id, candidate, user_id=user_id
+            )
+            await self._audit_world_reply(
+                purpose="reply_fallback_audit",
+                causation=intent_id,
+                user_text=message.text,
+                reply_text=str(candidate["reply_text"]),
+                grounding_context=audit_context,
+            )
         text = sanitize_world_chat_text(str(candidate["reply_text"]))
         question = self._world_reply_question(text)
         expires_at = self._world_logical_now() + timedelta(hours=12)

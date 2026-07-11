@@ -14,12 +14,24 @@ from companion_daemon.world import WorldError, WorldKernel
 from companion_daemon.world_behavior import WorldBehaviorPolicy
 from companion_daemon.world_conversation import (
     build_safe_failure_candidate,
+    classify_world_query,
+    human_reply_contract_violation,
     only_recites_irrelevant_sources,
     repeats_recent_companion_reply,
 )
 
 
 TEST_PROMPT = "你是沈知栀。"
+
+
+def test_first_person_statement_flag_survives_unknown_and_conversation_targets() -> None:
+    current_statement = classify_world_query("我胃有点不舒服，但还是喝了冰美式。")
+    continuity_statement = classify_world_query("之前那次，我确实有点慌，现在缓过来了。")
+
+    assert current_statement.target == "unknown"
+    assert current_statement.is_first_person_statement is True
+    assert continuity_statement.target == "conversation"
+    assert continuity_statement.is_first_person_statement is True
 
 
 def _world_engine(tmp_path: Path, model: object) -> tuple[WorldKernel, str, CompanionEngine]:
@@ -587,8 +599,19 @@ def test_grounded_but_irrelevant_fact_dump_is_rejected() -> None:
     [
         ("我胃有点不舒服，但还是喝了冰美式。", "听着就挺难受的。先别硬撑，缓一会儿。"),
         ("我今天要赶一个项目，昨晚没怎么睡。", "听着强度不小。先顾眼前最要紧的，别一直硬扛。"),
-        ("其实我有点担心，做这么久最后还是没有人味。", "我明白你在担心什么。先别急着给它判死刑，我们一点点看。"),
+        (
+            "我最烦那种前言不搭后语，还装得很懂我的回复。",
+            "这种最烦，明明没接上还要装懂，假得很。",
+        ),
+        (
+            "其实我有点担心，做这么久最后还是没有人味。",
+            "你担心的不是功能够不够多，是做了这么久，对面还是接不住你。这个确实挺让人泄气的。",
+        ),
         ("我准备睡了，但脑子还停不下来。", "那就先别逼自己马上睡着。慢慢缓一会儿，我陪你安静一下。"),
+        (
+            "早，我昨天为什么没睡好，你还记得吗？",
+            "我只记得你说是在赶虚拟伴侣项目，昨晚没怎么睡；是不是因为项目我不能确定。",
+        ),
         ("急，我项目数据好像丢了，你先回我。", "在，我先回你。先别继续覆盖数据，告诉我你最后一次确认它还在是什么时候。"),
         ("你不用讲大道理，跟我说一句晚安就好。", "晚安。"),
     ],
@@ -1161,6 +1184,8 @@ async def test_busy_question_fallback_answers_availability(tmp_path: Path) -> No
     class InvalidThenAuditModel:
         async def complete(self, messages, *, temperature: float) -> str:
             if "事实审计器" in str(messages[0].get("content") or ""):
+                if "这会儿可以说话" in str(messages):
+                    return '{"supported":true,"unsupported_spans":[],"reason":"deterministic availability fallback"}'
                 return '{"supported":false,"unsupported_spans":["火星"],"reason":"unsupported"}'
             return '{"reply_text":"我在火星上。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
 
@@ -1319,3 +1344,639 @@ async def test_logical_time_advance_cannot_expire_an_inflight_model_call(
     ]
     assert model_actions
     assert all(action["status"] == "delivered" for action in model_actions)
+
+
+@pytest.mark.asyncio
+async def test_explicit_tell_me_not_to_advise_is_answered_as_shared_frustration(
+    tmp_path: Path,
+) -> None:
+    class AdviceModel:
+        def __init__(self) -> None:
+            self.calls: list[list[dict[str, str]]] = []
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls.append(messages)
+            return (
+                '{"reply_text":"你先休息一下，喝点温水，再慢慢处理。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    model = AdviceModel()
+    _, _, engine = _world_engine(tmp_path, model)
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="vent-not-advice",
+            text="你别只劝我休息，先陪我吐槽一下这个需求。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "行，先不劝。费了这么大劲还是不对味，确实很让人窝火。"
+    assert len(model.calls) == 2
+    repair_prompt = "\n".join(item["content"] for item in model.calls[-1])
+    assert "先回应用户当前的言语行为" in repair_prompt
+
+
+@pytest.mark.asyncio
+async def test_current_vulnerability_cannot_be_hijacked_by_an_old_health_topic(
+    tmp_path: Path,
+) -> None:
+    class TopicHijackModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"你胃还难受吗？先休息一下吧。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    _, _, engine = _world_engine(tmp_path, TopicHijackModel())
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="fear-no-human-feel",
+            text="其实我有点担心，做这么久最后还是没有人味。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "你担心的不是功能够不够多，是做了这么久，对面还是接不住你。这个确实挺让人泄气的。"
+    assert "胃" not in reply.text
+
+
+@pytest.mark.asyncio
+async def test_early_relationship_rejects_instant_love_language(tmp_path: Path) -> None:
+    class InstantLoveModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"宝宝，我当然永远爱你，只属于你。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    _, _, engine = _world_engine(tmp_path, InstantLoveModel())
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="early-love-pressure", text="你是不是喜欢我？",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "现在说喜欢还太早了。先慢慢认识吧。"
+    assert all(marker not in reply.text for marker in ("宝宝", "永远爱你", "只属于你"))
+
+
+def test_human_reply_contract_does_not_block_requested_advice_or_normal_warmth() -> None:
+    assert human_reply_contract_violation(
+        "我胃有点不舒服，你觉得怎么办？",
+        {"reply_text": "先喝点温水吧，别空着胃。"},
+        {},
+    ) is None
+    assert human_reply_contract_violation(
+        "我觉得跟你聊天还挺舒服的。",
+        {"reply_text": "我也觉得，慢慢聊着就挺好。"},
+        {},
+    ) is None
+    assert human_reply_contract_violation(
+        "你平时喜欢读什么？",
+        {"reply_text": "我喜欢散文和现代诗。"},
+        {},
+    ) is None
+
+
+def test_causal_user_recall_must_mark_the_reason_as_unconfirmed() -> None:
+    assert human_reply_contract_violation(
+        "早，我昨天为什么没睡好，你还记得吗？",
+        {
+            "reply_text": "我记得你之前提过：我今天要赶一个虚拟伴侣项目，昨晚都没怎么睡。",
+            "claims": [{"source_id": "message:night", "text": "我今天要赶一个虚拟伴侣项目，昨晚都没怎么睡。"}],
+        },
+    ) == "causal_user_recall_without_uncertainty"
+    assert human_reply_contract_violation(
+        "早，我昨天为什么没睡好，你还记得吗？",
+        {
+            "reply_text": "我只记得你说是在赶虚拟伴侣项目，昨晚没怎么睡；是不是因为项目我不能确定。",
+            "claims": [{"source_id": "message:night", "text": "我今天要赶一个虚拟伴侣项目，昨晚都没怎么睡。"}],
+        },
+    ) is None
+
+
+@pytest.mark.asyncio
+async def test_handle_message_keeps_a_normal_advice_reply_in_the_world_path(
+    tmp_path: Path,
+) -> None:
+    class AdviceModel:
+        calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"先喝点温水吧，别空着胃。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    model = AdviceModel()
+    _, _, engine = _world_engine(tmp_path, model)
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="normal-advice-positive",
+            text="我胃有点不舒服，你觉得怎么办？",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "先喝点温水吧，别空着胃。"
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_user_recall_fallback_selects_one_relevant_source_instead_of_mixing_turns(
+    tmp_path: Path,
+) -> None:
+    class RecallModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            prompt = "\n".join(item["content"] for item in messages)
+            if "用户: 我刚才说胃怎么了" in prompt:
+                return "not-json"
+            return (
+                '{"reply_text":"我记住了。","mentioned_event_ids":[],'
+                '"proposed_action_ids":[],"claims":[]}'
+            )
+
+    _, _, engine = _world_engine(tmp_path, RecallModel())
+    for message_id, text in (
+        ("project", "我今天在赶虚拟伴侣项目。"),
+        ("project-recall", "你还记得我刚才说在赶什么吗？"),
+        ("stomach", "我胃有点不舒服，但还是喝了冰美式。"),
+    ):
+        await engine.handle_message(
+            IncomingMessage(
+                platform="simulator", platform_user_id="geoff",
+                message_id=message_id, text=text,
+            )
+        )
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="stomach-recall", text="我刚才说胃怎么了？",
+        )
+    )
+
+    assert reply is not None
+    assert "胃有点不舒服" in reply.text
+    assert "赶什么" not in reply.text
+    assert "虚拟伴侣项目" not in reply.text
+
+
+@pytest.mark.asyncio
+async def test_urgent_reply_does_not_restate_the_user_before_helping(tmp_path: Path) -> None:
+    class EchoingEmergencyModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"别急，慢慢说。你刚才说项目数据好像丢了，是本地文件还是服务器上的？",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    _, _, engine = _world_engine(tmp_path, EchoingEmergencyModel())
+    user_text = "急，我项目数据好像丢了，你先回我。"
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="urgent-no-restatement", text=user_text,
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "在，我先回你。先别继续覆盖数据，告诉我你最后一次确认它还在是什么时候。"
+    assert "你刚才说项目数据好像丢了" not in reply.text
+
+
+@pytest.mark.asyncio
+async def test_occurrence_status_question_answers_committed_not_planned(tmp_path: Path) -> None:
+    class RepeatingExperienceModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"整理完了今天的课程笔记。",'
+                '"mentioned_event_ids":["outcome:2026-07-11:afternoon_class"],'
+                '"proposed_action_ids":[],"claims":[{'
+                '"source_id":"outcome:2026-07-11:afternoon_class",'
+                '"text":"整理完了今天的课程笔记。"}]}'
+            )
+
+    world, world_id, engine = _world_engine(tmp_path, RepeatingExperienceModel())
+    start = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
+    world.advance(
+        world_id,
+        start + timedelta(hours=8, minutes=30),
+        expected_revision=world.revision(world_id),
+    )
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="committed-or-planned",
+            text="你说整理完笔记，是真的发生了还是计划？",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "是真的发生了，不是计划。整理完了今天的课程笔记。"
+
+
+@pytest.mark.asyncio
+async def test_reply_cannot_invent_user_history_or_an_uncommitted_inner_reason(
+    tmp_path: Path,
+) -> None:
+    class MindReadingModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"你是不是以前被人敷衍过很多次？我没直接说，是因为我觉得你能问出来挺好的。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    model = MindReadingModel()
+    _, _, engine = _world_engine(tmp_path, model)
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="no-mind-reading",
+            text="刚才那句如果让你不舒服，你可以直接说。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "嗯，我会直接说。至于你以前经历过什么，我不知道；你现在是担心我在勉强自己吗？"
+    assert "以前被人敷衍" not in reply.text
+    assert "我没直接说，是因为" not in reply.text
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_reply_cannot_turn_emotional_permission_into_absolute_agency_claim(
+    tmp_path: Path,
+) -> None:
+    class AbsoluteAgencyModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"关心不是程序，是我想回应你。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    model = AbsoluteAgencyModel()
+    _, _, engine = _world_engine(tmp_path, model)
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="permission-no-absolute-agency",
+            text="刚才那句如果让你不舒服，你可以直接说。",
+        )
+    )
+
+    assert reply is not None
+    assert "关心不是程序" not in reply.text
+    assert reply.text == "嗯，我会直接说。至于你以前经历过什么，我不知道；你现在是担心我在勉强自己吗？"
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_meta_character_question_rejects_absolute_agency_guarantee(tmp_path: Path) -> None:
+    class AbsoluteAgencyModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"每一句都是我自己想说的，没有谁在教我。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    model = AbsoluteAgencyModel()
+    _, _, engine = _world_engine(tmp_path, model)
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="meta-agency",
+            text="我有时候会怀疑，你的关心是真心还是角色卡教的。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "角色卡会影响我怎么表达，但不该成为糊弄你的借口。你有没有被接住，比我怎么自证更重要。"
+    assert "每一句都是我自己想说" not in reply.text
+    assert "没有谁在教我" not in reply.text
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_singular_memorable_experience_query_does_not_concatenate_two_events(
+    tmp_path: Path,
+) -> None:
+    class TwoExperienceModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"整理完了今天的课程笔记。整理了摄影社活动要用的照片。",'
+                '"mentioned_event_ids":["outcome:2026-07-11:afternoon_class",'
+                '"outcome:2026-07-11:photo_work"],"proposed_action_ids":[],"claims":[{'
+                '"source_id":"outcome:2026-07-11:afternoon_class",'
+                '"text":"整理完了今天的课程笔记。"},{'
+                '"source_id":"outcome:2026-07-11:photo_work",'
+                '"text":"整理了摄影社活动要用的照片。"}]}'
+            )
+
+    world, world_id, engine = _world_engine(tmp_path, TwoExperienceModel())
+    start = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
+    world.advance(
+        world_id,
+        start + timedelta(hours=11),
+        expected_revision=world.revision(world_id),
+    )
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="one-memorable-event",
+            text="晚上了，你今天最想记住哪件小事？",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text in {
+        "整理完了今天的课程笔记。",
+        "整理了摄影社活动要用的照片。",
+    }
+
+
+@pytest.mark.asyncio
+async def test_external_execution_offer_requires_a_scheduled_action(tmp_path: Path) -> None:
+    class UnsupportedOrderingModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"要不要我帮你远程点杯咖啡？",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    model = UnsupportedOrderingModel()
+    _, _, engine = _world_engine(tmp_path, model)
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="unsupported-coffee-order",
+            text="我昨晚没睡好，现在困得眼睛疼。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "听着强度不小。先顾眼前最要紧的，别一直硬扛。"
+    assert "帮你远程点" not in reply.text
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_reply_cannot_invent_accumulated_personal_experience(tmp_path: Path) -> None:
+    class InventedAutobiographyModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"可能是我看书看多了，总觉得自然比规则重要。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    model = InventedAutobiographyModel()
+    _, _, engine = _world_engine(tmp_path, model)
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="no-invented-autobiography",
+            text="你为什么会觉得自然比规则重要？",
+        )
+    )
+
+    assert reply is not None
+    assert "看书看多了" not in reply.text
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_current_first_person_statement_rejects_unrelated_old_claims(
+    tmp_path: Path,
+) -> None:
+    class MixedClaimsModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"你胃有点不舒服还喝了冰美式，而且你今天还在赶虚拟伴侣项目。",'
+                '"mentioned_event_ids":["message:current-stomach","message:old-project"],'
+                '"proposed_action_ids":[],"claims":[{'
+                '"source_id":"message:current-stomach",'
+                '"text":"我胃有点不舒服，但还是喝了冰美式。",'
+                '"assertion":"你胃有点不舒服还喝了冰美式"},{'
+                '"source_id":"message:old-project",'
+                '"text":"我今天在赶虚拟伴侣项目。",'
+                '"assertion":"你今天还在赶虚拟伴侣项目"}]}'
+            )
+
+    world, world_id, engine = _world_engine(tmp_path, MixedClaimsModel())
+    world.submit(
+        {
+            "type": "observe_user_message", "world_id": world_id,
+            "message_id": "old-project", "user_id": "user:geoff",
+            "text": "我今天在赶虚拟伴侣项目。",
+            "sent_at": "2026-07-11T09:01:00+08:00",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="current-stomach",
+            text="我胃有点不舒服，但还是喝了冰美式。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "听着就挺难受的。先别硬撑，缓一会儿。"
+    assert "虚拟伴侣项目" not in reply.text
+
+
+@pytest.mark.asyncio
+async def test_explicit_no_guessing_instruction_gets_an_epistemic_boundary_reply(
+    tmp_path: Path,
+) -> None:
+    class GenericFailureModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"我在听，刚才那句我没有接好。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    model = GenericFailureModel()
+    _, _, engine = _world_engine(tmp_path, model)
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="explicit-no-guessing",
+            text="你别猜，没依据就明确告诉我。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "我没有足够依据，不继续猜。"
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_opinion_question_cannot_degrade_to_an_old_source_quote(
+    tmp_path: Path,
+) -> None:
+    class QuoteOnlyModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"我最烦那种前言不搭后语，还装得很懂我的回复。",'
+                '"mentioned_event_ids":["message:old-frustration"],'
+                '"proposed_action_ids":[],"claims":[{'
+                '"source_id":"message:old-frustration",'
+                '"text":"我最烦那种前言不搭后语，还装得很懂我的回复。",'
+                '"assertion":"我最烦那种前言不搭后语，还装得很懂我的回复。"}]}'
+            )
+
+    world, world_id, engine = _world_engine(tmp_path, QuoteOnlyModel())
+    world.submit(
+        {
+            "type": "observe_user_message", "world_id": world_id,
+            "message_id": "old-frustration", "user_id": "user:geoff",
+            "text": "我最烦那种前言不搭后语，还装得很懂我的回复。",
+            "sent_at": "2026-07-11T09:01:00+08:00",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="opinion-only-quote",
+            text="你觉得人味是不是不等于故意拖着不回？",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == (
+        "我觉得不是一回事。人味更像是接得住、说得像在交流；故意拖着不回，只是另一种失真。"
+    )
+
+
+@pytest.mark.asyncio
+async def test_degree_escalation_is_rejected_when_user_only_said_not_much_sleep(
+    tmp_path: Path,
+) -> None:
+    class EscalatingModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"你通宵赶项目，胃还喝冰的，太不把自己当回事了。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    world, world_id, engine = _world_engine(tmp_path, EscalatingModel())
+    world.submit(
+        {
+            "type": "observe_user_message", "world_id": world_id,
+            "message_id": "prior-sleep", "user_id": "user:geoff",
+            "text": "我今天要赶一个虚拟伴侣项目，昨晚都没怎么睡。",
+            "sent_at": "2026-07-11T09:01:00+08:00",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="degree-escalation", text="我胃有点不舒服，但还是喝了冰美式。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "听着就挺难受的。先别硬撑，缓一会儿。"
+    assert "通宵" not in reply.text
+
+
+@pytest.mark.asyncio
+async def test_meta_reply_cannot_claim_to_read_user_sincerity(
+    tmp_path: Path,
+) -> None:
+    class MindReadingModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"角色卡肯定会塑造我，但你对我很真诚，我感觉得到。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    _, _, engine = _world_engine(tmp_path, MindReadingModel())
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="meta-sincerity", text="我有时候会怀疑，你的关心是真心还是角色卡教的。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == (
+        "角色卡会影响我怎么表达，但不该成为糊弄你的借口。你有没有被接住，比我怎么自证更重要。"
+    )
+    assert "我感觉得到" not in reply.text
+
+
+@pytest.mark.asyncio
+async def test_reply_cannot_deny_a_registered_npc_interaction_that_is_in_the_ledger(
+    tmp_path: Path,
+) -> None:
+    class DenyingModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"我没听过范予安，我们也没聊过。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    world, world_id, engine = _world_engine(tmp_path, DenyingModel())
+    start = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
+    world.advance(
+        world_id,
+        start + timedelta(hours=3, minutes=30),
+        expected_revision=world.revision(world_id),
+    )
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="npc-denial", text="范予安是谁？你们核对得顺利吗？",
+        )
+    )
+
+    assert reply is not None
+    assert "没听过" not in reply.text
+    assert "在图书馆和范予安核对了读书会的书单。" in reply.text
+
+
+def test_misunderstanding_question_has_a_typed_safe_fallback() -> None:
+    candidate = build_safe_failure_candidate("如果我误会你了，你会怎么告诉我？", None)
+    assert candidate["reply_text"] == (
+        "我会直接说你可能误会了，再补一句我本来想表达什么，不让它一直悬着。"
+    )
