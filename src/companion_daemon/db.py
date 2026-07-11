@@ -240,6 +240,38 @@ class CompanionStore:
                   unique (canonical_user_id, local_date, slot)
                 );
 
+                create table if not exists calendar_events (
+                  id integer primary key autoincrement,
+                  canonical_user_id text not null references users(id),
+                  title text not null,
+                  event_type text not null,
+                  starts_at text not null,
+                  ends_at text not null,
+                  status text not null default 'planned',
+                  importance integer not null default 50,
+                  source text not null,
+                  details text,
+                  memory_note text,
+                  share_state text not null default 'private',
+                  changed_reason text,
+                  created_at text not null,
+                  updated_at text not null
+                );
+                create index if not exists idx_calendar_events_window
+                  on calendar_events (canonical_user_id, starts_at, ends_at, status);
+
+                create table if not exists calendar_weeks (
+                  canonical_user_id text not null references users(id),
+                  week_start text not null,
+                  theme text not null,
+                  summary text not null,
+                  status text not null default 'active',
+                  source text not null,
+                  created_at text not null,
+                  updated_at text not null,
+                  primary key (canonical_user_id, week_start)
+                );
+
                 create table if not exists social_tasks (
                   id integer primary key autoincrement,
                   canonical_user_id text not null references users(id),
@@ -763,6 +795,87 @@ class CompanionStore:
                 (canonical_user_id, ends_at.astimezone(UTC).isoformat(), starts_at.astimezone(UTC).isoformat()),
             ).fetchall()
         return list(rows)
+
+    def create_calendar_event(
+        self,
+        canonical_user_id: str,
+        *,
+        title: str,
+        event_type: str,
+        starts_at: datetime,
+        ends_at: datetime,
+        importance: int = 50,
+        source: str = "calendar",
+        details: str | None = None,
+        memory_note: str | None = None,
+        status: str = "planned",
+    ) -> int:
+        now = utc_now().isoformat()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                insert into calendar_events (
+                  canonical_user_id,title,event_type,starts_at,ends_at,status,importance,source,
+                  details,memory_note,share_state,changed_reason,created_at,updated_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'private', null, ?, ?)
+                """,
+                (canonical_user_id, title, event_type, starts_at.astimezone(UTC).isoformat(),
+                 ends_at.astimezone(UTC).isoformat(), status, max(0, min(100, importance)), source,
+                 details, memory_note, now, now),
+            )
+        return int(cursor.lastrowid)
+
+    def calendar_events_between(self, canonical_user_id: str, *, starts_at: datetime, ends_at: datetime) -> list[sqlite3.Row]:
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select id,title,event_type,starts_at,ends_at,status,importance,source,details,
+                       memory_note,share_state,changed_reason
+                from calendar_events where canonical_user_id = ? and starts_at < ? and ends_at > ?
+                order by importance desc, starts_at asc
+                """,
+                (canonical_user_id, ends_at.astimezone(UTC).isoformat(), starts_at.astimezone(UTC).isoformat()),
+            ).fetchall()
+        return list(rows)
+
+    def calendar_event_by_source(self, canonical_user_id: str, source: str) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(
+                "select * from calendar_events where canonical_user_id = ? and source = ? limit 1",
+                (canonical_user_id, source),
+            ).fetchone()
+
+    def save_calendar_week(self, canonical_user_id: str, *, week_start: str, theme: str, summary: str, source: str) -> None:
+        now = utc_now().isoformat()
+        with self.connect() as conn:
+            conn.execute(
+                """
+                insert or ignore into calendar_weeks (canonical_user_id,week_start,theme,summary,status,source,created_at,updated_at)
+                values (?, ?, ?, ?, 'active', ?, ?, ?)
+                """,
+                (canonical_user_id, week_start, theme, summary, source, now, now),
+            )
+
+    def calendar_week(self, canonical_user_id: str, week_start: str) -> sqlite3.Row | None:
+        with self.connect() as conn:
+            return conn.execute(
+                "select * from calendar_weeks where canonical_user_id = ? and week_start = ?",
+                (canonical_user_id, week_start),
+            ).fetchone()
+
+    def update_calendar_event_status(self, event_id: int, *, status: str, changed_reason: str | None = None) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "update calendar_events set status = ?, changed_reason = ?, updated_at = ? where id = ?",
+                (status, changed_reason, utc_now().isoformat(), event_id),
+            )
+
+    def delete_calendar_events_by_source_prefix(self, canonical_user_id: str, prefix: str) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                "delete from calendar_events where canonical_user_id = ? and source like ?",
+                (canonical_user_id, f"{prefix}%"),
+            )
 
     def unshared_private_life_events(self, canonical_user_id: str, limit: int = 4) -> list[sqlite3.Row]:
         with self.connect() as conn:

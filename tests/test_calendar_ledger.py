@@ -17,6 +17,52 @@ def test_calendar_ledger_materializes_future_plans_without_lived_events(tmp_path
     tomorrow = next(day for day in ledger["days"] if day["relative"] == "明天")
     assert tomorrow["plans"]
     assert tomorrow["events"] == []
+    assert any(day["special_events"] for day in ledger["days"])
+
+
+def test_calendar_highlight_can_span_multiple_days(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "calendar.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 4, 0, tzinfo=UTC)
+    store.create_calendar_event(
+        "geoff", title="三天短途旅行", event_type="trip", starts_at=now + timedelta(days=1),
+        ends_at=now + timedelta(days=4), importance=90, source="test:trip", details="和朋友约好去附近走走",
+    )
+
+    ledger = calendar_ledger(store, "geoff", MoodState(), now=now, past_days=0, future_days=5)
+
+    trip_days = [day for day in ledger["days"] if any(event["title"] == "三天短途旅行" for event in day["special_events"])]
+    assert len(trip_days) == 4
+
+
+def test_lived_private_event_is_backfilled_as_a_distinct_calendar_memory(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "calendar.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 4, 0, tzinfo=UTC)
+    store.record_life_event(
+        "geoff", kind="private_life_event", content="图书馆遇到奇怪书名: 翻到一本很离谱的书",
+        started_at=now - timedelta(days=1), ends_at=now - timedelta(days=1), status="completed", source="test:lived",
+        shared_at=now - timedelta(days=1),
+    )
+
+    ledger = calendar_ledger(store, "geoff", MoodState(), now=now, past_days=2, future_days=0)
+
+    yesterday = next(day for day in ledger["days"] if day["relative"] == "昨天")
+    assert any(event["event_type"] == "lived_memory" for event in yesterday["special_events"])
+
+
+def test_weekly_plan_is_stable_and_contains_only_a_few_named_events(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "calendar.sqlite")
+    seed_user(store)
+    now = datetime(2026, 7, 10, 4, 0, tzinfo=UTC)
+
+    first = calendar_ledger(store, "geoff", MoodState(), now=now, past_days=0, future_days=7)
+    second = calendar_ledger(store, "geoff", MoodState(), now=now + timedelta(hours=2), past_days=0, future_days=7)
+    first_ids = {event["id"] for day in first["days"] for event in day["special_events"] if str(event["source"]).startswith("calendar:weekly:")}
+    second_ids = {event["id"] for day in second["days"] for event in day["special_events"] if str(event["source"]).startswith("calendar:weekly:")}
+
+    assert first_ids == second_ids
+    assert 1 <= len(first_ids) <= 2
 
 
 def test_calendar_context_keeps_future_plans_and_past_events_separate(tmp_path: Path) -> None:
