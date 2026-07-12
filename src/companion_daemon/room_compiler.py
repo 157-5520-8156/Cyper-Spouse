@@ -41,6 +41,7 @@ OBJECT_CATEGORIES = {
 OCCUPANCY_KINDS = {"footprint", "wall", "none"}
 LAYER_ROLES = {"shadow", "back", "body", "front", "light"}
 ROLE_DEPTH_BIAS = {"shadow": -300, "back": -200, "body": 0, "front": 500, "light": 1000}
+LAYER_BLEND_MODES = {"source-over", "screen", "lighter", "multiply"}
 
 
 def _legacy_layer_specs(item: dict[str, Any]) -> list[dict[str, Any]]:
@@ -250,6 +251,14 @@ def _validate_layers(
     for item in objects:
         for spec in item["layers"]:
             role = f"{spec['role']} layer"
+            opacity = spec.get("opacity", 1)
+            if not isinstance(opacity, (int, float)) or isinstance(opacity, bool) or not 0 <= opacity <= 1:
+                errors.append(f"{role} {spec['output']!r} opacity must be between 0 and 1")
+            blend_mode = spec.get("blendMode", "source-over")
+            if blend_mode not in LAYER_BLEND_MODES:
+                errors.append(
+                    f"{role} {spec['output']!r} has unsupported blendMode {blend_mode!r}"
+                )
             layer = _resolve_layer_source(manifest_dir, spec).image
             width, height = layer.size
             alpha_min, alpha_max = layer.getchannel("A").getextrema()
@@ -501,7 +510,10 @@ def _load_inventory(
     allowed_statuses = set(inventory.get("statusValues", ()))
     item_ids: set[str] = set()
     inventory_by_id: dict[str, dict[str, Any]] = {}
-    counts = {status: 0 for status in ("planned", "partial", "atomized", "verified")}
+    counts = {
+        status: 0
+        for status in ("planned", "partial", "atomized", "verified", "excluded")
+    }
     for item in inventory.get("items", ()):
         item_id = item["id"]
         if item_id in item_ids:
@@ -518,6 +530,8 @@ def _load_inventory(
         errors.append(f"room object {object_id!r} has no inventory owner")
     for item in [*manifest["objects"], *manifest.get("_draftObjects", [])]:
         owner = inventory_by_id.get(item["id"])
+        if owner and owner.get("status") == "excluded":
+            errors.append(f"object {item['id']!r} is excluded by the room inventory")
         if owner and owner.get("category") != item["category"]:
             errors.append(
                 f"object {item['id']!r} category {item['category']!r} does not match "
@@ -595,12 +609,17 @@ def _emit_runtime(
                         subdirectory=subdirectory,
                     )
                 )
-                runtime_object["layers"].append({
+                runtime_layer = {
                     "role": role,
                     "image": image_key,
                     "origin": source_layer["origin"],
                     "depthBias": source_layer.get("depthBias", ROLE_DEPTH_BIAS[role]),
-                })
+                }
+                if "opacity" in source_layer:
+                    runtime_layer["opacity"] = source_layer["opacity"]
+                if "blendMode" in source_layer:
+                    runtime_layer["blendMode"] = source_layer["blendMode"]
+                runtime_object["layers"].append(runtime_layer)
             runtime_objects.append(runtime_object)
         return runtime_objects
 

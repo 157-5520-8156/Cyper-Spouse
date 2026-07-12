@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "roomId": "zhizhi-home",
-  "statusValues": ["planned", "partial", "atomized", "verified"],
+  "statusValues": ["planned", "partial", "atomized", "verified", "excluded"],
   "shellAllowed": ["walls", "wall-trim", "wood-floor", "kitchen-tile", "room-outline", "window-opening", "ambient-light"],
   "artCandidates": [
     {
@@ -133,6 +133,45 @@
         }
       },
       "note": "Standalone floor-plant candidates. Bookcase content was trimmed so neither plant remains owned by the cluster."
+    },
+    {
+      "id": "wave3-neutral-light-shell-v1",
+      "targets": [],
+      "status": "needs-art",
+      "method": "imagegen-precise-object-edit",
+      "sources": [
+        "sources/clean-shell-neutral-light-ai-v1.png",
+        "sources/clean-shell-neutral-light-aligned-v1.png"
+      ],
+      "generation": {
+        "reference": "sources/clean-shell-ai-aligned-v3.png",
+        "prompt": "Remove only localized lamp illumination patches and hotspots; preserve exact shell geometry, materials, window, ambient tone, pixel density and isometric perspective."
+      },
+      "note": "Neutral-light shell candidate removes baked lamp-specific glows so light layers can disappear with their owning objects; aligned copy matches the 1391x1086 visual master."
+    },
+    {
+      "id": "wave3-table-lights-chroma-v1",
+      "targets": ["desk-lamp", "bedside-lamp", "foreground-table-lamp"],
+      "status": "needs-art",
+      "method": "imagegen-background-extraction",
+      "sources": [
+        "sources/desk-lamp-chroma-v1.png",
+        "sources/bedside-lamp-chroma-v1.png",
+        "sources/foreground-table-lamp-chroma-v1.png",
+        "sources/warm-lamp-halo-blue-v3.png",
+        "sources/warm-lamp-halo-alpha-v3.png"
+      ],
+      "generation": {
+        "reference": "zhizhi-room-isometric-v2.png",
+        "background": "flat #ff00ff chroma",
+        "prompts": {
+          "desk-lamp-chroma-v1.png": "Compact warm-brass articulated desk lamp with downward conical shade and round base; isolated low-density isometric pixel art.",
+          "bedside-lamp-chroma-v1.png": "Small warm-brass bedside lamp with compact cream pleated bell shade and round base; isolated low-density isometric pixel art.",
+          "foreground-table-lamp-chroma-v1.png": "Short dark-brass console lamp with warm cream scalloped fabric shade and round base; isolated low-density isometric pixel art.",
+          "warm-lamp-halo-blue-v3.png": "Soft warm amber circular light halo with dithered radial falloff and no fixture or surface, isolated on flat #0000ff for alpha extraction."
+        }
+      },
+      "note": "Desk lamp currently owns body plus extracted-alpha light layers. Bedside and foreground lamp sources stay pending until their carrier furniture is atomized, preventing floating or duplicate ownership."
     }
   ],
   "items": [
@@ -172,7 +211,7 @@
     {"id":"kitchen-utensil-rail","zone":"kitchen","category":"wall-decoration","status":"planned","interactive":false},
     {"id":"kitchen-sink-counter-decor","zone":"kitchen","category":"decor-cluster","status":"planned","interactive":false},
     {"id":"kitchen-stove-counter-decor","zone":"kitchen","category":"decor-cluster","status":"planned","interactive":false},
-    {"id":"kitchen-pendant-light","zone":"kitchen","category":"lighting","status":"planned","interactive":false},
+    {"id":"kitchen-pendant-light","zone":"kitchen","category":"lighting","status":"excluded","interactive":false,"note":"Product rule: omit all ceiling-mounted objects because they obstruct the room observation view."},
     {"id":"kitchen-bin","zone":"kitchen","category":"furniture","status":"planned","interactive":false},
 
     {"id":"dining","zone":"dining","category":"furniture","status":"partial","interactive":true,"note":"Legacy table/chairs aggregate; will split into table and chairs."},

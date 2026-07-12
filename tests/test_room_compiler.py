@@ -60,7 +60,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "depth": {"relativeTo": "dining", "layer": "above-front"},
     }
     assert bundle["inventory"]["summary"] == {
-        "total": 65, "planned": 58, "partial": 6, "atomized": 0, "verified": 1
+        "total": 65, "planned": 57, "partial": 6, "atomized": 0,
+        "verified": 1, "excluded": 1,
     }
     assert {item["id"]: item["status"] for item in bundle["inventory"]["items"]}["desk"] == "partial"
     assert bundle["behavior"]["actionDefinitions"]["read_phone"]["interaction"] == "phone"
@@ -75,7 +76,7 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     assert bundle["artDraft"]["background"] == "cleanShellCandidate"
     assert "cleanShellCandidate" not in bundle["images"]
     assert bundle["artDraft"]["images"]["cleanShellCandidate"].endswith(
-        "/sources/clean-shell-ai-aligned-v3.png"
+        "/sources/clean-shell-neutral-light-aligned-v1.png"
     )
     assert set(bundle["artDraft"]["images"]).isdisjoint(bundle["images"])
     assert [item["id"] for item in bundle["artDraft"]["objects"]] == [
@@ -90,6 +91,7 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "kitchen-stove-counter-decor", "fridge", "oven", "kitchen-shelf",
         "kitchen-utensil-rail", "kitchen-bin", "desk-rug", "dining-rug",
         "bed-rug", "living-rug", "desk-floor-plant", "living-large-plant",
+        "desk-lamp",
     ]
     assert bundle["artDraft"]["objects"][0]["layers"][0]["image"] == "sofaFront0Draft"
     bookcase = next(item for item in bundle["artDraft"]["objects"] if item["id"] == "tall-bookcase")
@@ -121,6 +123,18 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     assert bundle["anchors"]["rug"] == [7, 5, 0]
     assert [6, 5, 0] in bundle["routes"]["tour"]
     assert [7, 4, 0] not in bundle["routes"]["tour"]
+    lamps = [
+        draft_by_id[item_id] for item_id in ("desk-lamp",)
+    ]
+    assert all(item["category"] == "lighting" for item in lamps)
+    assert all(item["occupancy"] == {"kind": "none", "tiles": []} for item in lamps)
+    assert all([layer["role"] for layer in item["layers"]] == ["body", "light"] for item in lamps)
+    assert all(item["layers"][1]["blendMode"] == "screen" for item in lamps)
+    assert all(0 < item["layers"][1]["opacity"] < 1 for item in lamps)
+    assert all(item["audits"] == {
+        "hidden": True, "solo": True, "behind": False, "front": False,
+    } for item in lamps)
+    assert draft_by_id["desk-lamp"]["attachedTo"] == "desk"
 
     master = Image.open(ROOT / "assets/dashboard/zhizhi-room-isometric-v2.png").convert("RGBA")
     matte = Image.open(ROOT / "assets/dashboard/layers/desk-front-v1.png").convert("RGBA")
@@ -158,6 +172,7 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
             "desk-rug-draft.png", "dining-rug-draft.png",
             "bed-rug-draft.png", "living-rug-draft.png",
             "desk-floor-plant-draft.png", "living-large-plant-draft.png",
+            "desk-lamp-body-draft.png", "desk-lamp-light-draft.png",
         )
     )
 
@@ -441,6 +456,25 @@ def test_compile_room_rejects_inventory_category_drift(tmp_path: Path) -> None:
     with pytest.raises(
         RoomCompileError,
         match="object 'kitchen-shelf' category 'furniture' does not match inventory category 'wall-decoration'",
+    ):
+        compile_room(manifest_path, tmp_path / "runtime")
+
+
+def test_compile_room_rejects_an_inventory_excluded_object(tmp_path: Path) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    desk_lamp = next(
+        item for item in manifest["artDraft"]["objects"]
+        if item["id"] == "desk-lamp"
+    )
+    desk_lamp["id"] = "kitchen-pendant-light"
+    desk_lamp.pop("attachedTo", None)
+    for index, layer in enumerate(desk_lamp["layers"]):
+        layer["output"] = f"excluded-pendant-{index}.png"
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(
+        RoomCompileError,
+        match="object 'kitchen-pendant-light' is excluded by the room inventory",
     ):
         compile_room(manifest_path, tmp_path / "runtime")
 

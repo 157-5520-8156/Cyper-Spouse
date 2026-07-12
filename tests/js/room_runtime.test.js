@@ -126,6 +126,30 @@ test('generic object layers render by role without legacy furniture fields', () 
   assert.equal(calls[0][0], runtime.images.deskBack);
 });
 
+test('generic layers apply declared opacity and blend mode only while drawing', () => {
+  const states = [];
+  const context = new Proxy({
+    globalAlpha:1,
+    globalCompositeOperation:'source-over',
+    save() {},
+    restore() {},
+    drawImage() {
+      states.push([this.globalAlpha, this.globalCompositeOperation]);
+    }
+  }, {get:(target, key) => target[key] || (() => {})});
+  const runtime = new DashboardRoomRuntime(
+    {width:1000, height:760, getContext:() => context}, bundle, {}
+  );
+  runtime.images.lightFixture = {width:10, height:10};
+
+  runtime.drawLayer({
+    role:'light', image:'lightFixture', origin:[0, 0],
+    opacity:0.25, blendMode:'screen'
+  });
+
+  assert.deepEqual(states, [[0.25, 'screen']]);
+});
+
 test('non-front object layers use depth rather than manifest order', () => {
   const layeredBundle = structuredClone(bundle);
   const first = layeredBundle.objects[0], second = layeredBundle.objects[1];

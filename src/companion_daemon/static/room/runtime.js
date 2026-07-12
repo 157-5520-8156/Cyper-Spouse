@@ -384,6 +384,8 @@
       if (!image) return;
       const [x, y] = layer.origin;
       this.ctx.save(); this.ctx.imageSmoothingEnabled = false;
+      this.ctx.globalAlpha = layer.opacity ?? 1;
+      this.ctx.globalCompositeOperation = layer.blendMode || 'source-over';
       this.ctx.drawImage(image, this.stage.ox + x * this.stage.scale, this.stage.oy + y * this.stage.scale, image.width * this.stage.scale, image.height * this.stage.scale);
       this.ctx.restore();
     }

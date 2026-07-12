@@ -5,14 +5,14 @@
 ## 执行状态
 
 - [x] 计划与“完全原子化”验收定义落盘。
-- [x] 建立 65 项机器可读 inventory：58 项 `planned`、6 项 `partial`、1 项 `verified`（AI 新增 `teal-stool`；厨房台面 decor 按物理父柜拆成两项）。
+- [x] 建立 65 项机器可读 inventory：57 项 `planned`、6 项 `partial`、1 项 `verified`、1 项 `excluded`（屋顶吊灯按观测视野规则排除）。
 - [x] Compiler 将 inventory 状态编入 bundle，并拒绝非法状态、重复项及无 inventory 所有者的 room 对象。
 - [x] Runtime 增加 `?demo=atomization&object=<id>&mode=<hidden|solo>`；隐藏不改变 occupancy 与路径。
 - [x] Room Editor 显示 inventory 进度，并提供 hidden/solo 删除测试。
 - [x] 波次 0：通用对象 `layers / occupancy / audits / provenance` schema；`teal-stool` 已作为无互动原生对象接入，旧对象经 Compiler 归一化到同一 bundle 契约。
 - [ ] 波次 1：主要遮挡家具（进行中：clean shell 与 16 个家具/附属对象已进入可编译 `artDraft`，仍需逐件校准和删除测试）。
 - [x] 波次 2：厨房与大型收纳草稿功能闭环（29 个对象、36 个构建资产；全部厨房对象可删除，父子联动、适用遮挡与餐厨动作/路径通过；素材仍保持 `needs-art`，终稿基线在波次 6 统一批准）。
-- [ ] 波次 3：地毯、灯具、植物与窗区（进行中：四块独立地毯与两株落地植物已接入，草稿增至 35 对象、42 个构建资产；灯具、其余植物和窗区待处理）。
+- [ ] 波次 3：地毯、灯具、植物与窗区（进行中：四块地毯、两株落地植物和书桌灯已进入草稿，现为 36 对象、44 个构建资产；所有屋顶对象排除，另外两盏台灯等待承载家具拆分，其余植物和窗区待处理）。
 - [ ] 波次 4–6：decor、路径动作与最终验收。
 
 ### 波次 0 验收记录
@@ -76,6 +76,12 @@
 
 “独立”不要求每支笔、每本书都成为一个对象；不可单独操作的一组小物件可以形成一个 `decor-cluster`，但该 cluster 必须与桌子、柜子或墙面资产分离。例如桌面文具可以是一件 `desk-stationery-cluster`，不能继续烙在书桌 RGB 中。
 
+### 明确不进入观察画面的内容
+
+- 所有安装或悬挂在屋顶/天花板上的物件一律不生成、不渲染，包括餐厨吊灯；它们会压住俯视房间的观察视野。
+- 这类 inventory 项使用 `excluded` 状态并记录产品原因，Compiler 拒绝将其接入 production 或 `artDraft`。
+- 墙面灯串、壁挂植物等不属于屋顶对象，仍需按正常对象拆分和审计。
+
 ### 原子对象的删除测试
 
 隐藏任一对象时：
@@ -134,7 +140,7 @@
 - `kitchen-shelf`、`kitchen-utensil-rail`：墙面层架与挂具。
 - `kitchen-sink-counter-decor`：附着水槽柜的瓶罐与器具 cluster。
 - `kitchen-stove-counter-decor`：附着灶台柜的水壶与食物 cluster。
-- `kitchen-pendant-light`：餐厨吊灯。
+- `kitchen-pendant-light`：餐厨吊灯；按观测视野规则标记 `excluded`，不进入场景。
 - `kitchen-bin`：冰箱旁垃圾桶。
 
 ### 餐区
@@ -326,11 +332,11 @@ Runtime 不包含家具名称特判。层角色、depthTile、occupancy 与 inte
 
 ### 波次 3：地毯、灯具、植物与窗区
 
-- 四块地毯、所有落地/台面/吊灯、主要盆栽、窗帘、窗台植物、吊篮与灯串。
+- 四块地毯、所有非屋顶落地/台面灯、主要盆栽、窗帘、窗台植物、吊篮与墙面灯串。
 
 验收：灯具隐藏会同时移除其局部光效；地毯不阻塞路径；窗帘与植物深度正确。
 
-当前进度：`desk-rug / dining-rug / bed-rug / living-rug` 已作为四个 `soft-furnishing` 对象接入；`desk-floor-plant / living-large-plant` 已作为两个 `plant` 对象接入。地毯均不占地；书桌盆栽不伪造不可达后侧；大型植物占据 `[7,4]` 并由 tour 绕行。六件素材仍为 `planned / needs-art`，灯具、其余植物和窗区尚未开始。
+当前进度：四块地毯与两株落地植物已通过草稿检查点。`desk-lamp` 已按 `body + light` 双层对象进入草稿；clean shell 候选移除了烙在墙地面的局部灯斑，光效 source 已单独保留并提取 alpha。餐厨吊灯及所有屋顶对象按用户观测规则排除；床头灯和前景台灯 source 已生成，但因承载家具尚未原子化而不接入 runtime。当前共 36 个草稿对象、44 个构建资产。
 
 ### 波次 4：桌面、柜内和墙面 decor clusters
 

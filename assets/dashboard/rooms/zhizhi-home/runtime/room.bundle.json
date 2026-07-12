@@ -341,8 +341,9 @@
         "id": "kitchen-pendant-light",
         "zone": "kitchen",
         "category": "lighting",
-        "status": "planned",
-        "interactive": false
+        "status": "excluded",
+        "interactive": false,
+        "note": "Product rule: omit all ceiling-mounted objects because they obstruct the room observation view."
       },
       {
         "id": "kitchen-bin",
@@ -572,10 +573,11 @@
     ],
     "summary": {
       "total": 65,
-      "planned": 58,
+      "planned": 57,
       "partial": 6,
       "atomized": 0,
-      "verified": 1
+      "verified": 1,
+      "excluded": 1
     }
   },
   "behavior": {
@@ -1564,7 +1566,7 @@
     "background": "cleanShellCandidate",
     "status": "needs-art",
     "images": {
-      "cleanShellCandidate": "/assets/dashboard/rooms/zhizhi-home/sources/clean-shell-ai-aligned-v3.png",
+      "cleanShellCandidate": "/assets/dashboard/rooms/zhizhi-home/sources/clean-shell-neutral-light-aligned-v1.png",
       "sofaFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/sofa-frame-draft.png",
       "bedFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-frame-draft.png",
       "bedBeddingFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-bedding-draft.png",
@@ -1599,7 +1601,9 @@
       "bedRugBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-rug-draft.png",
       "livingRugBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/living-rug-draft.png",
       "deskFloorPlantFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-floor-plant-draft.png",
-      "livingLargePlantFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/living-large-plant-draft.png"
+      "livingLargePlantFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/living-large-plant-draft.png",
+      "deskLampBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-lamp-body-draft.png",
+      "deskLampLight1Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-lamp-light-draft.png"
     },
     "objects": [
       {
@@ -3217,6 +3221,56 @@
           ]
         },
         "auditPose": {}
+      },
+      {
+        "id": "desk-lamp",
+        "category": "lighting",
+        "assetMode": "layered",
+        "tile": [
+          1,
+          5,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "deskLampBody0Draft",
+            "origin": [
+              390,
+              488
+            ],
+            "depthBias": 0
+          },
+          {
+            "role": "light",
+            "image": "deskLampLight1Draft",
+            "origin": [
+              385,
+              462
+            ],
+            "depthBias": 1000,
+            "opacity": 0.15,
+            "blendMode": "screen"
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "desk"
       }
     ]
   }

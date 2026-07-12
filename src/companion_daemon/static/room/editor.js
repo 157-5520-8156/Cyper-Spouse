@@ -168,7 +168,7 @@
       this.panel.querySelector('[data-field="object"]').value = object.id;
       this.panel.querySelector('[data-field="inventory"]').value = this.inventorySelectionId;
       const summary = this.runtime.scene.inventory.summary;
-      this.panel.querySelector('[data-field="inventory-summary"]').textContent = `Inventory ${summary.total} · planned ${summary.planned} · partial ${summary.partial} · atomized ${summary.atomized} · verified ${summary.verified}`;
+      this.panel.querySelector('[data-field="inventory-summary"]').textContent = `Inventory ${summary.total} · planned ${summary.planned} · partial ${summary.partial} · atomized ${summary.atomized} · verified ${summary.verified} · excluded ${summary.excluded || 0}`;
       const inventoryItem = this.runtime.scene.inventory.items.find(item => item.id === this.inventorySelectionId);
       const provenance = this.inventorySelectionId === object.id && object.provenance
         ? ` / ${object.provenance.method} → ${object.provenance.reference}` : '';
