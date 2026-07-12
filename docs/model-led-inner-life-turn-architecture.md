@@ -367,6 +367,11 @@ class InvariantGuard:
 - `requires_action_settlement(action_ids)`；
 - `hard_reject(reason)`。
 
+当前实现把 `proposed_action_ids` 收窄为“本回复引用的、已授权但尚未结算的外部
+Action”：只能是当前用户的 `scheduled` tool/media Action。Guard 把引用写进回复 Action 的
+`action_dependencies`；回复的送达回执只结算这句话，绝不会替被引用的 tool/media Action
+制造成功结果。它们仍须各自通过 External Result 收据结算。
+
 Guard 不得返回“语气不自然”“共情不足”“没有采用建议 Stance”。不确定不等于矛盾；能从
 断言弱化为感受或猜测时，应局部弱化：
 

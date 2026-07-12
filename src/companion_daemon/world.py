@@ -600,6 +600,23 @@ class WorldKernel:
         denied_reasons: tuple[str, ...] = ()
         with self.store.connect() as conn:
             revision, state = self._load_state(conn, world_id)
+            settlement = trace.get("action_settlement")
+            action_dependencies: tuple[str, ...] = ()
+            if settlement is not None:
+                settlement_view = _as_dict(settlement, "outgoing action settlement")
+                if settlement_view.get("status") != "pending_guard_settlement":
+                    raise WorldError("outgoing action settlement has unsupported status")
+                action_dependencies = self._require_settleable_reply_actions_in_state(
+                    state,
+                    tuple(
+                        str(item)
+                        for item in _as_list(
+                            settlement_view.get("action_ids", []),
+                            "outgoing action settlement ids",
+                        )
+                    ),
+                    user_id=str(trace.get("user_id") or f"user:{canonical_user_id}"),
+                )
             logical_at = str(_as_dict(state["clock"], "clock")["logical_at"])
             request_id = str(trace.get("outbound_request_id") or _hash(
                 f"{world_id}|{kind}|{text}|{trace.get('input_message_id') or ''}|{logical_at}"
@@ -728,6 +745,10 @@ class WorldKernel:
                                 "platform": platform,
                                 "text": text,
                                 "segment_state": segment_projection,
+                                "action_dependencies": {
+                                    "referenced_action_ids": list(action_dependencies),
+                                    "semantics": "pending_external_action_reference",
+                                } if action_dependencies else None,
                                 "trace": trace,
                                 "delivery_id": delivery_id,
                                 "trace_id": trace_row_id,
@@ -2857,6 +2878,61 @@ class WorldKernel:
             "proposed_action_ids": [str(item) for item in proposed_actions],
             "claims": normalized_claims,
         }
+
+    def require_settleable_reply_actions(
+        self,
+        world_id: str,
+        action_ids: list[str] | tuple[str, ...],
+        *,
+        user_id: str,
+    ) -> tuple[str, ...]:
+        """Authorize pending external Action references in one reply.
+
+        A reply may say that an already-authorized operation is pending, but it
+        cannot use an arbitrary, terminal, cross-user, or ordinary message
+        Action as evidence of an external capability.  This check does not
+        settle the Action: only its own adapter receipt may do that.
+        """
+        state = self.snapshot(world_id)
+        return self._require_settleable_reply_actions_in_state(
+            state, action_ids, user_id=user_id
+        )
+
+    @staticmethod
+    def _require_settleable_reply_actions_in_state(
+        state: dict[str, object],
+        action_ids: list[str] | tuple[str, ...],
+        *,
+        user_id: str,
+    ) -> tuple[str, ...]:
+        action_ids = tuple(dict.fromkeys(str(item) for item in action_ids if str(item)))
+        actions = _as_dict(state.get("actions", {}), "actions")
+        media = _as_dict(state.get("media", {}), "media")
+        tools = _as_dict(state.get("tool_actions", {}), "tool actions")
+        for action_id in action_ids:
+            action = _as_dict(actions.get(action_id), "referenced reply action")
+            kind = str(action.get("kind") or "")
+            if action.get("status") != "scheduled":
+                raise WorldError("reply action reference must still be scheduled")
+            payload = _as_dict(action.get("payload", {}), "referenced reply action payload")
+            owner = ""
+            if kind == "tool_execution":
+                proposal = _as_dict(
+                    tools.get(str(payload.get("proposal_id") or "")),
+                    "referenced tool proposal",
+                )
+                owner = str(proposal.get("user_id") or "")
+            elif kind in {"media_generation", "media_delivery"}:
+                request = _as_dict(
+                    media.get(str(payload.get("request_id") or "")),
+                    "referenced media request",
+                )
+                owner = str(request.get("user_id") or "")
+            else:
+                raise WorldError("reply action reference is not an external user action")
+            if owner != user_id:
+                raise WorldError("reply action reference belongs to another user")
+        return action_ids
 
     def grounded_reply_from_mentions(
         self,

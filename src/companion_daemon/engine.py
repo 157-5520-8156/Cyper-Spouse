@@ -55,7 +55,7 @@ from companion_daemon.image_generation import (
 )
 from companion_daemon.image_prompt_builder import ChatImageMessage, build_image_prompt
 from companion_daemon.image_requests import detect_image_request
-from companion_daemon.invariant_guard import InvariantGuard
+from companion_daemon.invariant_guard import GuardResolution, InvariantGuard
 from companion_daemon.impression import apply_repeated_interaction_drift, apply_user_impression
 from companion_daemon.life_continuity import build_life_continuity
 from companion_daemon.life_runtime import (
@@ -531,6 +531,30 @@ class CompanionEngine:
             }
         )
         return user_id
+
+    def _guard_reply_candidate(
+        self,
+        candidate: dict[str, object],
+        *,
+        user_id: str,
+    ) -> tuple[dict[str, object], GuardResolution]:
+        """Apply the sole fact/Action gate for a visible reply candidate.
+
+        This deliberately returns the non-terminal Action verdict to the caller.
+        Delivery code can then make that dependency observable rather than silently
+        treating a scheduled external effect as a completed fact.
+        """
+        if not self.world_kernel or not self.world_id:
+            raise RuntimeError("reply guard requested outside world mode")
+        resolution = self.invariant_guard.resolve(
+            self.world_kernel,
+            self.world_id,
+            candidate,
+            user_id=user_id,
+        )
+        if resolution.disposition == "hard_reject":
+            raise WorldError(resolution.reason or "hard invariant rejected reply")
+        return dict(resolution.candidate or {}), resolution
 
     def _record_world_input(self, message: IncomingMessage, canonical_user_id: str) -> None:
         if not self.world_kernel or not self.world_id:
@@ -2170,6 +2194,7 @@ class CompanionEngine:
         }
         fallback_needs_audit = False
         related_npc_experiences: list[dict[str, object]] = []
+        action_settlement_ids: tuple[str, ...] = ()
         urgent_turn = bool(
             communication_decision
             and communication_decision.reason == "resumed_or_urgent_turn"
@@ -2211,19 +2236,17 @@ class CompanionEngine:
         ]
         try:
             parsed_candidate = parse_reply_candidate(raw)
-            guard_resolution = self.invariant_guard.resolve(
-                self.world_kernel,
-                self.world_id,
-                parsed_candidate,
-                user_id=user_id,
+            candidate, guard_resolution = self._guard_reply_candidate(
+                parsed_candidate, user_id=user_id
             )
-            if guard_resolution.disposition == "hard_reject":
-                raise WorldError(guard_resolution.reason or "hard invariant rejected reply")
-            candidate = dict(guard_resolution.candidate or {})
+            if guard_resolution.disposition == "requires_action_settlement":
+                action_settlement_ids = guard_resolution.action_ids
             if occurrence_candidate:
-                candidate = self.world_kernel.validate_reply_candidate(
-                    self.world_id, occurrence_candidate, user_id=user_id
+                candidate, guard_resolution = self._guard_reply_candidate(
+                    occurrence_candidate, user_id=user_id
                 )
+                if guard_resolution.disposition == "requires_action_settlement":
+                    action_settlement_ids = guard_resolution.action_ids
             if query_scope.asks_availability:
                 previous = [
                     str(item.get("text") or "")
@@ -2239,6 +2262,7 @@ class CompanionEngine:
                     "reply_text": availability_text,
                     "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
                 }
+                candidate, _ = self._guard_reply_candidate(candidate, user_id=user_id)
             if only_repeats_claimed_sources(message.text, candidate):
                 raise WorldError("reply repeats a source without answering the requested detail")
             if only_echoes_user_message(message.text, candidate):
@@ -2545,11 +2569,11 @@ class CompanionEngine:
                                 raise WorldError(
                                     "reply repair did not contain recoverable JSON"
                                 ) from recovery_error
-                        candidate = self.world_kernel.validate_reply_candidate(
-                            self.world_id,
-                            repaired_candidate,
-                            user_id=user_id,
+                        candidate, guard_resolution = self._guard_reply_candidate(
+                            repaired_candidate, user_id=user_id
                         )
+                        if guard_resolution.disposition == "requires_action_settlement":
+                            action_settlement_ids = guard_resolution.action_ids
                         if only_repeats_claimed_sources(message.text, candidate):
                             raise WorldError(
                                 "reply repeats a source without answering the requested detail"
@@ -2651,9 +2675,11 @@ class CompanionEngine:
                         )
                         fallback_needs_audit = True
         if fallback_needs_audit:
-            candidate = self.world_kernel.validate_reply_candidate(
-                self.world_id, candidate, user_id=user_id
+            candidate, guard_resolution = self._guard_reply_candidate(
+                candidate, user_id=user_id
             )
+            if guard_resolution.disposition == "requires_action_settlement":
+                action_settlement_ids = guard_resolution.action_ids
             fallback_text = str(candidate["reply_text"])
             fallback_grounding = GroundingAuditRisk().assess(
                 CandidateGroundingSignals(
@@ -2687,6 +2713,15 @@ class CompanionEngine:
                     grounding_context=audit_context,
                     required=False,
                 )
+        # Every branch above (including deterministic fallbacks) converges at
+        # the same hard-only boundary before anything becomes deliverable.
+        candidate, guard_resolution = self._guard_reply_candidate(
+            candidate, user_id=user_id
+        )
+        if guard_resolution.disposition == "requires_action_settlement":
+            action_settlement_ids = guard_resolution.action_ids
+        else:
+            action_settlement_ids = ()
         text = sanitize_world_chat_text(str(candidate["reply_text"]))
         public_mood_value = public_mood(modulation)
         text_parts = split_reply_text(text, MoodState(mood=public_mood_value))
@@ -2707,6 +2742,11 @@ class CompanionEngine:
             "short_lived_constraint": None,
             "observable_reason": "由已结算世界账本和本轮判断决定。",
         }
+        if action_settlement_ids:
+            trace["action_settlement"] = {
+                "action_ids": list(action_settlement_ids),
+                "status": "pending_guard_settlement",
+            }
         if question:
             thread_id = "thread:" + sha256(
                 f"{user_id}|{message.message_id}|{question}".encode("utf-8")
@@ -3083,8 +3123,7 @@ class CompanionEngine:
             )
 
         user_id = self._ensure_world_user(canonical_user_id)
-        self.world_kernel.validate_reply_candidate(
-            self.world_id,
+        self._guard_reply_candidate(
             {
                 "reply_text": text,
                 "mentioned_event_ids": [],
@@ -3418,8 +3457,7 @@ class CompanionEngine:
                 purpose="afterthought", causation=causation, content=raw, action_id=model_action_id
             )
             try:
-                candidate = self.world_kernel.validate_reply_candidate(
-                    self.world_id,
+                candidate, _ = self._guard_reply_candidate(
                     parse_reply_candidate(raw),
                     user_id=self._ensure_world_user(canonical_user_id),
                 )
@@ -3496,8 +3534,7 @@ class CompanionEngine:
         if self.world_kernel and self.world_id:
             # This entry point is also used by scheduler recovery.  Keep its
             # payload on the same grounded text boundary as normal replies.
-            self.world_kernel.validate_reply_candidate(
-                self.world_id,
+            self._guard_reply_candidate(
                 {"reply_text": text, "mentioned_event_ids": [], "proposed_action_ids": [], "claims": []},
                 user_id=self._ensure_world_user(canonical_user_id),
             )

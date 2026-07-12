@@ -1,3 +1,4 @@
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from companion_daemon.db import CompanionStore
@@ -75,3 +76,128 @@ def test_guard_hard_rejects_uncommitted_fact_reference(tmp_path: Path) -> None:
     assert result.disposition == "hard_reject"
     assert result.candidate is None
     assert result.reason
+
+
+def test_guard_binds_a_scheduled_same_user_media_action(tmp_path: Path) -> None:
+    kernel, world_id = _world(tmp_path)
+    requested = kernel.submit(
+        {
+            "type": "request_media",
+            "world_id": world_id,
+            "request_id": "media:guard-test",
+            "user_id": "user:geoff",
+            "media_kind": "creative_image",
+            "topic": "一张小图",
+            "reason": "用户请求",
+        },
+        expected_revision=kernel.revision(world_id),
+    )
+    action_id = "media-generation:media:guard-test"
+
+    result = InvariantGuard().resolve(
+        kernel,
+        world_id,
+        {
+            "reply_text": "结果回来之前，不把这张图当成已经发出。",
+            "mentioned_event_ids": [],
+            "proposed_action_ids": [action_id],
+            "claims": [],
+        },
+        user_id="user:geoff",
+    )
+
+    assert requested.revision == kernel.revision(world_id)
+    assert result.disposition == "requires_action_settlement"
+    assert result.action_ids == (action_id,)
+
+
+def test_referenced_action_is_bound_to_reply_without_being_settled(
+    tmp_path: Path,
+) -> None:
+    kernel, world_id = _world(tmp_path)
+    action_id = "media-generation:media:dependency-test"
+    kernel.submit(
+        {
+            "type": "request_media",
+            "world_id": world_id,
+            "request_id": "media:dependency-test",
+            "user_id": "user:geoff",
+            "media_kind": "creative_image",
+            "topic": "一张小图",
+            "reason": "用户请求",
+        },
+        expected_revision=kernel.revision(world_id),
+    )
+
+    delivery_id, _, outgoing_action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="simulator",
+        text="我先把这张图排进去了，结果回来前不说它已经发出。",
+        kind="reply",
+        expires_at=datetime.now(UTC) + timedelta(hours=1),
+        trace={
+            "world_id": world_id,
+            "user_id": "user:geoff",
+            "appraisal": "user_request",
+            "expression_policy": "自然说明待处理状态。",
+            "allowed_facts": [],
+            "short_lived_constraint": None,
+            "observable_reason": "引用待结算媒体动作。",
+            "action_settlement": {
+                "action_ids": [action_id],
+                "status": "pending_guard_settlement",
+            },
+        },
+    )
+    outgoing = kernel.snapshot(world_id)["actions"][outgoing_action_id]
+
+    assert outgoing["action_dependencies"] == {
+        "referenced_action_ids": [action_id],
+        "semantics": "pending_external_action_reference",
+    }
+    assert kernel.snapshot(world_id)["actions"][action_id]["status"] == "scheduled"
+
+    kernel.settle_outgoing_action(delivery_id, delivered=True)
+
+    assert kernel.snapshot(world_id)["actions"][action_id]["status"] == "scheduled"
+
+
+def test_terminal_or_other_user_action_cannot_be_referenced(tmp_path: Path) -> None:
+    kernel, world_id = _world(tmp_path)
+    registered = kernel.submit(
+        {
+            "type": "register_user",
+            "world_id": world_id,
+            "user_id": "user:other",
+            "name": "other",
+        },
+        expected_revision=kernel.revision(world_id),
+    )
+    assert registered.revision == kernel.revision(world_id)
+    kernel.submit(
+        {
+            "type": "request_media",
+            "world_id": world_id,
+            "request_id": "media:other-user",
+            "user_id": "user:other",
+            "media_kind": "creative_image",
+            "topic": "一张小图",
+            "reason": "用户请求",
+        },
+        expected_revision=kernel.revision(world_id),
+    )
+
+    result = InvariantGuard().resolve(
+        kernel,
+        world_id,
+        {
+            "reply_text": "结果回来之前，不把这件事当成已经完成。",
+            "mentioned_event_ids": [],
+            "proposed_action_ids": ["media-generation:media:other-user"],
+            "claims": [],
+        },
+        user_id="user:geoff",
+    )
+
+    assert result.disposition == "hard_reject"
+    assert result.reason == "reply action reference belongs to another user"

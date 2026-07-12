@@ -23,6 +23,7 @@ class GuardResolution:
     disposition: GuardDisposition
     candidate: dict[str, object] | None = None
     reason: str | None = None
+    action_ids: tuple[str, ...] = ()
 
 
 class InvariantGuard:
@@ -50,7 +51,15 @@ class InvariantGuard:
             return GuardResolution("hard_reject", reason=str(exc))
         proposed_actions = accepted.get("proposed_action_ids", [])
         if proposed_actions:
+            try:
+                action_ids = world.require_settleable_reply_actions(
+                    world_id,
+                    tuple(str(action_id) for action_id in proposed_actions),
+                    user_id=user_id,
+                )
+            except WorldError as exc:
+                return GuardResolution("hard_reject", reason=str(exc))
             return GuardResolution(
-                "requires_action_settlement", candidate=accepted
+                "requires_action_settlement", candidate=accepted, action_ids=action_ids
             )
         return GuardResolution("accept", candidate=accepted)
