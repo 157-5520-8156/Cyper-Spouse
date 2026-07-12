@@ -140,6 +140,150 @@ class AppraisalDecision:
     rejection_reason: str | None = None
 
 
+@dataclass(frozen=True)
+class UserAffectAppraisal:
+    """A bounded reading of the user's reaction to the companion's conduct."""
+
+    kind: str
+    intensity: int
+    unresolved: bool
+    confidence: float
+    evidence_spans: tuple[str, ...]
+    cause: str = "companion_response"
+
+    @property
+    def should_persist(self) -> bool:
+        return self.intensity >= 2 and self.unresolved
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "kind": self.kind,
+            "intensity": self.intensity,
+            "unresolved": self.unresolved,
+            "confidence": self.confidence,
+            "evidence_spans": list(self.evidence_spans),
+            "cause": self.cause,
+            "persist": self.should_persist,
+        }
+
+
+def appraise_user_affect(
+    text: str,
+    recent_messages: Sequence[Mapping[str, object]],
+    *,
+    active_affect: Mapping[str, object] | None = None,
+) -> UserAffectAppraisal | None:
+    """Recognise contextual disappointment without treating every terse turn as harm."""
+    compact = re.sub(r"\s+", "", text.strip())
+    if not compact:
+        return None
+    active = active_affect or {}
+    repair_match = re.search(
+        r"(?:没事了|没关系了|不过没事|不过现在没事|好多了|现在好了|"
+        r"这次(?:你)?接住了|这次好多了)", compact
+    )
+    if repair_match and (
+        active.get("unresolved")
+        or re.search(r"(?:失望|敷衍|没接住|不开心|不高兴)", compact)
+    ):
+        return UserAffectAppraisal(
+            "repaired", 2 if active.get("unresolved") else 1, False, 0.9,
+            (repair_match.group(0),),
+        )
+
+    prior = [item for item in recent_messages if str(item.get("text") or "").strip()]
+    has_companion_context = any(
+        str(item.get("direction") or "") == "out" for item in prior[-4:]
+    )
+    if not has_companion_context:
+        return None
+
+    # Once a disappointment episode is committed, a low-energy ambiguous
+    # continuation is evidence that it is still active; it must not fall back
+    # to an unrelated ordinary-message stance when a deep model is absent.
+    if (
+        active.get("unresolved")
+        and str(active.get("kind") or "") == "disappointment"
+        and compact in {"还行吧", "嗯", "哦", "随便吧", "行吧", "算了吧"}
+    ):
+        return UserAffectAppraisal(
+            "disappointment",
+            max(2, min(4, int(active.get("intensity") or 2))),
+            True,
+            0.78,
+            (text.strip()[:80],),
+        )
+
+    explicit = re.search(
+        r"(?:你(?:刚才)?(?:有点|太)?(?:敷衍|冷淡)|你(?:根本)?不想听|"
+        r"你没接住|(?:回复|回得)(?:也)?太?慢|我(?:有点)?失望)", compact
+    )
+    if explicit:
+        return UserAffectAppraisal(
+            "disappointment", 3, True, 0.95, (explicit.group(0),)
+        )
+    mild = re.search(r"(?:感觉你有点忙|是不是不太想聊|有点没劲|有点扫兴)", compact)
+    if mild:
+        historical_prior = prior
+        if prior and re.sub(r"\s+", "", str(prior[-1].get("text") or "")) == compact:
+            historical_prior = prior[:-1]
+        recent_mild = sum(
+            1
+            for item in historical_prior[-6:]
+            if str(item.get("direction") or "") == "in"
+            and re.search(
+                r"(?:感觉你有点忙|是不是不太想聊|有点没劲|有点扫兴)",
+                re.sub(r"\s+", "", str(item.get("text") or "")),
+            )
+        )
+        intensity = 2 if recent_mild >= 1 else 1
+        return UserAffectAppraisal(
+            "disappointment", intensity, True, 0.76, (mild.group(0),)
+        )
+    withdrawing = re.search(
+        r"(?:算了(?:吧)?[,，。]?(?:你|不说|不聊|没事|当我没说)|算了吧$|不说了|不想说了)",
+        compact,
+    )
+    if withdrawing:
+        return UserAffectAppraisal(
+            "disappointment", 3, True, 0.88, (withdrawing.group(0),)
+        )
+    confused = re.search(r"(?:什么意思.{0,8}(?:没懂|不懂)|我没懂|没听懂)", compact)
+    if confused:
+        return UserAffectAppraisal(
+            "confusion", 2, True, 0.9, (confused.group(0),)
+        )
+    return None
+
+
+def user_affect_interaction_event(
+    appraisal: UserAffectAppraisal,
+) -> InteractionEvent:
+    if appraisal.kind == "confusion":
+        return InteractionEvent(
+            "user_confused", appraisal.intensity, "repair_needed",
+            "用户没有理解刚才的表达，需要由我承担解释成本。",
+            "先直接换一种说法解释，不反问，不继续扩展新话题。",
+            acts=("clarification_request",), target="companion",
+            evidence_spans=appraisal.evidence_spans,
+        )
+    if appraisal.kind == "repaired":
+        return InteractionEvent(
+            "user_affect_repaired", appraisal.intensity, "repair_accepted",
+            "用户明确表示刚才的不适已经得到修复。",
+            "自然接住，不反复道歉，也不要立刻追问。",
+            acts=("repair_accepted",), target="companion",
+            evidence_spans=appraisal.evidence_spans,
+        )
+    return InteractionEvent(
+        "user_withdrawing", appraisal.intensity, "disappointed_with_companion",
+        "用户因刚才没有被认真接住而失望，并开始撤回分享。",
+        "停止好奇式追问，承认没接住，给出具体而克制的修复。",
+        acts=("disappointment", "withdrawal"), target="companion",
+        evidence_spans=appraisal.evidence_spans,
+    )
+
+
 def assess_appraisal_risk(
     evidence: InteractionEvidence,
     fallback: InteractionEvent,
@@ -150,6 +294,15 @@ def assess_appraisal_risk(
 
     reasons: list[str] = []
     score = 0
+    compact_text = re.sub(r"\s+", "", evidence.text)
+    relational_ambiguity = bool(
+        re.fullmatch(r"(?:还行吧?|嗯+|哦+|随便吧?|都可以吧?|呵呵)[。！？!?.]*", compact_text)
+    )
+    if relational_ambiguity:
+        # These are not harmful by themselves. In cross-turn context they can
+        # mean disappointment or withdrawal, so permit the bounded deep route.
+        reasons.append("relational_ambiguity")
+        score += 65
     if needs_contextual_appraisal(evidence.text, fallback):
         reasons.append("pragmatic_marker")
         score += 55
@@ -176,11 +329,15 @@ def assess_appraisal_risk(
         for reason in (
             "pragmatic_marker", "boundary_reply_target", "imperative_pressure",
             "quotation_or_joke",
+            "relational_ambiguity",
         )
     )
     request = lexical_risk and score >= 40
     contradictory = "quotation_or_joke" in reasons and "boundary_reply_target" in reasons
-    return AppraisalRisk(min(100, score), tuple(reasons), request, contradictory)
+    return AppraisalRisk(
+        min(100, score), tuple(reasons), request,
+        request_deeper_reasoning=relational_ambiguity or contradictory,
+    )
 
 
 class InteractionAppraiser:

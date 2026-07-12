@@ -146,7 +146,6 @@ def test_world_reply_accepts_an_opinion_that_contains_no_life_claim(tmp_path: Pa
             "claims": [],
         },
     )
-
     assert "我直觉是" in accepted["reply_text"]
 
     another = world.validate_reply_candidate(
@@ -162,6 +161,38 @@ def test_world_reply_accepts_an_opinion_that_contains_no_life_claim(tmp_path: Pa
         },
     )
     assert "聊天需要留点白" in another["reply_text"]
+
+
+def test_adapter_failure_reply_is_staged_and_settled_through_world_delivery_ledger(
+    tmp_path: Path,
+) -> None:
+    class UnusedModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            raise AssertionError("model is not used")
+
+    world, world_id, engine = _world_engine(tmp_path, UnusedModel())
+    incoming = IncomingMessage(
+        platform="simulator",
+        platform_user_id="geoff",
+        message_id="adapter-fallback-ledger",
+        text="算了，你继续看书吧",
+    )
+
+    reply = engine.prepare_adapter_failure_reply(
+        incoming,
+        "我听出来了，你对我刚才的回应有点失望。是我没接好。",
+        failure_reason="grounding audit unavailable",
+    )
+    segment_id = engine.begin_reply_part_delivery(reply, position=0)
+    assert segment_id is not None
+    engine.confirm_reply_part_delivery(
+        reply, segment_id=segment_id, external_receipt="platform:fallback:1"
+    )
+    engine.confirm_reply_delivery(reply)
+
+    action = world.snapshot(world_id)["actions"][reply.world_action_id]
+    assert action["status"] == "delivered"
+    assert action["trace"]["outbound_trigger"] == "adapter_failure_fallback"
 
 
 def test_world_claim_can_separate_exact_evidence_from_natural_assertion(tmp_path: Path) -> None:
@@ -757,11 +788,13 @@ async def test_independent_grounding_audit_rejects_an_unclaimed_virtual_world_de
     assert reply is not None
     assert reply.text == "听起来挺累的，今天别硬撑。"
     assert reply_model.calls == 2
-    assert audit_model.calls == 2
+    # The repaired candidate has no claims or world facts, so deterministic
+    # validation replaces a redundant second semantic audit.
+    assert audit_model.calls == 1
     assert sum(
         action["kind"] == "model_call" and action["status"] == "delivered"
         for action in world.snapshot(world_id)["actions"].values()
-    ) == 4
+    ) == 3
 
 
 @pytest.mark.asyncio
@@ -1637,6 +1670,132 @@ async def test_fact_free_reply_skips_independent_grounding_audit(
     assert reply is not None
     assert reply.text
     assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_fact_free_repair_recovers_fenced_json_without_a_third_audit_call(
+    tmp_path: Path,
+) -> None:
+    class FencedRepairModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return (
+                    '{"reply_text":"我刚从商场回来。","mentioned_event_ids":[],'
+                    '"proposed_action_ids":[],"claims":[]}'
+                )
+            if "事实审计器" in messages[0]["content"]:
+                if self.calls == 2:
+                    return (
+                        '{"supported":false,"unsupported_spans":["我刚从商场回来"],'
+                        '"reason":"没有世界来源"}'
+                    )
+                raise AssertionError("fact-free repaired reply must not need another LLM audit")
+            return (
+                "```json\n"
+                '{"reply_text":"我觉得先修最影响体验的那一处。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+                "\n```"
+            )
+
+    model = FencedRepairModel()
+    _, _, engine = _world_engine(tmp_path, model)
+    engine.world_grounding_audit_model = model
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="fenced-fact-free-repair",
+            text="你觉得我最该先修什么？",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "我觉得先修最影响体验的那一处。"
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_bounded_reply_repair_uses_the_configured_task_model(tmp_path: Path) -> None:
+    class PrimaryModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"我刚从商场回来。","mentioned_event_ids":[],'
+                '"proposed_action_ids":[],"claims":[]}'
+            )
+
+    class RepairModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"我觉得先处理最影响体感的响应问题。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    primary = PrimaryModel()
+    repair = RepairModel()
+    _, _, engine = _world_engine(tmp_path, primary)
+    engine.reply_repair_model = repair  # public task-level routing seam
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="configured-repair-model",
+            text="你觉得我最该先处理什么？",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "我觉得先处理最影响体感的响应问题。"
+    assert primary.calls == 1
+    assert repair.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_deterministic_fact_free_fallback_never_calls_llm_audit(
+    tmp_path: Path,
+) -> None:
+    class AlwaysInvalidModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if "事实审计器" in messages[0]["content"]:
+                raise AssertionError("deterministic fact-free fallback is locally auditable")
+            return (
+                '{"reply_text":"我刚从商场回来。","mentioned_event_ids":[],'
+                '"proposed_action_ids":[],"claims":[]}'
+            )
+
+    model = AlwaysInvalidModel()
+    _, _, engine = _world_engine(tmp_path, model)
+    engine.world_grounding_audit_model = model
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="local-fallback-audit",
+            text="你觉得我最该先修什么？",
+        )
+    )
+
+    assert reply is not None
+    assert "没有足够依据" in reply.text
+    assert model.calls == 2
 
 
 @pytest.mark.asyncio

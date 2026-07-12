@@ -218,6 +218,18 @@ class CharacterDeliberation:
                     ("seek_repair", 25 + trust // 10),
                 ),
             )
+        if appraisal in {"user_withdrawing", "user_confused"}:
+            severity = max(1, min(4, int(situation.get("severity") or 2)))
+            return (
+                "relation_repair_needed",
+                ("repair_connection_vs_continue_topic",),
+                (
+                    ("seek_repair", 110 + severity * 10 + trust // 10),
+                    ("care_despite_hurt", 45 + _number(self_core, "care", 50) // 5),
+                    ("comply", 20),
+                    ("defer", 10 + max(0, 35 - energy)),
+                ),
+            )
         if request.kind == "avoid_address":
             return "boundary_request", (), (("comply", 100), ("set_boundary", 25))
         if request.kind == "selfie_request":

@@ -120,6 +120,24 @@ def test_open_commitment_and_hurt_make_repair_a_replayable_option() -> None:
     assert with_thread.chosen_stance == "seek_repair"
 
 
+@pytest.mark.parametrize("appraisal", ["user_withdrawing", "user_confused"])
+def test_user_disappointment_or_confusion_selects_relation_repair(appraisal: str) -> None:
+    decision = _decide(
+        situation={
+            "text": "算了，你继续看书吧",
+            "risk": "low",
+            "appraisal": appraisal,
+            "severity": 3,
+        },
+        user_request=UserRequest.from_text("算了，你继续看书吧"),
+        affect={"irritation": 0, "hurt": 0},
+        open_commitments=(),
+    )
+
+    assert decision.chosen_stance == "seek_repair"
+    assert decision.display_strategy == "name_the_gap_and_invite_repair"
+
+
 def test_hurt_character_can_still_choose_care_for_a_vulnerable_user() -> None:
     decision = _decide(
         situation={"text": "我真的撑不住了，你先陪我一下。", "risk": "low"},

@@ -4594,6 +4594,9 @@ class WorldKernel:
         if command_type == "appraise_turn":
             appraisal = str(command.get("appraisal") or "ordinary_message")
             interaction = _as_dict(command.get("interaction", {}), "interaction appraisal")
+            raw_user_affect = _as_dict(
+                interaction.get("user_affect", {}), "user affect appraisal"
+            )
             has_interaction_severity = "severity" in interaction
             severity = int(interaction.get("severity") or 3)
             target = str(interaction.get("target") or "general")
@@ -4775,6 +4778,92 @@ class WorldKernel:
                     },
                 ),
             ]
+            if raw_user_affect:
+                affect_kind = str(raw_user_affect.get("kind") or "")
+                affect_intensity = int(raw_user_affect.get("intensity") or 0)
+                affect_unresolved = bool(raw_user_affect.get("unresolved"))
+                affect_confidence = float(raw_user_affect.get("confidence") or 0.0)
+                affect_evidence = [
+                    str(item)[:120]
+                    for item in _as_list(
+                        raw_user_affect.get("evidence_spans", []),
+                        "user affect evidence",
+                    )[:6]
+                ]
+                if (
+                    affect_kind not in {"disappointment", "confusion", "repaired"}
+                    or not 1 <= affect_intensity <= 4
+                    or not 0.0 <= affect_confidence <= 1.0
+                    or not affect_evidence
+                ):
+                    raise WorldError("user affect appraisal is outside the bounded schema")
+                prior_user_affect = _as_dict(
+                    _as_dict(state.get("user_affect", {}), "user affect projection").get(
+                        str(command.get("user_id") or ""), {}
+                    ),
+                    "active user affect",
+                )
+                prior_active_episodes = [
+                    _as_dict(item, "active user affect episode")
+                    for item in _as_list(
+                        prior_user_affect.get("active_episodes", []),
+                        "active user affect episodes",
+                    )
+                ]
+                if (
+                    bool(prior_user_affect.get("unresolved"))
+                    and str(prior_user_affect.get("source_message_id") or "")
+                    and not prior_active_episodes
+                ):
+                    prior_active_episodes = [prior_user_affect]
+                # Persistence is a World invariant, not a caller preference.
+                # Commands provide bounded observations; the authoritative
+                # ledger decides whether they are large and unresolved enough
+                # to survive beyond this turn.
+                should_persist = affect_intensity >= 2 and affect_unresolved
+                # A repair settlement is ledger-worthy only when it closes an
+                # already committed unresolved episode. Mild, immediately
+                # resolved reactions remain turn-local.
+                closes_committed_episode = (
+                    affect_kind == "repaired"
+                    and bool(prior_active_episodes)
+                )
+                if should_persist or closes_committed_episode:
+                    events.append(
+                        (
+                            "UserAffectAppraised",
+                            {
+                                "user_id": str(command.get("user_id") or ""),
+                                "source_message_id": str(command.get("message_id") or ""),
+                                "kind": affect_kind,
+                                "intensity": affect_intensity,
+                                "unresolved": affect_unresolved,
+                                "confidence": affect_confidence,
+                                "cause": str(
+                                    raw_user_affect.get("cause") or "companion_response"
+                                )[:80],
+                                "evidence_spans": affect_evidence,
+                                "settles_source_message_id": (
+                                    str(
+                                        prior_active_episodes[-1].get("source_message_id")
+                                        or ""
+                                    )
+                                    if closes_committed_episode
+                                    else ""
+                                ),
+                                "settles_source_message_ids": (
+                                    [
+                                        str(item.get("source_message_id") or "")
+                                        for item in prior_active_episodes
+                                        if str(item.get("source_message_id") or "")
+                                    ]
+                                    if closes_committed_episode
+                                    else []
+                                ),
+                                "rule_version": "user-affect-v1",
+                            },
+                        )
+                    )
             message_reference = (
                 f"message:{command.get('message_id') or command.get('intent_id') or 'unknown'}"
             )
@@ -6155,6 +6244,64 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
             turn = raw_turn
             turn["appraisal"] = str(payload.get("appraisal") or "")
             turn["user_id"] = str(payload.get("user_id") or "")
+    elif event.event_type == "UserAffectAppraised":
+        user_id = str(payload["user_id"])
+        affect_by_user = _as_dict(
+            next_state.setdefault("user_affect", {}), "user affect"
+        )
+        previous = affect_by_user.get(user_id, {})
+        active_episodes = {
+            str(item.get("source_message_id") or ""): dict(item)
+            for item in (
+                _as_list(previous.get("active_episodes", []), "active user affect episodes")
+                if isinstance(previous, dict)
+                else []
+            )
+            if isinstance(item, dict) and str(item.get("source_message_id") or "")
+        }
+        if (
+            isinstance(previous, dict)
+            and bool(previous.get("unresolved"))
+            and str(previous.get("source_message_id") or "")
+        ):
+            active_episodes.setdefault(
+                str(previous["source_message_id"]),
+                {key: value for key, value in previous.items() if key != "active_episodes"},
+            )
+        source_message_id = str(payload.get("source_message_id") or "")
+        settles_source = str(payload.get("settles_source_message_id") or "")
+        if bool(payload.get("unresolved")) and source_message_id:
+            # A terse continuation updates the same semantic episode instead
+            # of leaking one active entry per message. Different kinds (for
+            # example disappointment plus confusion) remain independently
+            # visible until an explicit repair settles them.
+            for episode_id, episode in list(active_episodes.items()):
+                if (
+                    str(episode.get("kind") or "") == str(payload.get("kind") or "")
+                    and str(episode.get("cause") or "") == str(payload.get("cause") or "")
+                ):
+                    active_episodes.pop(episode_id, None)
+            active_episodes[source_message_id] = dict(payload)
+        settles_sources = {
+            str(item)
+            for item in _as_list(
+                payload.get("settles_source_message_ids", []),
+                "settled user affect sources",
+            )
+            if str(item)
+        }
+        if settles_source:
+            settles_sources.add(settles_source)
+        for settled_id in settles_sources:
+            active_episodes.pop(settled_id, None)
+        projected = dict(payload)
+        if not bool(payload.get("unresolved")) and active_episodes:
+            projected = dict(next(reversed(active_episodes.values())))
+        affect_by_user[user_id] = {
+            **projected,
+            "active_episodes": list(active_episodes.values()),
+            "appraised_at": event.observed_at,
+        }
     elif event.event_type == "AffectDisplaySelected":
         next_state["last_affect_display"] = dict(payload)
     elif event.event_type == "AffinityInteractionSettled":
@@ -6294,6 +6441,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "recent_messages": [],
         "input_merges": {},
         "last_appraisal": None,
+        "user_affect": {},
         "relationships": {},
         "long_term_affinity": {},
         "repair_cases": {},

@@ -20,6 +20,7 @@ from companion_daemon.qq_websocket import (
 )
 from companion_daemon.turn_taking import TurnTakingPolicy
 from companion_daemon.world import WorldKernel
+from companion_daemon.world import WorldError
 
 
 def test_clean_content_strips_message_text() -> None:
@@ -31,6 +32,90 @@ def test_reply_msg_seq_is_positive() -> None:
     from companion_daemon.qq_websocket import _reply_msg_seq
 
     assert _reply_msg_seq() > 0
+
+
+@pytest.mark.asyncio
+async def test_world_failure_is_visible_to_user_and_observable_instead_of_becoming_task_noise() -> None:
+    class FailingEngine:
+        async def handle_message(
+            self, _incoming: IncomingMessage, **_kwargs: object
+        ) -> CompanionReply:
+            raise WorldError("grounding audit unavailable")
+
+    class FakeTarget:
+        def __init__(self) -> None:
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs: object) -> dict[str, str]:
+            self.replies.append(str(kwargs["content"]))
+            return {"id": "fallback-receipt"}
+
+    observations: list[object] = []
+    clock = iter((10.0, 12.5))
+    target = FakeTarget()
+    coalescer = QQMessageCoalescer(
+        FailingEngine(),  # type: ignore[arg-type]
+        delay_seconds=0.0,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.0, long_wait_seconds=0.0),
+        on_turn_observation=observations.append,
+        monotonic=lambda: next(clock),
+    )
+
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="算了，你继续看书吧"),
+        target,
+    )
+    await asyncio.sleep(0.02)
+
+    assert target.replies == ["我听出来了，你对我刚才的回应有点失望。是我没接好，不该继续追着问。"]
+    assert len(observations) == 1
+    observation = observations[0]
+    assert observation.outcome == "world_error_fallback_delivered"
+    assert observation.elapsed_seconds == 2.5
+    assert observation.failure_type == "WorldError"
+
+
+@pytest.mark.asyncio
+async def test_response_deadline_delivers_visible_fallback_instead_of_serial_waiting() -> None:
+    class SlowEngine:
+        async def handle_message(
+            self, _incoming: IncomingMessage, **_kwargs: object
+        ) -> CompanionReply:
+            await asyncio.sleep(60)
+            raise AssertionError("deadline should cancel the slow reply")
+
+    class FakeTarget:
+        def __init__(self) -> None:
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs: object) -> dict[str, str]:
+            self.replies.append(str(kwargs["content"]))
+            return {"id": "deadline-fallback-receipt"}
+
+    observations: list[object] = []
+    target = FakeTarget()
+    coalescer = QQMessageCoalescer(
+        SlowEngine(),  # type: ignore[arg-type]
+        delay_seconds=0.0,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.2, long_wait_seconds=0.2),
+        on_turn_observation=observations.append,
+        response_timeout_seconds=0.3,
+    )
+
+    await coalescer.add(
+        "c2c:deadline",
+        IncomingMessage(platform="qq", platform_user_id="user", text="什么意思？我没懂"),
+        target,
+    )
+    # 0.2s of input merging leaves roughly 0.1s for generation. If the
+    # coalescing wait incorrectly received a separate budget, no fallback
+    # would be visible until about 0.5s.
+    await asyncio.sleep(0.4)
+
+    assert len(target.replies) == 1
+    assert observations[0].outcome == "deadline_fallback_delivered"
+    assert observations[0].failure_type == "TimeoutError"
 
 
 @pytest.mark.asyncio

@@ -23,7 +23,10 @@ from companion_daemon.interaction_appraiser import (
     InteractionAppraiser,
     InteractionEvidence,
     TurnAppraisalInput,
+    UserAffectAppraisal,
     assess_appraisal_risk,
+    appraise_user_affect,
+    user_affect_interaction_event,
 )
 from companion_daemon.conversation_cadence import (
     ConversationCadence,
@@ -146,6 +149,7 @@ from companion_daemon.world_conversation import (
     only_recites_irrelevant_sources,
     only_repeats_claimed_sources,
     repeats_recent_companion_reply,
+    recover_structured_reply,
 )
 from companion_daemon.world_media import WorldMediaPolicy
 from companion_daemon.world_reply_audit import WorldReplyAuditor
@@ -215,6 +219,7 @@ class CompanionEngine:
         world_grounding_audit_model: ChatModel | None = None,
         interaction_appraisal_model: ChatModel | None = None,
         interaction_deep_appraisal_model: ChatModel | None = None,
+        reply_repair_model: ChatModel | None = None,
         attachment_cache: AttachmentCache | None = None,
         attachment_fetcher: Callable[[str], Awaitable[bytes]] | None = None,
         managed_async_resources: tuple[object, ...] = (),
@@ -237,6 +242,7 @@ class CompanionEngine:
         self.world_grounding_audit_model = world_grounding_audit_model
         self.interaction_appraisal_model = interaction_appraisal_model
         self.interaction_deep_appraisal_model = interaction_deep_appraisal_model
+        self.reply_repair_model = reply_repair_model
         self.attachment_cache = attachment_cache
         self.attachment_fetcher = attachment_fetcher or self._fetch_attachment
         self.managed_async_resources = managed_async_resources
@@ -1494,9 +1500,24 @@ class CompanionEngine:
             relationship_stage=relationship_stage,
         )
         history = contextual_history_for_user(
-            self.world_kernel.snapshot(self.world_id).get("recent_messages", []),
+            stage_snapshot.get("recent_messages", []),
             user_id,
         )
+        user_affect_projection = stage_snapshot.get("user_affect", {})
+        active_user_affect = (
+            user_affect_projection.get(user_id, {})
+            if isinstance(user_affect_projection, dict)
+            else {}
+        )
+        user_affect = appraise_user_affect(
+            message.text,
+            history,
+            active_affect=(
+                active_user_affect if isinstance(active_user_affect, dict) else {}
+            ),
+        )
+        if user_affect is not None:
+            event = user_affect_interaction_event(user_affect)
         evidence = InteractionEvidence.from_message(
             message,
             source_event_ids=tuple(message.source_message_ids),
@@ -1531,7 +1552,9 @@ class CompanionEngine:
             canonical_user_id=user_id,
         )
         appraisal_risk = assess_appraisal_risk(evidence, event)
-        contextual_payload: dict[str, object] = {}
+        contextual_payload: dict[str, object] = (
+            {"user_affect": user_affect.payload()} if user_affect is not None else {}
+        )
         calls_used = 0
         if (
             self.interaction_appraisal_model
@@ -1600,8 +1623,25 @@ class CompanionEngine:
                     )
                     event = appraisal_decision.accepted
                     if appraisal_decision.proposal is not None:
-                        contextual_payload = appraisal_decision.proposal.payload()
+                        contextual_payload = {
+                            **contextual_payload,
+                            **appraisal_decision.proposal.payload(),
+                        }
                         contextual_payload.pop("appraisal", None)
+                        if event.kind in {"user_withdrawing", "user_confused"}:
+                            proposal = appraisal_decision.proposal
+                            user_affect = UserAffectAppraisal(
+                                kind=(
+                                    "disappointment"
+                                    if event.kind == "user_withdrawing"
+                                    else "confusion"
+                                ),
+                                intensity=max(2, min(4, int(proposal.severity))),
+                                unresolved=True,
+                                confidence=float(proposal.confidence),
+                                evidence_spans=tuple(proposal.evidence_spans),
+                            )
+                            contextual_payload["user_affect"] = user_affect.payload()
         appraisal = event.kind
         if appraisal == "repair_attempt":
             appraisal = classify_repair_appraisal(message.text) or appraisal
@@ -2264,6 +2304,12 @@ class CompanionEngine:
                     purpose="reply_repair",
                     calls_used=calls_used,
                     ambiguous=appraisal_risk.request_model_proposal,
+                    complexity=(
+                        "cross_turn_relation_repair"
+                        if user_affect is not None
+                        and user_affect.kind in {"disappointment", "confusion"}
+                        else "complex_grounding_conflict"
+                    ),
                     recovery_probe=self.provider_circuit_state().status == "half_open",
                     remaining_budget_cny=remaining_after_calls(calls_used),
                     estimated_call_cost_cny=0.02,
@@ -2292,8 +2338,14 @@ class CompanionEngine:
                     with model_call_scope(
                         "reply_repair", action_id=repair_action_id
                     ):
+                        repair_model = (
+                            self.reply_repair_model
+                            if repair_decision.model_tier == "strong"
+                            and self.reply_repair_model is not None
+                            else self.model
+                        )
                         repaired_raw = await self._bounded_world_model_complete(
-                            self.model,
+                            repair_model,
                             [
                                 {"role": "system", "content": self.companion_system_prompt},
                                 {
@@ -2337,9 +2389,18 @@ class CompanionEngine:
                         action_id=repair_action_id,
                     )
                     try:
+                        try:
+                            repaired_candidate = parse_reply_candidate(repaired_raw)
+                        except WorldError:
+                            try:
+                                repaired_candidate = recover_structured_reply(repaired_raw)
+                            except (ValueError, json.JSONDecodeError) as recovery_error:
+                                raise WorldError(
+                                    "reply repair did not contain recoverable JSON"
+                                ) from recovery_error
                         candidate = self.world_kernel.validate_reply_candidate(
                             self.world_id,
-                            parse_reply_candidate(repaired_raw),
+                            repaired_candidate,
                             user_id=user_id,
                         )
                         if only_repeats_claimed_sources(message.text, candidate):
@@ -2398,13 +2459,40 @@ class CompanionEngine:
                             and denies_known_npc_interaction(str(candidate.get("reply_text") or ""))
                         ):
                             raise WorldError("reply denies a known NPC interaction")
-                        await self._audit_world_reply(
-                            purpose="reply_repair_audit",
-                            causation=intent_id,
-                            user_text=message.text,
-                            reply_text=str(candidate["reply_text"]),
-                            grounding_context=audit_context,
+                        repaired_claims = candidate.get("claims", [])
+                        repaired_mentions = candidate.get("mentioned_event_ids", [])
+                        repaired_actions = candidate.get("proposed_action_ids", [])
+                        repaired_text = str(candidate["reply_text"])
+                        repaired_grounding = GroundingAuditRisk().assess(
+                            CandidateGroundingSignals(
+                                reply_text=repaired_text,
+                                claims=tuple(
+                                    str(item.get("source_id") or "")
+                                    for item in repaired_claims
+                                    if isinstance(item, dict)
+                                ) if isinstance(repaired_claims, list) else (),
+                                mentioned_event_ids=tuple(str(item) for item in repaired_mentions)
+                                if isinstance(repaired_mentions, list) else (),
+                                proposed_action_ids=tuple(str(item) for item in repaired_actions)
+                                if isinstance(repaired_actions, list) else (),
+                                has_factual_language=bool(
+                                    re.search(
+                                        r"我(?:刚|今天|昨天|明天|在|去了|从|已经|有个|认识)"
+                                        r"|\d{2,}|我[一二两三四五六七八九十]+(?:天|周|月|年)前",
+                                        repaired_text,
+                                    )
+                                ),
+                            )
                         )
+                        if repaired_grounding.requires_independent_audit:
+                            await self._audit_world_reply(
+                                purpose="reply_repair_audit",
+                                causation=intent_id,
+                                user_text=message.text,
+                                reply_text=repaired_text,
+                                grounding_context=audit_context,
+                                timeout_seconds=repair_decision.soft_timeout_seconds,
+                            )
                     except WorldError:
                         candidate = build_safe_failure_candidate(
                             message.text,
@@ -2419,14 +2507,39 @@ class CompanionEngine:
             candidate = self.world_kernel.validate_reply_candidate(
                 self.world_id, candidate, user_id=user_id
             )
-            await self._audit_world_reply(
-                purpose="reply_fallback_audit",
-                causation=intent_id,
-                user_text=message.text,
-                reply_text=str(candidate["reply_text"]),
-                grounding_context=audit_context,
-                required=False,
+            fallback_text = str(candidate["reply_text"])
+            fallback_grounding = GroundingAuditRisk().assess(
+                CandidateGroundingSignals(
+                    reply_text=fallback_text,
+                    claims=tuple(
+                        str(item.get("source_id") or "")
+                        for item in candidate.get("claims", [])
+                        if isinstance(item, dict)
+                    ),
+                    mentioned_event_ids=tuple(
+                        str(item) for item in candidate.get("mentioned_event_ids", [])
+                    ),
+                    proposed_action_ids=tuple(
+                        str(item) for item in candidate.get("proposed_action_ids", [])
+                    ),
+                    has_factual_language=bool(
+                        re.search(
+                            r"我(?:刚|今天|昨天|明天|在|去了|从|已经|有个|认识)"
+                            r"|\d{2,}|我[一二两三四五六七八九十]+(?:天|周|月|年)前",
+                            fallback_text,
+                        )
+                    ),
+                )
             )
+            if fallback_grounding.requires_independent_audit:
+                await self._audit_world_reply(
+                    purpose="reply_fallback_audit",
+                    causation=intent_id,
+                    user_text=message.text,
+                    reply_text=fallback_text,
+                    grounding_context=audit_context,
+                    required=False,
+                )
         text = sanitize_world_chat_text(str(candidate["reply_text"]))
         public_mood_value = public_mood(modulation)
         text_parts = split_reply_text(text, MoodState(mood=public_mood_value))
@@ -2734,6 +2847,84 @@ class CompanionEngine:
             confidence=0.65,
         )
         return TurnCommit(reply.turn_trace_id, reply.delivery_id, "delivered")
+
+    def prepare_adapter_failure_reply(
+        self,
+        message: IncomingMessage,
+        text: str,
+        *,
+        failure_reason: str,
+    ) -> CompanionReply:
+        """Stage a last-resort visible reply through the normal delivery ledger.
+
+        The adapter may use this only after the normal world reply pipeline has
+        failed.  The text remains fact-free and is still validated before an
+        outgoing action is scheduled, so reliability never creates an
+        untracked side channel around the authoritative World ledger.
+        """
+        canonical_user_id = self.store.resolve_user(
+            message.platform, message.platform_user_id
+        )
+        if not self.world_kernel or not self.world_id:
+            delivery_id, trace_id = self.store.queue_outgoing_with_turn_trace(
+                canonical_user_id,
+                message.platform,
+                text,
+                kind="reply",
+                appraisal="adapter_failure_fallback",
+                expression_policy="只回应当前消息，不添加世界事实。",
+                allowed_facts=[message.text],
+                short_lived_constraint=None,
+                observable_reason=failure_reason[:240],
+            )
+            return CompanionReply(
+                canonical_user_id=canonical_user_id,
+                mood="calm",
+                text=text,
+                text_parts=[text],
+                delivery_id=delivery_id,
+                turn_trace_id=trace_id,
+            )
+
+        user_id = self._ensure_world_user(canonical_user_id)
+        self.world_kernel.validate_reply_candidate(
+            self.world_id,
+            {
+                "reply_text": text,
+                "mentioned_event_ids": [],
+                "proposed_action_ids": [],
+                "claims": [],
+            },
+            user_id=user_id,
+        )
+        delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(
+            canonical_user_id=canonical_user_id,
+            platform=message.platform,
+            text=text,
+            text_parts=[text],
+            kind="reply",
+            expires_at=self._world_logical_now() + timedelta(minutes=10),
+            trace={
+                "world_id": self.world_id,
+                "user_id": user_id,
+                "input_message_id": str(message.message_id or ""),
+                "appraisal": "adapter_failure_fallback",
+                "outbound_trigger": "adapter_failure_fallback",
+                "expression_policy": "只回应当前消息，不添加世界事实。",
+                "allowed_facts": [message.text],
+                "short_lived_constraint": None,
+                "observable_reason": failure_reason[:240],
+            },
+        )
+        return CompanionReply(
+            canonical_user_id=canonical_user_id,
+            mood="calm",
+            text=text,
+            text_parts=[text],
+            delivery_id=delivery_id,
+            turn_trace_id=trace_id,
+            world_action_id=action_id,
+        )
 
     def begin_reply_part_delivery(
         self, reply: CompanionReply, *, position: int

@@ -17,6 +17,8 @@ ALLOWED_APPRAISALS = {
     "dehumanization",
     "coercion",
     "control_pressure",
+    "user_withdrawing",
+    "user_confused",
 }
 ALLOWED_TARGETS = {"general", "companion", "self", "third_party"}
 ALLOWED_AGENCY = {"user", "companion", "npc", "situation", "unknown"}
@@ -74,6 +76,26 @@ class ContextualAppraisal:
                 target=fallback.target,
                 evidence_spans=self.evidence_spans,
             )
+        if self.appraisal in {"user_withdrawing", "user_confused"}:
+            confused = self.appraisal == "user_confused"
+            return InteractionEvent(
+                self.appraisal,
+                self.severity,
+                "repair_needed" if confused else "disappointed_with_companion",
+                (
+                    "用户没有理解刚才的表达，需要由我承担解释成本。"
+                    if confused
+                    else "用户可能因上一轮没有被接住而失望并撤回分享。"
+                ),
+                (
+                    "换一种说法直接解释，不反问。"
+                    if confused
+                    else "停止追问，承认没接住并做具体修复。"
+                ),
+                acts=self.acts,
+                target="companion",
+                evidence_spans=self.evidence_spans,
+            )
         return InteractionEvent(
             self.appraisal,
             self.severity,
@@ -122,6 +144,8 @@ async def propose_contextual_appraisal(
         "relationship_stage": relationship_stage,
         "rules": [
             "Distinguish sarcasm from sincere praise, quotation, self-attack, and joking.",
+            "Use user_withdrawing only when recent context supports disappointment with the companion; a terse answer alone is insufficient.",
+            "Use user_confused when the user requests repair of the companion's immediately prior expression, not for an ordinary topic question.",
             "Do not infer harm without an exact evidence span from current_text.",
             "Return one alternative interpretation and calibrated confidence.",
         ],
@@ -180,17 +204,23 @@ def validate_contextual_appraisal(raw: str, *, text: str) -> ContextualAppraisal
         raise ValueError("contextual appraisal requires an alternative interpretation")
     severity = _bounded_int(value, "severity", 1, 4)
     compact_evidence = tuple(re.sub(r"\s+", "", span) for span in evidence)
+    relational_reaction = appraisal in {"user_withdrawing", "user_confused"}
     supported_harm = (
         appraisal == "ordinary_message"
         or (
-            agency == "user"
+            relational_reaction
+            and agency == "companion"
+            and target == "self"
+            and any(len(span) >= 2 for span in compact_evidence)
+        )
+        or (
+            not relational_reaction
+            and agency == "user"
             and target == "companion"
             and any(len(span) >= 2 for span in compact_evidence)
         )
     )
-    accepted_appraisal = (
-        appraisal if confidence >= 0.75 and supported_harm else "ordinary_message"
-    )
+    accepted_appraisal = appraisal if confidence >= 0.75 and supported_harm else "ordinary_message"
     acts = tuple(str(item)[:40] for item in raw_acts[:6])
     return ContextualAppraisal(
         proposed_appraisal=appraisal,

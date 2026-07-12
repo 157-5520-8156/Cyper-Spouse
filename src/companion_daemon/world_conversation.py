@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
@@ -9,6 +10,32 @@ from hashlib import sha256
 from typing import Literal
 
 from companion_daemon.expression_plan import policy_spec_from_projection
+
+
+def recover_structured_reply(raw: str) -> dict[str, object]:
+    """Recover a valid reply object from harmless transport decoration.
+
+    Providers occasionally wrap otherwise valid JSON in a Markdown fence or a
+    short lead-in.  Recovering that locally avoids paying for another model
+    call; schema and world provenance are still validated by ``WorldKernel``.
+    """
+    text = str(raw or "").strip()
+    if text.startswith("```") and text.endswith("```"):
+        first_newline = text.find("\n")
+        if first_newline >= 0:
+            text = text[first_newline + 1 : -3].strip()
+    start = text.find("{")
+    if start < 0:
+        raise ValueError("structured reply has no JSON object")
+    candidate, _ = json.JSONDecoder().raw_decode(text[start:])
+    if not isinstance(candidate, dict):
+        raise ValueError("structured reply must be a JSON object")
+    return {
+        "reply_text": str(candidate.get("reply_text") or "").strip(),
+        "mentioned_event_ids": candidate.get("mentioned_event_ids", []),
+        "proposed_action_ids": candidate.get("proposed_action_ids", []),
+        "claims": candidate.get("claims", []),
+    }
 
 
 QueryTarget = Literal["user", "companion", "conversation", "unknown"]

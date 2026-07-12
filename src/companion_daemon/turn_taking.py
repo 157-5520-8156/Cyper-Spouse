@@ -119,6 +119,14 @@ class TurnTakingPolicy:
                 "longform_opener_waiting_for_user",
             )
 
+        if heat == "hot" and turn.pending_count == 1 and _looks_like_terse_complete_turn(latest):
+            return TurnDecision(
+                TurnState.READY,
+                ReplyTiming.SHORT_WAIT,
+                max(0.4, min(0.8, short_wait)),
+                "hot_terse_complete_turn",
+            )
+
         if turn.pending_count == 1 and _looks_like_complete_short_turn(latest):
             return TurnDecision(
                 TurnState.READY,
@@ -172,6 +180,18 @@ def _looks_like_complete_short_turn(text: str) -> bool:
     if len(text) <= 6 and not _ends_like_question_or_completion(text):
         return False
     return _ends_like_question_or_completion(text) or len(text) >= 18
+
+
+def _looks_like_terse_complete_turn(text: str) -> bool:
+    """Recognise brief floor-yielding replies common in an active IM exchange."""
+    stripped = text.strip()
+    if not stripped or len(stripped) > 14 or _looks_like_continuation(stripped):
+        return False
+    if stripped in {"嗯", "嗯嗯", "好", "好的", "行", "还行", "知道了", "明白了"}:
+        return True
+    if any(token in stripped for token in ("没懂", "不明白", "什么意思")):
+        return True
+    return stripped.endswith(("吧", "呢", "呀", "啊", "哦", "啦", "了"))
 
 
 def _looks_like_continuation(text: str) -> bool:

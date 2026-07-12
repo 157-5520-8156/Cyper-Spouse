@@ -20,6 +20,12 @@ ModelCallPurpose = Literal[
     "afterthought",
     "afterthought_audit",
 ]
+ModelComplexity = Literal[
+    "routine",
+    "high_pragmatic_ambiguity",
+    "cross_turn_relation_repair",
+    "complex_grounding_conflict",
+]
 GroundingAuditReason = Literal[
     "fact_free_candidate",
     "claims",
@@ -105,6 +111,7 @@ class ModelCallRequest:
     recovery_probe: bool = False
     remaining_budget_cny: float | None = None
     estimated_call_cost_cny: float = 0.0
+    complexity: ModelComplexity = "routine"
 
 
 @dataclass(frozen=True)
@@ -132,6 +139,8 @@ class ModelCallDecision:
     requires_independent_audit: bool
     hard_invariants_required: bool
     reason: ModelCallDecisionReason
+    model_tier: Literal["flash", "strong"] = "flash"
+    thinking: bool = False
 
 
 class TurnModelCallBudget:
@@ -239,6 +248,11 @@ class TurnModelCallBudget:
                 if turn.cadence.heat == "hot"
                 else "fact_free_reply_within_budget"
             )
+        use_strong_reasoning = (
+            request.complexity != "routine"
+            and turn.cadence.heat != "hot"
+            and request.purpose in {"interaction_appraisal", "reply_repair", "reply_audit"}
+        )
         return ModelCallDecision(
             allowed=allowed,
             max_calls=max_calls,
@@ -246,4 +260,6 @@ class TurnModelCallBudget:
             requires_independent_audit=grounding.requires_independent_audit,
             hard_invariants_required=True,
             reason=reason,
+            model_tier="strong" if use_strong_reasoning else "flash",
+            thinking=use_strong_reasoning,
         )

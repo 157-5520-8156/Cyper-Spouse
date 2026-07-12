@@ -69,6 +69,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
 
     interaction_appraisal_model = None
     interaction_deep_appraisal_model = None
+    reply_repair_model = None
     shared_model_client = None
     if settings.deepseek_api_key and not use_fake_model:
         provider_circuit = ProviderCircuitBreaker(
@@ -99,9 +100,19 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         interaction_deep_appraisal_model = DeepSeekChatModel(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
-            model="deepseek-v4-flash",
-            thinking_enabled=True,
-            reasoning_effort="high",
+            model=settings.deepseek_deep_appraisal_model,
+            thinking_enabled=settings.deepseek_deep_appraisal_thinking_enabled,
+            reasoning_effort=settings.deepseek_deep_appraisal_reasoning_effort,
+            usage_observer=record_model_usage,
+            circuit_breaker=provider_circuit,
+            client=shared_model_client,
+        )
+        reply_repair_model = DeepSeekChatModel(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            model=settings.deepseek_repair_model,
+            thinking_enabled=settings.deepseek_repair_thinking_enabled,
+            reasoning_effort=settings.deepseek_repair_reasoning_effort,
             usage_observer=record_model_usage,
             circuit_breaker=provider_circuit,
             client=shared_model_client,
@@ -181,6 +192,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         world_grounding_audit_model=model if world_kernel else None,
         interaction_appraisal_model=interaction_appraisal_model,
         interaction_deep_appraisal_model=interaction_deep_appraisal_model,
+        reply_repair_model=reply_repair_model,
         attachment_cache=AttachmentCache(settings.attachment_cache_path),
         managed_async_resources=(shared_model_client,) if shared_model_client else (),
     )

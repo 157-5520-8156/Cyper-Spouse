@@ -36,6 +36,7 @@ from companion_daemon.reply_decision import (
 from companion_daemon.time import utc_now
 from companion_daemon.turn_taking import TurnInput, TurnTakingPolicy
 from companion_daemon.runtime import build_companion_engine
+from companion_daemon.world import WorldError
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,15 @@ class AfterthoughtPlan:
     probability: float
 
 
+@dataclass(frozen=True)
+class TurnRuntimeObservation:
+    key: str
+    outcome: str
+    elapsed_seconds: float
+    failure_type: str | None = None
+    failure_reason: str | None = None
+
+
 class QQMessageCoalescer:
     def __init__(
         self,
@@ -128,6 +138,9 @@ class QQMessageCoalescer:
         enable_reply_decision: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         rng: random.Random | None = None,
+        on_turn_observation: Callable[[TurnRuntimeObservation], None] | None = None,
+        monotonic: Callable[[], float] = time.monotonic,
+        response_timeout_seconds: float | None = None,
     ):
         self.engine = engine
         self.delay_seconds = delay_seconds
@@ -140,6 +153,9 @@ class QQMessageCoalescer:
         self.enable_reply_decision = enable_reply_decision
         self.sleep = sleep
         self.rng = rng or random.Random()
+        self.on_turn_observation = on_turn_observation
+        self.monotonic = monotonic
+        self.response_timeout_seconds = response_timeout_seconds
         self._pending: dict[str, list[QueuedQQMessage]] = defaultdict(list)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._deferred: dict[str, DeferredReply] = {}
@@ -257,6 +273,7 @@ class QQMessageCoalescer:
         )
 
     async def _flush_later(self, key: str, wait_seconds: float) -> None:
+        started_at = self.monotonic()
         try:
             await self.sleep(wait_seconds)
             queued = self._pending.pop(key, [])
@@ -364,13 +381,103 @@ class QQMessageCoalescer:
                     self._settle_input_merge(key, queued)
                     return
 
-            await self._generate_and_send(
-                merged,
-                last.reply_target,
-                key=key,
-                turn_context=self._frozen_turn_contexts.pop(key, None),
-            )
+            frozen_context = self._frozen_turn_contexts.pop(key, None)
+            response_budget = self.response_timeout_seconds
+            if response_budget is None:
+                heat = str(
+                    getattr(getattr(frozen_context, "cadence", None), "heat", "cold")
+                )
+                response_budget = {"hot": 5.0, "warm": 8.0, "cold": 12.0}.get(
+                    heat, 12.0
+                )
+            # The deadline is user-perceived turn time, not a fresh budget
+            # granted after coalescing has already consumed several seconds.
+            generation_budget = max(0.05, response_budget - max(0.0, wait_seconds))
+            async with asyncio.timeout(generation_budget):
+                delivered = await self._generate_and_send(
+                    merged,
+                    last.reply_target,
+                    key=key,
+                    turn_context=frozen_context,
+                )
             self._settle_input_merge(key, queued)
+            self._observe_turn(
+                TurnRuntimeObservation(
+                    key=key,
+                    outcome="reply_delivered" if delivered else "no_reply_delivered",
+                    elapsed_seconds=max(0.0, self.monotonic() - started_at),
+                )
+            )
+        except (WorldError, TimeoutError) as exc:
+            logger.exception("world reply failed for %s; delivering bounded adapter fallback", key)
+            delivered = False
+            if "last" in locals() and "merged" in locals():
+                try:
+                    fallback_text = _safe_live_failure_reply(merged.text)
+                    prepared_reply = None
+                    if hasattr(self.engine, "prepare_adapter_failure_reply"):
+                        prepared_reply = self.engine.prepare_adapter_failure_reply(
+                            merged,
+                            fallback_text,
+                            failure_reason=str(exc),
+                        )
+                    segment_id = None
+                    if prepared_reply is not None and hasattr(
+                        self.engine, "begin_reply_part_delivery"
+                    ):
+                        segment_id = self.engine.begin_reply_part_delivery(
+                            prepared_reply, position=0
+                        )
+                    response = await last.reply_target.reply(
+                        content=fallback_text, msg_seq=_reply_msg_seq()
+                    )
+                    if segment_id and hasattr(
+                        self.engine, "confirm_reply_part_delivery"
+                    ):
+                        receipt = QQDelivery.receipt_candidate(response)
+                        if not receipt:
+                            raise MissingDeliveryEvidenceError(
+                                "QQ fallback returned without durable delivery evidence"
+                            )
+                        self.engine.confirm_reply_part_delivery(
+                            prepared_reply,
+                            segment_id=segment_id,
+                            external_receipt=receipt,
+                        )
+                    if prepared_reply is not None and hasattr(
+                        self.engine, "confirm_reply_delivery"
+                    ):
+                        self.engine.confirm_reply_delivery(prepared_reply)
+                    delivered = True
+                except Exception as fallback_error:
+                    logger.exception("failed to deliver bounded adapter fallback for %s", key)
+                    if (
+                        "prepared_reply" in locals()
+                        and prepared_reply is not None
+                        and hasattr(self.engine, "fail_reply_delivery")
+                    ):
+                        self.engine.fail_reply_delivery(
+                            prepared_reply, f"QQ adapter fallback failed: {fallback_error}"
+                        )
+                if "queued" in locals():
+                    self._settle_input_merge(key, queued)
+            self._observe_turn(
+                TurnRuntimeObservation(
+                    key=key,
+                    outcome=(
+                        ("deadline_fallback_delivered" if delivered else "deadline_fallback_failed")
+                        if isinstance(exc, TimeoutError)
+                        else (
+                            "world_error_fallback_delivered"
+                            if delivered
+                            else "world_error_fallback_failed"
+                        )
+                    ),
+                    elapsed_seconds=max(0.0, self.monotonic() - started_at),
+                    failure_type=type(exc).__name__,
+                    failure_reason=str(exc)[:240],
+                )
+            )
         except asyncio.CancelledError:
             if "merged" in locals() and hasattr(
                 self.engine, "settle_cancelled_world_turn"
@@ -385,6 +492,21 @@ class QQMessageCoalescer:
             task = self._tasks.get(key)
             if task is asyncio.current_task():
                 self._tasks.pop(key, None)
+
+    def _observe_turn(self, observation: TurnRuntimeObservation) -> None:
+        logger.info(
+            "QQ turn outcome=%s key=%s elapsed_seconds=%.3f failure_type=%s",
+            observation.outcome,
+            observation.key,
+            observation.elapsed_seconds,
+            observation.failure_type or "none",
+        )
+        if self.on_turn_observation is None:
+            return
+        try:
+            self.on_turn_observation(observation)
+        except Exception:
+            logger.exception("QQ turn observer failed for %s", observation.key)
 
     def _settle_input_merge(self, key: str, queued: list[QueuedQQMessage]) -> None:
         if hasattr(self.engine, "settle_input_merge"):
@@ -1047,6 +1169,32 @@ def _recent_context_open(rows) -> bool:
 
 def _reply_msg_seq() -> int:
     return int(time.time() * 1000) % 1_000_000
+
+
+def _safe_live_failure_reply(text: str) -> str:
+    """Return a bounded, current-turn reply when the world pipeline cannot settle.
+
+    It deliberately makes no world or memory claims.  A small set of pragmatic
+    cues keeps the last-resort message from sounding unrelated to what the user
+    just said.
+    """
+    compact = re.sub(r"\s+", "", text or "")
+    disappointment_cues = (
+        "算了",
+        "不说了",
+        "没意思",
+        "敷衍",
+        "不想听",
+        "你继续",
+        "当我没说",
+    )
+    if any(cue in compact for cue in disappointment_cues):
+        return "我听出来了，你对我刚才的回应有点失望。是我没接好，不该继续追着问。"
+    if compact.endswith(("?", "？")) or any(
+        compact.startswith(token) for token in ("为什么", "怎么", "什么", "你觉得", "是不是")
+    ):
+        return "我看到你在认真问我这件事。刚才回复这边出了点问题，我先不拿一句敷衍话糊弄你。"
+    return "我看到你刚才说的了。回复这边出了点问题，但不是故意忽略你这句。"
 
 
 async def _send_reply_parts(
