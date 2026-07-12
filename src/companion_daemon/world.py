@@ -2855,6 +2855,21 @@ class WorldKernel:
         )
         if event_claim and not normalized_claims:
             raise WorldError("reply states an experience without a committed source id")
+        unsupported_environment_claim = re.search(
+            r"(?:图书馆|学校|宿舍|门口|楼下|附近)[^。！!?！？]{0,24}"
+            r"(?:新开|开了|有家|发生|正在)",
+            reply_text,
+        )
+        environment_has_direct_source = bool(
+            unsupported_environment_claim
+            and any(
+                unsupported_environment_claim.group(0)
+                in sources.get(str(claim.get("source_id") or ""), "")
+                for claim in normalized_claims
+            )
+        )
+        if unsupported_environment_claim and not environment_has_direct_source:
+            raise WorldError("reply states a local world detail without a committed source id")
         entities = _as_dict(state["entities"], "entities")
         for entity in entities.values():
             npc = _as_dict(entity, "entity")

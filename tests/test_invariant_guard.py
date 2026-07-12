@@ -99,6 +99,33 @@ def test_guard_rejects_ungrounded_identity_and_external_capability_claims(
     assert result.reason == "absolute_meta_agency_guarantee"
 
 
+def test_guard_does_not_let_an_unrelated_claim_cover_a_local_world_detail(
+    tmp_path: Path,
+) -> None:
+    kernel, world_id = _world(tmp_path)
+
+    result = InvariantGuard().resolve(
+        kernel,
+        world_id,
+        {
+            "reply_text": "你说你有点失望。图书馆门口新开了一家花店。",
+            "mentioned_event_ids": ["message:m:1"],
+            "proposed_action_ids": [],
+            "claims": [
+                {
+                    "source_id": "message:m:1",
+                    "text": "我有点失望。",
+                    "assertion": "你说你有点失望。",
+                }
+            ],
+        },
+        user_id="user:geoff",
+    )
+
+    assert result.disposition == "hard_reject"
+    assert result.reason == "reply states a local world detail without a committed source id"
+
+
 def test_guard_binds_a_scheduled_same_user_media_action(tmp_path: Path) -> None:
     kernel, world_id = _world(tmp_path)
     requested = kernel.submit(

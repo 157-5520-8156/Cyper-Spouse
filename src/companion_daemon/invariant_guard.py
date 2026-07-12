@@ -27,6 +27,16 @@ class GuardResolution:
     action_ids: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class HardEvidenceContext:
+    """Turn-local evidence needed for hard claims about the active user."""
+
+    user_text: str = ""
+    recent_user_texts: tuple[str, ...] = ()
+    meta_agency_query: bool = False
+    epistemic_honesty_requested: bool = False
+
+
 class InvariantGuard:
     """Centralize fact and external-action authorization for reply candidates.
 
@@ -43,6 +53,7 @@ class InvariantGuard:
         candidate: dict[str, object],
         *,
         user_id: str,
+        evidence: HardEvidenceContext | None = None,
     ) -> GuardResolution:
         try:
             accepted = world.validate_reply_candidate(
@@ -50,9 +61,11 @@ class InvariantGuard:
             )
         except WorldError as exc:
             return GuardResolution("hard_reject", reason=str(exc))
-        semantic_error = _hard_semantic_claim_error(accepted)
+        semantic_error = _hard_semantic_claim_error(accepted, evidence=evidence)
         if semantic_error:
             return GuardResolution("hard_reject", reason=semantic_error)
+        if _uncommitted_companion_affect_claim(accepted):
+            return GuardResolution("hard_reject", reason="uncommitted_companion_affect")
         proposed_actions = accepted.get("proposed_action_ids", [])
         if proposed_actions:
             try:
@@ -69,7 +82,9 @@ class InvariantGuard:
         return GuardResolution("accept", candidate=accepted)
 
 
-def _hard_semantic_claim_error(candidate: dict[str, object]) -> str | None:
+def _hard_semantic_claim_error(
+    candidate: dict[str, object], *, evidence: HardEvidenceContext | None
+) -> str | None:
     """Reject factual, identity, and external-capability claims outside World.
 
     This intentionally excludes relevance, warmth, relationship wording, and
@@ -112,4 +127,60 @@ def _hard_semantic_claim_error(candidate: dict[str, object]) -> str | None:
         reply,
     ) and not has_grounded_claim:
         return "uncommitted_accumulated_personal_experience"
+    if evidence is None:
+        return None
+    if evidence.epistemic_honesty_requested and not re.search(
+        r"(?:没|没有)[^。！？]{0,8}(?:依据|把握|记录|能确认)"
+        r"|不知道|不确定|不(?:再|继续|会)?猜|不乱说",
+        reply,
+    ):
+        return "explicit_epistemic_instruction_not_acknowledged"
+    recent_context = "\n".join((evidence.user_text, *evidence.recent_user_texts))
+    if "没怎么睡" in recent_context and any(
+        marker in reply for marker in ("通宵", "彻夜", "整晚没睡", "一夜没睡")
+    ):
+        return "sleep_degree_escalated_beyond_user_statement"
+    if (
+        "为什么" in evidence.user_text
+        and any(marker in evidence.user_text for marker in ("没睡", "睡不好", "失眠"))
+        and has_grounded_claim
+        and not re.search(
+            r"不能确定|不确定|不知道|没依据|不清楚|没有能确认|不想乱说",
+            reply,
+        )
+    ):
+        return "causal_user_recall_without_uncertainty"
+    if evidence.meta_agency_query and not has_grounded_claim and re.search(
+        r"(?:我感觉得到|我看得出来|这说明|因为).{0,10}你(?:也|其实|一直)?"
+        r"(?:很|挺)?(?:真诚|在乎|认真(?:在听)?)"
+        r"|你(?:对我)?(?:也|其实|一直)?(?:很|挺)?(?:真诚|在乎|认真(?:在听)?).{0,10}"
+        r"(?:我感觉得到|我看得出来)",
+        reply,
+    ):
+        return "unsupported_user_sincerity_inference"
+    if evidence.meta_agency_query and not has_grounded_claim and re.search(
+        r"你(?:是不是)?[^。！？]{0,16}(?:被[^。！？]{0,8}(?:搞烦|敷衍)|"
+        r"区分得出来|分得出来|认真在听)",
+        reply,
+    ):
+        return "unsupported_user_history_or_ability_inference"
     return None
+
+
+def _uncommitted_companion_affect_claim(candidate: dict[str, object]) -> bool:
+    """Keep only explicit new companion-affect assertions on the hard boundary.
+
+    A broad emotion lexicon would misread a quoted user symptom (for example
+    ``我胃有点不舒服``) as the companion's feeling.  This conservative shape
+    catches direct first-person/new-state assertions and leaves expression
+    nuance to the Advisory/telemetry path.
+    """
+    reply = str(candidate.get("reply_text") or "")
+    return bool(
+        re.search(
+            r"(?:^|[。！？])\s*(?:是有一点儿?|我(?:这会儿|刚才)?(?:有一点|有点)?|"
+            r"你这么说让我有一点)(?:不舒服|介意|生气|难过|委屈|不高兴|烦|压着火|"
+            r"闷着|不想理|失落|孤独|心里发紧)",
+            reply,
+        )
+    )

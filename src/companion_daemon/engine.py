@@ -55,7 +55,11 @@ from companion_daemon.image_generation import (
 )
 from companion_daemon.image_prompt_builder import ChatImageMessage, build_image_prompt
 from companion_daemon.image_requests import detect_image_request
-from companion_daemon.invariant_guard import GuardResolution, InvariantGuard
+from companion_daemon.invariant_guard import (
+    GuardResolution,
+    HardEvidenceContext,
+    InvariantGuard,
+)
 from companion_daemon.impression import apply_repeated_interaction_drift, apply_user_impression
 from companion_daemon.life_continuity import build_life_continuity
 from companion_daemon.life_runtime import (
@@ -543,6 +547,7 @@ class CompanionEngine:
         candidate: dict[str, object],
         *,
         user_id: str,
+        hard_evidence: HardEvidenceContext | None = None,
     ) -> tuple[dict[str, object], GuardResolution]:
         """Apply the sole fact/Action gate for a visible reply candidate.
 
@@ -557,6 +562,7 @@ class CompanionEngine:
             self.world_id,
             candidate,
             user_id=user_id,
+            evidence=hard_evidence,
         )
         if resolution.disposition == "hard_reject":
             raise WorldError(resolution.reason or "hard invariant rejected reply")
@@ -1977,7 +1983,6 @@ class CompanionEngine:
         facts = [str(item["value"]) for item in fact_sources]
         current_scene = context["current_scene"]
         current_scene_source = context["current_scene_source"]
-        self_core = context["self_core"]
         policy = (snapshot.get("last_appraisal") or {}).get("policy", "自然回应当前消息。")
         behavior = context["behavior"]
         world_policy = behavior["policy"]
@@ -2057,14 +2062,6 @@ class CompanionEngine:
             },
             rotation_key=str(message.message_id or intent_id),
         )
-        audit_context: dict[str, object] = {
-            "current_scene": current_scene_source,
-            "confirmed_facts": fact_sources,
-            "committed_experiences": experience_sources,
-            "attachment_insights": attachment_insight_sources,
-            "user_messages": conversation_sources,
-            "self_core": self_core,
-        }
         context_block = (
             "世界账本授权（必须遵守）：\n"
             f"- 本轮关系判断: {appraisal}\n- 本轮表达策略: {policy}\n"
@@ -2202,10 +2199,22 @@ class CompanionEngine:
         fallback_needs_audit = False
         related_npc_experiences: list[dict[str, object]] = []
         action_settlement_ids: tuple[str, ...] = ()
+        grounding_diagnostic_recommended = False
+        quality_signals: list[str] = []
         urgent_turn = bool(
             communication_decision
             and communication_decision.reason == "resumed_or_urgent_turn"
             and not resume_action_id
+        )
+        hard_evidence = HardEvidenceContext(
+            user_text=message.text,
+            recent_user_texts=tuple(
+                str(item.get("text") or "")
+                for item in snapshot.get("recent_messages", [])
+                if item.get("direction") == "in" and str(item.get("text") or "").strip()
+            ),
+            meta_agency_query=query_scope.asks_meta_agency,
+            epistemic_honesty_requested=query_scope.asks_epistemic_honesty,
         )
         occurrence_source = (
             best_matching_grounded_source(message.text, experience_sources)
@@ -2245,13 +2254,13 @@ class CompanionEngine:
             mind_proposal = parse_mind_proposal(raw)
             parsed_candidate = mind_proposal.candidate
             candidate, guard_resolution = self._guard_reply_candidate(
-                parsed_candidate, user_id=user_id
+                parsed_candidate, user_id=user_id, hard_evidence=hard_evidence
             )
             if guard_resolution.disposition == "requires_action_settlement":
                 action_settlement_ids = guard_resolution.action_ids
             if occurrence_candidate:
                 candidate, guard_resolution = self._guard_reply_candidate(
-                    occurrence_candidate, user_id=user_id
+                    occurrence_candidate, user_id=user_id, hard_evidence=hard_evidence
                 )
                 if guard_resolution.disposition == "requires_action_settlement":
                     action_settlement_ids = guard_resolution.action_ids
@@ -2270,15 +2279,17 @@ class CompanionEngine:
                     "reply_text": availability_text,
                     "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
                 }
-                candidate, _ = self._guard_reply_candidate(candidate, user_id=user_id)
+                candidate, _ = self._guard_reply_candidate(
+                    candidate, user_id=user_id, hard_evidence=hard_evidence
+                )
             if only_repeats_claimed_sources(message.text, candidate):
-                raise WorldError("reply repeats a source without answering the requested detail")
+                quality_signals.append("repeats_claimed_source")
             if only_echoes_user_message(message.text, candidate):
-                raise WorldError("reply only echoes the current user message")
+                quality_signals.append("echoes_current_user_message")
             if only_recites_irrelevant_sources(message.text, candidate):
-                raise WorldError("reply only recites sources unrelated to the current turn")
+                quality_signals.append("recites_irrelevant_sources")
             if repeats_recent_companion_reply(candidate, list(snapshot.get("recent_messages", []))):
-                raise WorldError("reply repeats one of the last two companion replies")
+                quality_signals.append("repeats_recent_companion_reply")
             human_violation = human_reply_contract_violation(
                 message.text,
                 candidate,
@@ -2297,12 +2308,12 @@ class CompanionEngine:
                 chosen_stance=chosen_stance,
             )
             if human_violation:
-                raise WorldError(f"human reply contract rejected: {human_violation}")
+                quality_signals.append(f"human_reply_contract:{human_violation}")
             affect_violation = expression_plan.validate(
                 str(candidate.get("reply_text") or "")
             )
             if affect_violation:
-                raise WorldError(f"world affect contract rejected: {affect_violation}")
+                quality_signals.append(f"expression_plan:{affect_violation}")
             if (
                 asks_for_source_detail(message.text)
                 and related_npc_experiences
@@ -2349,33 +2360,10 @@ class CompanionEngine:
                         ),
                     )
                 )
-                circuit_state = self.provider_circuit_state()
-                audit_decision = call_budget.decide(
-                    turn=frozen_turn,
-                    request=ModelCallRequest(
-                        purpose="reply_audit",
-                        calls_used=calls_used,
-                        ambiguous=appraisal_risk.request_model_proposal,
-                        recovery_probe=circuit_state.status == "half_open",
-                        remaining_budget_cny=remaining_after_calls(calls_used),
-                        estimated_call_cost_cny=0.01,
-                    ),
-                    grounding=grounding,
-                    circuit=circuit_state,
+                grounding_diagnostic_recommended = (
+                    grounding_diagnostic_recommended
+                    or grounding.requires_independent_audit
                 )
-                if audit_decision.allowed:
-                    await self._audit_world_reply(
-                        purpose="reply_audit",
-                        causation=intent_id,
-                        user_text=message.text,
-                        reply_text=reply_text,
-                        grounding_context=audit_context,
-                        timeout_seconds=audit_decision.soft_timeout_seconds,
-                    )
-                elif grounding.requires_independent_audit:
-                    raise WorldError(
-                        f"required reply audit unavailable: {audit_decision.reason}"
-                    )
         except WorldError as validation_error:
             grounded_fallback = occurrence_candidate
             if occurrence_candidate:
@@ -2580,24 +2568,22 @@ class CompanionEngine:
                                     "reply repair did not contain recoverable JSON"
                                 ) from recovery_error
                         candidate, guard_resolution = self._guard_reply_candidate(
-                            repaired_candidate, user_id=user_id
+                            repaired_candidate,
+                            user_id=user_id,
+                            hard_evidence=hard_evidence,
                         )
                         if guard_resolution.disposition == "requires_action_settlement":
                             action_settlement_ids = guard_resolution.action_ids
                         if only_repeats_claimed_sources(message.text, candidate):
-                            raise WorldError(
-                                "reply repeats a source without answering the requested detail"
-                            )
+                            quality_signals.append("repeats_claimed_source")
                         if only_echoes_user_message(message.text, candidate):
-                            raise WorldError("reply only echoes the current user message")
+                            quality_signals.append("echoes_current_user_message")
                         if only_recites_irrelevant_sources(message.text, candidate):
-                            raise WorldError(
-                                "reply only recites sources unrelated to the current turn"
-                            )
+                            quality_signals.append("recites_irrelevant_sources")
                         if repeats_recent_companion_reply(
                             candidate, list(snapshot.get("recent_messages", []))
                         ):
-                            raise WorldError("reply repeats one of the last two companion replies")
+                            quality_signals.append("repeats_recent_companion_reply")
                         human_violation = human_reply_contract_violation(
                             message.text,
                             candidate,
@@ -2616,15 +2602,15 @@ class CompanionEngine:
                             chosen_stance=chosen_stance,
                         )
                         if human_violation:
-                            raise WorldError(
-                                f"human reply contract rejected: {human_violation}"
+                            quality_signals.append(
+                                f"human_reply_contract:{human_violation}"
                             )
                         affect_violation = expression_plan.validate(
                             str(candidate.get("reply_text") or "")
                         )
                         if affect_violation:
-                            raise WorldError(
-                                f"world affect contract rejected: {affect_violation}"
+                            quality_signals.append(
+                                f"expression_plan:{affect_violation}"
                             )
                         related_npc_experiences = [
                             item
@@ -2666,14 +2652,7 @@ class CompanionEngine:
                             )
                         )
                         if repaired_grounding.requires_independent_audit:
-                            await self._audit_world_reply(
-                                purpose="reply_repair_audit",
-                                causation=intent_id,
-                                user_text=message.text,
-                                reply_text=repaired_text,
-                                grounding_context=audit_context,
-                                timeout_seconds=repair_decision.soft_timeout_seconds,
-                            )
+                            grounding_diagnostic_recommended = True
                     except WorldError:
                         candidate = build_safe_failure_candidate(
                             message.text,
@@ -2686,7 +2665,7 @@ class CompanionEngine:
                         fallback_needs_audit = True
         if fallback_needs_audit:
             candidate, guard_resolution = self._guard_reply_candidate(
-                candidate, user_id=user_id
+                candidate, user_id=user_id, hard_evidence=hard_evidence
             )
             if guard_resolution.disposition == "requires_action_settlement":
                 action_settlement_ids = guard_resolution.action_ids
@@ -2715,18 +2694,11 @@ class CompanionEngine:
                 )
             )
             if fallback_grounding.requires_independent_audit:
-                await self._audit_world_reply(
-                    purpose="reply_fallback_audit",
-                    causation=intent_id,
-                    user_text=message.text,
-                    reply_text=fallback_text,
-                    grounding_context=audit_context,
-                    required=False,
-                )
+                grounding_diagnostic_recommended = True
         # Every branch above (including deterministic fallbacks) converges at
         # the same hard-only boundary before anything becomes deliverable.
         candidate, guard_resolution = self._guard_reply_candidate(
-            candidate, user_id=user_id
+            candidate, user_id=user_id, hard_evidence=hard_evidence
         )
         if guard_resolution.disposition == "requires_action_settlement":
             action_settlement_ids = guard_resolution.action_ids
@@ -2775,6 +2747,10 @@ class CompanionEngine:
             }
         if mind_proposal is not None and mind_proposal.display_strategy:
             trace["display_strategy"] = mind_proposal.display_strategy
+        if grounding_diagnostic_recommended:
+            trace["grounding_diagnostic"] = "offline_evaluation_recommended"
+        if quality_signals:
+            trace["quality_signals"] = list(dict.fromkeys(quality_signals))
         private_impression = self._material_private_impression_proposal(
             message=message,
             user_id=user_id,

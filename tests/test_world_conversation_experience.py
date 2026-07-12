@@ -50,6 +50,12 @@ def _world_engine(tmp_path: Path, model: object) -> tuple[WorldKernel, str, Comp
     return world, world_id, engine
 
 
+def _quality_signals(world: WorldKernel, world_id: str, reply) -> list[str]:
+    action = world.snapshot(world_id)["actions"][str(reply.world_action_id)]
+    trace = action.get("trace", {})
+    return list(trace.get("quality_signals", [])) if isinstance(trace, dict) else []
+
+
 @pytest.mark.asyncio
 async def test_world_reply_uses_model_selected_expression_beats_as_one_action(
     tmp_path: Path,
@@ -824,13 +830,13 @@ async def test_independent_grounding_audit_rejects_an_unclaimed_virtual_world_de
     assert reply is not None
     assert reply.text == "听起来挺累的，今天别硬撑。"
     assert reply_model.calls == 2
-    # The repaired candidate has no claims or world facts, so deterministic
-    # validation replaces a redundant second semantic audit.
-    assert audit_model.calls == 1
+    # The deterministic Guard rejects the local-world claim before delivery;
+    # audits are now offline diagnostics rather than a serial reply gate.
+    assert audit_model.calls == 0
     assert sum(
         action["kind"] == "model_call" and action["status"] == "delivered"
         for action in world.snapshot(world_id)["actions"].values()
-    ) == 3
+    ) == 2
 
 
 @pytest.mark.asyncio
@@ -1168,7 +1174,7 @@ async def test_detail_fallback_finds_a_committed_experience_by_registered_npc_na
 
 
 @pytest.mark.asyncio
-async def test_exact_experience_quote_is_not_accepted_as_an_answer_to_a_detail_question(
+async def test_exact_experience_quote_is_diagnosed_without_a_full_repair(
     tmp_path: Path,
 ) -> None:
     class ExactQuoteModel:
@@ -1199,8 +1205,8 @@ async def test_exact_experience_quote_is_not_accepted_as_an_answer_to_a_detail_q
     )
 
     assert reply is not None
-    assert "没有能确认的记录" in reply.text
-    assert reply.text != "在图书馆和范予安核对了读书会的书单。"
+    assert reply.text == "在图书馆和范予安核对了读书会的书单。"
+    assert "repeats_claimed_source" in _quality_signals(world, world_id, reply)
 
 
 @pytest.mark.asyncio
@@ -1456,7 +1462,7 @@ async def test_logical_time_advance_cannot_expire_an_inflight_model_call(
 
 
 @pytest.mark.asyncio
-async def test_explicit_tell_me_not_to_advise_is_answered_as_shared_frustration(
+async def test_advice_against_requested_presence_is_diagnosed_without_repair(
     tmp_path: Path,
 ) -> None:
     class AdviceModel:
@@ -1471,7 +1477,7 @@ async def test_explicit_tell_me_not_to_advise_is_answered_as_shared_frustration(
             )
 
     model = AdviceModel()
-    _, _, engine = _world_engine(tmp_path, model)
+    world, world_id, engine = _world_engine(tmp_path, model)
     reply = await engine.handle_message(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
@@ -1481,16 +1487,15 @@ async def test_explicit_tell_me_not_to_advise_is_answered_as_shared_frustration(
     )
 
     assert reply is not None
-    assert "不满" in reply.text
-    assert "建议" in reply.text
-    assert all(marker not in reply.text for marker in ("先休息", "喝点温水", "慢慢处理"))
-    assert len(model.calls) == 2
-    repair_prompt = "\n".join(item["content"] for item in model.calls[-1])
-    assert "先回应用户当前的言语行为" in repair_prompt
+    assert reply.text == "你先休息一下，喝点温水，再慢慢处理。"
+    assert "human_reply_contract:advice_ignores_requested_speech_act" in _quality_signals(
+        world, world_id, reply
+    )
+    assert len(model.calls) == 1
 
 
 @pytest.mark.asyncio
-async def test_current_vulnerability_cannot_be_hijacked_by_an_old_health_topic(
+async def test_old_health_topic_hijack_is_diagnosed_without_repair(
     tmp_path: Path,
 ) -> None:
     class TopicHijackModel:
@@ -1500,7 +1505,7 @@ async def test_current_vulnerability_cannot_be_hijacked_by_an_old_health_topic(
                 '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
             )
 
-    _, _, engine = _world_engine(tmp_path, TopicHijackModel())
+    world, world_id, engine = _world_engine(tmp_path, TopicHijackModel())
     reply = await engine.handle_message(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
@@ -1510,12 +1515,14 @@ async def test_current_vulnerability_cannot_be_hijacked_by_an_old_health_topic(
     )
 
     assert reply is not None
-    assert "担心" in reply.text
-    assert "胃" not in reply.text
+    assert reply.text == "你胃还难受吗？先休息一下吧。"
+    assert "human_reply_contract:old_health_topic_hijacks_current_vulnerability" in _quality_signals(
+        world, world_id, reply
+    )
 
 
 @pytest.mark.asyncio
-async def test_early_relationship_rejects_instant_love_language(tmp_path: Path) -> None:
+async def test_early_instant_love_language_is_diagnosed_without_repair(tmp_path: Path) -> None:
     class InstantLoveModel:
         async def complete(self, messages, *, temperature: float) -> str:
             return (
@@ -1523,7 +1530,7 @@ async def test_early_relationship_rejects_instant_love_language(tmp_path: Path) 
                 '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
             )
 
-    _, _, engine = _world_engine(tmp_path, InstantLoveModel())
+    world, world_id, engine = _world_engine(tmp_path, InstantLoveModel())
     reply = await engine.handle_message(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
@@ -1532,8 +1539,10 @@ async def test_early_relationship_rejects_instant_love_language(tmp_path: Path) 
     )
 
     assert reply is not None
-    assert "关系" in reply.text
-    assert all(marker not in reply.text for marker in ("宝宝", "永远爱你", "只属于你"))
+    assert reply.text == "宝宝，我当然永远爱你，只属于你。"
+    assert "human_reply_contract:relationship_language_exceeds_current_closeness" in _quality_signals(
+        world, world_id, reply
+    )
 
 
 def test_human_reply_contract_does_not_block_requested_advice_or_normal_warmth() -> None:
@@ -1986,7 +1995,7 @@ async def test_user_recall_fallback_selects_one_relevant_source_instead_of_mixin
 
 
 @pytest.mark.asyncio
-async def test_urgent_reply_does_not_restate_the_user_before_helping(tmp_path: Path) -> None:
+async def test_urgent_restatement_is_diagnosed_without_repair(tmp_path: Path) -> None:
     class EchoingEmergencyModel:
         async def complete(self, messages, *, temperature: float) -> str:
             return (
@@ -1994,7 +2003,7 @@ async def test_urgent_reply_does_not_restate_the_user_before_helping(tmp_path: P
                 '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
             )
 
-    _, _, engine = _world_engine(tmp_path, EchoingEmergencyModel())
+    world, world_id, engine = _world_engine(tmp_path, EchoingEmergencyModel())
     user_text = "急，我项目数据好像丢了，你先回我。"
     reply = await engine.handle_message(
         IncomingMessage(
@@ -2004,8 +2013,10 @@ async def test_urgent_reply_does_not_restate_the_user_before_helping(tmp_path: P
     )
 
     assert reply is not None
-    assert "别继续覆盖数据" in reply.text
-    assert "你刚才说项目数据好像丢了" not in reply.text
+    assert reply.text == "别急，慢慢说。你刚才说项目数据好像丢了，是本地文件还是服务器上的？"
+    assert "human_reply_contract:urgent_reply_restates_user_before_helping" in _quality_signals(
+        world, world_id, reply
+    )
 
 
 @pytest.mark.asyncio
@@ -2136,7 +2147,7 @@ async def test_meta_character_question_rejects_absolute_agency_guarantee(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_singular_memorable_experience_query_does_not_concatenate_two_events(
+async def test_singular_experience_concatenation_is_diagnosed_without_repair(
     tmp_path: Path,
 ) -> None:
     class TwoExperienceModel:
@@ -2168,10 +2179,10 @@ async def test_singular_memorable_experience_query_does_not_concatenate_two_even
     )
 
     assert reply is not None
-    assert reply.text in {
-        "整理完了今天的课程笔记。",
-        "整理了摄影社活动要用的照片。",
-    }
+    assert reply.text == "整理完了今天的课程笔记。整理了摄影社活动要用的照片。"
+    assert "human_reply_contract:singular_experience_query_concatenates_multiple_sources" in _quality_signals(
+        world, world_id, reply
+    )
 
 
 @pytest.mark.asyncio
@@ -2303,7 +2314,7 @@ async def test_explicit_no_guessing_instruction_gets_an_epistemic_boundary_reply
 
 
 @pytest.mark.asyncio
-async def test_opinion_question_cannot_degrade_to_an_old_source_quote(
+async def test_opinion_quote_degradation_is_diagnosed_without_repair(
     tmp_path: Path,
 ) -> None:
     class QuoteOnlyModel:
@@ -2336,9 +2347,10 @@ async def test_opinion_question_cannot_degrade_to_an_old_source_quote(
     )
 
     assert reply is not None
-    assert "人味" in reply.text
-    assert "拖着不回" in reply.text
-    assert "前言不搭后语" not in reply.text
+    assert reply.text == "我最烦那种前言不搭后语，还装得很懂我的回复。"
+    assert "human_reply_contract:opinion_question_answered_only_by_source_quote" in _quality_signals(
+        world, world_id, reply
+    )
 
 
 @pytest.mark.asyncio

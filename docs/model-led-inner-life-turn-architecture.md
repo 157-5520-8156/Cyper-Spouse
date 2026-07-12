@@ -404,6 +404,11 @@ Guard 不得返回“语气不自然”“共情不足”“没有采用建议 S
 
 禁止重新形成 `reply → full repair → full audit → template`。
 
+当前运行时把相关性、复读、关系口径、共情与表达计划偏差写入回复 Action 的
+`trace.quality_signals`，供离线评测与回放分析；它们不会单独触发 repair 或独立 LLM audit。
+无来源世界细节、身份/能力宣称、未结算 Action 与其他确定性事实冲突仍由 Guard 拒绝。普通
+带 provenance 的回复只做确定性核验；`grounding_diagnostic` 仅表示应进入离线评测。
+
 ### 8.6 原子提交最小因果状态
 
 投递前原子提交：
