@@ -716,10 +716,6 @@
       4
     ],
     [
-      7,
-      4
-    ],
-    [
       2,
       3
     ],
@@ -826,7 +822,7 @@
     ],
     "rug": [
       7,
-      4,
+      5,
       0
     ]
   },
@@ -1443,8 +1439,8 @@
         0
       ],
       [
-        7,
-        4,
+        6,
+        3,
         0
       ],
       [
@@ -1473,8 +1469,18 @@
         0
       ],
       [
-        7,
+        6,
+        3,
+        0
+      ],
+      [
+        6,
         4,
+        0
+      ],
+      [
+        6,
+        5,
         0
       ],
       [
@@ -1591,7 +1597,9 @@
       "deskRugBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-rug-draft.png",
       "diningRugBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/dining-rug-draft.png",
       "bedRugBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-rug-draft.png",
-      "livingRugBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/living-rug-draft.png"
+      "livingRugBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/living-rug-draft.png",
+      "deskFloorPlantFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-floor-plant-draft.png",
+      "livingLargePlantFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/living-large-plant-draft.png"
     },
     "objects": [
       {
@@ -3110,6 +3118,104 @@
           "reference": "zhizhi-room-isometric-v2.png"
         },
         "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "desk-floor-plant",
+        "category": "plant",
+        "assetMode": "layered",
+        "tile": [
+          0.8,
+          4.25,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "deskFloorPlantFront0Draft",
+            "origin": [
+              370,
+              480
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "front": [
+            1.15,
+            4.15,
+            0
+          ]
+        },
+        "auditPose": {}
+      },
+      {
+        "id": "living-large-plant",
+        "category": "plant",
+        "assetMode": "layered",
+        "tile": [
+          6.8,
+          3.75,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              7,
+              4
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "livingLargePlantFront0Draft",
+            "origin": [
+              885,
+              610
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": true
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            7.1,
+            3.3,
+            0
+          ],
+          "front": [
+            7.45,
+            3.65,
+            0
+          ]
+        },
         "auditPose": {}
       }
     ]

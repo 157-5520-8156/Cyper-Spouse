@@ -114,6 +114,25 @@
         "sources/living-rug-chroma-v1.png"
       ],
       "note": "Four zone-specific floor rugs use independent body layers and never claim path occupancy."
+    },
+    {
+      "id": "wave3-floor-plants-chroma-v1",
+      "targets": ["desk-floor-plant", "living-large-plant"],
+      "status": "needs-art",
+      "method": "imagegen-background-extraction",
+      "sources": [
+        "sources/desk-floor-plant-chroma-v1.png",
+        "sources/living-large-plant-chroma-v1.png"
+      ],
+      "generation": {
+        "reference": "zhizhi-room-isometric-v2.png",
+        "background": "flat #ff00ff chroma",
+        "prompts": {
+          "desk-floor-plant-chroma-v1.png": "Compact leafy floor plant with upright oval leaves in a warm terracotta pot; match the reference room's low-density pixel art, warm palette, scale and isometric view; isolated single object on a flat #ff00ff background.",
+          "living-large-plant-chroma-v1.png": "Taller, fuller broad-leaf floor plant in a dark charcoal-blue ceramic pot; match the reference room's low-density pixel art, warm palette, scale and isometric view; isolated single object on a flat #ff00ff background."
+        }
+      },
+      "note": "Standalone floor-plant candidates. Bookcase content was trimmed so neither plant remains owned by the cluster."
     }
   ],
   "items": [

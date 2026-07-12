@@ -12,7 +12,7 @@
 - [x] 波次 0：通用对象 `layers / occupancy / audits / provenance` schema；`teal-stool` 已作为无互动原生对象接入，旧对象经 Compiler 归一化到同一 bundle 契约。
 - [ ] 波次 1：主要遮挡家具（进行中：clean shell 与 16 个家具/附属对象已进入可编译 `artDraft`，仍需逐件校准和删除测试）。
 - [x] 波次 2：厨房与大型收纳草稿功能闭环（29 个对象、36 个构建资产；全部厨房对象可删除，父子联动、适用遮挡与餐厨动作/路径通过；素材仍保持 `needs-art`，终稿基线在波次 6 统一批准）。
-- [ ] 波次 3：地毯、灯具、植物与窗区（进行中：四块独立地毯已接入，草稿增至 33 对象、40 个构建资产；灯具、植物和窗区待处理）。
+- [ ] 波次 3：地毯、灯具、植物与窗区（进行中：四块独立地毯与两株落地植物已接入，草稿增至 35 对象、42 个构建资产；灯具、其余植物和窗区待处理）。
 - [ ] 波次 4–6：decor、路径动作与最终验收。
 
 ### 波次 0 验收记录
@@ -41,6 +41,12 @@
 - 双轴检查点审查补出一处依赖遗漏：局部 effect 现在与对象图层复用同一可见性集合，隐藏父对象不会残留子对象光效；高书柜也从永远位于角色后的 `body` 改为共享深度队列中的 `front`，并补齐前后审计点。
 - 这七件素材仍为 `planned / needs-art`：书柜/吊柜父子 hidden/solo、高书柜前后深度，以及三件下厨资产的 12 项 hidden/solo/behind/front 浏览器矩阵均已通过；厨房完整组合、逐像素风格校准和最终视觉基线尚未完成，不能据此升级 inventory 状态。
 - 首次烤箱候选被明确标为 `rejected`：它错误生成了带炉面的独立灶具，而母版需要柜下嵌入式烤箱；被拒素材保留 provenance，但没有进入 manifest 或 runtime。
+
+### 波次 3 地毯与落地植物草稿记录
+
+- 四块区域地毯与两株落地植物已进入统一对象契约；书柜内容裁掉重复植物像素，草稿现为 35 个对象、42 个构建资产。
+- 书桌盆栽不占新增路径格，且其不可达后侧明确为 `false`；大型植物占据 `[7,4]`，地毯锚点与 tour 改从 `[7,5]` 绕行。
+- AI 生成意图与 reference 已记录在 inventory。对象仍为 `planned / needs-art`；详细定位、视觉审计和动态 tour 证据见 `docs/dashboard-visual-worklog.md`。
 
 ## 用户目标
 
@@ -324,7 +330,7 @@ Runtime 不包含家具名称特判。层角色、depthTile、occupancy 与 inte
 
 验收：灯具隐藏会同时移除其局部光效；地毯不阻塞路径；窗帘与植物深度正确。
 
-当前进度：`desk-rug / dining-rug / bed-rug / living-rug` 已作为四个 `soft-furnishing` 对象接入，统一使用 `body` 图层与 `occupancy.kind=none`。浏览器完成八项 hidden/solo 矩阵，每个 hidden 只移除目标、每个 solo 只保留目标；实际 tour 经过工作区与客厅地毯，路径和家具遮挡未改变。四件素材仍为 `planned / needs-art`，灯具、植物和窗区尚未开始。
+当前进度：`desk-rug / dining-rug / bed-rug / living-rug` 已作为四个 `soft-furnishing` 对象接入；`desk-floor-plant / living-large-plant` 已作为两个 `plant` 对象接入。地毯均不占地；书桌盆栽不伪造不可达后侧；大型植物占据 `[7,4]` 并由 tour 绕行。六件素材仍为 `planned / needs-art`，灯具、其余植物和窗区尚未开始。
 
 ### 波次 4：桌面、柜内和墙面 decor clusters
 

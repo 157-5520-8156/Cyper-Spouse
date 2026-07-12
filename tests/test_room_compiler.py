@@ -89,7 +89,7 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "kitchen-stove-counter", "kitchen-sink-counter-decor",
         "kitchen-stove-counter-decor", "fridge", "oven", "kitchen-shelf",
         "kitchen-utensil-rail", "kitchen-bin", "desk-rug", "dining-rug",
-        "bed-rug", "living-rug",
+        "bed-rug", "living-rug", "desk-floor-plant", "living-large-plant",
     ]
     assert bundle["artDraft"]["objects"][0]["layers"][0]["image"] == "sofaFront0Draft"
     bookcase = next(item for item in bundle["artDraft"]["objects"] if item["id"] == "tall-bookcase")
@@ -103,6 +103,24 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     assert all(item["category"] == "soft-furnishing" for item in rugs)
     assert all(item["occupancy"] == {"kind": "none", "tiles": []} for item in rugs)
     assert all([layer["role"] for layer in item["layers"]] == ["body"] for item in rugs)
+    draft_by_id = {item["id"]: item for item in bundle["artDraft"]["objects"]}
+    desk_plant = draft_by_id["desk-floor-plant"]
+    living_plant = draft_by_id["living-large-plant"]
+    assert desk_plant["category"] == living_plant["category"] == "plant"
+    assert desk_plant["occupancy"] == {"kind": "none", "tiles": []}
+    assert living_plant["occupancy"] == {"kind": "footprint", "tiles": [[7, 4]]}
+    assert [layer["role"] for layer in desk_plant["layers"]] == ["front"]
+    assert [layer["role"] for layer in living_plant["layers"]] == ["front"]
+    assert desk_plant["audits"] == {
+        "hidden": True, "solo": True, "behind": False, "front": True,
+    }
+    assert desk_plant["audit"] == {"front": [1.15, 4.15, 0]}
+    assert all(living_plant["audits"].values())
+    assert draft_by_id["bookcase-content-cluster"]["attachedTo"] == "tall-bookcase"
+    assert [7, 4] not in bundle["walkable"]
+    assert bundle["anchors"]["rug"] == [7, 5, 0]
+    assert [6, 5, 0] in bundle["routes"]["tour"]
+    assert [7, 4, 0] not in bundle["routes"]["tour"]
 
     master = Image.open(ROOT / "assets/dashboard/zhizhi-room-isometric-v2.png").convert("RGBA")
     matte = Image.open(ROOT / "assets/dashboard/layers/desk-front-v1.png").convert("RGBA")
@@ -139,6 +157,7 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
             "kitchen-utensil-rail-draft.png", "kitchen-bin-draft.png",
             "desk-rug-draft.png", "dining-rug-draft.png",
             "bed-rug-draft.png", "living-rug-draft.png",
+            "desk-floor-plant-draft.png", "living-large-plant-draft.png",
         )
     )
 
