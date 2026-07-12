@@ -406,6 +406,113 @@ class WorldKernel:
             expected_revision=expected_revision,
         )
 
+    def commit_private_impression(
+        self,
+        world_id: str,
+        *,
+        impression_id: str,
+        user_id: str,
+        kind: str,
+        summary: str,
+        confidence: float,
+        source_event_ids: tuple[str, ...],
+        expires_at: datetime,
+        expected_revision: int,
+    ) -> WorldDecision:
+        """Persist a bounded, fallible interpretation without creating a fact.
+
+        ``source_event_ids`` retains the architecture document's field name,
+        but contains canonical projection source references (for example
+        ``message:<id>``), never opaque ``WorldEvent.event_id`` UUIDs.
+        """
+        return self.submit(
+            {
+                "type": "commit_private_impression",
+                "world_id": world_id,
+                "impression_id": impression_id,
+                "user_id": user_id,
+                "kind": kind,
+                "summary": summary,
+                "confidence": confidence,
+                "source_event_ids": list(source_event_ids),
+                "expires_at": expires_at.isoformat(),
+                "idempotency_key": f"private-impression:{impression_id}",
+            },
+            expected_revision=expected_revision,
+        )
+
+    def contradict_private_impression(
+        self,
+        world_id: str,
+        *,
+        impression_id: str,
+        source_event_ids: tuple[str, ...],
+        reason: str,
+        expected_revision: int,
+    ) -> WorldDecision:
+        return self.submit(
+            {
+                "type": "contradict_private_impression",
+                "world_id": world_id,
+                "impression_id": impression_id,
+                "source_event_ids": list(source_event_ids),
+                "reason": reason,
+                "idempotency_key": f"private-impression-contradiction:{impression_id}:{_hash(reason)[:16]}",
+            },
+            expected_revision=expected_revision,
+        )
+
+    def commit_private_commitment(
+        self,
+        world_id: str,
+        *,
+        commitment_id: str,
+        user_id: str,
+        intention: str,
+        source_event_ids: tuple[str, ...],
+        expires_at: datetime,
+        priority: int,
+        related_thread_id: str = "",
+        expected_revision: int,
+    ) -> WorldDecision:
+        """Persist an internal future concern; it is neither a plan nor an Action."""
+        return self.submit(
+            {
+                "type": "commit_private_commitment",
+                "world_id": world_id,
+                "commitment_id": commitment_id,
+                "user_id": user_id,
+                "intention": intention,
+                "source_event_ids": list(source_event_ids),
+                "expires_at": expires_at.isoformat(),
+                "priority": priority,
+                "related_thread_id": related_thread_id,
+                "idempotency_key": f"private-commitment:{commitment_id}",
+            },
+            expected_revision=expected_revision,
+        )
+
+    def resolve_private_commitment(
+        self,
+        world_id: str,
+        *,
+        commitment_id: str,
+        outcome: str,
+        reason: str,
+        expected_revision: int,
+    ) -> WorldDecision:
+        return self.submit(
+            {
+                "type": "resolve_private_commitment",
+                "world_id": world_id,
+                "commitment_id": commitment_id,
+                "outcome": outcome,
+                "reason": reason,
+                "idempotency_key": f"private-commitment-resolve:{commitment_id}:{outcome}",
+            },
+            expected_revision=expected_revision,
+        )
+
     def start_from_seed_file(self, path: Path) -> WorldDecision:
         """Start one clean world epoch from a human-reviewed YAML seed."""
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
@@ -2989,6 +3096,41 @@ class WorldKernel:
             if command.get("observed_at"):
                 clock_payload["observed_at"] = str(command["observed_at"])
             emit("ClockAdvanced", clock_payload)
+            # Inner records are temporal projections, not immortal memories.
+            # Emit terminal expiry events deterministically so replay and an
+            # incremental logical-clock advance converge on the same state.
+            for impression_id, raw_impression in sorted(
+                _as_dict(working.get("private_impressions", {}), "private impressions").items(),
+                key=lambda item: str(_as_dict(item[1], "private impression").get("expires_at") or ""),
+            ):
+                impression = _as_dict(raw_impression, "private impression")
+                expires_at = str(impression.get("expires_at") or "")
+                if (
+                    impression.get("status") == "active"
+                    and expires_at
+                    and _parse_at(expires_at) <= target_at
+                ):
+                    emit(
+                        "PrivateImpressionExpired",
+                        {"impression_id": impression_id, "reason": "logical_expiry"},
+                        logical_at=expires_at,
+                    )
+            for commitment_id, raw_commitment in sorted(
+                _as_dict(working.get("private_commitments", {}), "private commitments").items(),
+                key=lambda item: str(_as_dict(item[1], "private commitment").get("expires_at") or ""),
+            ):
+                commitment = _as_dict(raw_commitment, "private commitment")
+                expires_at = str(commitment.get("expires_at") or "")
+                if (
+                    commitment.get("status") == "active"
+                    and expires_at
+                    and _parse_at(expires_at) <= target_at
+                ):
+                    emit(
+                        "PrivateCommitmentExpired",
+                        {"commitment_id": commitment_id, "reason": "logical_expiry"},
+                        logical_at=expires_at,
+                    )
             # Weekly plans are intentions materialized from the seed.  Use the
             # pre-advance clock as the planning cutoff so a long replay jump
             # produces the same future plan that incremental ticks would have
@@ -4817,6 +4959,160 @@ class WorldKernel:
                     )[:20],
                 },
             )]
+        if command_type == "commit_private_impression":
+            impression_id = str(command.get("impression_id") or "")
+            user_id = str(command.get("user_id") or "")
+            kind = str(command.get("kind") or "")
+            summary = str(command.get("summary") or "").strip()
+            confidence = float(command.get("confidence") or 0.0)
+            sources = self._validated_inner_life_sources(
+                state,
+                user_id=user_id,
+                source_event_ids=command.get("source_event_ids", []),
+            )
+            expires_at = str(command.get("expires_at") or "")
+            if (
+                not impression_id
+                or impression_id in _as_dict(state.get("private_impressions", {}), "private impressions")
+                or kind not in {
+                    "possible_disappointment",
+                    "possible_confusion",
+                    "boundary_concern",
+                    "relational_hypothesis",
+                    "continuity_note",
+                }
+                or len(kind) > 80
+                or not summary
+                or len(summary) > 240
+                or not 0.0 < confidence <= 1.0
+                or not expires_at
+                or _parse_at(expires_at) <= _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+            ):
+                raise WorldError("private impression is outside the bounded schema")
+            return [
+                (
+                    "PrivateImpressionCommitted",
+                    {
+                        "impression_id": impression_id,
+                        "user_id": user_id,
+                        "kind": kind,
+                        "summary": summary,
+                        "confidence": confidence,
+                        "source_event_ids": sources,
+                        "expires_at": expires_at,
+                        "contradictory_evidence": [],
+                        "rule_version": "private-inner-life-v1",
+                    },
+                )
+            ]
+        if command_type == "contradict_private_impression":
+            impression_id = str(command.get("impression_id") or "")
+            impressions = _as_dict(state.get("private_impressions", {}), "private impressions")
+            impression = _as_dict(impressions.get(impression_id), "private impression")
+            sources = self._validated_inner_life_sources(
+                state,
+                user_id=str(impression.get("user_id") or ""),
+                source_event_ids=command.get("source_event_ids", []),
+            )
+            reason = str(command.get("reason") or "").strip()
+            if (
+                impression.get("status") != "active"
+                or not sources
+                or not set(sources).isdisjoint(
+                    set(_as_list(impression.get("source_event_ids", []), "impression sources"))
+                )
+                or not reason
+                or len(reason) > 240
+            ):
+                raise WorldError("private impression contradiction requires active impression and evidence")
+            return [
+                (
+                    "PrivateImpressionContradicted",
+                    {
+                        "impression_id": impression_id,
+                        "source_event_ids": sources,
+                        "reason": reason,
+                    },
+                )
+            ]
+        if command_type == "commit_private_commitment":
+            commitment_id = str(command.get("commitment_id") or "")
+            user_id = str(command.get("user_id") or "")
+            intention = str(command.get("intention") or "").strip()
+            sources = self._validated_inner_life_sources(
+                state,
+                user_id=user_id,
+                source_event_ids=command.get("source_event_ids", []),
+            )
+            expires_at = str(command.get("expires_at") or "")
+            priority = int(command.get("priority") or 0)
+            related_thread_id = str(command.get("related_thread_id") or "")
+            if (
+                not commitment_id
+                or commitment_id in _as_dict(state.get("private_commitments", {}), "private commitments")
+                or not intention
+                or len(intention) > 240
+                or not 1 <= priority <= 100
+                or not expires_at
+                or _parse_at(expires_at) <= _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+                or len(related_thread_id) > 160
+                or (
+                    related_thread_id
+                    and (
+                        _as_dict(
+                            _as_dict(state.get("conversation_threads", {}), "threads").get(
+                                related_thread_id
+                            ),
+                            "related thread",
+                        ).get("status")
+                        != "open"
+                        or str(
+                            _as_dict(
+                                _as_dict(state.get("conversation_threads", {}), "threads").get(
+                                    related_thread_id
+                                ),
+                                "related thread",
+                            ).get("user_id")
+                            or ""
+                        )
+                        != user_id
+                    )
+                )
+            ):
+                raise WorldError("private commitment is outside the bounded schema")
+            return [
+                (
+                    "PrivateCommitmentCommitted",
+                    {
+                        "commitment_id": commitment_id,
+                        "user_id": user_id,
+                        "intention": intention,
+                        "source_event_ids": sources,
+                        "expires_at": expires_at,
+                        "priority": priority,
+                        "related_thread_id": related_thread_id,
+                        "rule_version": "private-inner-life-v1",
+                    },
+                )
+            ]
+        if command_type == "resolve_private_commitment":
+            commitment_id = str(command.get("commitment_id") or "")
+            commitment = _as_dict(
+                _as_dict(state.get("private_commitments", {}), "private commitments").get(
+                    commitment_id
+                ),
+                "private commitment",
+            )
+            outcome = str(command.get("outcome") or "")
+            reason = str(command.get("reason") or "").strip()
+            if commitment.get("status") != "active" or outcome not in {"fulfilled", "released"} or not reason or len(reason) > 240:
+                raise WorldError("private commitment resolution requires an active bounded commitment")
+            return [
+                (
+                    "PrivateCommitmentResolved",
+                    {"commitment_id": commitment_id, "outcome": outcome, "reason": reason},
+                )
+            ]
         if command_type == "settle_turn":
             message_id = str(command.get("message_id") or "")
             status = str(command.get("status") or "")
@@ -5756,6 +6052,50 @@ class WorldKernel:
             for row in rows
         ]
 
+    @staticmethod
+    def _validated_inner_life_sources(
+        state: dict[str, object], *, user_id: str, source_event_ids: object
+    ) -> list[str]:
+        """Allow only committed records to justify a fallible inner proposal."""
+        source_ids = [
+            str(item)
+            for item in _as_list(source_event_ids, "inner life source ids")
+            if str(item)
+        ]
+        if not source_ids or len(source_ids) > 6 or len(set(source_ids)) != len(source_ids):
+            raise WorldError("private inner life requires one to six unique committed sources")
+        known = {
+            f"message:{str(item.get('message_id') or '')}"
+            for raw in _as_list(state.get("recent_messages", []), "recent messages")
+            if (item := _as_dict(raw, "recent message")).get("message_id")
+            and (not user_id or str(item.get("user_id") or "") in {"", user_id})
+        }
+        known.update(
+            str(fact_id)
+            for fact_id, raw in _as_dict(state.get("facts", {}), "facts").items()
+            if _fact_is_current(raw)
+            and str(_as_dict(raw, "fact").get("subject") or "")
+            in {user_id, "zhizhi", "world"}
+        )
+        known.update(
+            str(experience_id)
+            for experience_id in _as_dict(state.get("experiences", {}), "experiences")
+        )
+        known.update(
+            str(thread_id)
+            for thread_id, raw in _as_dict(state.get("conversation_threads", {}), "threads").items()
+            if (thread := _as_dict(raw, "thread")).get("status") == "open"
+            and str(thread.get("user_id") or "") == user_id
+        )
+        known.update(
+            str(action_id)
+            for action_id, raw in _as_dict(state.get("actions", {}), "actions").items()
+            if _as_dict(raw, "action").get("status") == "delivered"
+        )
+        if any(source_id not in known for source_id in source_ids):
+            raise WorldError("private inner life requires committed source ids")
+        return source_ids
+
     def _receipt(self, conn, world_id: str, key: str):
         return conn.execute(
             "select revision, event_ids_json from world_command_receipts where world_id = ? and idempotency_key = ?", (world_id, key)
@@ -6398,6 +6738,69 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
             thread["resolution_reason"] = str(payload["reason"])
             thread["terminal_state"] = "expired"
             thread["terminal_reason"] = str(payload["reason"])
+    elif event.event_type == "PrivateImpressionCommitted":
+        _as_dict(next_state.setdefault("private_impressions", {}), "private impressions")[
+            str(payload["impression_id"])
+        ] = {
+            **payload,
+            "status": "active",
+            "committed_at": event.logical_at,
+            "committed_revision": event.revision,
+        }
+    elif event.event_type == "PrivateImpressionContradicted":
+        impression = _as_dict(
+            _as_dict(next_state.setdefault("private_impressions", {}), "private impressions").get(
+                str(payload["impression_id"])
+            ),
+            "private impression",
+        )
+        if impression.get("status") == "active":
+            impression["status"] = "contradicted"
+            impression["contradicted_at"] = event.logical_at
+            impression["contradiction_reason"] = str(payload["reason"])
+            impression["contradictory_evidence"] = list(payload["source_event_ids"])
+    elif event.event_type == "PrivateCommitmentCommitted":
+        _as_dict(next_state.setdefault("private_commitments", {}), "private commitments")[
+            str(payload["commitment_id"])
+        ] = {
+            **payload,
+            "status": "active",
+            "committed_at": event.logical_at,
+            "committed_revision": event.revision,
+        }
+    elif event.event_type == "PrivateImpressionExpired":
+        impression = _as_dict(
+            _as_dict(next_state.setdefault("private_impressions", {}), "private impressions").get(
+                str(payload["impression_id"])
+            ),
+            "private impression",
+        )
+        if impression.get("status") == "active":
+            impression["status"] = "expired"
+            impression["expired_at"] = event.logical_at
+            impression["expiry_reason"] = str(payload["reason"])
+    elif event.event_type == "PrivateCommitmentResolved":
+        commitment = _as_dict(
+            _as_dict(next_state.setdefault("private_commitments", {}), "private commitments").get(
+                str(payload["commitment_id"])
+            ),
+            "private commitment",
+        )
+        if commitment.get("status") == "active":
+            commitment["status"] = str(payload["outcome"])
+            commitment["resolved_at"] = event.logical_at
+            commitment["resolution_reason"] = str(payload["reason"])
+    elif event.event_type == "PrivateCommitmentExpired":
+        commitment = _as_dict(
+            _as_dict(next_state.setdefault("private_commitments", {}), "private commitments").get(
+                str(payload["commitment_id"])
+            ),
+            "private commitment",
+        )
+        if commitment.get("status") == "active":
+            commitment["status"] = "expired"
+            commitment["expired_at"] = event.logical_at
+            commitment["expiry_reason"] = str(payload["reason"])
     elif event.event_type == "MediaRequested":
         _as_dict(next_state["media"], "media")[str(payload["request_id"])] = {**payload, "status": "requested"}
     elif event.event_type == "MediaRequestRejected":
@@ -6776,6 +7179,8 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "input_merges": {},
         "last_appraisal": None,
         "user_affect": {},
+        "private_impressions": {},
+        "private_commitments": {},
         "relationships": {},
         "long_term_affinity": {},
         "repair_cases": {},

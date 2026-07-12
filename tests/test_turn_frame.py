@@ -89,6 +89,8 @@ def test_turn_frame_is_bounded_and_carries_provenance() -> None:
         "open_threads",
         "open_actions",
         "capability",
+        "private_impressions",
+        "private_commitments",
     }
     assert "我有点失望" not in str(delta)
     assert len(str(delta)) < 3_000
@@ -208,3 +210,74 @@ def test_unresolved_user_disappointment_becomes_repair_advisory_despite_surface_
     assert repair.intensity == 100
     assert repair.confidence == 0.85
     assert repair.source_event_ids == ("qq:geoff:earlier",)
+
+
+def test_turn_frame_injects_only_active_user_scoped_inner_records_as_fallible_delta() -> None:
+    compiler = TurnFrameCompiler()
+    frame = compiler.compile(
+        world_id="world:1",
+        revision=10,
+        state_hash="e" * 64,
+        snapshot={
+            "clock": {"logical_at": "2026-07-12T12:00:00+00:00"},
+            "recent_messages": [],
+            "relationships": {},
+            "emotion_modulation": {},
+            "facts": {},
+            "experiences": {},
+            "conversation_threads": {},
+            "actions": {},
+            "agenda": {},
+            "private_impressions": {
+                "impression:active": {
+                    "status": "active",
+                    "user_id": "user:geoff",
+                    "kind": "possible_disappointment",
+                    "summary": "我感觉他可能有点失望。",
+                    "confidence": 0.8,
+                    "source_event_ids": ["message:m:earlier"],
+                    "expires_at": "2026-07-13T12:00:00+00:00",
+                },
+                "impression:expired": {
+                    "status": "active",
+                    "user_id": "user:geoff",
+                    "kind": "continuity_note",
+                    "summary": "过期的。",
+                    "confidence": 0.9,
+                    "source_event_ids": ["message:m:old"],
+                    "expires_at": "2026-07-11T12:00:00+00:00",
+                },
+                "impression:other": {
+                    "status": "active",
+                    "user_id": "user:other",
+                    "kind": "continuity_note",
+                    "summary": "别人的。",
+                    "confidence": 0.9,
+                    "source_event_ids": ["message:m:other"],
+                    "expires_at": "2026-07-13T12:00:00+00:00",
+                },
+            },
+            "private_commitments": {
+                "commitment:high": {
+                    "status": "active",
+                    "user_id": "user:geoff",
+                    "intention": "等合适时把话听完。",
+                    "priority": 80,
+                    "source_event_ids": ["message:m:earlier"],
+                    "expires_at": "2026-07-13T12:00:00+00:00",
+                }
+            },
+        },
+        user_id="user:geoff",
+        message=IncomingMessage(platform="qq", platform_user_id="geoff", text="没事。"),
+    )
+
+    delta = frame.prompt_delta()
+
+    assert [item["impression_id"] for item in frame.private_impressions] == ["impression:active"]
+    assert [item["commitment_id"] for item in frame.private_commitments] == ["commitment:high"]
+    assert delta["private_impressions"] == list(frame.private_impressions)
+    assert delta["private_commitments"] == list(frame.private_commitments)
+    assert "message:m:earlier" in frame.dependency_tokens
+    assert any(item.kind == "continuity" for item in compiler.advisories(frame))
+    assert any(item.kind == "agency" for item in compiler.advisories(frame))

@@ -35,6 +35,8 @@ class TurnFrame:
     relationship: dict[str, object]
     affect: dict[str, object]
     user_affect: dict[str, object]
+    private_impressions: tuple[dict[str, object], ...]
+    private_commitments: tuple[dict[str, object], ...]
     facts: tuple[dict[str, object], ...]
     experiences: tuple[dict[str, object], ...]
     open_threads: tuple[dict[str, object], ...]
@@ -53,6 +55,8 @@ class TurnFrame:
             "relationship": self.relationship,
             "affect": self.affect,
             "user_affect": self.user_affect,
+            "private_impressions": list(self.private_impressions),
+            "private_commitments": list(self.private_commitments),
             "recent_messages": list(self.recent_messages),
             "facts": list(self.facts),
             "experiences": list(self.experiences),
@@ -76,6 +80,9 @@ class TurnFrame:
             "open_threads": list(self.open_threads),
             "open_actions": list(self.open_actions),
             "capability": self.capability,
+            # These are explicitly fallible inner records, not user facts.
+            "private_impressions": list(self.private_impressions),
+            "private_commitments": list(self.private_commitments),
         }
 
 
@@ -115,6 +122,12 @@ class TurnFrameCompiler:
         user_affect = dict(
             self._mapping(self._mapping(snapshot.get("user_affect")).get(user_id))
         )
+        private_impressions = tuple(
+            self._private_impressions(snapshot, user_id=user_id)[: self.MAX_THREADS]
+        )
+        private_commitments = tuple(
+            self._private_commitments(snapshot, user_id=user_id)[: self.MAX_THREADS]
+        )
         capability = self._capability(snapshot)
         dependencies = tuple(
             token
@@ -124,6 +137,18 @@ class TurnFrameCompiler:
                 *(str(item.get("experience_id") or "") for item in experiences),
                 *(str(item.get("thread_id") or "") for item in threads),
                 *(str(item.get("action_id") or "") for item in actions),
+                *(str(item.get("impression_id") or "") for item in private_impressions),
+                *(
+                    str(source)
+                    for item in private_impressions
+                    for source in list(item.get("source_event_ids") or [])
+                ),
+                *(str(item.get("commitment_id") or "") for item in private_commitments),
+                *(
+                    str(source)
+                    for item in private_commitments
+                    for source in list(item.get("source_event_ids") or [])
+                ),
             )
             if token
         )
@@ -138,6 +163,8 @@ class TurnFrameCompiler:
             relationship=relationship,
             affect=affect,
             user_affect=user_affect,
+            private_impressions=private_impressions,
+            private_commitments=private_commitments,
             facts=facts,
             experiences=experiences,
             open_threads=threads,
@@ -201,6 +228,52 @@ class TurnFrameCompiler:
                     confidence=0.75,
                     source_event_ids=tuple(
                         str(item.get("thread_id") or "") for item in frame.open_threads
+                    ),
+                )
+            )
+        if frame.private_impressions:
+            advisories.append(
+                InnerAdvisory(
+                    kind="continuity",
+                    tendency="有未被证实的内在判断；可以影响分寸，但绝不能当作用户事实。",
+                    intensity=max(
+                        20,
+                        min(
+                            80,
+                            int(
+                                max(
+                                    float(item.get("confidence") or 0.0)
+                                    for item in frame.private_impressions
+                                )
+                                * 100
+                            ),
+                        ),
+                    ),
+                    confidence=max(
+                        float(item.get("confidence") or 0.0)
+                        for item in frame.private_impressions
+                    ),
+                    source_event_ids=tuple(
+                        str(item.get("impression_id") or "")
+                        for item in frame.private_impressions
+                        if str(item.get("impression_id") or "")
+                    ),
+                )
+            )
+        if frame.private_commitments:
+            advisories.append(
+                InnerAdvisory(
+                    kind="agency",
+                    tendency="有仍想在意的事；只在当前输入相关时自然承接，不把它说成已经安排或完成。",
+                    intensity=max(
+                        int(item.get("priority") or 0)
+                        for item in frame.private_commitments
+                    ),
+                    confidence=0.9,
+                    source_event_ids=tuple(
+                        str(item.get("commitment_id") or "")
+                        for item in frame.private_commitments
+                        if str(item.get("commitment_id") or "")
                     ),
                 )
             )
@@ -315,6 +388,53 @@ class TurnFrameCompiler:
             for action_id, raw in self._mapping(snapshot.get("actions")).items()
             if (item := self._mapping(raw)).get("status") in {"scheduled", "sending", "unknown"}
         ]
+
+    def _private_impressions(
+        self, snapshot: dict[str, object], *, user_id: str
+    ) -> list[dict[str, object]]:
+        logical_at = str(self._mapping(snapshot.get("clock")).get("logical_at") or "")
+        impressions = [
+            {
+                "impression_id": str(impression_id),
+                "kind": str(item.get("kind") or ""),
+                "summary": str(item.get("summary") or "")[:240],
+                "confidence": float(item.get("confidence") or 0.0),
+                "source_event_ids": list(item.get("source_event_ids") or [])[:6],
+                "expires_at": str(item.get("expires_at") or ""),
+                "contradictory_evidence": list(item.get("contradictory_evidence") or [])[:6],
+            }
+            for impression_id, raw in self._mapping(snapshot.get("private_impressions")).items()
+            if (item := self._mapping(raw)).get("status") == "active"
+            and item.get("user_id") == user_id
+            and (not logical_at or str(item.get("expires_at") or "") > logical_at)
+        ]
+        return sorted(
+            impressions,
+            key=lambda item: (-float(item["confidence"]), str(item["expires_at"])),
+        )
+
+    def _private_commitments(
+        self, snapshot: dict[str, object], *, user_id: str
+    ) -> list[dict[str, object]]:
+        logical_at = str(self._mapping(snapshot.get("clock")).get("logical_at") or "")
+        commitments = [
+            {
+                "commitment_id": str(commitment_id),
+                "intention": str(item.get("intention") or "")[:240],
+                "priority": int(item.get("priority") or 0),
+                "source_event_ids": list(item.get("source_event_ids") or [])[:6],
+                "expires_at": str(item.get("expires_at") or ""),
+                "related_thread_id": str(item.get("related_thread_id") or ""),
+            }
+            for commitment_id, raw in self._mapping(snapshot.get("private_commitments")).items()
+            if (item := self._mapping(raw)).get("status") == "active"
+            and item.get("user_id") == user_id
+            and (not logical_at or str(item.get("expires_at") or "") > logical_at)
+        ]
+        return sorted(
+            commitments,
+            key=lambda item: (-int(item["priority"]), str(item["expires_at"])),
+        )
 
     def _scene(self, snapshot: dict[str, object]) -> dict[str, object]:
         clock = self._mapping(snapshot.get("clock"))

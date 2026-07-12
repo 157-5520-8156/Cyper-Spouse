@@ -1,9 +1,11 @@
+from datetime import datetime
 from pathlib import Path
 import json
 
 import pytest
 
 from companion_daemon.db import CompanionStore
+from companion_daemon.conversation_cadence import ConversationCadence, FrozenTurnContext
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import IncomingMessage
@@ -167,6 +169,30 @@ async def test_mild_disappointment_resolved_in_the_same_turn_is_not_ledgered(
     ]
     assert all(event.event_type != "UserAffectAppraised" for event in new_events)
     assert "user:geoff" not in engine.world_kernel.snapshot(engine.world_id)["user_affect"]
+
+
+@pytest.mark.asyncio
+async def test_explicit_disappointment_with_natural_intensifiers_is_not_missed(
+    tmp_path: Path,
+) -> None:
+    engine, _ = _engine(tmp_path)
+    await engine.handle_message(
+        IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="我想分享件事", message_id="share-intensified"
+        )
+    )
+    await engine.handle_message(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            text="你刚才真的有点敷衍，我挺失望的。",
+            message_id="disappointed-intensified",
+        )
+    )
+
+    affect = engine.world_kernel.snapshot(engine.world_id)["user_affect"]["user:geoff"]
+    assert affect["kind"] == "disappointment"
+    assert affect["unresolved"] is True
 
 
 @pytest.mark.asyncio
@@ -348,7 +374,16 @@ async def test_model_validated_implicit_withdrawal_is_committed_to_the_world_led
     await engine.handle_message(
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="还行吧", message_id="implicit-model"
-        )
+        ),
+        turn_context=FrozenTurnContext(
+            turn_id="implicit-model",
+            world_id=engine.world_id,
+            user_id="user:geoff",
+            observed_at=datetime.fromisoformat(
+                engine.world_kernel.snapshot(engine.world_id)["clock"]["logical_at"]
+            ),
+            cadence=ConversationCadence("warm", None, 0, "offline_model_appraisal"),
+        ),
     )
 
     assert store.recent_turn_traces("geoff")[-1]["appraisal"] == "user_withdrawing"
