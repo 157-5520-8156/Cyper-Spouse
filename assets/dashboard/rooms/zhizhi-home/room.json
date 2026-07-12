@@ -1452,7 +1452,7 @@
         "occupancy": {"kind": "wall", "tiles": []},
         "layers": [{
           "role": "body",
-          "source": "generated/window-view-alpha-v2.png",
+          "source": "sources/window-view-chroma-v2.png", "sourceTransform": {"crop": [130, 60, 880, 1490], "chromaKey": "#00ff00", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [140, 225]},
           "output": "window-view-draft.png",
           "origin": [1018, 175]
         }],
@@ -1469,7 +1469,7 @@
         "occupancy": {"kind": "wall", "tiles": []},
         "layers": [{
           "role": "body",
-          "source": "generated/window-frame-alpha-v1.png",
+          "source": "sources/window-frame-chroma-v1.png", "sourceTransform": {"crop": [330, 35, 1080, 1075], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [165, 270]},
           "output": "window-frame-draft.png",
           "origin": [1005, 155]
         }],
@@ -1486,7 +1486,7 @@
         "occupancy": {"kind": "wall", "tiles": []},
         "layers": [{
           "role": "body",
-          "source": "generated/wall-art-window-upper-alpha-v1.png",
+          "source": "sources/wall-art-window-upper-chroma-v1.png", "sourceTransform": {"crop": [370, 150, 890, 1100], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [45, 90]},
           "output": "wall-art-window-upper-draft.png",
           "origin": [895, 140]
         }],
@@ -1503,7 +1503,7 @@
         "occupancy": {"kind": "wall", "tiles": []},
         "layers": [{
           "role": "body",
-          "source": "generated/wall-art-window-lower-alpha-v1.png",
+          "source": "sources/wall-art-window-lower-chroma-v1.png", "sourceTransform": {"crop": [250, 160, 870, 1230], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [55, 95]},
           "output": "wall-art-window-lower-draft.png",
           "origin": [892, 245]
         }],
@@ -1520,7 +1520,7 @@
         "occupancy": {"kind": "wall", "tiles": []},
         "layers": [{
           "role": "body",
-          "source": "generated/wall-art-bedside-alpha-v1.png",
+          "source": "sources/wall-art-bedside-chroma-v1.png", "sourceTransform": {"crop": [410, 190, 855, 1045], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [45, 80]},
           "output": "wall-art-bedside-draft.png",
           "origin": [1300, 355]
         }],
@@ -1538,7 +1538,7 @@
         "occupancy": {"kind": "wall", "tiles": []},
         "layers": [{
           "role": "body",
-          "source": "generated/window-curtains-alpha-v1.png",
+          "source": "sources/window-curtains-chroma-v1.png", "sourceTransform": {"crop": [295, 50, 1200, 1070], "chromaKey": "#ff00ff", "transparentThreshold": 12, "opaqueThreshold": 220, "despill": true, "resize": [270, 330]},
           "output": "window-curtains-draft.png",
           "origin": [965, 120]
         }],
@@ -1556,7 +1556,7 @@
         "occupancy": {"kind": "wall", "tiles": []},
         "layers": [{
           "role": "body",
-          "source": "generated/window-planter-left-alpha-v1.png",
+          "source": "sources/window-planter-left-chroma-v1.png", "sourceTransform": {"crop": [320, 280, 920, 990], "chromaKey": "#ff00ff", "transparentThreshold": 12, "opaqueThreshold": 220, "despill": true, "resize": [65, 78]},
           "output": "window-planter-left-draft.png",
           "origin": [1025, 290]
         }],
@@ -1574,7 +1574,7 @@
         "occupancy": {"kind": "wall", "tiles": []},
         "layers": [{
           "role": "body",
-          "source": "generated/window-planter-right-alpha-v1.png",
+          "source": "sources/window-planter-right-chroma-v1.png", "sourceTransform": {"crop": [320, 215, 1100, 890], "chromaKey": "#ff00ff", "transparentThreshold": 12, "opaqueThreshold": 220, "despill": true, "resize": [120, 85]},
           "output": "window-planter-right-draft.png",
           "origin": [1110, 325]
         }],
@@ -1591,7 +1591,7 @@
         "occupancy": {"kind": "wall", "tiles": []},
         "layers": [{
           "role": "body",
-          "source": "generated/window-hanging-plant-alpha-v1.png",
+          "source": "sources/window-hanging-plant-chroma-v1.png", "sourceTransform": {"crop": [295, 100, 975, 1140], "chromaKey": "#ff00ff", "transparentThreshold": 12, "opaqueThreshold": 220, "despill": true, "resize": [120, 185]},
           "output": "window-hanging-plant-draft.png",
           "origin": [1200, 185]
         }],
@@ -1608,7 +1608,7 @@
         "occupancy": {"kind": "wall", "tiles": []},
         "layers": [{
           "role": "body",
-          "source": "generated/window-string-lights-alpha-v1.png",
+          "source": "sources/window-string-lights-chroma-v1.png", "sourceTransform": {"crop": [370, 70, 815, 1285], "chromaKey": "#ff00ff", "transparentThreshold": 12, "opaqueThreshold": 220, "despill": true, "resize": [95, 220]},
           "output": "window-string-lights-draft.png",
           "origin": [1215, 190]
         }],
