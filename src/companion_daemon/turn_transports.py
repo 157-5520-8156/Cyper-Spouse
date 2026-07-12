@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from time import monotonic
 
 from companion_daemon.companion_turn import (
     DispatchAcceptance,
@@ -17,8 +18,11 @@ class CaptureTurnTransport(TurnTransport):
 
     receipt_namespace: str = "capture"
     beats: list[TurnBeat] = field(default_factory=list)
+    first_dispatched_at: float | None = None
 
     async def dispatch(self, beat: TurnBeat) -> DispatchAcceptance:
+        if self.first_dispatched_at is None:
+            self.first_dispatched_at = monotonic()
         self.beats.append(beat)
         return DispatchAcceptance(
             status="delivered",

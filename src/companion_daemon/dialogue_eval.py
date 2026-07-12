@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import dataclass, field
+import json
 from pathlib import Path
 import re
 import tempfile
+from time import monotonic
 
 from companion_daemon.config import get_settings
 from companion_daemon.companion_turn import CompanionTurn, ResponseBudget, TurnEnvelope
@@ -13,10 +15,12 @@ from companion_daemon.context_orchestrator import build_context_package
 from companion_daemon.emotion_state import interpret_interaction
 from companion_daemon.interaction_appraiser import InteractionEvidence, assess_appraisal_risk
 from companion_daemon.models import IncomingMessage, MoodState
+from companion_daemon.llm import model_call_scope, model_turn_scope
 from companion_daemon.reply_decision import classify_message
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.sanitize import sanitize_chat_text
 from companion_daemon.turn_transports import CaptureTurnTransport
+from companion_daemon.time import utc_now
 from companion_daemon.world import WorldKernel
 
 
@@ -126,6 +130,50 @@ class ReplyEval:
 class EvalScenario:
     name: str
     turns: list[str]
+
+
+@dataclass(frozen=True)
+class MeasuredTurn:
+    """One comparable bare/full observation, including failures as data."""
+
+    variant: str
+    scenario: str
+    turn_index: int
+    user_text: str
+    reply_text: str
+    visible_status: str
+    first_visible_delivery_ms: int | None
+    end_to_end_complete_ms: int
+    model_usage: dict[str, object]
+    issues: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class BaselineReport:
+    """A local, reproducible comparison; not a claim about live TTFT."""
+
+    model_profile: dict[str, object]
+    turns: tuple[MeasuredTurn, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "model_profile": self.model_profile,
+            "turns": [
+                {
+                    "variant": turn.variant,
+                    "scenario": turn.scenario,
+                    "turn_index": turn.turn_index,
+                    "user_text": turn.user_text,
+                    "reply_text": turn.reply_text,
+                    "visible_status": turn.visible_status,
+                    "first_visible_delivery_ms": turn.first_visible_delivery_ms,
+                    "end_to_end_complete_ms": turn.end_to_end_complete_ms,
+                    "model_usage": turn.model_usage,
+                    "issues": list(turn.issues),
+                }
+                for turn in self.turns
+            ],
+        }
 
 
 @dataclass(frozen=True)
@@ -651,6 +699,148 @@ async def run_scenarios(
             settings.database_path = original_db
 
 
+async def run_baseline_scenarios(
+    *, live: bool = False, max_cases: int | None = None
+) -> BaselineReport:
+    """Measure a deliberately thin model chat against the complete turn path.
+
+    ``bare`` is not the legacy Engine: it is exactly one call to the configured
+    reply model with the character prompt and delivered local transcript.  Each
+    variant gets a separate database and transcript, preventing the full path
+    from lending memories, world state, or tool side effects to the control.
+    The non-streaming provider cannot supply TTFT, so the visible metric is
+    first successful transport dispatch rather than a claimed token timestamp.
+    """
+    settings = get_settings()
+    original_db = settings.database_path
+    measured: list[MeasuredTurn] = []
+    profile: dict[str, object] = {
+        "live": live,
+        "configured_model": settings.deepseek_model,
+        "thinking_enabled": settings.deepseek_thinking_enabled,
+        "temperature": 0.75,
+        "bare_contract": "one model completion; character prompt plus delivered local transcript",
+    }
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            scenarios = SCENARIOS[: max_cases or len(SCENARIOS)]
+            for variant in ("bare", "full"):
+                for scenario in scenarios:
+                    temp_db = Path(tmp) / f"baseline-{variant}-{scenario.name}.sqlite"
+                    settings.database_path = temp_db
+                    engine = build_companion_engine(use_fake_model=not live)
+                    history: list[dict[str, str]] = []
+                    recent_questions = 0
+                    try:
+                        for turn_index, text in enumerate(scenario.turns, start=1):
+                            message = IncomingMessage(
+                                platform="qq",
+                                platform_user_id=f"baseline-{variant}-{scenario.name}",
+                                message_id=f"{scenario.name}:{turn_index}",
+                                text=text,
+                            )
+                            if variant == "bare":
+                                reply_text, status, first_visible, elapsed, turn_id = (
+                                    await _run_bare_baseline_turn(
+                                        engine, message=message, history=history
+                                    )
+                                )
+                            else:
+                                reply_text, status, first_visible, elapsed, turn_id = (
+                                    await _run_full_baseline_turn(engine, message=message)
+                                )
+                            evaluated = (
+                                evaluate_reply(
+                                    reply_text,
+                                    user_text=text,
+                                    recent_assistant_questions=recent_questions,
+                                )
+                                if reply_text
+                                else _evaluate_no_reply(text, is_deferred=status == "deferred")
+                            )
+                            measured.append(
+                                MeasuredTurn(
+                                    variant=variant,
+                                    scenario=scenario.name,
+                                    turn_index=turn_index,
+                                    user_text=text,
+                                    reply_text=reply_text,
+                                    visible_status=status,
+                                    first_visible_delivery_ms=first_visible,
+                                    end_to_end_complete_ms=elapsed,
+                                    model_usage=_usage_for_turn(engine, turn_id),
+                                    issues=tuple(issue.code for issue in evaluated.issues),
+                                )
+                            )
+                            if reply_text:
+                                history.extend(
+                                    [
+                                        {"role": "user", "content": text},
+                                        {"role": "assistant", "content": reply_text},
+                                    ]
+                                )
+                                history[:] = history[-16:]
+                                recent_questions = reply_text.count("？") + reply_text.count("?")
+                            else:
+                                recent_questions = 0
+                    finally:
+                        close = getattr(engine, "aclose", None)
+                        if callable(close):
+                            await close()
+    finally:
+        settings.database_path = original_db
+    return BaselineReport(profile, tuple(measured))
+
+
+async def _run_bare_baseline_turn(
+    engine, *, message: IncomingMessage, history: list[dict[str, str]]
+) -> tuple[str, str, int | None, int, str]:
+    turn_id = f"baseline:bare:{message.message_id}"
+    started = monotonic()
+    with model_turn_scope(turn_id=turn_id, cadence="baseline"):
+        with model_call_scope("bare_reply"):
+            text = await engine.model.complete(
+                [
+                    {"role": "system", "content": engine.companion_system_prompt},
+                    *history[-16:],
+                    {"role": "user", "content": message.text},
+                ],
+                temperature=0.75,
+            )
+    elapsed = max(0, int((monotonic() - started) * 1000))
+    reply_text = sanitize_chat_text(text)
+    return reply_text, "delivered" if reply_text else "failed", elapsed, elapsed, turn_id
+
+
+async def _run_full_baseline_turn(
+    engine, *, message: IncomingMessage
+) -> tuple[str, str, int | None, int, str]:
+    transport = CaptureTurnTransport(receipt_namespace="baseline")
+    turn = CompanionTurn(engine, transport)
+    started = monotonic()
+    outcome = await turn.respond(
+        TurnEnvelope.from_message(
+            message,
+            idempotency_key=f"{message.platform}:{message.platform_user_id}:{message.message_id}",
+        ),
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+    )
+    await turn.wait_for_delivery_continuations()
+    elapsed = max(0, int((monotonic() - started) * 1000))
+    first_visible = (
+        max(0, int((transport.first_dispatched_at - started) * 1000))
+        if transport.first_dispatched_at is not None
+        else None
+    )
+    return transport.text.strip(), outcome.visible_status, first_visible, elapsed, outcome.turn_id
+
+
+def _usage_for_turn(engine, turn_id: str) -> dict[str, object]:
+    report = engine.store.model_usage_report("day", utc_now())
+    turns = report.get("turns", {})
+    return dict(turns.get(turn_id, {})) if isinstance(turns, dict) else {}
+
+
 async def run_scenario_suite(
     *, live: bool = False, max_cases: int | None = None
 ) -> ScenarioSummary:
@@ -687,6 +877,26 @@ def format_context_results(results: list[ContextEval]) -> str:
     )
 
 
+def format_baseline_report(report: BaselineReport) -> str:
+    lines = [json.dumps(report.model_profile, ensure_ascii=False, sort_keys=True)]
+    for turn in report.turns:
+        lines.append(
+            "[{}:{}:{}] visible={} first_visible_delivery_ms={} end_to_end_complete_ms={} "
+            "calls={} total_tokens={} issues={}".format(
+                turn.variant,
+                turn.scenario,
+                turn.turn_index,
+                turn.visible_status,
+                turn.first_visible_delivery_ms,
+                turn.end_to_end_complete_ms,
+                turn.model_usage.get("calls", 0),
+                turn.model_usage.get("total_tokens", 0),
+                ",".join(turn.issues) or "ok",
+            )
+        )
+    return "\n".join(lines)
+
+
 def format_pragmatic_metrics(metrics: PragmaticMetrics) -> str:
     return (
         f"cases={metrics.cases} precision={metrics.precision:.3f} "
@@ -713,6 +923,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--live", action="store_true", help="Use configured DeepSeek model.")
     parser.add_argument("--max-cases", type=int, default=None)
     parser.add_argument(
+        "--baseline", action="store_true", help="Compare bare one-call chat with the full turn path."
+    )
+    parser.add_argument(
+        "--report", type=Path, default=None, help="Optional JSON file for a baseline run."
+    )
+    parser.add_argument(
         "--context", action="store_true", help="Run deterministic context-selection regressions."
     )
     parser.add_argument(
@@ -729,6 +945,16 @@ def main(argv: list[str] | None = None) -> int:
         metrics = run_pragmatic_adversarial_eval()
         print(format_pragmatic_metrics(metrics))
         return int(metrics.precision < 0.80 or metrics.recall < 0.90 or metrics.f1 < 0.85)
+    if args.baseline:
+        report = asyncio.run(
+            run_baseline_scenarios(live=args.live, max_cases=args.max_cases)
+        )
+        if args.report:
+            args.report.write_text(
+                json.dumps(report.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        print(format_baseline_report(report))
+        return 0
     summary = asyncio.run(run_scenario_suite(live=args.live, max_cases=args.max_cases))
     print(format_results(summary.results))
     return summary.exit_code

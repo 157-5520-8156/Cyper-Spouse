@@ -11,6 +11,7 @@ from companion_daemon.dialogue_eval import (
     evaluate_reply,
     format_results,
     pragmatic_classification_metrics,
+    run_baseline_scenarios,
     run_context_scenarios,
     run_pragmatic_adversarial_eval,
     summarize_results,
@@ -34,6 +35,18 @@ async def test_scenario_runner_records_none_reply_without_crashing(monkeypatch) 
 
     assert results
     assert results[0][2].cleaned == "<no reply>"
+
+
+@pytest.mark.asyncio
+async def test_baseline_runner_keeps_bare_and_full_variants_isolated() -> None:
+    report = await run_baseline_scenarios(max_cases=1)
+
+    assert report.model_profile["bare_contract"].startswith("one model completion")
+    assert {turn.variant for turn in report.turns} == {"bare", "full"}
+    assert len(report.turns) == 6
+    assert all(turn.end_to_end_complete_ms >= 0 for turn in report.turns)
+    assert all(turn.first_visible_delivery_ms is None or turn.first_visible_delivery_ms >= 0 for turn in report.turns)
+    assert all("legacy" not in turn.variant for turn in report.turns)
 
 
 def test_context_regression_suite_passes() -> None:
