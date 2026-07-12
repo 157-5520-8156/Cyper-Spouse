@@ -455,6 +455,7 @@ class WorldKernel:
         kind: str,
         expires_at: datetime,
         trace: dict[str, object],
+        complete_by_observed_at: datetime | None = None,
     ) -> tuple[int, int, str]:
         """Atomically create the outbox row, turn trace, and world action."""
         parts = tuple(text_parts or (text,))
@@ -463,6 +464,8 @@ class WorldKernel:
         world_id = str(trace.get("world_id") or "")
         if not world_id:
             raise WorldError("world delivery trace requires world_id")
+        if complete_by_observed_at is not None and complete_by_observed_at.tzinfo is None:
+            raise WorldError("outgoing completion deadline must be timezone-aware")
         denied_reasons: tuple[str, ...] = ()
         with self.store.connect() as conn:
             revision, state = self._load_state(conn, world_id)
@@ -563,6 +566,11 @@ class WorldKernel:
                                 "outbound_trigger": trigger,
                                 "topic_key": topic_key,
                                 "expires_at": expires_at.isoformat(),
+                                "complete_by_observed_at": (
+                                    complete_by_observed_at.isoformat()
+                                    if complete_by_observed_at is not None
+                                    else None
+                                ),
                                 "canonical_user_id": canonical_user_id,
                                 "platform": platform,
                                 "text": text,
@@ -691,6 +699,29 @@ class WorldKernel:
             if not action_id:
                 raise WorldError(f"world action for delivery {delivery_id} is missing")
             action = _as_dict(_as_dict(state["actions"], "actions")[action_id], "action")
+            current_segments = _as_list(
+                _as_dict(action.get("segment_state", {}), "segment state")["segments"],
+                "segments",
+            )
+            current_segment = next(
+                (
+                    _as_dict(item, "segment")
+                    for item in current_segments
+                    if str(_as_dict(item, "segment").get("segment_id") or "")
+                    == segment_id
+                ),
+                None,
+            )
+            if current_segment is None:
+                raise WorldError("outgoing segment does not belong to delivery")
+            if str(current_segment.get("status") or "") == "delivered":
+                if str(current_segment.get("external_receipt") or "") != str(
+                    external_receipt or ""
+                ):
+                    raise WorldError(
+                        "delivered segment cannot be reconciled with another receipt"
+                    )
+                return action
             segmented = self.action_coordinator.from_projection(
                 _as_dict(action.get("segment_state", {}), "segment state")
             )
@@ -806,6 +837,75 @@ class WorldKernel:
                 "complete": complete,
                 "cancelled_segment_ids": cancelled_ids,
             }
+
+    def record_outgoing_segment_acceptance(
+        self,
+        delivery_id: int,
+        segment_id: str,
+        *,
+        lookup_token: str,
+        expected_revision: int,
+    ) -> bool:
+        """Persist a non-terminal platform acceptance for later reconciliation."""
+        token = lookup_token.strip()
+        if not token or len(token) > 500:
+            raise WorldError("receipt lookup token must be present and bounded")
+        with self.store.connect() as conn:
+            action_row = conn.execute(
+                "select world_id from world_actions where json_extract(state_json, '$.delivery_id') = ?",
+                (delivery_id,),
+            ).fetchone()
+            if not action_row:
+                raise WorldError(f"outbox delivery {delivery_id} has no world action")
+            world_id = str(action_row["world_id"])
+            revision, state = self._load_state(conn, world_id)
+            self._check_revision(revision, expected_revision)
+            action_id = self.action_id_for_delivery(world_id, delivery_id)
+            if not action_id:
+                raise WorldError(f"world action for delivery {delivery_id} is missing")
+            action = _as_dict(_as_dict(state["actions"], "actions")[action_id], "action")
+            segments = _as_list(
+                _as_dict(action.get("segment_state", {}), "segment state")["segments"],
+                "segments",
+            )
+            segment = next(
+                (
+                    _as_dict(item, "segment")
+                    for item in segments
+                    if str(_as_dict(item, "segment").get("segment_id") or "")
+                    == segment_id
+                ),
+                None,
+            )
+            if segment is None or str(segment.get("status") or "") != "sending":
+                raise WorldError("only a claimed outgoing segment can be accepted")
+            existing = str(segment.get("receipt_lookup_token") or "")
+            if existing:
+                if existing != token:
+                    raise WorldError("outgoing segment already has another lookup token")
+                return False
+            self._append_and_project(
+                conn,
+                world_id,
+                revision,
+                state,
+                [
+                    (
+                        "ActionSegmentDispatchAccepted",
+                        {
+                            "action_id": action_id,
+                            "segment_id": segment_id,
+                            "lookup_token": token,
+                        },
+                    )
+                ],
+                idempotency_key=f"segment-accepted:{segment_id}",
+                correlation_id=str(uuid4()),
+                source="segment_delivery",
+                actor={"kind": "transport"},
+                causation_id=action_id,
+            )
+            return True
 
     def mark_outgoing_segment_unknown(
         self,
@@ -925,6 +1025,74 @@ class WorldKernel:
                 source="turn_coordinator",
                 actor={"kind": "user"},
                 causation_id=user_message_id,
+            )
+            return cancelled_ids
+
+    def expire_outgoing_remainder(
+        self,
+        delivery_id: int,
+        *,
+        reason: str,
+        expected_revision: int,
+        terminal_reason: str = "complete_deadline_elapsed",
+    ) -> tuple[str, ...]:
+        """Cancel only never-dispatched beats after a terminal coordination event."""
+        with self.store.connect() as conn:
+            action_row = conn.execute(
+                "select world_id from world_actions where json_extract(state_json, '$.delivery_id') = ?",
+                (delivery_id,),
+            ).fetchone()
+            if not action_row:
+                return ()
+            world_id = str(action_row["world_id"])
+            revision, state = self._load_state(conn, world_id)
+            self._check_revision(revision, expected_revision)
+            action_id = self.action_id_for_delivery(world_id, delivery_id)
+            if not action_id:
+                return ()
+            action = _as_dict(_as_dict(state["actions"], "actions")[action_id], "action")
+            segments = _as_list(
+                _as_dict(action.get("segment_state", {}), "segment state")["segments"],
+                "segments",
+            )
+            cancelled_ids = tuple(
+                str(_as_dict(item, "segment")["segment_id"])
+                for item in segments
+                if str(_as_dict(item, "segment").get("status") or "") == "planned"
+            )
+            if not cancelled_ids:
+                return ()
+            now = utc_now().isoformat()
+            conn.execute(
+                "update outbox_messages set status = 'cancelled', failed_at = ?, failure_reason = ? where id = ?",
+                (now, reason[:500], delivery_id),
+            )
+            conn.execute(
+                "update turn_traces set status = 'cancelled', failure_reason = ?, updated_at = ? where delivery_id = ?",
+                (reason[:500], now, delivery_id),
+            )
+            self._append_and_project(
+                conn,
+                world_id,
+                revision,
+                state,
+                [
+                    (
+                        "ActionSegmentsCancelled",
+                        {
+                            "action_id": action_id,
+                            "segment_ids": list(cancelled_ids),
+                            "user_message_id": "",
+                            "reason": reason,
+                            "terminal_reason": terminal_reason,
+                        },
+                    )
+                ],
+                idempotency_key=f"segment-remainder-cancel:{action_id}:{terminal_reason}",
+                correlation_id=str(uuid4()),
+                source="turn_coordinator",
+                actor={"kind": "system"},
+                causation_id=action_id,
             )
             return cancelled_ids
 
@@ -5820,8 +5988,16 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
             str(_as_dict(item, "segment")["status"])
             for item in _as_list(segment_state["segments"], "segments")
         }
-        segment_state["status"] = "planned" if "planned" in statuses else "delivered"
-        action["status"] = "scheduled" if "planned" in statuses else "delivered"
+        aggregate_status = next(
+            (
+                status
+                for status in ("unknown", "sending", "planned", "cancelled")
+                if status in statuses
+            ),
+            "delivered",
+        )
+        segment_state["status"] = aggregate_status
+        action["status"] = "scheduled" if aggregate_status == "planned" else aggregate_status
         if delivered_segment is not None:
             history = _as_list(next_state["recent_messages"], "recent messages")
             trace = _as_dict(action.get("trace", {}), "outgoing trace")
@@ -5840,6 +6016,13 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
                 }
             )
             next_state["recent_messages"] = history[-64:]
+    elif event.event_type == "ActionSegmentDispatchAccepted":
+        action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
+        segment_state = _as_dict(action["segment_state"], "segment state")
+        for raw_segment in _as_list(segment_state["segments"], "segments"):
+            segment = _as_dict(raw_segment, "segment")
+            if str(segment["segment_id"]) == str(payload["segment_id"]):
+                segment["receipt_lookup_token"] = str(payload["lookup_token"])
     elif event.event_type == "ActionSegmentDeliveryUncertain":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         segment_state = _as_dict(action["segment_state"], "segment state")
@@ -5858,9 +6041,24 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
             segment = _as_dict(raw_segment, "segment")
             if str(segment["segment_id"]) in cancelled_ids:
                 segment["status"] = "cancelled"
-                segment["terminal_reason"] = f"interrupted_by:{payload['user_message_id']}"
-        segment_state["status"] = "cancelled"
-        action["status"] = "cancelled"
+                segment["terminal_reason"] = str(
+                    payload.get("terminal_reason")
+                    or f"interrupted_by:{payload['user_message_id']}"
+                )
+        statuses = {
+            str(_as_dict(item, "segment").get("status") or "")
+            for item in _as_list(segment_state["segments"], "segments")
+        }
+        aggregate_status = next(
+            (
+                status
+                for status in ("unknown", "sending", "planned", "cancelled")
+                if status in statuses
+            ),
+            "delivered",
+        )
+        segment_state["status"] = aggregate_status
+        action["status"] = aggregate_status
         action["reason"] = str(payload.get("reason") or "")
     elif event.event_type == "ActionAttempted":
         _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]["attempted"] = True

@@ -1041,6 +1041,7 @@ class CompanionEngine:
         defer_delivery: bool = False,
         resume_action_id: str | None = None,
         turn_context: FrozenTurnContext | None = None,
+        complete_by_observed_at: datetime | None = None,
     ) -> CompanionReply | None:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         if self.world_kernel and self.world_id:
@@ -1073,6 +1074,7 @@ class CompanionEngine:
                         defer_delivery=defer_delivery,
                         resume_action_id=resume_action_id,
                         cadence=cadence,
+                        complete_by_observed_at=complete_by_observed_at,
                     )
             except Exception as exc:
                 try:
@@ -1482,6 +1484,7 @@ class CompanionEngine:
         defer_delivery: bool,
         resume_action_id: str | None,
         cadence: ConversationCadence | None = None,
+        complete_by_observed_at: datetime | None = None,
     ) -> CompanionReply | None:
         """World-mode turn path; legacy state tables are not behavioural inputs here."""
         assert self.world_kernel and self.world_id
@@ -2666,6 +2669,7 @@ class CompanionEngine:
             kind="reply",
             expires_at=expires_at,
             trace=trace,
+            complete_by_observed_at=complete_by_observed_at,
         )
         reply = CompanionReply(
             canonical_user_id=canonical_user_id,
