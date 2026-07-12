@@ -1352,6 +1352,30 @@
         "audit": {}
       },
       {
+        "id": "dining-side-table", "category": "furniture", "assetMode": "layered",
+        "depthTile": [3, 1, 0], "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{"role": "front", "source": "sources/dining-side-table-chroma-v1.png", "sourceTransform": {"crop": [326, 100, 942, 1125], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [72, 120]}, "output": "dining-side-table-draft.png", "origin": [855, 340], "depthBias": 500}],
+        "interactions": [], "audits": {"hidden": true, "solo": true, "behind": false, "front": false}, "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"}, "audit": {}
+      },
+      {
+        "id": "dining-side-plant", "attachedTo": "dining-side-table", "category": "plant", "assetMode": "layered",
+        "depthTile": [3, 1, 0], "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{"role": "front", "source": "sources/dining-side-plant-chroma-v1.png", "sourceTransform": {"crop": [319, 187, 946, 1082], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [52, 75]}, "output": "dining-side-plant-draft.png", "origin": [865, 300], "depthBias": 550}],
+        "interactions": [], "audits": {"hidden": true, "solo": true, "behind": false, "front": false}, "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"}, "audit": {}
+      },
+      {
+        "id": "foreground-ottoman", "category": "furniture", "assetMode": "layered",
+        "depthTile": [5.5, 7, 0], "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{"role": "front", "source": "sources/foreground-ottoman-chroma-v1.png", "sourceTransform": {"crop": [209, 225, 1049, 1008], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [95, 88]}, "output": "foreground-ottoman-draft.png", "origin": [645, 895], "depthBias": 500}],
+        "interactions": [], "audits": {"hidden": true, "solo": true, "behind": false, "front": false}, "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"}, "audit": {}
+      },
+      {
+        "id": "living-floor-lamp", "category": "lighting", "assetMode": "layered",
+        "depthTile": [4, 5, 0], "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{"role": "front", "source": "sources/living-floor-lamp-chroma-v1.png", "sourceTransform": {"crop": [514, 80, 737, 1159], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [40, 170]}, "output": "living-floor-lamp-draft.png", "origin": [420, 525], "depthBias": 500}],
+        "interactions": [], "audits": {"hidden": true, "solo": true, "behind": false, "front": false}, "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"}, "audit": {}
+      },
+      {
         "id": "foreground-console",
         "category": "furniture",
         "assetMode": "layered",

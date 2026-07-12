@@ -385,6 +385,14 @@
         }
       },
       "note": "Desk surface objects attach directly to desk. Shelf books and plants attach to their wall shelf; the photo cluster remains independent on the wall. No asset contains a carrier, wall, ceiling or roof pixel."
+    },
+    {
+      "id": "wave5-remaining-floor-assets-chroma-v1",
+      "targets": ["dining-side-table", "dining-side-plant", "foreground-ottoman", "living-floor-lamp"],
+      "status": "needs-art", "method": "imagegen-background-extraction",
+      "sources": ["sources/dining-side-table-chroma-v1.png", "sources/dining-side-plant-chroma-v1.png", "sources/foreground-ottoman-chroma-v1.png", "sources/living-floor-lamp-chroma-v1.png"],
+      "generation": {"reference": "zhizhi-room-isometric-v2.png", "background": "flat #ff00ff chroma", "alphaPostprocess": {"helper": "imagegen/scripts/remove_chroma_key.py", "keying": {"autoKey": "border", "transparentThreshold": 50, "opaqueThreshold": 160, "softMatte": true, "despill": true}}},
+      "note": "Dining plant attaches only to its side table. Ottoman and floor lamp are freestanding ground assets; the lamp is explicitly floor-standing and never ceiling- or roof-mounted."
     }
   ],
   "items": [
@@ -432,8 +440,8 @@
     {"id":"dining-chair-right","zone":"dining","category":"furniture","status":"planned","interactive":false},
     {"id":"dining-table-setting","zone":"dining","category":"decor-cluster","status":"planned","interactive":false},
     {"id":"dining-rug","zone":"dining","category":"soft-furnishing","status":"planned","interactive":false},
-    {"id":"dining-side-table","zone":"dining","category":"furniture","status":"planned","interactive":false},
-    {"id":"dining-side-plant","zone":"dining","category":"plant","status":"planned","interactive":false},
+    {"id":"dining-side-table","zone":"dining","category":"furniture","status":"planned","interactive":false,"note":"Art-draft side table carries only dining-side-plant."},
+    {"id":"dining-side-plant","zone":"dining","category":"plant","status":"planned","interactive":false,"note":"Art-draft plant attaches to dining-side-table."},
 
     {"id":"bed","zone":"bedroom","category":"furniture","status":"partial","interactive":true,"note":"Legacy bed assembly; frame and bedding will become separate layers/objects."},
     {"id":"bed-bedding","zone":"bedroom","category":"soft-furnishing","status":"planned","interactive":true},
@@ -455,8 +463,8 @@
     {"id":"foreground-console","zone":"foreground","category":"furniture","status":"planned","interactive":false},
     {"id":"foreground-console-plants","zone":"foreground","category":"plant","status":"planned","interactive":false},
     {"id":"foreground-table-lamp","zone":"foreground","category":"lighting","status":"planned","interactive":false},
-    {"id":"foreground-ottoman","zone":"foreground","category":"furniture","status":"planned","interactive":false},
-    {"id":"living-floor-lamp","zone":"living","category":"lighting","status":"planned","interactive":false},
+    {"id":"foreground-ottoman","zone":"foreground","category":"furniture","status":"planned","interactive":false,"note":"Independent art-draft foreground footstool."},
+    {"id":"living-floor-lamp","zone":"living","category":"lighting","status":"planned","interactive":false,"note":"Independent floor-standing art-draft lamp; never ceiling- or roof-mounted."},
     {"id":"living-large-plant","zone":"living","category":"plant","status":"planned","interactive":false}
   ]
 }

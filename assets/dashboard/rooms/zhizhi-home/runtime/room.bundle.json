@@ -410,14 +410,16 @@
         "zone": "dining",
         "category": "furniture",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft side table carries only dining-side-plant."
       },
       {
         "id": "dining-side-plant",
         "zone": "dining",
         "category": "plant",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft plant attaches to dining-side-table."
       },
       {
         "id": "bed",
@@ -562,14 +564,16 @@
         "zone": "foreground",
         "category": "furniture",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Independent art-draft foreground footstool."
       },
       {
         "id": "living-floor-lamp",
         "zone": "living",
         "category": "lighting",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Independent floor-standing art-draft lamp; never ceiling- or roof-mounted."
       },
       {
         "id": "living-large-plant",
@@ -1632,6 +1636,10 @@
       "bedsideLampFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bedside-lamp-front-draft.png",
       "bedsideLampLight1Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bedside-lamp-light-draft.png",
       "bedsideDecorClusterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bedside-decor-cluster-draft.png",
+      "diningSideTableFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/dining-side-table-draft.png",
+      "diningSidePlantFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/dining-side-plant-draft.png",
+      "foregroundOttomanFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-ottoman-draft.png",
+      "livingFloorLampFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/living-floor-lamp-draft.png",
       "foregroundConsoleFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-console-draft.png",
       "foregroundTableLampFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-table-lamp-front-draft.png",
       "foregroundTableLampLight1Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-table-lamp-light-draft.png",
@@ -3716,6 +3724,159 @@
         "audit": {},
         "auditPose": {},
         "attachedTo": "bedside-table"
+      },
+      {
+        "id": "dining-side-table",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          3,
+          1,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "diningSideTableFront0Draft",
+            "origin": [
+              855,
+              340
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "dining-side-plant",
+        "category": "plant",
+        "assetMode": "layered",
+        "tile": [
+          3,
+          1,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "diningSidePlantFront0Draft",
+            "origin": [
+              865,
+              300
+            ],
+            "depthBias": 550
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "dining-side-table"
+      },
+      {
+        "id": "foreground-ottoman",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          5.5,
+          7,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "foregroundOttomanFront0Draft",
+            "origin": [
+              645,
+              895
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "living-floor-lamp",
+        "category": "lighting",
+        "assetMode": "layered",
+        "tile": [
+          4,
+          5,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "livingFloorLampFront0Draft",
+            "origin": [
+              420,
+              525
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
       },
       {
         "id": "foreground-console",

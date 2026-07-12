@@ -192,6 +192,11 @@
 - 首次整屋、seven-object solo、七件逐一 hidden、desk hidden、shelf hidden、两个子 solo 与连续 tour 均已实际检查；laptop、书和文具没有进入书柜/椅子空间，墙架与照片墙没有侵入角色路线，浏览器控制台无 warning/error。Runtime 测试锁定逐件隐藏不改变路径，desk/shelf 只级联自己的后代，photo cluster 始终独立。草稿累计为 59 个对象、70 个构建资产，继续保持 `planned / needs-art`。
 - 无新屋顶/天花素材：壁架植物的承载语义明确为 shelf-mounted。
 
+## 全资产原子化 · 剩余地面资产草稿（2026-07-12）
+
+- 餐区边桌与盆栽成为明确父子；前景脚凳和客厅落地灯为独立对象。四者均从品红 chroma 原稿由 manifest 的 crop/key/despill/resize 构建，且落地灯明确不属于屋顶或天花资产。
+- 整屋草稿视觉检查通过：边桌在餐区右侧，脚凳在前景地毯边缘，落地灯未侵入屋顶或墙面。逐件 hidden/solo 和完整回归仍待本批下一步完成。
+
 ## 后续扩展规则
 
 - 后续若新增家具或新动作，必须同时添加 `behind/front` 或动作巡检入口，不能只改 daemon 映射。
