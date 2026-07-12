@@ -28,7 +28,9 @@ class CompanionStore:
 
     def _world_mode_is_persisted(self) -> bool:
         with self.connect() as conn:
-            row = conn.execute("select value from runtime_flags where key = 'world_mode_enabled'").fetchone()
+            row = conn.execute(
+                "select value from runtime_flags where key = 'world_mode_enabled'"
+            ).fetchone()
         return bool(row and row["value"] == "1")
 
     def _assert_legacy_behavior_write_allowed(self, operation: str) -> None:
@@ -216,6 +218,13 @@ class CompanionStore:
                   cache_miss_tokens integer not null,
                   total_tokens integer not null,
                   error text not null,
+                  world_id text not null default '',
+                  turn_id text not null default '',
+                  action_id text not null default '',
+                  cadence text not null default '',
+                  attempt integer not null default 1,
+                  pricing_version text not null default '',
+                  estimated_cost_usd real not null default 0,
                   created_at text not null
                 );
                 create index if not exists idx_model_usage_created
@@ -382,30 +391,59 @@ class CompanionStore:
             self._ensure_column(conn, "mood_state", "security", "integer not null default 45")
             self._ensure_column(conn, "mood_state", "curiosity", "integer not null default 40")
             self._ensure_column(conn, "mood_state", "initiative", "integer not null default 20")
-            self._ensure_column(conn, "mood_state", "emotional_charge", "integer not null default 0")
+            self._ensure_column(
+                conn, "mood_state", "emotional_charge", "integer not null default 0"
+            )
             self._ensure_column(conn, "mood_state", "boundary_level", "integer not null default 0")
-            self._ensure_column(conn, "mood_state", "perceived_respect", "integer not null default 50")
-            self._ensure_column(conn, "mood_state", "perceived_reliability", "integer not null default 50")
-            self._ensure_column(conn, "mood_state", "perceived_responsiveness", "integer not null default 50")
+            self._ensure_column(
+                conn, "mood_state", "perceived_respect", "integer not null default 50"
+            )
+            self._ensure_column(
+                conn, "mood_state", "perceived_reliability", "integer not null default 50"
+            )
+            self._ensure_column(
+                conn, "mood_state", "perceived_responsiveness", "integer not null default 50"
+            )
             self._ensure_column(conn, "mood_state", "last_user_intent", "text")
             self._ensure_column(conn, "mood_state", "last_interaction_event", "text")
             self._ensure_column(conn, "mood_state", "reply_style_hint", "text")
-            self._ensure_column(conn, "mood_state", "emotion_vector_json", "text not null default '{}'")
-            self._ensure_column(conn, "mood_state", "emotion_baseline_json", "text not null default '{}'")
-            self._ensure_column(conn, "mood_state", "emotion_affinity_json", "text not null default '{}'")
-            self._ensure_column(conn, "mood_state", "last_emotion_impact_json", "text not null default '{}'")
+            self._ensure_column(
+                conn, "mood_state", "emotion_vector_json", "text not null default '{}'"
+            )
+            self._ensure_column(
+                conn, "mood_state", "emotion_baseline_json", "text not null default '{}'"
+            )
+            self._ensure_column(
+                conn, "mood_state", "emotion_affinity_json", "text not null default '{}'"
+            )
+            self._ensure_column(
+                conn, "mood_state", "last_emotion_impact_json", "text not null default '{}'"
+            )
             self._ensure_column(conn, "mood_state", "last_emotion_source", "text")
             self._ensure_column(conn, "mood_state", "has_unread", "integer not null default 0")
             self._ensure_column(conn, "proactive_events", "trigger_type", "text")
             self._ensure_column(conn, "life_runtime", "user_event_effect", "text")
             self._ensure_column(conn, "life_runtime", "user_event_effect_until", "text")
             self._ensure_column(conn, "life_runtime", "base_attention_demand", "integer")
-            self._ensure_column(conn, "life_runtime", "user_event_attention_delta", "integer not null default 0")
+            self._ensure_column(
+                conn, "life_runtime", "user_event_attention_delta", "integer not null default 0"
+            )
             self._ensure_column(conn, "life_runtime", "state_effect", "text")
             self._ensure_column(conn, "life_runtime_events", "shared_at", "text")
             self._ensure_column(conn, "social_tasks", "origin_turn_trace_id", "integer")
             self._ensure_column(conn, "social_tasks", "reason_code", "text")
             self._ensure_column(conn, "social_tasks", "resolution", "text")
+            self._ensure_column(conn, "model_usage_events", "world_id", "text not null default ''")
+            self._ensure_column(conn, "model_usage_events", "turn_id", "text not null default ''")
+            self._ensure_column(conn, "model_usage_events", "action_id", "text not null default ''")
+            self._ensure_column(conn, "model_usage_events", "cadence", "text not null default ''")
+            self._ensure_column(conn, "model_usage_events", "attempt", "integer not null default 1")
+            self._ensure_column(
+                conn, "model_usage_events", "pricing_version", "text not null default ''"
+            )
+            self._ensure_column(
+                conn, "model_usage_events", "estimated_cost_usd", "real not null default 0"
+            )
             self._init_world_schema(conn)
             conn.execute(
                 "update life_runtime set base_attention_demand = attention_demand where base_attention_demand is null"
@@ -531,10 +569,7 @@ class CompanionStore:
         column: str,
         definition: str,
     ) -> None:
-        columns = {
-            row["name"]
-            for row in conn.execute(f"pragma table_info({table})").fetchall()
-        }
+        columns = {row["name"] for row in conn.execute(f"pragma table_info({table})").fetchall()}
         if column not in columns:
             conn.execute(f"alter table {table} add column {column} {definition}")
 
@@ -577,7 +612,9 @@ class CompanionStore:
             ).fetchone()
             return str(row["canonical_user_id"]) if row else canonical_user_id
 
-    def map_account(self, platform: Platform, platform_user_id: str, canonical_user_id: str) -> None:
+    def map_account(
+        self, platform: Platform, platform_user_id: str, canonical_user_id: str
+    ) -> None:
         now = utc_now().isoformat()
         with self.connect() as conn:
             conn.execute(
@@ -706,9 +743,17 @@ class CompanionStore:
                 ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)
                 """,
                 (
-                    canonical_user_id, direction, appraisal, expression_policy,
-                    json.dumps(allowed_facts, ensure_ascii=False), short_lived_constraint,
-                    observable_reason, text, delivery_id, now, now,
+                    canonical_user_id,
+                    direction,
+                    appraisal,
+                    expression_policy,
+                    json.dumps(allowed_facts, ensure_ascii=False),
+                    short_lived_constraint,
+                    observable_reason,
+                    text,
+                    delivery_id,
+                    now,
+                    now,
                 ),
             )
         return delivery_id, int(trace.lastrowid)
@@ -858,7 +903,9 @@ class CompanionStore:
             )
         return int(cursor.lastrowid)
 
-    def complete_turn_trace(self, trace_id: int, *, delivered: bool, failure_reason: str | None = None) -> None:
+    def complete_turn_trace(
+        self, trace_id: int, *, delivered: bool, failure_reason: str | None = None
+    ) -> None:
         now = utc_now().isoformat()
         with self.connect() as conn:
             conn.execute(
@@ -867,7 +914,12 @@ class CompanionStore:
                 set status = ?, failure_reason = ?, updated_at = ?
                 where id = ? and status = 'planned'
                 """,
-                ("delivered" if delivered else "failed", failure_reason[:500] if failure_reason else None, now, trace_id),
+                (
+                    "delivered" if delivered else "failed",
+                    failure_reason[:500] if failure_reason else None,
+                    now,
+                    trace_id,
+                ),
             )
 
     def resolve_turn_trace(self, trace_id: int, *, status: str, reason: str | None = None) -> None:
@@ -897,7 +949,8 @@ class CompanionStore:
     def turn_trace_id_for_delivery(self, delivery_id: int) -> int | None:
         with self.connect() as conn:
             row = conn.execute(
-                "select id from turn_traces where delivery_id = ? order by id desc limit 1", (delivery_id,)
+                "select id from turn_traces where delivery_id = ? order by id desc limit 1",
+                (delivery_id,),
             ).fetchone()
         return int(row["id"]) if row else None
 
@@ -1038,10 +1091,20 @@ class CompanionStore:
             ends_at=datetime.fromisoformat(row["ends_at"]),
             phone_attention=row["phone_attention"],
             notification_count=row["notification_count"],
-            last_notification_at=(datetime.fromisoformat(row["last_notification_at"]) if row["last_notification_at"] else None),
-            last_read_at=datetime.fromisoformat(row["last_read_at"]) if row["last_read_at"] else None,
+            last_notification_at=(
+                datetime.fromisoformat(row["last_notification_at"])
+                if row["last_notification_at"]
+                else None
+            ),
+            last_read_at=datetime.fromisoformat(row["last_read_at"])
+            if row["last_read_at"]
+            else None,
             user_event_effect=row["user_event_effect"],
-            user_event_effect_until=(datetime.fromisoformat(row["user_event_effect_until"]) if row["user_event_effect_until"] else None),
+            user_event_effect_until=(
+                datetime.fromisoformat(row["user_event_effect_until"])
+                if row["user_event_effect_until"]
+                else None
+            ),
             user_event_attention_delta=row["user_event_attention_delta"],
             state_effect=row["state_effect"],
             updated_at=datetime.fromisoformat(row["updated_at"]),
@@ -1059,13 +1122,24 @@ class CompanionStore:
                 ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    canonical_user_id, runtime.activity, runtime.activity_kind, runtime.base_attention_demand, runtime.attention_demand,
-                    runtime.interruptible, runtime.started_at.isoformat(), runtime.ends_at.isoformat(),
-                    runtime.phone_attention, runtime.notification_count,
-                    runtime.last_notification_at.isoformat() if runtime.last_notification_at else None,
+                    canonical_user_id,
+                    runtime.activity,
+                    runtime.activity_kind,
+                    runtime.base_attention_demand,
+                    runtime.attention_demand,
+                    runtime.interruptible,
+                    runtime.started_at.isoformat(),
+                    runtime.ends_at.isoformat(),
+                    runtime.phone_attention,
+                    runtime.notification_count,
+                    runtime.last_notification_at.isoformat()
+                    if runtime.last_notification_at
+                    else None,
                     runtime.last_read_at.isoformat() if runtime.last_read_at else None,
                     runtime.user_event_effect,
-                    runtime.user_event_effect_until.isoformat() if runtime.user_event_effect_until else None,
+                    runtime.user_event_effect_until.isoformat()
+                    if runtime.user_event_effect_until
+                    else None,
                     runtime.user_event_attention_delta,
                     runtime.state_effect,
                     runtime.updated_at.isoformat(),
@@ -1093,13 +1167,22 @@ class CompanionStore:
                 ) values (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    canonical_user_id, kind, content, started_at.isoformat(), ends_at.isoformat(), status,
-                    source, shared_at.isoformat() if shared_at else None, utc_now().isoformat(),
+                    canonical_user_id,
+                    kind,
+                    content,
+                    started_at.isoformat(),
+                    ends_at.isoformat(),
+                    status,
+                    source,
+                    shared_at.isoformat() if shared_at else None,
+                    utc_now().isoformat(),
                 ),
             )
         return int(cursor.lastrowid)
 
-    def complete_active_life_events(self, canonical_user_id: str, *, completed_at: datetime) -> None:
+    def complete_active_life_events(
+        self, canonical_user_id: str, *, completed_at: datetime
+    ) -> None:
         self._assert_legacy_behavior_write_allowed("complete_active_life_events")
         with self.connect() as conn:
             conn.execute(
@@ -1111,9 +1194,7 @@ class CompanionStore:
                 (completed_at.isoformat(), canonical_user_id),
             )
 
-    def correct_active_life_event(
-        self, canonical_user_id: str, *, kind: str, content: str
-    ) -> None:
+    def correct_active_life_event(self, canonical_user_id: str, *, kind: str, content: str) -> None:
         """Correct an invalid generated runtime block before it becomes history."""
         self._assert_legacy_behavior_write_allowed("correct_active_life_event")
         with self.connect() as conn:
@@ -1141,7 +1222,9 @@ class CompanionStore:
             ).fetchall()
         return list(reversed(rows))
 
-    def upcoming_life_plan_items(self, canonical_user_id: str, *, now: datetime, limit: int = 5) -> list[sqlite3.Row]:
+    def upcoming_life_plan_items(
+        self, canonical_user_id: str, *, now: datetime, limit: int = 5
+    ) -> list[sqlite3.Row]:
         now = now.astimezone(UTC)
         with self.connect() as conn:
             rows = conn.execute(
@@ -1167,7 +1250,11 @@ class CompanionStore:
                 where canonical_user_id = ? and starts_at < ? and ends_at > ?
                 order by starts_at asc
                 """,
-                (canonical_user_id, ends_at.astimezone(UTC).isoformat(), starts_at.astimezone(UTC).isoformat()),
+                (
+                    canonical_user_id,
+                    ends_at.astimezone(UTC).isoformat(),
+                    starts_at.astimezone(UTC).isoformat(),
+                ),
             ).fetchall()
         return list(rows)
 
@@ -1182,7 +1269,11 @@ class CompanionStore:
                 where canonical_user_id = ? and started_at < ? and ends_at >= ?
                 order by started_at asc, id asc
                 """,
-                (canonical_user_id, ends_at.astimezone(UTC).isoformat(), starts_at.astimezone(UTC).isoformat()),
+                (
+                    canonical_user_id,
+                    ends_at.astimezone(UTC).isoformat(),
+                    starts_at.astimezone(UTC).isoformat(),
+                ),
             ).fetchall()
         return list(rows)
 
@@ -1214,16 +1305,31 @@ class CompanionStore:
                   details,memory_note,share_state,changed_reason,created_at,updated_at
                 ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'private', null, ?, ?)
                 """,
-                (canonical_user_id, title, event_type, starts_at.astimezone(UTC).isoformat(),
-                 ends_at.astimezone(UTC).isoformat(), status, max(0, min(100, importance)), source,
-                 details, memory_note, now, now),
+                (
+                    canonical_user_id,
+                    title,
+                    event_type,
+                    starts_at.astimezone(UTC).isoformat(),
+                    ends_at.astimezone(UTC).isoformat(),
+                    status,
+                    max(0, min(100, importance)),
+                    source,
+                    details,
+                    memory_note,
+                    now,
+                    now,
+                ),
             )
         event_id = int(cursor.lastrowid)
-        self._record_calendar_transition(event_id, from_status=None, to_status=status, reason="创建事件")
+        self._record_calendar_transition(
+            event_id, from_status=None, to_status=status, reason="创建事件"
+        )
         self.sync_calendar_event_memory(canonical_user_id, event_id)
         return event_id
 
-    def calendar_events_between(self, canonical_user_id: str, *, starts_at: datetime, ends_at: datetime) -> list[sqlite3.Row]:
+    def calendar_events_between(
+        self, canonical_user_id: str, *, starts_at: datetime, ends_at: datetime
+    ) -> list[sqlite3.Row]:
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -1237,7 +1343,11 @@ class CompanionStore:
                 where event.canonical_user_id = ? and event.starts_at < ? and event.ends_at > ?
                 order by event.starts_at asc, event.importance desc
                 """,
-                (canonical_user_id, ends_at.astimezone(UTC).isoformat(), starts_at.astimezone(UTC).isoformat()),
+                (
+                    canonical_user_id,
+                    ends_at.astimezone(UTC).isoformat(),
+                    starts_at.astimezone(UTC).isoformat(),
+                ),
             ).fetchall()
         return list(rows)
 
@@ -1248,7 +1358,9 @@ class CompanionStore:
                 (canonical_user_id, source),
             ).fetchone()
 
-    def save_calendar_week(self, canonical_user_id: str, *, week_start: str, theme: str, summary: str, source: str) -> None:
+    def save_calendar_week(
+        self, canonical_user_id: str, *, week_start: str, theme: str, summary: str, source: str
+    ) -> None:
         self._assert_legacy_behavior_write_allowed("save_calendar_week")
         now = utc_now().isoformat()
         with self.connect() as conn:
@@ -1267,7 +1379,9 @@ class CompanionStore:
                 (canonical_user_id, week_start),
             ).fetchone()
 
-    def update_calendar_event_status(self, event_id: int, *, status: str, changed_reason: str | None = None) -> None:
+    def update_calendar_event_status(
+        self, event_id: int, *, status: str, changed_reason: str | None = None
+    ) -> None:
         self._assert_legacy_behavior_write_allowed("update_calendar_event_status")
         allowed = {
             "planned": {"active", "completed", "cancelled", "postponed"},
@@ -1277,7 +1391,9 @@ class CompanionStore:
             "cancelled": set(),
         }
         with self.connect() as conn:
-            row = conn.execute("select canonical_user_id, status from calendar_events where id = ?", (event_id,)).fetchone()
+            row = conn.execute(
+                "select canonical_user_id, status from calendar_events where id = ?", (event_id,)
+            ).fetchone()
             if not row:
                 raise ValueError(f"calendar event {event_id} does not exist")
             previous = str(row["status"])
@@ -1289,10 +1405,14 @@ class CompanionStore:
                 "update calendar_events set status = ?, changed_reason = ?, updated_at = ? where id = ?",
                 (status, changed_reason, utc_now().isoformat(), event_id),
             )
-        self._record_calendar_transition(event_id, from_status=previous, to_status=status, reason=changed_reason)
+        self._record_calendar_transition(
+            event_id, from_status=previous, to_status=status, reason=changed_reason
+        )
         self.sync_calendar_event_memory(str(row["canonical_user_id"]), event_id)
 
-    def _record_calendar_transition(self, event_id: int, *, from_status: str | None, to_status: str, reason: str | None) -> None:
+    def _record_calendar_transition(
+        self, event_id: int, *, from_status: str | None, to_status: str, reason: str | None
+    ) -> None:
         self._assert_legacy_behavior_write_allowed("record_calendar_transition")
         with self.connect() as conn:
             conn.execute(
@@ -1302,10 +1422,12 @@ class CompanionStore:
 
     def calendar_event_history(self, event_id: int) -> list[sqlite3.Row]:
         with self.connect() as conn:
-            return list(conn.execute(
-                "select from_status,to_status,reason,changed_at from calendar_event_history where calendar_event_id = ? order by id asc",
-                (event_id,),
-            ).fetchall())
+            return list(
+                conn.execute(
+                    "select from_status,to_status,reason,changed_at from calendar_event_history where calendar_event_id = ? order by id asc",
+                    (event_id,),
+                ).fetchall()
+            )
 
     def postpone_next_calendar_event(
         self,
@@ -1337,9 +1459,17 @@ class CompanionStore:
             shift = delay if starts_at >= now else now - starts_at + delay
             conn.execute(
                 "update calendar_events set starts_at = ?, ends_at = ?, status = 'postponed', changed_reason = ?, updated_at = ? where id = ?",
-                ((starts_at + shift).isoformat(), (ends_at + shift).isoformat(), reason, utc_now().isoformat(), event_id),
+                (
+                    (starts_at + shift).isoformat(),
+                    (ends_at + shift).isoformat(),
+                    reason,
+                    utc_now().isoformat(),
+                    event_id,
+                ),
             )
-        self._record_calendar_transition(event_id, from_status=str(row["status"]), to_status="postponed", reason=reason)
+        self._record_calendar_transition(
+            event_id, from_status=str(row["status"]), to_status="postponed", reason=reason
+        )
         self.sync_calendar_event_memory(canonical_user_id, event_id)
         return event_id
 
@@ -1373,10 +1503,19 @@ class CompanionStore:
         """Give every calendar event one stable, queryable memory record."""
         self._assert_legacy_behavior_write_allowed("sync_calendar_event_memory")
         with self.connect() as conn:
-            event = conn.execute("select * from calendar_events where id = ? and canonical_user_id = ?", (event_id, canonical_user_id)).fetchone()
+            event = conn.execute(
+                "select * from calendar_events where id = ? and canonical_user_id = ?",
+                (event_id, canonical_user_id),
+            ).fetchone()
             if not event:
                 return
-            status_label = {"planned": "计划中", "active": "进行中", "completed": "已发生", "cancelled": "已取消", "postponed": "已推迟"}.get(str(event["status"]), str(event["status"]))
+            status_label = {
+                "planned": "计划中",
+                "active": "进行中",
+                "completed": "已发生",
+                "cancelled": "已取消",
+                "postponed": "已推迟",
+            }.get(str(event["status"]), str(event["status"]))
             content = f"{event['title']}（{status_label}）"
             detail = event["memory_note"] or event["details"]
             if detail:
@@ -1384,15 +1523,27 @@ class CompanionStore:
             if event["changed_reason"]:
                 content += f"；变更原因：{event['changed_reason']}"
             source = f"calendar:event:{event_id}"
-            existing = conn.execute("select id from memories where canonical_user_id = ? and kind = 'calendar_event' and source = ?", (canonical_user_id, source)).fetchone()
+            existing = conn.execute(
+                "select id from memories where canonical_user_id = ? and kind = 'calendar_event' and source = ?",
+                (canonical_user_id, source),
+            ).fetchone()
             now = utc_now().isoformat()
             if existing:
                 memory_id = int(existing["id"])
-                conn.execute("update memories set content = ?, confidence = 1.0, updated_at = ? where id = ?", (content, now, memory_id))
+                conn.execute(
+                    "update memories set content = ?, confidence = 1.0, updated_at = ? where id = ?",
+                    (content, now, memory_id),
+                )
             else:
-                cursor = conn.execute("insert into memories (canonical_user_id,kind,content,source,confidence,created_at,updated_at) values (?, 'calendar_event', ?, ?, 1.0, ?, ?)", (canonical_user_id, content, source, now, now))
+                cursor = conn.execute(
+                    "insert into memories (canonical_user_id,kind,content,source,confidence,created_at,updated_at) values (?, 'calendar_event', ?, ?, 1.0, ?, ?)",
+                    (canonical_user_id, content, source, now, now),
+                )
                 memory_id = int(cursor.lastrowid)
-            conn.execute("insert into calendar_event_memories (calendar_event_id,memory_id,linked_at) values (?, ?, ?) on conflict(calendar_event_id) do update set memory_id=excluded.memory_id, linked_at=excluded.linked_at", (event_id, memory_id, now))
+            conn.execute(
+                "insert into calendar_event_memories (calendar_event_id,memory_id,linked_at) values (?, ?, ?) on conflict(calendar_event_id) do update set memory_id=excluded.memory_id, linked_at=excluded.linked_at",
+                (event_id, memory_id, now),
+            )
 
     def delete_calendar_events_by_source_prefix(self, canonical_user_id: str, prefix: str) -> None:
         self._assert_legacy_behavior_write_allowed("delete_calendar_events_by_source_prefix")
@@ -1405,10 +1556,15 @@ class CompanionStore:
     def cancel_elapsed_calendar_plans(self, canonical_user_id: str, *, now: datetime) -> None:
         self._assert_legacy_behavior_write_allowed("cancel_elapsed_calendar_plans")
         with self.connect() as conn:
-            rows = conn.execute("select id from calendar_events where canonical_user_id = ? and status in ('planned', 'active', 'postponed') and ends_at < ?", (canonical_user_id, now.astimezone(UTC).isoformat())).fetchall()
+            rows = conn.execute(
+                "select id from calendar_events where canonical_user_id = ? and status in ('planned', 'active', 'postponed') and ends_at < ?",
+                (canonical_user_id, now.astimezone(UTC).isoformat()),
+            ).fetchall()
         reason = "该计划时段已过去，但没有完成凭据；不能把它伪装成已发生。"
         for row in rows:
-            self.update_calendar_event_status(int(row["id"]), status="cancelled", changed_reason=reason)
+            self.update_calendar_event_status(
+                int(row["id"]), status="cancelled", changed_reason=reason
+            )
 
     def normalize_single_day_weekly_plans(self, canonical_user_id: str) -> list[int]:
         """Repair prototype weekly plans that accidentally occupied the next day."""
@@ -1429,11 +1585,17 @@ class CompanionStore:
                     continue
                 conn.execute(
                     "update calendar_events set ends_at = ?, updated_at = ? where id = ?",
-                    ((starts_at + timedelta(hours=2)).isoformat(), utc_now().isoformat(), int(row["id"])),
+                    (
+                        (starts_at + timedelta(hours=2)).isoformat(),
+                        utc_now().isoformat(),
+                        int(row["id"]),
+                    ),
                 )
         return [int(row["id"]) for row in rows]
 
-    def unshared_private_life_events(self, canonical_user_id: str, limit: int = 4) -> list[sqlite3.Row]:
+    def unshared_private_life_events(
+        self, canonical_user_id: str, limit: int = 4
+    ) -> list[sqlite3.Row]:
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -1448,7 +1610,9 @@ class CompanionStore:
             ).fetchall()
         return list(rows)
 
-    def trusted_private_life_event(self, canonical_user_id: str, event_id: int) -> sqlite3.Row | None:
+    def trusted_private_life_event(
+        self, canonical_user_id: str, event_id: int
+    ) -> sqlite3.Row | None:
         """Return one completed event that the deterministic world runtime owns."""
         with self.connect() as conn:
             return conn.execute(
@@ -1488,7 +1652,9 @@ class CompanionStore:
             ).fetchone()
         return row is not None
 
-    def save_life_day_plan(self, canonical_user_id: str, local_date: str, items: list[dict[str, object]]) -> None:
+    def save_life_day_plan(
+        self, canonical_user_id: str, local_date: str, items: list[dict[str, object]]
+    ) -> None:
         """Persist a private schedule. Planned entries are not lived facts."""
         self._assert_legacy_behavior_write_allowed("save_life_day_plan")
         with self.connect() as conn:
@@ -1505,9 +1671,16 @@ class CompanionStore:
                 """,
                 [
                     (
-                        canonical_user_id, local_date, item["slot"], item["kind"], item["activity"],
-                        item["attention_demand"], int(bool(item["interruptible"])), item["starts_at"],
-                        item["ends_at"], utc_now().isoformat(),
+                        canonical_user_id,
+                        local_date,
+                        item["slot"],
+                        item["kind"],
+                        item["activity"],
+                        item["attention_demand"],
+                        int(bool(item["interruptible"])),
+                        item["starts_at"],
+                        item["ends_at"],
+                        utc_now().isoformat(),
                     )
                     for item in items
                 ],
@@ -1527,7 +1700,9 @@ class CompanionStore:
             ).fetchone()
         return row
 
-    def update_life_day_plan_status(self, canonical_user_id: str, *, before: datetime, status: str) -> None:
+    def update_life_day_plan_status(
+        self, canonical_user_id: str, *, before: datetime, status: str
+    ) -> None:
         self._assert_legacy_behavior_write_allowed("update_life_day_plan_status")
         before = before.astimezone(UTC)
         with self.connect() as conn:
@@ -1542,7 +1717,9 @@ class CompanionStore:
     def activate_life_day_plan_item(self, item_id: int) -> None:
         self._assert_legacy_behavior_write_allowed("activate_life_day_plan_item")
         with self.connect() as conn:
-            conn.execute("update life_day_plan_items set status = 'active' where id = ?", (item_id,))
+            conn.execute(
+                "update life_day_plan_items set status = 'active' where id = ?", (item_id,)
+            )
 
     def adjust_next_life_day_plan_item(
         self,
@@ -1571,7 +1748,12 @@ class CompanionStore:
                     set activity = ?, adjustment_note = ?, attention_demand = ?
                     where id = ?
                     """,
-                    (activity, note, max(0, min(100, row["attention_demand"] + attention_delta)), row["id"]),
+                    (
+                        activity,
+                        note,
+                        max(0, min(100, row["attention_demand"] + attention_delta)),
+                        row["id"],
+                    ),
                 )
 
     def create_social_task(
@@ -1598,9 +1780,17 @@ class CompanionStore:
                 ) values (?, ?, 'pending', ?, ?, ?, ?, ?, ?, ?, ?, null, null, ?)
                 """,
                 (
-                    canonical_user_id, kind, platform, platform_user_id,
-                    json.dumps(payload, ensure_ascii=False), reason, origin_turn_trace_id, reason_code, due_at.astimezone(UTC).isoformat(),
-                    expires_at.astimezone(UTC).isoformat(), utc_now().isoformat(),
+                    canonical_user_id,
+                    kind,
+                    platform,
+                    platform_user_id,
+                    json.dumps(payload, ensure_ascii=False),
+                    reason,
+                    origin_turn_trace_id,
+                    reason_code,
+                    due_at.astimezone(UTC).isoformat(),
+                    expires_at.astimezone(UTC).isoformat(),
+                    utc_now().isoformat(),
                 ),
             )
         return int(cursor.lastrowid)
@@ -1646,7 +1836,9 @@ class CompanionStore:
                 (utc_now().isoformat(), canonical_user_id, kind),
             )
 
-    def claim_due_social_tasks(self, *, kind: str, now: datetime, limit: int = 8) -> list[sqlite3.Row]:
+    def claim_due_social_tasks(
+        self, *, kind: str, now: datetime, limit: int = 8
+    ) -> list[sqlite3.Row]:
         """Claim due work; stale claims are retried after a daemon crash."""
         self._assert_legacy_behavior_write_allowed("claim_due_social_tasks")
         now = now.astimezone(UTC)
@@ -2066,7 +2258,9 @@ class CompanionStore:
                 ),
             )
 
-    def active_fact_lines(self, canonical_user_id: str, *, subject: str = "user", limit: int = 8) -> list[str]:
+    def active_fact_lines(
+        self, canonical_user_id: str, *, subject: str = "user", limit: int = 8
+    ) -> list[str]:
         with self.connect() as conn:
             rows = conn.execute(
                 """
@@ -2307,15 +2501,31 @@ class CompanionStore:
         cache_miss_tokens: int = 0,
         total_tokens: int = 0,
         error: str = "",
+        world_id: str = "",
+        turn_id: str = "",
+        action_id: str = "",
+        cadence: str = "",
+        attempt: int = 1,
     ) -> None:
+        from companion_daemon.usage_metrics import estimate_model_cost_usd
+
+        estimated_cost_usd, pricing_version = estimate_model_cost_usd(
+            model=model,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            cache_hit_tokens=cache_hit_tokens,
+            cache_miss_tokens=cache_miss_tokens,
+        )
         with self.connect() as conn:
             conn.execute(
                 """
                 insert into model_usage_events (
                   purpose, model, status, latency_ms, prompt_tokens,
                   completion_tokens, reasoning_tokens, cache_hit_tokens,
-                  cache_miss_tokens, total_tokens, error, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  cache_miss_tokens, total_tokens, error, world_id, turn_id,
+                  action_id, cadence, attempt, pricing_version,
+                  estimated_cost_usd, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     purpose[:80],
@@ -2329,13 +2539,18 @@ class CompanionStore:
                     max(0, int(cache_miss_tokens)),
                     max(0, int(total_tokens)),
                     error[:500],
+                    world_id[:120],
+                    turn_id[:120],
+                    action_id[:120],
+                    cadence[:20],
+                    max(1, int(attempt)),
+                    pricing_version[:80],
+                    max(0.0, float(estimated_cost_usd)),
                     utc_now().isoformat(),
                 ),
             )
 
-    def model_usage_summary(
-        self, window: str, now: datetime
-    ) -> dict[str, dict[str, int]]:
+    def model_usage_summary(self, window: str, now: datetime) -> dict[str, dict[str, int]]:
         if window == "day":
             prefix = now.date().isoformat()
         elif window == "month":
@@ -2370,14 +2585,56 @@ class CompanionStore:
             "total_tokens",
             "latency_ms",
         )
-        summary = {
-            str(row["purpose"]): {key: int(row[key] or 0) for key in keys}
-            for row in rows
-        }
-        summary["_total"] = {
-            key: sum(item[key] for item in summary.values()) for key in keys
-        }
+        summary = {str(row["purpose"]): {key: int(row[key] or 0) for key in keys} for row in rows}
+        summary["_total"] = {key: sum(item[key] for item in summary.values()) for key in keys}
         return summary
+
+    def model_usage_report(
+        self,
+        window: str,
+        now: datetime,
+        *,
+        cny_per_usd: float = 7.2,
+    ) -> dict[str, object]:
+        """Aggregate persisted provider usage by purpose/cadence/model and turn."""
+        from companion_daemon.usage_metrics import aggregate_usage_rows
+
+        if window == "day":
+            prefix = now.date().isoformat()
+        elif window == "month":
+            prefix = now.strftime("%Y-%m")
+        else:
+            raise ValueError(f"Unsupported usage window: {window}")
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select * from model_usage_events
+                where substr(created_at, 1, ?) = ?
+                order by id
+                """,
+                (len(prefix), prefix),
+            ).fetchall()
+        groups: dict[str, list[sqlite3.Row]] = {}
+        turns: dict[str, list[sqlite3.Row]] = {}
+        for row in rows:
+            group_key = "|".join((str(row["purpose"]), str(row["cadence"]), str(row["model"])))
+            groups.setdefault(group_key, []).append(row)
+            turn_id = str(row["turn_id"] or "")
+            if turn_id:
+                turns.setdefault(turn_id, []).append(row)
+        return {
+            "window": window,
+            "currency_rate": {"cny_per_usd": max(0.0, float(cny_per_usd))},
+            "total": aggregate_usage_rows(rows, cny_per_usd=cny_per_usd),
+            "groups": {
+                key: aggregate_usage_rows(items, cny_per_usd=cny_per_usd)
+                for key, items in groups.items()
+            },
+            "turns": {
+                key: aggregate_usage_rows(items, cny_per_usd=cny_per_usd)
+                for key, items in turns.items()
+            },
+        }
 
     def save_proactive_event(
         self,

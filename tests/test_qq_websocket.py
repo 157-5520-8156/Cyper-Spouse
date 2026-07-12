@@ -1,9 +1,13 @@
 import asyncio
 from datetime import datetime, timezone
+import json
+from pathlib import Path
 import random
 
 import pytest
 
+from companion_daemon.db import CompanionStore
+from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.models import CompanionReply, IncomingMessage, MessageAttachment, MoodState
 from companion_daemon.qq_websocket import (
     CompanionQQClient,
@@ -15,6 +19,7 @@ from companion_daemon.qq_websocket import (
     _send_reply_parts,
 )
 from companion_daemon.turn_taking import TurnTakingPolicy
+from companion_daemon.world import WorldKernel
 
 
 def test_clean_content_strips_message_text() -> None:
@@ -26,6 +31,49 @@ def test_reply_msg_seq_is_positive() -> None:
     from companion_daemon.qq_websocket import _reply_msg_seq
 
     assert _reply_msg_seq() > 0
+
+
+@pytest.mark.asyncio
+async def test_world_typing_starts_before_reply_generation() -> None:
+    order: list[str] = []
+
+    class FakeEngine:
+        world_kernel = object()
+        world_id = "world"
+
+        def mark_phone_read_for_message(self, _incoming: IncomingMessage) -> None:
+            order.append("read")
+
+        def begin_world_typing(self, _incoming: IncomingMessage) -> None:
+            order.append("typing")
+
+        def stop_world_typing(self, _incoming: IncomingMessage, *, reason: str) -> None:
+            order.append(f"typing_stopped:{reason}")
+
+        async def handle_message(
+            self, _incoming: IncomingMessage, **_kwargs: object
+        ) -> CompanionReply:
+            # World mode starts typing after the message has entered the ledger;
+            # the adapter must not attempt that transition before observation.
+            self.begin_world_typing(_incoming)
+            order.append("model")
+            return CompanionReply(canonical_user_id="geoff", mood="calm", text="在。")
+
+    class FakeTarget:
+        async def reply(self, **_kwargs: object) -> None:
+            order.append("delivered")
+
+    coalescer = QQMessageCoalescer(
+        FakeEngine(), delay_seconds=0.01, human_timing=False
+    )
+    sent = await coalescer._generate_and_send(
+        IncomingMessage(platform="qq", platform_user_id="user", text="在吗"),
+        FakeTarget(),
+        key="c2c:user",
+    )
+
+    assert sent is True
+    assert order[:3] == ["read", "typing", "model"]
 
 
 def test_attachments_from_botpy() -> None:
@@ -321,9 +369,11 @@ async def test_coalescer_batches_rapid_messages() -> None:
     class FakeEngine:
         def __init__(self):
             self.seen_texts: list[str] = []
+            self.seen_source_ids: list[list[str]] = []
 
         async def handle_message(self, incoming: IncomingMessage) -> CompanionReply:
             self.seen_texts.append(incoming.text)
+            self.seen_source_ids.append(incoming.source_message_ids)
             return CompanionReply(canonical_user_id="geoff", mood="calm", text="收到")
 
     class FakeTarget:
@@ -345,17 +395,22 @@ async def test_coalescer_batches_rapid_messages() -> None:
 
     await coalescer.add(
         "c2c:user",
-        IncomingMessage(platform="qq", platform_user_id="user", text="第一句"),
+        IncomingMessage(
+            platform="qq", platform_user_id="user", message_id="qq:1", text="第一句"
+        ),
         first,
     )
     await coalescer.add(
         "c2c:user",
-        IncomingMessage(platform="qq", platform_user_id="user", text="第二句"),
+        IncomingMessage(
+            platform="qq", platform_user_id="user", message_id="qq:2", text="第二句"
+        ),
         second,
     )
     await asyncio.sleep(0.03)
 
     assert engine.seen_texts == ["第一句\n第二句"]
+    assert engine.seen_source_ids == [["qq:1", "qq:2"]]
     assert first.replies == []
     assert second.replies == ["收到"]
 
@@ -1170,3 +1225,87 @@ async def test_coalescer_sends_generated_image_after_text_reply() -> None:
     await asyncio.sleep(0.03)
 
     assert sent == [("user", "assets/life/reply.png")]
+
+
+@pytest.mark.asyncio
+async def test_new_hot_message_cancels_and_settles_claimed_turn_before_merge_recovery(
+    tmp_path: Path,
+) -> None:
+    class BlockingFirstModel:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.first_started = asyncio.Event()
+
+        async def complete(self, _messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                self.first_started.set()
+                await asyncio.Event().wait()
+            return json.dumps(
+                {
+                    "reply_text": "收到。",
+                    "mentioned_event_ids": [],
+                    "proposed_action_ids": [],
+                    "claims": [],
+                },
+                ensure_ascii=False,
+            )
+
+    class FakeTarget:
+        async def reply(self, **_kwargs: object) -> dict[str, str]:
+            return {"message_id": "qq-race-receipt"}
+
+    store = CompanionStore(tmp_path / "cancelled-hot-turn.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    model = BlockingFirstModel()
+    engine = CompanionEngine(
+        store,
+        model,
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+    )
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        human_timing=False,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+    )
+    target = FakeTarget()
+
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="user",
+            message_id="race-1",
+            text="第一条",
+        ),
+        target,
+    )
+    await asyncio.wait_for(model.first_started.wait(), timeout=2)
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="user",
+            message_id="race-2",
+            text="第二条",
+        ),
+        target,
+    )
+    await asyncio.sleep(0.3)
+
+    snapshot = world.snapshot(world_id)
+    assert snapshot["turns"]["race-1"]["status"] == "failed"
+    assert snapshot["turns"]["race-1"]["reason"] == "adapter_generation_cancelled"
+    assert any(
+        action.get("kind") == "model_call" and action.get("status") == "failed"
+        for action in snapshot["actions"].values()
+    )
+    assert any(
+        item.get("message_id") == "race-2" and item.get("text") == "第一条\n第二条"
+        for item in snapshot["recent_messages"]
+    )

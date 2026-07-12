@@ -1,16 +1,21 @@
+import asyncio
+from datetime import datetime, timezone
 import json
 from pathlib import Path
+from time import monotonic
 
 import pytest
 
 from companion_daemon.db import CompanionStore
 from companion_daemon.contextual_appraisal import validate_contextual_appraisal
+from companion_daemon.conversation_cadence import ConversationCadence, FrozenTurnContext
 from companion_daemon.engine import (
     CompanionEngine,
     contextual_history_for_user,
     seed_user,
 )
 from companion_daemon.models import IncomingMessage
+from companion_daemon.llm import ProviderCircuitBreaker
 from companion_daemon.world import WorldKernel
 
 
@@ -211,3 +216,94 @@ async def test_explicit_harm_uses_local_rule_without_spending_semantic_model_cal
 
     assert reply is not None
     assert world.snapshot(world_id)["last_appraisal"]["appraisal"] == "boundary_violation"
+
+
+@pytest.mark.asyncio
+async def test_open_real_provider_circuit_skips_appraisal_and_reply_models(
+    tmp_path: Path,
+) -> None:
+    class MustNotRun:
+        async def complete(self, messages, *, temperature: float) -> str:
+            raise AssertionError("open provider circuit must use local fallback")
+
+    breaker = ProviderCircuitBreaker(failure_threshold=1, cooldown_seconds=30)
+    breaker.record_failure()
+    main_model = MustNotRun()
+    main_model.circuit_breaker = breaker
+    store = CompanionStore(tmp_path / "open-appraisal-circuit.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        main_model,
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+        interaction_appraisal_model=MustNotRun(),
+    )
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="open-circuit",
+            text="你可真聪明，连这都做不好。",
+        )
+    )
+
+    assert reply is not None
+    assert engine.provider_circuit_state().status == "open"
+
+
+@pytest.mark.asyncio
+async def test_hot_turn_bounds_contextual_appraisal_before_reply_generation(
+    tmp_path: Path,
+) -> None:
+    class SlowAppraisalModel:
+        cancelled = False
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    slow = SlowAppraisalModel()
+    store = CompanionStore(tmp_path / "bounded-appraisal.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        BoundaryReplyModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+        interaction_appraisal_model=slow,
+    )
+    observed_at = datetime.now(timezone.utc)
+    frozen = FrozenTurnContext(
+        turn_id="bounded-appraisal",
+        world_id=world_id,
+        user_id="user:geoff",
+        observed_at=observed_at,
+        cadence=ConversationCadence("hot", 2.0, 4, "test_hot_turn"),
+    )
+
+    started = monotonic()
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="bounded-appraisal",
+            sent_at=observed_at,
+            text="你可真聪明，连这都做不好。",
+        ),
+        turn_context=frozen,
+    )
+
+    assert monotonic() - started < 8
+    assert slow.cancelled is True
+    assert reply is not None

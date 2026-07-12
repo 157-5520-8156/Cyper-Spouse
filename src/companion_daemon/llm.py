@@ -1,25 +1,62 @@
-from collections.abc import Callable, Iterator
+import asyncio
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass
 import json
 from time import monotonic
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 import httpx
+
+from companion_daemon.model_call_policy import ProviderCircuitState
+
+
+_T = TypeVar("_T")
 
 
 _MODEL_CALL_PURPOSE: ContextVar[str] = ContextVar(
     "model_call_purpose", default="unclassified"
 )
+_MODEL_CALL_META: ContextVar[dict[str, object]] = ContextVar(
+    "model_call_meta", default={}
+)
 
 
 @contextmanager
-def model_call_scope(purpose: str) -> Iterator[None]:
-    token = _MODEL_CALL_PURPOSE.set(purpose)
+def model_turn_scope(
+    *, world_id: str = "", turn_id: str = "", cadence: str = ""
+) -> Iterator[None]:
+    token = _MODEL_CALL_META.set(
+        {
+            **_MODEL_CALL_META.get(),
+            "world_id": world_id,
+            "turn_id": turn_id,
+            "cadence": cadence,
+        }
+    )
     try:
         yield
     finally:
+        _MODEL_CALL_META.reset(token)
+
+
+@contextmanager
+def model_call_scope(
+    purpose: str, *, action_id: str = "", attempt: int = 1
+) -> Iterator[None]:
+    token = _MODEL_CALL_PURPOSE.set(purpose)
+    meta_token = _MODEL_CALL_META.set(
+        {
+            **_MODEL_CALL_META.get(),
+            "action_id": action_id,
+            "attempt": max(1, int(attempt)),
+        }
+    )
+    try:
+        yield
+    finally:
+        _MODEL_CALL_META.reset(meta_token)
         _MODEL_CALL_PURPOSE.reset(token)
 
 
@@ -36,6 +73,124 @@ class ModelCallUsage:
     cache_miss_tokens: int = 0
     total_tokens: int = 0
     error: str = ""
+    world_id: str = ""
+    turn_id: str = ""
+    action_id: str = ""
+    cadence: str = ""
+    attempt: int = 1
+
+
+class ModelCircuitOpenError(ConnectionError):
+    """Raised immediately while a model provider circuit is open."""
+
+
+def _is_provider_outage(exc: Exception) -> bool:
+    if isinstance(exc, ModelCircuitOpenError):
+        return False
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status == 408 or status == 429 or status >= 500
+    return isinstance(exc, (ConnectionError, httpx.TransportError))
+
+
+class ProviderCircuitBreaker:
+    """Bound repeated provider stalls while allowing a timed recovery probe."""
+
+    def __init__(
+        self,
+        *,
+        failure_threshold: int = 2,
+        cooldown_seconds: float = 30.0,
+        clock: Callable[[], float] = monotonic,
+    ) -> None:
+        self.failure_threshold = max(1, int(failure_threshold))
+        self.cooldown_seconds = max(0.0, float(cooldown_seconds))
+        self.clock = clock
+        self._failures = 0
+        self._opened_at: float | None = None
+        self._probe_in_flight = False
+
+    def before_call(self) -> None:
+        if self._opened_at is None:
+            return
+        if self.clock() - self._opened_at < self.cooldown_seconds:
+            raise ModelCircuitOpenError("model provider circuit is open")
+        if self._probe_in_flight:
+            raise ModelCircuitOpenError("model provider recovery probe is in flight")
+        self._probe_in_flight = True
+
+    def record_success(self) -> None:
+        self._failures = 0
+        self._opened_at = None
+        self._probe_in_flight = False
+
+    def record_failure(self) -> None:
+        self._failures += 1
+        self._probe_in_flight = False
+        if self._failures >= self.failure_threshold:
+            self._opened_at = self.clock()
+
+    def release_probe(self) -> None:
+        """Release a half-open lease without treating caller cancellation as failure."""
+        self._probe_in_flight = False
+
+    def snapshot(self) -> ProviderCircuitState:
+        if self._opened_at is None:
+            return ProviderCircuitState.closed()
+        if self.clock() - self._opened_at < self.cooldown_seconds:
+            return ProviderCircuitState.open()
+        return ProviderCircuitState.half_open()
+
+
+async def complete_with_timeout(
+    awaitable: Awaitable[_T],
+    *,
+    timeout_seconds: float,
+    cancellation_grace_seconds: float = 0.1,
+) -> _T:
+    """Bound one model operation while preserving why its task was cancelled."""
+    task = asyncio.ensure_future(awaitable)
+    try:
+        done, _pending = await asyncio.wait(
+            (task,), timeout=max(0.0, float(timeout_seconds))
+        )
+    except asyncio.CancelledError:
+        await _cancel_with_grace(
+            task,
+            reason="caller_cancelled",
+            grace_seconds=cancellation_grace_seconds,
+        )
+        raise
+    if task in done:
+        return task.result()
+    await _cancel_with_grace(
+        task,
+        reason="provider_timeout",
+        grace_seconds=cancellation_grace_seconds,
+    )
+    raise TimeoutError(f"model call exceeded {timeout_seconds:g}s")
+
+
+async def _cancel_with_grace(
+    task: asyncio.Future[object], *, reason: str, grace_seconds: float
+) -> None:
+    task.cancel(reason)
+    done, _pending = await asyncio.wait(
+        (task,), timeout=max(0.0, float(grace_seconds))
+    )
+    if task in done:
+        _consume_task_result(task)
+    else:
+        task.add_done_callback(_consume_task_result)
+
+
+def _consume_task_result(task: asyncio.Future[object]) -> None:
+    try:
+        task.result()
+    except BaseException:
+        # A detached, already-cancelled child must not produce an unhandled-task
+        # warning or replace the caller's cancellation/timeout outcome.
+        pass
 
 
 class ChatModel(Protocol):
@@ -54,6 +209,8 @@ class DeepSeekChatModel:
         reasoning_effort: str = "high",
         transport: httpx.AsyncBaseTransport | None = None,
         usage_observer: Callable[[ModelCallUsage], None] | None = None,
+        circuit_breaker: ProviderCircuitBreaker | None = None,
+        client: httpx.AsyncClient | None = None,
     ):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
@@ -62,6 +219,12 @@ class DeepSeekChatModel:
         self.reasoning_effort = reasoning_effort
         self.transport = transport
         self.usage_observer = usage_observer
+        self.circuit_breaker = circuit_breaker
+        self.client = client or httpx.AsyncClient(
+            timeout=45,
+            trust_env=False,
+            transport=transport,
+        )
 
     def request_payload(self, messages: list[dict[str, str]], *, temperature: float) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -81,21 +244,19 @@ class DeepSeekChatModel:
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         started = monotonic()
         purpose = _MODEL_CALL_PURPOSE.get()
+        call_meta = _MODEL_CALL_META.get()
         try:
-            async with httpx.AsyncClient(
-                timeout=45,
-                trust_env=False,
-                transport=self.transport,
-            ) as client:
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {self.api_key}",
-                        "Content-Type": "application/json",
-                    },
-                    json=self.request_payload(messages, temperature=temperature),
-                )
-                response.raise_for_status()
+            if self.circuit_breaker is not None:
+                self.circuit_breaker.before_call()
+            response = await self.client.post(
+                f"{self.base_url}/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=self.request_payload(messages, temperature=temperature),
+            )
+            response.raise_for_status()
             payload = response.json()
             choices = payload.get("choices") if isinstance(payload, dict) else None
             if not isinstance(choices, list) or not choices:
@@ -104,17 +265,58 @@ class DeepSeekChatModel:
             content = message.get("content") if isinstance(message, dict) else None
             if not isinstance(content, str) or not content.strip():
                 raise ValueError("model response content must be a non-empty string")
-        except Exception as exc:
+        except asyncio.CancelledError as exc:
+            cancellation_kind = str(exc.args[0]) if exc.args else "caller_cancelled"
+            provider_timeout = cancellation_kind == "provider_timeout"
+            if self.circuit_breaker is not None:
+                if provider_timeout:
+                    self.circuit_breaker.record_failure()
+                else:
+                    self.circuit_breaker.release_probe()
             self._report_usage(
                 ModelCallUsage(
                     purpose=purpose,
                     model=self.model,
                     status="failed",
                     latency_ms=max(0, int((monotonic() - started) * 1000)),
-                    error=str(exc)[:500],
+                    error="provider_timeout" if provider_timeout else "caller_cancelled",
+                    world_id=str(call_meta.get("world_id") or ""),
+                    turn_id=str(call_meta.get("turn_id") or ""),
+                    action_id=str(call_meta.get("action_id") or ""),
+                    cadence=str(call_meta.get("cadence") or ""),
+                    attempt=max(1, int(call_meta.get("attempt") or 1)),
                 )
             )
             raise
+        except Exception as exc:
+            provider_outage = _is_provider_outage(exc)
+            if self.circuit_breaker is not None and provider_outage:
+                self.circuit_breaker.record_failure()
+            if isinstance(exc, (ValueError, TypeError, json.JSONDecodeError)):
+                error = f"schema_error:{exc}"
+            elif provider_outage:
+                error = f"provider_error:{exc}"
+            elif isinstance(exc, httpx.HTTPStatusError):
+                error = f"provider_rejection:{exc}"
+            else:
+                error = f"unexpected_error:{exc}"
+            self._report_usage(
+                ModelCallUsage(
+                    purpose=purpose,
+                    model=self.model,
+                    status="failed",
+                    latency_ms=max(0, int((monotonic() - started) * 1000)),
+                    error=error[:500],
+                    world_id=str(call_meta.get("world_id") or ""),
+                    turn_id=str(call_meta.get("turn_id") or ""),
+                    action_id=str(call_meta.get("action_id") or ""),
+                    cadence=str(call_meta.get("cadence") or ""),
+                    attempt=max(1, int(call_meta.get("attempt") or 1)),
+                )
+            )
+            raise
+        if self.circuit_breaker is not None:
+            self.circuit_breaker.record_success()
         usage = payload.get("usage")
         usage = usage if isinstance(usage, dict) else {}
         details = usage.get("completion_tokens_details")
@@ -131,9 +333,17 @@ class DeepSeekChatModel:
                 cache_hit_tokens=_usage_int(usage, "prompt_cache_hit_tokens"),
                 cache_miss_tokens=_usage_int(usage, "prompt_cache_miss_tokens"),
                 total_tokens=_usage_int(usage, "total_tokens"),
+                world_id=str(call_meta.get("world_id") or ""),
+                turn_id=str(call_meta.get("turn_id") or ""),
+                action_id=str(call_meta.get("action_id") or ""),
+                cadence=str(call_meta.get("cadence") or ""),
+                attempt=max(1, int(call_meta.get("attempt") or 1)),
             )
         )
         return content
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
 
     def _report_usage(self, usage: ModelCallUsage) -> None:
         if self.usage_observer is None:

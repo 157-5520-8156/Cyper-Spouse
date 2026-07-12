@@ -41,6 +41,10 @@ class IncomingMessage(BaseModel):
     channel_id: str | None = None
     message_id: str | None = None
     attachments: list[MessageAttachment] = Field(default_factory=list)
+    emoji: list[str] = Field(default_factory=list)
+    sticker_kind: str | None = None
+    reply_target: str | None = None
+    source_message_ids: list[str] = Field(default_factory=list)
     sent_at: datetime = Field(default_factory=utc_now)
 
 

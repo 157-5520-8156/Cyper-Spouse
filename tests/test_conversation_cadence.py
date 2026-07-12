@@ -13,6 +13,8 @@ from companion_daemon.models import CompanionReply, IncomingMessage
 from companion_daemon.qq_websocket import QQMessageCoalescer
 from companion_daemon.turn_taking import TurnInput, TurnTakingPolicy
 from companion_daemon.world_behavior import WorldBehaviorPolicy
+from companion_daemon.world import WorldKernel
+from companion_daemon.conversation_cadence import ConversationCadence, FrozenTurnContext
 
 
 @dataclass(frozen=True)
@@ -276,6 +278,241 @@ def test_recent_logical_time_cannot_make_an_observationally_cold_chat_hot() -> N
     )
 
     assert cadence.heat == "cold"
+
+
+def test_cadence_hysteresis_keeps_a_hot_turn_stable_near_the_entry_boundary() -> None:
+    cadence_module = import_module("companion_daemon.conversation_cadence")
+    observed_now = datetime(2026, 7, 12, 4, 0, 0, tzinfo=timezone.utc)
+    state = {
+        "recent_messages": [
+            {
+                "direction": "in",
+                "user_id": "user:geoff",
+                "observed_at": (observed_now - timedelta(seconds=100)).isoformat(),
+            },
+            {
+                "direction": "out",
+                "user_id": "user:geoff",
+                "observed_at": (observed_now - timedelta(seconds=95)).isoformat(),
+            },
+        ]
+    }
+
+    entering = cadence_module.derive_conversation_cadence(
+        state, user_id="user:geoff", observed_at=observed_now
+    )
+    staying = cadence_module.derive_conversation_cadence(
+        state,
+        user_id="user:geoff",
+        observed_at=observed_now,
+        previous_heat="hot",
+    )
+
+    assert entering.heat == "warm"
+    assert staying.heat == "hot"
+    assert staying.profile_version == "rhythm-v1"
+
+
+def test_future_or_out_of_order_observation_is_classified_conservatively() -> None:
+    cadence_module = import_module("companion_daemon.conversation_cadence")
+    now = datetime(2026, 7, 12, 4, 0, 0, tzinfo=timezone.utc)
+    future = {
+        "recent_messages": [
+            {
+                "direction": "out",
+                "user_id": "user:geoff",
+                "observed_at": (now + timedelta(seconds=6)).isoformat(),
+            }
+        ]
+    }
+    out_of_order = {
+        "recent_messages": [
+            {"direction": "in", "user_id": "user:geoff", "observed_at": now.isoformat()},
+            {
+                "direction": "out",
+                "user_id": "user:geoff",
+                "observed_at": (now - timedelta(seconds=2)).isoformat(),
+            },
+        ]
+    }
+
+    future_result = cadence_module.derive_conversation_cadence(
+        future, user_id="user:geoff", observed_at=now
+    )
+    order_result = cadence_module.derive_conversation_cadence(
+        out_of_order, user_id="user:geoff", observed_at=now
+    )
+
+    assert (future_result.heat, future_result.reason) == ("cold", "future_observation")
+    assert (order_result.heat, order_result.reason) == ("cold", "out_of_order_observation")
+
+
+def test_frozen_turn_context_is_the_single_cadence_value_for_a_turn() -> None:
+    cadence_module = import_module("companion_daemon.conversation_cadence")
+    observed_at = datetime(2026, 7, 12, 4, 0, 0, tzinfo=timezone.utc)
+    state = {
+        "recent_messages": [
+            {
+                "direction": "in",
+                "user_id": "user:geoff",
+                "observed_at": (observed_at - timedelta(seconds=20)).isoformat(),
+            },
+            {
+                "direction": "out",
+                "user_id": "user:geoff",
+                "observed_at": (observed_at - timedelta(seconds=10)).isoformat(),
+            },
+        ]
+    }
+
+    context = cadence_module.freeze_turn_context(
+        state,
+        user_id="user:geoff",
+        observed_at=observed_at,
+        turn_id="turn-7",
+        world_id="world-1",
+    )
+
+    assert context.turn_id == "turn-7"
+    assert context.world_id == "world-1"
+    assert context.observed_at is observed_at
+    assert context.cadence.heat == "hot"
+    assert context.usage_dimensions()["cadence"] == "hot"
+
+
+@pytest.mark.asyncio
+async def test_qq_passes_the_same_frozen_turn_context_into_engine_generation() -> None:
+    frozen = FrozenTurnContext(
+        turn_id="turn:frozen",
+        world_id="world",
+        user_id="user:geoff",
+        observed_at=datetime(2026, 7, 12, 12, 0, tzinfo=timezone.utc),
+        cadence=ConversationCadence("hot", 12.0, 3, "active_back_and_forth"),
+    )
+
+    class Engine:
+        def __init__(self) -> None:
+            self.received = None
+            self.called = asyncio.Event()
+
+        def freeze_turn_context(self, _message: IncomingMessage) -> FrozenTurnContext:
+            return frozen
+
+        async def handle_message(self, _message: IncomingMessage, **kwargs: object) -> CompanionReply:
+            self.received = kwargs.get("turn_context")
+            self.called.set()
+            return CompanionReply(canonical_user_id="geoff", mood="calm", text="在。")
+
+    class Target:
+        async def reply(self, **_kwargs: object) -> None:
+            return None
+
+    engine = Engine()
+    coalescer = QQMessageCoalescer(engine, delay_seconds=0.01)
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="继续？"),
+        Target(),
+    )
+    await asyncio.wait_for(engine.called.wait(), timeout=1)
+
+    assert engine.received is frozen
+
+
+@pytest.mark.asyncio
+async def test_real_world_qq_two_turns_freeze_hot_cadence_type_and_settle_delivery(
+    tmp_path: Path,
+) -> None:
+    store = CompanionStore(tmp_path / "qq-real-world.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    order: list[str] = []
+
+    class OrderedModel(FakeCompanionModel):
+        async def complete(self, messages, *, temperature=0.8):  # type: ignore[no-untyped-def]
+            order.append("model")
+            return await super().complete(messages, temperature=temperature)
+
+    model = OrderedModel()
+    engine = CompanionEngine(
+        store,
+        model,
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+    )
+    original_typing = engine.begin_world_typing
+    original_handle = engine.handle_message
+    seen_contexts: list[FrozenTurnContext] = []
+
+    def record_typing(message: IncomingMessage) -> None:
+        order.append("typing")
+        original_typing(message)
+
+    async def record_handle(message: IncomingMessage, **kwargs: object):  # type: ignore[no-untyped-def]
+        context = kwargs.get("turn_context")
+        assert isinstance(context, FrozenTurnContext)
+        seen_contexts.append(context)
+        return await original_handle(message, **kwargs)
+
+    engine.begin_world_typing = record_typing  # type: ignore[method-assign]
+    engine.handle_message = record_handle  # type: ignore[method-assign]
+
+    class ReceiptTarget:
+        def __init__(self) -> None:
+            self.count = 0
+
+        async def reply(self, **_kwargs: object) -> dict[str, str]:
+            self.count += 1
+            order.append("delivery")
+            return {"message_id": f"qq-out-{self.count}"}
+
+    target = ReceiptTarget()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+    )
+    for index, text in enumerate(("在吗？", "继续？"), start=1):
+        await coalescer.add(
+            "c2c:geoff",
+            IncomingMessage(
+                platform="qq",
+                platform_user_id="geoff",
+                message_id=f"qq-in-{index}",
+                text=text,
+                emoji=["qq-face:178"] if index == 1 else [],
+                sticker_kind="[无语]" if index == 1 else None,
+                reply_target="qq-prior" if index == 1 else None,
+            ),
+            target,
+        )
+        for _ in range(40):
+            await asyncio.sleep(0.05)
+            turn = world.snapshot(world_id).get("turns", {}).get(f"qq-in-{index}", {})
+            if turn.get("status") == "delivered":
+                break
+
+    assert [context.cadence.heat for context in seen_contexts] == ["cold", "hot"]
+    assert len(model.calls) == 2
+    assert order.index("typing") < order.index("model") < order.index("delivery")
+    delivered = [
+        action
+        for action in world.snapshot(world_id)["actions"].values()
+        if action.get("kind") == "outgoing_message"
+        and action.get("status") == "delivered"
+    ]
+    assert len(delivered) == 2
+    first_observed = next(
+        item
+        for item in world.snapshot(world_id)["recent_messages"]
+        if item.get("message_id") == "qq-in-1"
+    )
+    assert first_observed["emoji"] == ["qq-face:178"]
+    assert first_observed["sticker_kind"] == "[无语]"
+    assert first_observed["reply_target"] == "qq-prior"
+    assert first_observed["source_message_ids"] == ["qq-in-1"]
 
 
 def test_legacy_runtime_derives_hot_cadence_from_delivered_chat_history(

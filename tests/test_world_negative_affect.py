@@ -143,7 +143,7 @@ def test_sub_hour_clock_ticks_carry_decay_remainder_forward(tmp_path: Path) -> N
         now + timedelta(hours=1),
         expected_revision=kernel.revision(world_id),
     )
-    assert kernel.snapshot(world_id)["emotion_modulation"]["vector"]["hurt"] == 16
+    assert kernel.snapshot(world_id)["emotion_modulation"]["vector"]["hurt"] == 17
 
 
 def test_logical_decay_that_clears_affect_has_an_explicit_resolution_event(tmp_path: Path) -> None:
@@ -153,12 +153,19 @@ def test_logical_decay_that_clears_affect_has_an_explicit_resolution_event(tmp_p
 
     kernel.advance(
         world_id,
-        now + timedelta(hours=12),
+        now + timedelta(hours=72),
         expected_revision=kernel.revision(world_id),
     )
 
     events = kernel.events(world_id)
     assert any(event.event_type == "AffectResolved" for event in events)
+    archived = kernel.snapshot(world_id)["emotion_modulation"]["archived_episodes"]
+    assert any(
+        episode["source_reference"] == "message:affect-message:1"
+        and episode["status"] == "resolved"
+        for episode in archived
+    )
+    assert kernel.rebuild_projection(world_id, "world_current_state").matches_live is True
     # A later, independently settled NPC conflict may create new unresolved
     # emotion without undoing the explicit resolution of the user's offense.
     affect = kernel.snapshot(world_id)["emotion_modulation"]
@@ -307,9 +314,9 @@ def test_thread_expiry_in_a_long_jump_is_decayed_only_after_it_occurs(tmp_path: 
     )
     decayed_expiry = affect_events[expiry_index + 1]
     assert decayed_expiry.event_type == "AffectDecayed"
-    assert decayed_expiry.payload["vector"]["sadness"] == 2
-    assert decayed_expiry.payload["vector"]["loneliness"] == 1
-    assert decayed_expiry.payload["vector"]["anxiety"] == 1
+    assert decayed_expiry.payload["vector"]["sadness"] == 4
+    assert decayed_expiry.payload["vector"]["loneliness"] == 3
+    assert decayed_expiry.payload["vector"]["anxiety"] == 4
     assert decayed_expiry.payload["source_appraisal"] == "conversation_thread_expired"
 
     # A life outcome at the same logical instant may legitimately continue to

@@ -1582,7 +1582,30 @@ async def test_provider_outage_returns_a_local_fact_safe_reply(tmp_path: Path) -
 
 
 @pytest.mark.asyncio
-async def test_audit_provider_outage_does_not_block_a_locally_validated_reply(
+async def test_reply_programming_error_fails_closed_instead_of_becoming_outage_fallback(
+    tmp_path: Path,
+) -> None:
+    class BrokenModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            raise RuntimeError("programming integration bug")
+
+    world, world_id, engine = _world_engine(tmp_path, BrokenModel())
+
+    with pytest.raises(RuntimeError, match="programming integration bug"):
+        await engine.handle_message(
+            IncomingMessage(
+                platform="simulator",
+                platform_user_id="geoff",
+                message_id="reply-programming-error",
+                text="你觉得呢？",
+            )
+        )
+
+    assert world.snapshot(world_id)["turns"]["reply-programming-error"]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_fact_free_reply_skips_independent_grounding_audit(
     tmp_path: Path,
 ) -> None:
     class AuditOfflineModel:
@@ -1613,7 +1636,7 @@ async def test_audit_provider_outage_does_not_block_a_locally_validated_reply(
 
     assert reply is not None
     assert reply.text
-    assert model.calls == 2
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio

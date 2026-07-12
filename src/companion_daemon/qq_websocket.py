@@ -146,6 +146,7 @@ class QQMessageCoalescer:
         self._deferred_tasks: dict[str, asyncio.Task[None]] = {}
         self._afterthought_tasks: dict[str, list[asyncio.Task[None]]] = {}
         self._active_sends: dict[str, ActiveSend] = {}
+        self._frozen_turn_contexts: dict[str, object] = {}
 
     async def add(self, key: str, incoming: IncomingMessage, reply_target: ReplyTarget) -> None:
         self._cancel_afterthought(key)
@@ -244,7 +245,11 @@ class QQMessageCoalescer:
         latest = queued[-1].incoming.text if queued else ""
         merged = "\n".join(item.incoming.text for item in queued if item.incoming.text.strip())
         cadence = None
-        if queued and hasattr(self.engine, "conversation_cadence"):
+        if queued and hasattr(self.engine, "freeze_turn_context"):
+            context = self.engine.freeze_turn_context(queued[-1].incoming)
+            self._frozen_turn_contexts[key] = context
+            cadence = context.cadence
+        elif queued and hasattr(self.engine, "conversation_cadence"):
             cadence = self.engine.conversation_cadence(queued[-1].incoming)
         return self.turn_policy.decide(
             TurnInput(pending_count=len(queued), latest_text=latest, merged_text=merged),
@@ -265,7 +270,19 @@ class QQMessageCoalescer:
                 for attachment in item.incoming.attachments
             ]
             merged = last.incoming.model_copy(
-                update={"text": merged_text, "attachments": attachments}
+                update={
+                    "text": merged_text,
+                    "attachments": attachments,
+                    "emoji": [
+                        emoji
+                        for item in queued
+                        for emoji in item.incoming.emoji
+                    ][:16],
+                    "source_message_ids": [
+                        str(item.incoming.message_id or item.incoming.sent_at.isoformat())
+                        for item in queued
+                    ],
+                }
             )
 
             if hasattr(self.engine, "phone_attention_decision"):
@@ -347,11 +364,24 @@ class QQMessageCoalescer:
                     self._settle_input_merge(key, queued)
                     return
 
-            await self._generate_and_send(merged, last.reply_target, key=key)
+            await self._generate_and_send(
+                merged,
+                last.reply_target,
+                key=key,
+                turn_context=self._frozen_turn_contexts.pop(key, None),
+            )
             self._settle_input_merge(key, queued)
         except asyncio.CancelledError:
+            if "merged" in locals() and hasattr(
+                self.engine, "settle_cancelled_world_turn"
+            ):
+                try:
+                    self.engine.settle_cancelled_world_turn(merged)
+                except Exception:
+                    logger.exception("failed to settle cancelled world turn for %s", key)
             return
         finally:
+            self._frozen_turn_contexts.pop(key, None)
             task = self._tasks.get(key)
             if task is asyncio.current_task():
                 self._tasks.pop(key, None)
@@ -428,20 +458,45 @@ class QQMessageCoalescer:
         *,
         key: str = "",
         context_hint: str | None = None,
+        turn_context: object | None = None,
     ) -> bool:
         if hasattr(self.engine, "mark_phone_read_for_message"):
             self.engine.mark_phone_read_for_message(merged)
+        world_mode = bool(
+            getattr(self.engine, "world_kernel", None)
+            and getattr(self.engine, "world_id", None)
+        )
+        typing_started = world_mode
+        if not world_mode and hasattr(self.engine, "begin_world_typing"):
+            try:
+                self.engine.begin_world_typing(merged)
+                typing_started = True
+            except Exception:
+                logger.exception("failed to record early world typing state")
         kwargs: dict[str, object] = {}
         if context_hint:
             kwargs["context_hint"] = context_hint
         kwargs["defer_delivery"] = True
+        if turn_context is not None:
+            kwargs["turn_context"] = turn_context
         try:
-            reply = await self.engine.handle_message(merged, **kwargs)
-        except TypeError:
-            # Lightweight test/dummy engines may not expose delivery staging.
-            kwargs.pop("defer_delivery", None)
-            reply = await self.engine.handle_message(merged, **kwargs)
+            try:
+                reply = await self.engine.handle_message(merged, **kwargs)
+            except TypeError:
+                # Lightweight test/dummy engines may not expose delivery staging.
+                kwargs.pop("defer_delivery", None)
+                reply = await self.engine.handle_message(merged, **kwargs)
+        except asyncio.CancelledError:
+            if typing_started and hasattr(self.engine, "stop_world_typing"):
+                self.engine.stop_world_typing(merged, reason="reply_generation_cancelled")
+            raise
+        except Exception:
+            if typing_started and hasattr(self.engine, "stop_world_typing"):
+                self.engine.stop_world_typing(merged, reason="reply_generation_failed")
+            raise
         if reply is None:
+            if typing_started and hasattr(self.engine, "stop_world_typing"):
+                self.engine.stop_world_typing(merged, reason="no_reply_selected")
             return False
         if self.on_reaction and reply.suggested_reaction:
             # She reacts to the message as she reads it, before typing a reply.
@@ -450,7 +505,6 @@ class QQMessageCoalescer:
             except Exception:
                 logger.exception("failed to send QQ emoji reaction")
         timing_state = None
-        world_mode = bool(getattr(self.engine, "world_kernel", None) and getattr(self.engine, "world_id", None))
         if (
             self.human_timing
             and not world_mode
@@ -462,8 +516,6 @@ class QQMessageCoalescer:
             except Exception:
                 logger.exception("failed to load state for reply timing")
         try:
-            if hasattr(self.engine, "begin_world_typing"):
-                self.engine.begin_world_typing(merged)
             # In world mode the old stochastic timing model is not allowed to
             # make a hidden behavioural decision.  A future delayed send must
             # first be scheduled as a world action; an immediately dispatched
@@ -547,7 +599,7 @@ class QQMessageCoalescer:
                 self.engine.fail_reply_delivery(reply, "QQ text delivery failed")
             return False
         finally:
-            if hasattr(self.engine, "stop_world_typing"):
+            if typing_started and hasattr(self.engine, "stop_world_typing"):
                 self.engine.stop_world_typing(
                     merged,
                     reason="reply_sent" if 'sent_completely' in locals() and sent_completely else "reply_send_stopped",
@@ -1091,7 +1143,10 @@ def main() -> None:
                 is_sandbox=args.sandbox,
                 use_fake_model=args.fake,
             )
-            client.run(appid=settings.qq_bot_app_id, secret=settings.qq_bot_secret)
+            try:
+                client.run(appid=settings.qq_bot_app_id, secret=settings.qq_bot_secret)
+            finally:
+                asyncio.run(client.engine.aclose())
     except AlreadyRunningError as exc:
         raise SystemExit(f"QQ outbound adapter cannot start: {exc}") from exc
 

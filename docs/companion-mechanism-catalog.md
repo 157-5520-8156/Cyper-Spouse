@@ -104,16 +104,22 @@
 伤害在收到时结算，不因她选择沉默或稍后回复而丢失；具体道歉与后续尊重只会渐进修复。
 
 当前世界情绪进一步分成四层：结构化 appraisal、带 source/target/half-life 的 emotion
-episode、聚合离散向量与 PAD/core affect、以及独立的 regulation/display plan。正负 episode
+episode、从 active episode 派生的离散向量与 PAD/core affect、以及按当前 revision 即时编译的
+`ExpressionPlan`。episode 是短中期情绪的唯一动态权威；resolved episode 进入因果归档，
+不会因投影收敛而丢失来源。正负 episode
 可同时存在，最后发生的温暖不会覆盖尚未解决的受伤；NPC/目标事件造成的负面余波会限制
 在较小 leakage 内，并明确禁止归罪用户。讽刺、潜台词和权力压迫只在本地规则无法高置信
-判断时交给 V4 Flash thinking 生成受限 proposal；证据必须逐字来自当前消息，低于置信门槛
+判断时交给 V4 Flash 生成受限 proposal，只有高风险且证据冲突时启用 thinking；证据必须逐字来自当前消息，低于置信门槛
 只能保留为歧义，不能写入长期伤害。
 
 衰减、episode 半衰期、关系敏化、修复证据门槛和 spillover 上限来自版本化
 `affect_profile`。具体道歉只开启观察期；纯时间流逝或重复说对不起不能完成修复，必须出现
 后续一致行为证据。长期 resentment 只在多次已结算伤害后小幅延长同源负面 episode，不能
 覆盖硬边界或把一次事件升级为永久判断。
+
+平台层会保留合并前的消息 ID，并将可观测的 emoji、贴纸、附件、回复目标和消息 burst
+组成有界 `InteractionEvidence`。非文本线索只调节显著性和确定度，不能单独证明强恶意。
+表达 prompt、确定性校验和 provider 失败 fallback 来自同一个 policy spec，避免三套规则漂移。
 
 ### 3.3 关系、印象与边界
 

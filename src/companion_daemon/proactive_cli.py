@@ -9,6 +9,15 @@ from companion_daemon.runtime import build_companion_engine
 
 async def run(user_id: str, *, send: bool, sandbox: bool) -> None:
     engine = build_companion_engine()
+    try:
+        await _run_with_engine(engine, user_id=user_id, send=send, sandbox=sandbox)
+    finally:
+        close = getattr(engine, "aclose", None)
+        if callable(close):
+            await close()
+
+
+async def _run_with_engine(engine, *, user_id: str, send: bool, sandbox: bool) -> None:
     decision = await engine.proactive_tick(user_id)
     print(f"private: {decision.private_thought}")
     print(f"should_send: {decision.should_send}")

@@ -470,6 +470,9 @@ async def scheduler_loop(
             except Exception as exc:
                 logger.exception("life-event scheduler step failed")
                 print(f"life-event failed for {user_id}: {exc}", flush=True)
+        close_engine = getattr(engine, "aclose", None)
+        if callable(close_engine):
+            await close_engine()
         if once:
             return
         await asyncio.sleep(_next_sleep_seconds(settings.proactive_interval_seconds))

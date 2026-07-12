@@ -432,6 +432,34 @@ async def test_life_event_without_ledger_source_never_calls_the_generator(
 
 
 @pytest.mark.asyncio
+async def test_life_event_closes_engine_on_early_return(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = CompanionStore(tmp_path / "close-early.sqlite")
+    seed_user(store)
+
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.store = store
+            self.closed = False
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    engine = FakeEngine()
+    monkeypatch.setattr(life_event_module, "build_companion_engine", lambda: engine)
+
+    assert await run(
+        user_id="geoff",
+        send=False,
+        sandbox=True,
+        generate_image=False,
+        image_kind="life",
+    ) is False
+    assert engine.closed is True
+
+
+@pytest.mark.asyncio
 async def test_life_event_respects_budget_before_generation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)

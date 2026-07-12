@@ -59,6 +59,35 @@ class BudgetGate:
     def record(self, estimate: UsageEstimate, *, note: str = "") -> None:
         self.store.record_usage(estimate.kind, estimate.cny, note=note)
 
+    def remaining_model_budget_cny(
+        self, *, automatic: bool, now: datetime | None = None
+    ) -> float:
+        """Return remaining spend after actual token-priced model usage.
+
+        Legacy fixed-cost usage and provider token usage live in separate
+        ledgers, so both are included without recording a model call twice.
+        """
+        observed_at = now or datetime.now(UTC)
+        daily_fixed = self.store.usage_total("day", observed_at)
+        monthly_fixed = self.store.usage_total("month", observed_at)
+        daily_model = float(
+            self.store.model_usage_report("day", observed_at)["total"][
+                "estimated_cost_cny"
+            ]
+        )
+        monthly_model = float(
+            self.store.model_usage_report("month", observed_at)["total"][
+                "estimated_cost_cny"
+            ]
+        )
+        limits = [
+            self.daily_budget_cny - daily_fixed - daily_model,
+            self.monthly_budget_cny - monthly_fixed - monthly_model,
+        ]
+        if automatic:
+            limits.append(self.soft_daily_budget_cny - daily_fixed - daily_model)
+        return max(0.0, min(limits))
+
 
 ESTIMATES = {
     "vision": UsageEstimate("vision", 0.03),

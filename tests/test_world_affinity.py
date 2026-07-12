@@ -39,6 +39,9 @@ def test_personality_baseline_is_deterministic_and_affect_decays_back_to_it() ->
         "loneliness": 0,
         "anxiety": 0,
         "resentment": 0,
+        "shame": 0,
+        "guilt": 0,
+        "jealousy": 0,
         "warmth": 6,
         "joy": 2,
     }
@@ -71,14 +74,14 @@ def test_affinity_changes_only_after_repeated_settled_interactions_and_each_chan
         user_id="user:geoff",
         appraisal="warmth_received",
         settlement_id="turn:2",
-        logical_at=(NOW + timedelta(minutes=1)).isoformat(),
+        logical_at=(NOW + timedelta(days=1)).isoformat(),
     )
     third = settle_affinity_interaction(
         second.state,
         user_id="user:geoff",
         appraisal="warmth_received",
         settlement_id="turn:3",
-        logical_at=(NOW + timedelta(minutes=2)).isoformat(),
+        logical_at=(NOW + timedelta(days=2)).isoformat(),
     )
 
     assert first.delta == {}
@@ -86,6 +89,33 @@ def test_affinity_changes_only_after_repeated_settled_interactions_and_each_chan
     assert third.delta == {"warmth": 1}
     assert third.state["vector"] == {"warmth": 1}
     assert max(abs(value) for value in third.delta.values()) <= 1
+
+
+def test_affinity_normalizes_high_frequency_messages_to_bounded_daily_exposure() -> None:
+    high_frequency = initial_affinity()
+    for index in range(30):
+        outcome = settle_affinity_interaction(
+            high_frequency,
+            user_id="user:geoff",
+            appraisal="boundary_violation",
+            settlement_id=f"high:{index}",
+            logical_at=(NOW + timedelta(minutes=index)).isoformat(),
+        )
+        high_frequency = outcome.state
+
+    low_frequency = initial_affinity()
+    for index in range(3):
+        outcome = settle_affinity_interaction(
+            low_frequency,
+            user_id="user:geoff",
+            appraisal="boundary_violation",
+            settlement_id=f"low:{index}",
+            logical_at=(NOW + timedelta(hours=index * 6)).isoformat(),
+        )
+        low_frequency = outcome.state
+
+    assert high_frequency["evidence_weights"] == low_frequency["evidence_weights"]
+    assert high_frequency["vector"] == low_frequency["vector"] == {}
 
 
 def test_affinity_settlement_is_idempotent_for_replay() -> None:
@@ -146,11 +176,11 @@ def test_world_records_affinity_only_when_a_turn_is_delivered(tmp_path: Path) ->
         )
 
     affinity = kernel.snapshot(started.world_id)["long_term_affinity"]["user:geoff"]
-    assert affinity["vector"] == {"warmth": 1}
+    assert affinity["vector"] == {}
     assert affinity["settled_interaction_count"] == 3
     events = [event for event in kernel.events(started.world_id) if event.event_type == "AffinityInteractionSettled"]
     assert len(events) == 3
-    assert events[-1].payload["delta"] == {"warmth": 1}
+    assert events[-1].payload["delta"] == {}
     assert kernel.rebuild_projection(started.world_id, "world_current_state").matches_live is True
 
 

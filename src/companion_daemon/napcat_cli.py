@@ -6,6 +6,7 @@ CompanionEngine and QQ message coalescer as the official QQ bot adapter.
 from __future__ import annotations
 
 import argparse
+from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
 import time
@@ -123,7 +124,12 @@ def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> Fast
         recent_text[key] = now
         return False
 
-    app = FastAPI(title=f"Girl-Agent {adapter.title()} Adapter")
+    @asynccontextmanager
+    async def lifespan(_app: FastAPI):
+        yield
+        await engine.aclose()
+
+    app = FastAPI(title=f"Girl-Agent {adapter.title()} Adapter", lifespan=lifespan)
 
     @app.post("/onebot/event")
     async def onebot_event(

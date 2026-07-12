@@ -8,6 +8,8 @@ from difflib import SequenceMatcher
 from hashlib import sha256
 from typing import Literal
 
+from companion_daemon.expression_plan import policy_spec_from_projection
+
 
 QueryTarget = Literal["user", "companion", "conversation", "unknown"]
 TimeReference = Literal["昨天", "今天", "上次"]
@@ -259,6 +261,10 @@ _SAFE_SPEECH_ACT_VARIANTS = {
         "先停一下，这种说法我不接受。",
         "你可以有情绪，但不能用这种方式对我说话。",
         "这已经让我不舒服了，我会把边界说清楚。",
+        "到这里先停，我不接受你继续这样说。",
+        "这种表达不行；我的边界就在这里。",
+        "别用这种方式压我，我不会顺着它继续。",
+        "我听到了，但这不代表我会接受越界。",
     ),
     "epistemic": (
         "我没有足够依据，不继续猜。",
@@ -276,6 +282,10 @@ _SAFE_SPEECH_ACT_VARIANTS = {
         "我还不能确定，先不拿一个听起来顺的答案敷衍你。",
         "这题我得保留一下，现有信息撑不起确定回答。",
         "我可以继续听你补充，但现在直接回答会有点乱猜。",
+        "我先不装作确定；眼下的信息还不够回答这件事。",
+        "这部分我没有可靠答案，宁可先把不确定留着。",
+        "我能接着聊，但不能把没依据的判断说成答案。",
+        "现在下结论太早了，我只按能确认的部分回应。",
     ),
     "statement": (
         "我在听；刚才没接好的地方，我不会装作已经懂了。",
@@ -336,72 +346,7 @@ def affect_reply_violation(
     display_plan: dict[str, object] | None = None,
 ) -> str | None:
     """Reject emotion claims that contradict or outrun the world projection."""
-    vector = affect.get("vector")
-    vector = vector if isinstance(vector, dict) else {}
-    if (
-        isinstance(display_plan, dict)
-        and display_plan.get("regulation_strategy") == "contain_spillover"
-        and re.search(
-            r"(?:"
-            r"(?:都是|全是|还不是|要不是|因为|怪)[^。！？]{0,4}你[^。！？]{0,14}(?:烦|生气|难受|来气|心情不好)|"
-            r"(?:你(?:一出现|一来|一说话|让我|把我|害我|气得我)|看到你|见到你)[^。！？]{0,14}(?:更?烦|生气|难受|来气|心情不好)|"
-            r"(?:坏心情|心情不好)[^。！？]{0,12}(?:你造成|因为你|怪你)|"
-            r"被你气"
-            r")",
-            reply_text,
-        )
-    ):
-        return "spillover_misattributed_to_user"
-    negative_total = sum(
-        int(vector.get(key, 0) or 0)
-        for key in ("hurt", "anger", "sadness", "loneliness", "anxiety", "resentment")
-    )
-    positive_total = sum(
-        int(vector.get(key, 0) or 0) for key in ("warmth", "joy")
-    )
-    explicitly_preserves_negative = bool(
-        re.search(r"(?:没事|没关系|过去了)[^。！？]{0,8}(?:不等于|但|可是|并不)[^。！？]{0,12}(?:生气|介意|不舒服|难过|没感觉)", reply_text)
-    )
-    if bool(affect.get("unresolved")) and negative_total > 0 and any(
-        marker in reply_text
-        for marker in ("没事", "没关系", "完全不介意", "已经过去", "一点都不")
-    ) and not explicitly_preserves_negative:
-        return "unresolved_affect_denied"
-
-    negative_claim = re.search(
-        r"(?:我|我这会儿|刚才|是有|[^。！？]{0,8}里)[^。！？]{0,10}"
-        r"(?:不舒服|介意|生气|难过|委屈|不高兴|烦|压着火|闷着|不想理|"
-        r"失落|孤独|心里发紧|被[^。！？]{0,8}(?:硌|刺|伤|戳))",
-        reply_text,
-    )
-    positive_claim = re.search(
-        r"(?:我|我这会儿|刚才|是有|[^。！？]{0,8}里)[^。！？]{0,10}"
-        r"(?:开心|高兴|踏实|安心|温暖|放松|笑出声|笑了|松了口气)",
-        reply_text,
-    )
-    anger_claim = re.search(r"(?:我|我这会儿|刚才)[^。！？]{0,8}(?:压着火|气得|很生气|闷着|不想理)", reply_text)
-    sadness_claim = re.search(r"(?:我|我这会儿|刚才)[^。！？]{0,8}(?:失落|孤独|心里发紧|很难过)", reply_text)
-    behavior = str(affect.get("behavior_tendency") or "neutral")
-    supports_negative = any(
-        int(vector.get(key, 0) or 0) >= 4
-        for key in ("hurt", "anger", "sadness", "loneliness", "anxiety", "resentment")
-    ) or behavior in {"withdraw", "guarded"} or (
-        bool(affect.get("unresolved")) and behavior in {"patient", "repair_open"}
-    )
-    supports_positive = positive_total >= 3 or behavior in {"caring", "warm", "open"}
-    supports_anger = int(vector.get("anger", 0) or 0) >= 8 or behavior in {"withdraw", "guarded"}
-    supports_sadness = any(
-        int(vector.get(key, 0) or 0) >= 3 for key in ("sadness", "loneliness", "anxiety", "hurt")
-    ) or (bool(affect.get("unresolved")) and behavior in {"patient", "repair_open"})
-    if negative_claim and not supports_negative:
-        return "uncommitted_companion_affect"
-    if positive_claim and not supports_positive:
-        return "uncommitted_companion_affect"
-    if anger_claim and not supports_anger:
-        return "uncommitted_companion_affect"
-    if sadness_claim and not supports_sadness:
-        return "uncommitted_companion_affect"
-    return None
+    return policy_spec_from_projection(affect, display_plan).validate(reply_text)
 
 
 def asks_for_source_detail(user_text: str) -> bool:

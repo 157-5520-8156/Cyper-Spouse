@@ -89,6 +89,29 @@ def test_parse_image_only_message() -> None:
     assert len(incoming.attachments) == 1
 
 
+def test_parse_interaction_evidence_segments() -> None:
+    event = {
+        "post_type": "message",
+        "message_type": "private",
+        "user_id": 123456,
+        "message": [
+            {"type": "reply", "data": {"id": "prior-7"}},
+            {"type": "text", "data": {"text": "行吧"}},
+            {"type": "face", "data": {"id": "178"}},
+            {"type": "mface", "data": {"summary": "[无语]", "emoji_id": "sticker-3"}},
+        ],
+        "raw_message": "行吧",
+        "message_id": 789,
+    }
+
+    incoming = parse_onebot_event(event)
+
+    assert incoming is not None
+    assert incoming.emoji == ["qq-face:178"]
+    assert incoming.sticker_kind == "[无语]"
+    assert incoming.reply_target == "prior-7"
+
+
 def test_parse_non_message_event_returns_none() -> None:
     event = {"post_type": "notice", "notice_type": "group_increase"}
     assert parse_onebot_event(event) is None

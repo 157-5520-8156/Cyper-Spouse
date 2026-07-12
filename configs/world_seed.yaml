@@ -48,7 +48,7 @@ protagonist:
     - literature_society
     - photography_society
 affect_profile:
-  version: zhizhi-affect-v1
+  version: affect-profile-v2
   negative_half_life_hours: 18
   positive_half_life_hours: 10
   warmth_half_life_hours: 6

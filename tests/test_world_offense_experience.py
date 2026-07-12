@@ -231,6 +231,8 @@ async def test_repeated_offenses_accumulate_affect_violation_and_long_term_affin
     assert hurt_levels[0] < hurt_levels[1] < hurt_levels[2]
     assert affect["violation_count"] == 3
     assert affect["behavior_tendency"] == "withdraw"
-    assert affinity["evidence_counts"]["boundary_harm"] == 3
-    assert affinity["vector"]["resentment"] >= 1
-    assert affinity["vector"]["warmth"] <= -1
+    # Three messages in one burst/day intensify current hurt, but count as one
+    # long-term exposure so message frequency cannot manufacture relationship history.
+    assert affinity["evidence_counts"]["boundary_harm"] == 1
+    assert affinity["vector"].get("resentment", 0) == 0
+    assert affinity["vector"].get("warmth", 0) == 0

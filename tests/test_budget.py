@@ -67,3 +67,31 @@ def test_model_usage_summary_groups_real_tokens_by_purpose(tmp_path: Path) -> No
     assert summary["_total"]["calls"] == 2
     assert summary["_total"]["total_tokens"] == 188
     assert summary["_total"]["cache_hit_tokens"] == 110
+
+
+def test_model_budget_remaining_uses_persisted_real_token_cost(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "model-budget.sqlite")
+    store.record_model_usage(
+        purpose="reply",
+        model="deepseek-v4-flash",
+        status="succeeded",
+        latency_ms=100,
+        prompt_tokens=1_000_000,
+        completion_tokens=0,
+        cache_hit_tokens=0,
+        cache_miss_tokens=1_000_000,
+        total_tokens=1_000_000,
+    )
+    gate = BudgetGate(
+        store,
+        monthly_budget_cny=10,
+        daily_budget_cny=2,
+        soft_daily_budget_cny=1.01,
+        monthly_image_limit=20,
+        monthly_vision_limit=120,
+        monthly_audio_limit=60,
+    )
+
+    # One million cache-miss input tokens cost USD 0.14, or CNY 1.008 at
+    # the persisted report rate. This must reduce the automatic budget.
+    assert 0 <= gate.remaining_model_budget_cny(automatic=True) < 0.01

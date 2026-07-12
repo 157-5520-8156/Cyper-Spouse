@@ -27,7 +27,7 @@ def test_world_negative_emotion_decays_without_erasing_relationship_or_later_lif
     )
     respect_before = kernel.snapshot(started.world_id)["relationships"]["user:geoff"]["respect"]
 
-    kernel.advance(started.world_id, logical_at + timedelta(hours=9), expected_revision=appraised.revision)
+    kernel.advance(started.world_id, logical_at + timedelta(hours=72), expected_revision=appraised.revision)
 
     snapshot = kernel.snapshot(started.world_id)
     assert any(

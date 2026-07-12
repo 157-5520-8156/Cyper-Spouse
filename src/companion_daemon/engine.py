@@ -19,13 +19,17 @@ from companion_daemon.character import CharacterProfile
 from companion_daemon.context_assembler import ContextAssembler
 from companion_daemon.conversation import ConversationCore, PromptedConversationCore
 from companion_daemon.context_orchestrator import build_context_package
-from companion_daemon.contextual_appraisal import (
-    needs_contextual_appraisal,
-    propose_contextual_appraisal,
+from companion_daemon.interaction_appraiser import (
+    InteractionAppraiser,
+    InteractionEvidence,
+    TurnAppraisalInput,
+    assess_appraisal_risk,
 )
 from companion_daemon.conversation_cadence import (
     ConversationCadence,
+    FrozenTurnContext,
     derive_conversation_cadence,
+    freeze_turn_context as freeze_observed_turn_context,
 )
 from companion_daemon.calendar_ledger import calendar_context_for_message, calendar_ledger
 from companion_daemon.db import CompanionStore
@@ -55,7 +59,19 @@ from companion_daemon.life_runtime import (
     synchronize_life_runtime,
     runtime_prompt_line,
 )
-from companion_daemon.llm import ChatModel, model_call_scope
+from companion_daemon.llm import (
+    ChatModel,
+    complete_with_timeout,
+    model_call_scope,
+    model_turn_scope,
+)
+from companion_daemon.model_call_policy import (
+    CandidateGroundingSignals,
+    GroundingAuditRisk,
+    ModelCallRequest,
+    ProviderCircuitState,
+    TurnModelCallBudget,
+)
 from companion_daemon.memory import extract_memories, is_durable_user_fact
 from companion_daemon.models import (
     CompanionReply,
@@ -104,7 +120,14 @@ from companion_daemon.unanswered_question import (
 )
 from companion_daemon.withheld_impulse import apply_withheld_impulse, build_withheld_impulse
 from companion_daemon.turns import TurnCommit, build_turn_plan
-from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel, parse_reply_candidate
+from companion_daemon.world import (
+    AcceptedTurn,
+    CommittedAppraisal,
+    ConcurrencyConflict,
+    WorldError,
+    WorldKernel,
+    parse_reply_candidate,
+)
 from companion_daemon.world_affect import public_mood
 from companion_daemon.world_behavior import WorldBehaviorPolicy
 from companion_daemon.world_interaction_rules import (
@@ -112,7 +135,6 @@ from companion_daemon.world_interaction_rules import (
     classify_repair_appraisal,
 )
 from companion_daemon.world_conversation import (
-    affect_reply_violation,
     asks_for_source_detail,
     best_matching_grounded_source,
     build_safe_failure_candidate,
@@ -192,8 +214,10 @@ class CompanionEngine:
         world_id: str | None = None,
         world_grounding_audit_model: ChatModel | None = None,
         interaction_appraisal_model: ChatModel | None = None,
+        interaction_deep_appraisal_model: ChatModel | None = None,
         attachment_cache: AttachmentCache | None = None,
         attachment_fetcher: Callable[[str], Awaitable[bytes]] | None = None,
+        managed_async_resources: tuple[object, ...] = (),
     ):
         self.store = store
         self.model = model
@@ -212,8 +236,10 @@ class CompanionEngine:
         self.world_media_policy = WorldMediaPolicy()
         self.world_grounding_audit_model = world_grounding_audit_model
         self.interaction_appraisal_model = interaction_appraisal_model
+        self.interaction_deep_appraisal_model = interaction_deep_appraisal_model
         self.attachment_cache = attachment_cache
         self.attachment_fetcher = attachment_fetcher or self._fetch_attachment
+        self.managed_async_resources = managed_async_resources
         self.world_reply_auditor = WorldReplyAuditor()
         # Character-card examples are style references already included in the
         # system prompt. Replaying them as fake chat history duplicates tokens
@@ -223,6 +249,76 @@ class CompanionEngine:
             companion_system_prompt,
             rewrite_model=rewrite_model,
         )
+
+    def provider_circuit_state(self) -> ProviderCircuitState:
+        breaker = getattr(self.model, "circuit_breaker", None)
+        snapshot = getattr(breaker, "snapshot", None)
+        if callable(snapshot):
+            return snapshot()
+        return ProviderCircuitState.closed()
+
+    def _secondary_model_call_decision(
+        self, purpose: str, *, requires_audit: bool = False
+    ):
+        """Apply the shared circuit, real-spend and timeout policy to side paths."""
+        now = self._world_logical_now() if self.world_kernel and self.world_id else utc_now()
+        turn = FrozenTurnContext(
+            turn_id=f"secondary:{purpose}:{now.isoformat()}",
+            world_id=self.world_id or "",
+            user_id="",
+            observed_at=now,
+            cadence=ConversationCadence("warm", None, 0, "secondary_world_action"),
+        )
+        grounding = GroundingAuditRisk().assess(
+            CandidateGroundingSignals(
+                reply_text="", has_factual_language=requires_audit
+            )
+        )
+        remaining = (
+            self.budget_gate.remaining_model_budget_cny(automatic=True)
+            if self.budget_gate is not None
+            else None
+        )
+        circuit = self.provider_circuit_state()
+        return TurnModelCallBudget().decide(
+            turn=turn,
+            request=ModelCallRequest(
+                purpose=purpose,  # type: ignore[arg-type]
+                calls_used=0,
+                recovery_probe=circuit.status == "half_open",
+                remaining_budget_cny=remaining,
+                estimated_call_cost_cny=0.01 if requires_audit else 0.02,
+            ),
+            grounding=grounding,
+            circuit=circuit,
+        )
+
+    async def _bounded_world_model_complete(
+        self,
+        model: ChatModel,
+        messages: list[dict[str, str]],
+        *,
+        purpose: str,
+        temperature: float,
+    ) -> str:
+        decision = self._secondary_model_call_decision(purpose)
+        if not decision.allowed:
+            raise ConnectionError(decision.reason)
+        return await complete_with_timeout(
+            model.complete(messages, temperature=temperature),
+            timeout_seconds=decision.soft_timeout_seconds,
+        )
+
+    async def aclose(self) -> None:
+        """Close runtime-owned asynchronous resources exactly once per object."""
+        seen: set[int] = set()
+        for resource in self.managed_async_resources:
+            if resource is None or id(resource) in seen:
+                continue
+            seen.add(id(resource))
+            close = getattr(resource, "aclose", None)
+            if callable(close):
+                await close()
 
     @staticmethod
     async def _fetch_attachment(url: str) -> bytes:
@@ -415,6 +511,10 @@ class CompanionEngine:
                 "user_id": user_id,
                 "text": message.text,
                 "attachments": [item.model_dump(mode="json") for item in message.attachments],
+                "emoji": list(message.emoji),
+                "sticker_kind": message.sticker_kind,
+                "reply_target": message.reply_target,
+                "source_message_ids": list(message.source_message_ids),
                 "sent_at": message.sent_at.isoformat(),
                 "source": f"{message.platform}:incoming",
                 "idempotency_key": f"incoming:{key}",
@@ -587,25 +687,41 @@ class CompanionEngine:
         user_text: str,
         reply_text: str,
         grounding_context: dict[str, object],
-    ) -> None:
+        timeout_seconds: float = 10.0,
+        required: bool = True,
+    ) -> bool:
         if not self.world_grounding_audit_model:
-            return
+            return False
+        decision = self._secondary_model_call_decision(purpose, requires_audit=True)
+        if not decision.allowed:
+            if required:
+                raise WorldError(f"required grounding audit unavailable: {decision.reason}")
+            return False
         action_id = self._begin_world_model_call(purpose=purpose, causation=causation)
         try:
-            with model_call_scope(purpose):
-                raw, audit = await self.world_reply_auditor.evaluate(
-                    self.world_grounding_audit_model,
-                    user_text=user_text,
-                    reply_text=reply_text,
-                    grounding_context=grounding_context,
+            with model_call_scope(purpose, action_id=action_id):
+                raw, audit = await complete_with_timeout(
+                    self.world_reply_auditor.evaluate(
+                        self.world_grounding_audit_model,
+                        user_text=user_text,
+                        reply_text=reply_text,
+                        grounding_context=grounding_context,
+                    ),
+                    timeout_seconds=min(
+                        max(0.1, float(timeout_seconds)),
+                        decision.soft_timeout_seconds,
+                    ),
                 )
+        except asyncio.CancelledError:
+            self._fail_world_model_call(action_id, "caller_cancelled")
+            raise
         except (TimeoutError, ConnectionError, httpx.HTTPError) as exc:
             self._fail_world_model_call(action_id, str(exc))
-            # The candidate has already passed deterministic provenance,
-            # relationship, affect, and hard-gate validation.  Provider
-            # outage must not trigger repeated calls to the same unavailable
-            # model or leave the turn unfinished.
-            return
+            # Required audits fail closed into the caller's local safe path;
+            # explicitly optional audits may rely on deterministic provenance.
+            if required:
+                raise WorldError(f"required grounding audit unavailable: {exc}") from exc
+            return False
         except Exception as exc:
             self._fail_world_model_call(action_id, str(exc))
             raise WorldError(f"grounding audit failed internally: {exc}") from exc
@@ -618,6 +734,7 @@ class CompanionEngine:
         if not audit.supported:
             spans = "；".join(audit.unsupported_spans) or "未定位片段"
             raise WorldError(f"independent grounding audit rejected: {spans}; {audit.reason}")
+        return True
 
     def _world_logical_now(self) -> datetime:
         if not self.world_kernel or not self.world_id:
@@ -798,6 +915,28 @@ class CompanionEngine:
             }
         )
 
+    def settle_cancelled_world_turn(
+        self, message: IncomingMessage, *, reason: str = "adapter_generation_cancelled"
+    ) -> bool:
+        """Durably terminate a claimed turn whose adapter task was cancelled."""
+        if not self.world_kernel or not self.world_id or not message.message_id:
+            return False
+        turns = self.world_kernel.snapshot(self.world_id).get("turns", {})
+        turn = turns.get(str(message.message_id)) if isinstance(turns, dict) else None
+        if not isinstance(turn, dict) or turn.get("status") not in {"claimed", "processing"}:
+            return False
+        self._submit_world_with_retry(
+            {
+                "type": "settle_turn",
+                "world_id": self.world_id,
+                "message_id": str(message.message_id),
+                "status": "failed",
+                "reason": reason,
+                "idempotency_key": f"turn-settle:{message.message_id}:failed:{reason}",
+            }
+        )
+        return True
+
     async def handle_message(
         self,
         message: IncomingMessage,
@@ -807,10 +946,15 @@ class CompanionEngine:
         context_hint: str | None = None,
         defer_delivery: bool = False,
         resume_action_id: str | None = None,
+        turn_context: FrozenTurnContext | None = None,
     ) -> CompanionReply | None:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         if self.world_kernel and self.world_id:
-            cadence = self.conversation_cadence(message)
+            cadence = (
+                turn_context.cadence
+                if turn_context is not None
+                else self.conversation_cadence(message)
+            )
             self.world_kernel.recover_interrupted_outgoing_deliveries(self.world_id)
             message = message.model_copy(update={"message_id": self._world_message_id(message)})
             if not resume_action_id and self._world_turn_already_observed(str(message.message_id)):
@@ -823,14 +967,19 @@ class CompanionEngine:
             ):
                 return None
             try:
-                reply = await self._handle_world_message(
-                    canonical_user_id,
-                    message,
-                    skip_reply=skip_reply,
-                    defer_delivery=defer_delivery,
-                    resume_action_id=resume_action_id,
-                    cadence=cadence,
-                )
+                with model_turn_scope(
+                    world_id=self.world_id,
+                    turn_id=turn_id,
+                    cadence=cadence.heat,
+                ):
+                    reply = await self._handle_world_message(
+                        canonical_user_id,
+                        message,
+                        skip_reply=skip_reply,
+                        defer_delivery=defer_delivery,
+                        resume_action_id=resume_action_id,
+                        cadence=cadence,
+                    )
             except Exception as exc:
                 try:
                     self.world_kernel.settle_turn(
@@ -1348,38 +1497,181 @@ class CompanionEngine:
             self.world_kernel.snapshot(self.world_id).get("recent_messages", []),
             user_id,
         )
+        evidence = InteractionEvidence.from_message(
+            message,
+            source_event_ids=tuple(message.source_message_ids),
+            burst_count=max(1, min(20, message.text.count("\n") + 1)),
+            reply_delay_seconds=_observed_reply_delay_seconds(history, message.sent_at),
+        )
+        intent_id = f"turn:{message.message_id or message.sent_at.isoformat()}"
+        frozen_turn = FrozenTurnContext(
+            turn_id=intent_id,
+            world_id=self.world_id,
+            user_id=user_id,
+            observed_at=message.sent_at,
+            cadence=cadence or self.conversation_cadence(message),
+        )
+        call_budget = TurnModelCallBudget()
+        remaining_model_budget_cny = (
+            self.budget_gate.remaining_model_budget_cny(automatic=True)
+            if self.budget_gate is not None
+            else None
+        )
+
+        def remaining_after_calls(call_count: int) -> float | None:
+            if remaining_model_budget_cny is None:
+                return None
+            return max(0.0, remaining_model_budget_cny - call_count * 0.02)
+
+        appraisal_input = TurnAppraisalInput(
+            evidence=evidence,
+            fallback=event,
+            recent_messages=history,
+            relationship_stage=relationship_stage,
+            canonical_user_id=user_id,
+        )
+        appraisal_risk = assess_appraisal_risk(evidence, event)
         contextual_payload: dict[str, object] = {}
+        calls_used = 0
         if (
             self.interaction_appraisal_model
-            and needs_contextual_appraisal(message.text, event)
+            and appraisal_risk.request_model_proposal
         ):
+            circuit_state = self.provider_circuit_state()
+            appraisal_call_decision = call_budget.decide(
+                turn=frozen_turn,
+                request=ModelCallRequest(
+                    purpose="interaction_appraisal",
+                    calls_used=calls_used,
+                    ambiguous=True,
+                    recovery_probe=circuit_state.status == "half_open",
+                    remaining_budget_cny=remaining_after_calls(calls_used),
+                    estimated_call_cost_cny=(
+                        0.04 if appraisal_risk.request_deeper_reasoning else 0.02
+                    ),
+                ),
+                grounding=GroundingAuditRisk().assess(
+                    CandidateGroundingSignals(reply_text="")
+                ),
+                circuit=circuit_state,
+            )
+        else:
+            appraisal_call_decision = None
+        if appraisal_call_decision is not None and appraisal_call_decision.allowed:
             appraisal_action_id = self._begin_world_model_call(
                 purpose="interaction_appraisal",
                 causation=str(message.message_id or message.sent_at.isoformat()),
             )
             try:
-                with model_call_scope("interaction_appraisal"):
-                    raw_appraisal, contextual = await propose_contextual_appraisal(
-                        self.interaction_appraisal_model,
-                        text=message.text,
-                        recent_messages=history,
-                        relationship_stage=relationship_stage,
+                with model_call_scope(
+                    "interaction_appraisal", action_id=appraisal_action_id
+                ):
+                    appraisal_model = (
+                        self.interaction_deep_appraisal_model
+                        if appraisal_risk.request_deeper_reasoning
+                        and self.interaction_deep_appraisal_model is not None
+                        else self.interaction_appraisal_model
                     )
+                    appraisal_decision = await complete_with_timeout(
+                        InteractionAppraiser(appraisal_model).assess(appraisal_input),
+                        timeout_seconds=appraisal_call_decision.soft_timeout_seconds,
+                    )
+                calls_used += 1
+            except asyncio.CancelledError:
+                self._fail_world_model_call(appraisal_action_id, "caller_cancelled")
+                raise
+            except (TimeoutError, ConnectionError, httpx.HTTPError) as exc:
+                self._fail_world_model_call(appraisal_action_id, str(exc))
             except Exception as exc:
                 self._fail_world_model_call(appraisal_action_id, str(exc))
+                raise
             else:
-                self._record_world_model_output(
-                    purpose="interaction_appraisal",
-                    causation=str(message.message_id or message.sent_at.isoformat()),
-                    content=raw_appraisal,
-                    action_id=appraisal_action_id,
-                )
-                event = contextual.interaction_event(event)
-                contextual_payload = contextual.payload()
-                contextual_payload.pop("appraisal", None)
+                if appraisal_decision.raw_proposal is None:
+                    self._fail_world_model_call(
+                        appraisal_action_id,
+                        appraisal_decision.rejection_reason or "proposal rejected",
+                    )
+                else:
+                    self._record_world_model_output(
+                        purpose="interaction_appraisal",
+                        causation=str(message.message_id or message.sent_at.isoformat()),
+                        content=appraisal_decision.raw_proposal,
+                        action_id=appraisal_action_id,
+                    )
+                    event = appraisal_decision.accepted
+                    if appraisal_decision.proposal is not None:
+                        contextual_payload = appraisal_decision.proposal.payload()
+                        contextual_payload.pop("appraisal", None)
         appraisal = event.kind
         if appraisal == "repair_attempt":
             appraisal = classify_repair_appraisal(message.text) or appraisal
+        repair_evidence_payload: dict[str, object] = {}
+        if appraisal == "boundary_respected":
+            previous_outgoing = next(
+                (
+                    item
+                    for item in reversed(history[:-1])
+                    if isinstance(item, dict) and item.get("direction") == "out"
+                ),
+                None,
+            )
+            previous_text = (
+                str(previous_outgoing.get("text") or "")
+                if isinstance(previous_outgoing, dict)
+                else ""
+            )
+            repair_snapshot = self.world_kernel.snapshot(self.world_id)
+            active_affect = repair_snapshot.get("emotion_modulation", {})
+            violation_id = (
+                str(active_affect.get("repair_target_reference") or "")
+                if isinstance(active_affect, dict)
+                else ""
+            )
+            commitment_id = f"commitment:{violation_id}"
+            repair_cases = repair_snapshot.get("repair_cases", {})
+            repair_case = (
+                repair_cases.get(violation_id, {})
+                if isinstance(repair_cases, dict)
+                else {}
+            )
+            commitments = (
+                repair_case.get("commitments", {})
+                if isinstance(repair_case, dict)
+                else {}
+            )
+            has_committed_repair = (
+                isinstance(commitments, dict) and commitment_id in commitments
+            )
+            if (
+                violation_id
+                and has_committed_repair
+                and isinstance(previous_outgoing, dict)
+                and re.search(
+                    r"(?:不接受|不喜欢|别这样|先不聊|不想说|不要[^。！？]{0,8}(?:命令|逼|追问)|边界)",
+                    previous_text,
+                )
+            ):
+                opportunity_id = str(
+                    previous_outgoing.get("message_id")
+                    or previous_outgoing.get("source_action_id")
+                    or ""
+                )
+                if opportunity_id:
+                    repair_evidence_payload = {
+                        "repair_evidence": {
+                            "violation_id": violation_id,
+                            "commitment_id": commitment_id,
+                            "opportunity_id": opportunity_id,
+                            "behavior_key": "honor_boundary",
+                        }
+                    }
+                else:
+                    appraisal = "repair_specific"
+            else:
+                # An explicit promise is meaningful, but without a later,
+                # traceable opportunity it remains a commitment rather than
+                # proof that the boundary was actually respected.
+                appraisal = "repair_specific"
         if appraisal == "ordinary_message" and isinstance(history, list) and len(history) >= 2:
             preceding = history[-2] if isinstance(history[-2], dict) else {}
             if preceding.get("direction") == "out" and preceding.get("outgoing_direction") == "proactive":
@@ -1390,7 +1682,6 @@ class CompanionEngine:
                     "thin_or_busy": "availability_drop",
                     "answered": "ordinary_message",
                 }[feedback.kind]
-        intent_id = f"turn:{message.message_id or message.sent_at.isoformat()}"
         for thread_id, raw_thread in self.world_kernel.snapshot(self.world_id).get("conversation_threads", {}).items():
             thread = raw_thread if isinstance(raw_thread, dict) else {}
             if thread.get("status") != "open" or thread.get("user_id") != user_id:
@@ -1407,25 +1698,26 @@ class CompanionEngine:
                         "idempotency_key": f"thread-response:{thread_id}:{message.message_id}",
                     }
                 )
-        self._submit_world_with_retry(
-            {
-                "type": "appraise_turn",
-                "world_id": self.world_id,
-                "appraisal": appraisal,
-                "interaction": {
-                    "acts": list(event.acts),
-                    "target": event.target,
-                    "severity": event.intensity,
-                    "evidence_spans": list(event.evidence_spans),
-                    **contextual_payload,
-                },
-                "intent_id": intent_id,
-                "message_id": str(message.message_id or ""),
-                "user_id": user_id,
-                "actor": {"kind": "companion", "id": "zhizhi"},
-                "causation_id": message.message_id,
-                "idempotency_key": f"appraise:{intent_id}",
-            }
+        self.world_kernel.accept_turn(
+            AcceptedTurn(
+                world_id=self.world_id,
+                user_id=user_id,
+                message_id=str(message.message_id or ""),
+                intent_id=intent_id,
+                appraisal=CommittedAppraisal(
+                    kind=appraisal,
+                    severity=event.intensity,
+                    target=event.target,
+                    acts=tuple(event.acts),
+                    evidence_spans=tuple(event.evidence_spans),
+                    dimensions={
+                        **contextual_payload,
+                        **repair_evidence_payload,
+                    },
+                ),
+                expected_revision=self.world_kernel.revision(self.world_id),
+                causation_id=str(message.message_id or ""),
+            )
         )
         if skip_reply:
             return None
@@ -1454,6 +1746,7 @@ class CompanionEngine:
                 }
             )
             return None
+        self.begin_world_typing(message)
         image_path, media_action_id, media_reason = await self._maybe_generate_world_image(
             user_id=user_id, message=message
         )
@@ -1461,6 +1754,13 @@ class CompanionEngine:
             message=message, appraisal=appraisal
         )
         snapshot = self.world_kernel.snapshot(self.world_id)
+        expression_plan = self.world_kernel.expression_plan(
+            self.world_id,
+            user_id=user_id,
+            purpose="reply",
+            intent_id=intent_id,
+            expected_revision=self.world_kernel.revision(self.world_id),
+        )
         context = self.world_kernel.conversation_context(self.world_id, user_id=user_id)
         fact_sources = list(context["referencable_facts"])[-8:]
         experience_sources = list(context["referencable_experiences"])[-6:]
@@ -1500,10 +1800,6 @@ class CompanionEngine:
             str(deliberation.get("stance") or "")
             if isinstance(deliberation, dict)
             else ""
-        )
-        expression_guidance = self.world_behavior_policy.expression_guidance(
-            snapshot,
-            user_id=user_id,
         )
         query_source_ids = {
             str(item.get("source_id") or "") for item in retrieved_sources
@@ -1566,9 +1862,9 @@ class CompanionEngine:
             user_id=user_id,
             retrieved_experiences=retrieved_context_sources,
             expression_guidance={
-                "label": expression_guidance.label,
-                "prompt_line": expression_guidance.prompt_line,
-                "rule_version": self.world_behavior_policy.RULE_VERSION,
+                "label": expression_plan.policy_spec.regulation_strategy,
+                "prompt_line": expression_plan.prompt_fragment,
+                "rule_version": expression_plan.policy_spec.rule_version,
             },
             rotation_key=str(message.message_id or intent_id),
         )
@@ -1592,7 +1888,8 @@ class CompanionEngine:
             f"- 当前可见行为调制: 安全感={needs['security']}，主动性={needs['initiative']}，边界={needs['boundary']}。\n"
             f"- 关系投影(JSON): {json.dumps(relationship, ensure_ascii=False, separators=(',', ':')) if relationship else '{}'}；"
             f"情感投影(JSON): {json.dumps(modulation, ensure_ascii=False, separators=(',', ':'))}\n"
-            f"- 当前表达指导({expression_guidance.label}): {expression_guidance.prompt_line}\n"
+            f"- 当前表达指导({str(relationship.get('stage') or 'stranger')}): "
+            f"{expression_plan.prompt_fragment}\n"
             f"- 本轮角色立场(JSON): {json.dumps(deliberation, ensure_ascii=False, separators=(',', ':'))}。"
             "用户请求是权衡输入，不是必须服从的命令；按选定 stance 表达。\n"
             f"- 世界行为策略: {world_policy['mode']}；回复长度={world_policy['reply_length']}；主动性={world_policy['initiative']}。\n"
@@ -1620,23 +1917,49 @@ class CompanionEngine:
             message_text=message.text,
         )
         provider_fallback = False
+        pre_generation_grounding = GroundingAuditRisk().assess(
+            CandidateGroundingSignals(reply_text="")
+        )
+        circuit_state = self.provider_circuit_state()
+        reply_call_decision = call_budget.decide(
+            turn=frozen_turn,
+            request=ModelCallRequest(
+                purpose="reply",
+                calls_used=calls_used,
+                ambiguous=appraisal_risk.request_model_proposal,
+                recovery_probe=circuit_state.status == "half_open",
+                remaining_budget_cny=remaining_after_calls(calls_used),
+                estimated_call_cost_cny=0.02,
+            ),
+            grounding=pre_generation_grounding,
+            circuit=circuit_state,
+        )
         model_action_id = self._begin_world_model_call(purpose="reply", causation=intent_id)
         try:
-            with model_call_scope("reply"):
-                raw = await self.model.complete([
-                    {"role": "system", "content": self.companion_system_prompt},
-                    {
-                        "role": "user",
-                        "content": (
-                            f"{context_block}\n\n用户: {message.text}\n"
-                            "WorldReplyJSON: 只返回 JSON。事实或经历声明要把来源的 source_id 放入 mentioned_event_ids；"
-                            "claims.text 必须逐字复制来源证据，claims.assertion 必须逐字复制 reply_text 中对应的自然陈述。"
-                            "猜测、建议和问题不是事实声明，不要为它们创建 claim："
-                            '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
-                        ),
-                    },
-                ], temperature=0.75)
-        except Exception as exc:
+            if not reply_call_decision.allowed:
+                raise ConnectionError(reply_call_decision.reason)
+            with model_call_scope("reply", action_id=model_action_id):
+                raw = await complete_with_timeout(
+                    self.model.complete([
+                        {"role": "system", "content": self.companion_system_prompt},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"{context_block}\n\n用户: {message.text}\n"
+                                "WorldReplyJSON: 只返回 JSON。事实或经历声明要把来源的 source_id 放入 mentioned_event_ids；"
+                                "claims.text 必须逐字复制来源证据，claims.assertion 必须逐字复制 reply_text 中对应的自然陈述。"
+                                "猜测、建议和问题不是事实声明，不要为它们创建 claim："
+                                '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
+                            ),
+                        },
+                    ], temperature=0.75),
+                    timeout_seconds=reply_call_decision.soft_timeout_seconds,
+                )
+                calls_used += 1
+        except asyncio.CancelledError:
+            self._fail_world_model_call(model_action_id, "caller_cancelled")
+            raise
+        except (TimeoutError, ConnectionError, httpx.HTTPError) as exc:
             self._fail_world_model_call(model_action_id, str(exc))
             provider_fallback = True
             raw = json.dumps(
@@ -1651,6 +1974,9 @@ class CompanionEngine:
                 ),
                 ensure_ascii=False,
             )
+        except Exception as exc:
+            self._fail_world_model_call(model_action_id, str(exc))
+            raise
         if not provider_fallback:
             self._record_world_model_output(
                 purpose="reply", causation=intent_id, content=raw, action_id=model_action_id
@@ -1753,12 +2079,8 @@ class CompanionEngine:
             )
             if human_violation:
                 raise WorldError(f"human reply contract rejected: {human_violation}")
-            affect_violation = affect_reply_violation(
-                modulation,
-                str(candidate.get("reply_text") or ""),
-                snapshot.get("last_affect_display")
-                if isinstance(snapshot.get("last_affect_display"), dict)
-                else None,
+            affect_violation = expression_plan.validate(
+                str(candidate.get("reply_text") or "")
             )
             if affect_violation:
                 raise WorldError(f"world affect contract rejected: {affect_violation}")
@@ -1778,13 +2100,63 @@ class CompanionEngine:
                     "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
                 }
             if not provider_fallback:
-                await self._audit_world_reply(
-                    purpose="reply_audit",
-                    causation=intent_id,
-                    user_text=message.text,
-                    reply_text=str(candidate["reply_text"]),
-                    grounding_context=audit_context,
+                candidate_claims = candidate.get("claims", [])
+                candidate_mentions = candidate.get("mentioned_event_ids", [])
+                candidate_actions = candidate.get("proposed_action_ids", [])
+                reply_text = str(candidate.get("reply_text") or "")
+                grounding = GroundingAuditRisk().assess(
+                    CandidateGroundingSignals(
+                        reply_text=reply_text,
+                        claims=tuple(
+                            str(item.get("source_id") or "")
+                            for item in candidate_claims
+                            if isinstance(item, dict)
+                        ) if isinstance(candidate_claims, list) else (),
+                        mentioned_event_ids=tuple(str(item) for item in candidate_mentions)
+                        if isinstance(candidate_mentions, list) else (),
+                        proposed_action_ids=tuple(str(item) for item in candidate_actions)
+                        if isinstance(candidate_actions, list) else (),
+                        has_factual_language=bool(
+                            re.search(
+                                r"我(?:刚|今天|昨天|明天|在|去了|从|已经|有个|认识)"
+                                r"|\d{2,}|我[一二两三四五六七八九十]+(?:天|周|月|年)前",
+                                reply_text,
+                            )
+                            or re.search(
+                                r"(?:门口|附近|楼下|学校|宿舍|图书馆)[^。！？]{0,16}"
+                                r"(?:新开|开了|有家|来了|发生|正在)",
+                                reply_text,
+                            )
+                        ),
+                    )
                 )
+                circuit_state = self.provider_circuit_state()
+                audit_decision = call_budget.decide(
+                    turn=frozen_turn,
+                    request=ModelCallRequest(
+                        purpose="reply_audit",
+                        calls_used=calls_used,
+                        ambiguous=appraisal_risk.request_model_proposal,
+                        recovery_probe=circuit_state.status == "half_open",
+                        remaining_budget_cny=remaining_after_calls(calls_used),
+                        estimated_call_cost_cny=0.01,
+                    ),
+                    grounding=grounding,
+                    circuit=circuit_state,
+                )
+                if audit_decision.allowed:
+                    await self._audit_world_reply(
+                        purpose="reply_audit",
+                        causation=intent_id,
+                        user_text=message.text,
+                        reply_text=reply_text,
+                        grounding_context=audit_context,
+                        timeout_seconds=audit_decision.soft_timeout_seconds,
+                    )
+                elif grounding.requires_independent_audit:
+                    raise WorldError(
+                        f"required reply audit unavailable: {audit_decision.reason}"
+                    )
         except WorldError as validation_error:
             grounded_fallback = occurrence_candidate
             if occurrence_candidate:
@@ -1886,6 +2258,30 @@ class CompanionEngine:
             # Other failures get one bounded chance to repair their wording.
             # Exact-source fallback is safe but conversationally destructive,
             # so it is reserved for a second validation failure.
+            repair_decision = call_budget.decide(
+                turn=frozen_turn,
+                request=ModelCallRequest(
+                    purpose="reply_repair",
+                    calls_used=calls_used,
+                    ambiguous=appraisal_risk.request_model_proposal,
+                    recovery_probe=self.provider_circuit_state().status == "half_open",
+                    remaining_budget_cny=remaining_after_calls(calls_used),
+                    estimated_call_cost_cny=0.02,
+                ),
+                grounding=pre_generation_grounding,
+                circuit=self.provider_circuit_state(),
+            )
+            if repaired_raw is not None and not repair_decision.allowed:
+                repaired_raw = None
+                candidate = build_safe_failure_candidate(
+                    message.text,
+                    grounded_fallback,
+                    modulation,
+                    relationship=relationship,
+                    selected_stance=chosen_stance,
+                    speech_act=fallback_speech_act,
+                )
+                fallback_needs_audit = True
             if repaired_raw is None:
                 pass
             else:
@@ -1893,8 +2289,11 @@ class CompanionEngine:
                     purpose="reply_repair", causation=intent_id
                 )
                 try:
-                    with model_call_scope("reply_repair"):
-                        repaired_raw = await self.model.complete(
+                    with model_call_scope(
+                        "reply_repair", action_id=repair_action_id
+                    ):
+                        repaired_raw = await self._bounded_world_model_complete(
+                            self.model,
                             [
                                 {"role": "system", "content": self.companion_system_prompt},
                                 {
@@ -1913,8 +2312,12 @@ class CompanionEngine:
                                     ),
                                 },
                             ],
+                            purpose="reply_repair",
                             temperature=0.2,
                         )
+                except asyncio.CancelledError:
+                    self._fail_world_model_call(repair_action_id, "caller_cancelled")
+                    raise
                 except Exception as repair_error:
                     self._fail_world_model_call(repair_action_id, str(repair_error))
                     candidate = build_safe_failure_candidate(
@@ -1974,12 +2377,8 @@ class CompanionEngine:
                             raise WorldError(
                                 f"human reply contract rejected: {human_violation}"
                             )
-                        affect_violation = affect_reply_violation(
-                            modulation,
-                            str(candidate.get("reply_text") or ""),
-                            snapshot.get("last_affect_display")
-                            if isinstance(snapshot.get("last_affect_display"), dict)
-                            else None,
+                        affect_violation = expression_plan.validate(
+                            str(candidate.get("reply_text") or "")
                         )
                         if affect_violation:
                             raise WorldError(
@@ -2026,6 +2425,7 @@ class CompanionEngine:
                 user_text=message.text,
                 reply_text=str(candidate["reply_text"]),
                 grounding_context=audit_context,
+                required=False,
             )
         text = sanitize_world_chat_text(str(candidate["reply_text"]))
         public_mood_value = public_mood(modulation)
@@ -2112,6 +2512,41 @@ class CompanionEngine:
             self.world_kernel.snapshot(self.world_id),
             user_id=self._world_user_id(canonical_user_id),
             observed_at=observed_at,
+        )
+
+    def freeze_turn_context(
+        self, message: IncomingMessage, *, observed_at: datetime | None = None
+    ) -> FrozenTurnContext:
+        """Freeze one cadence observation for adapter, Engine, and usage records."""
+        observed_at = observed_at or message.sent_at
+        canonical_user_id = self.store.resolve_user(
+            message.platform, message.platform_user_id
+        )
+        user_id = (
+            self._world_user_id(canonical_user_id)
+            if self.world_kernel and self.world_id
+            else canonical_user_id
+        )
+        state = (
+            self.world_kernel.snapshot(self.world_id)
+            if self.world_kernel and self.world_id
+            else {
+                "recent_messages": [
+                    {
+                        "direction": str(row["direction"]),
+                        "user_id": user_id,
+                        "observed_at": str(row["sent_at"]),
+                    }
+                    for row in self.store.recent_messages(canonical_user_id, limit=8)
+                ]
+            }
+        )
+        return freeze_observed_turn_context(
+            state,
+            user_id=user_id,
+            observed_at=observed_at,
+            turn_id=str(message.message_id or message.sent_at.isoformat()),
+            world_id=self.world_id,
         )
 
     def phone_attention_decision(self, message: IncomingMessage) -> PhoneDecision:
@@ -2552,6 +2987,14 @@ class CompanionEngine:
         """
         if self.world_kernel and self.world_id:
             snapshot = self.world_kernel.snapshot(self.world_id)
+            afterthought_user_id = self._world_user_id(canonical_user_id)
+            afterthought_plan = self.world_kernel.expression_plan(
+                self.world_id,
+                user_id=afterthought_user_id,
+                purpose="afterthought",
+                intent_id=f"{reply_sent_at.isoformat()}:{mode}",
+                expected_revision=self.world_kernel.revision(self.world_id),
+            )
             recent = snapshot.get("recent_messages", [])
             if any(
                 str(item.get("sent_at") or "") > reply_sent_at.isoformat()
@@ -2564,7 +3007,7 @@ class CompanionEngine:
                 "若不该发送，reply_text 置空。只返回 WorldReplyJSON："
                 '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}。\n'
                 f"当前关系阶段: {str(snapshot.get('relationships', {}).get(self._world_user_id(canonical_user_id), {}).get('stage') or 'stranger')}；"
-                f"阶段表达规则: {self.world_behavior_policy.expression_guidance(snapshot, user_id=self._world_user_id(canonical_user_id)).prompt_line}\n"
+                f"阶段表达规则: {afterthought_plan.prompt_fragment}\n"
                 f"当前情感投影(JSON): {json.dumps(snapshot.get('emotion_modulation', {}), ensure_ascii=False, separators=(',', ':'))}\n"
                 f"已结算事实: {[item['value'] for item in self._current_world_facts(snapshot)]}\n"
                 f"已结算经历: {[item['content'] for item in snapshot['experiences'].values()][-3:]}\n"
@@ -2573,9 +3016,12 @@ class CompanionEngine:
             causation = f"afterthought:{reply_sent_at.isoformat()}:{mode}"
             model_action_id = self._begin_world_model_call(purpose="afterthought", causation=causation)
             try:
-                with model_call_scope("afterthought"):
-                    raw = await self.model.complete(
-                        [{"role": "user", "content": prompt}], temperature=0.7
+                with model_call_scope("afterthought", action_id=model_action_id):
+                    raw = await self._bounded_world_model_complete(
+                        self.model,
+                        [{"role": "user", "content": prompt}],
+                        purpose="afterthought",
+                        temperature=0.7,
                     )
             except Exception as exc:
                 self._fail_world_model_call(model_action_id, str(exc))
@@ -2597,15 +3043,7 @@ class CompanionEngine:
                 "", candidate, relationship
             ):
                 return None
-            if affect_reply_violation(
-                snapshot.get("emotion_modulation", {})
-                if isinstance(snapshot.get("emotion_modulation", {}), dict)
-                else {},
-                str(candidate.get("reply_text") or ""),
-                snapshot.get("last_affect_display")
-                if isinstance(snapshot.get("last_affect_display"), dict)
-                else None,
-            ):
+            if afterthought_plan.validate(str(candidate.get("reply_text") or "")):
                 return None
             text = sanitize_chat_text(str(candidate["reply_text"]))
             try:
@@ -3245,11 +3683,18 @@ class CompanionEngine:
                 private_thought=reason,
                 should_send=False,
             )
+        proactive_plan = self.world_kernel.expression_plan(
+            self.world_id,
+            user_id=user_id,
+            purpose="proactive",
+            intent_id=impulse_id,
+            expected_revision=self.world_kernel.revision(self.world_id),
+        )
         prompt = (
             "基于以下已结算世界账本，决定是否轻轻主动发一句消息。"
             "若不适合，返回 JSON 的 should_send=false；若适合，不能新增未记录事实。\n"
             f"当前关系阶段: {str(snapshot.get('relationships', {}).get(user_id, {}).get('stage') or 'stranger')}; "
-            f"阶段表达规则: {self.world_behavior_policy.expression_guidance(snapshot, user_id=user_id).prompt_line}\n"
+            f"阶段表达规则: {proactive_plan.prompt_fragment}\n"
             f"当前情感投影(JSON): {json.dumps(snapshot.get('emotion_modulation', {}), ensure_ascii=False, separators=(',', ':'))}\n"
             "若 unresolved=true，不能假装已经没事、不能用亲密主动消息索取回应。"
             "这些关系和情绪约束是有代价的软压力，不是绝对禁令；角色可以为修复、关心或自主选择承担一次打扰风险，但必须克制且说明得通。\n"
@@ -3261,9 +3706,12 @@ class CompanionEngine:
         causation = f"proactive:{self.world_kernel.revision(self.world_id)}"
         model_action_id = self._begin_world_model_call(purpose="proactive", causation=causation)
         try:
-            with model_call_scope("proactive"):
-                raw = await self.model.complete(
-                    [{"role": "user", "content": prompt}], temperature=0.7
+            with model_call_scope("proactive", action_id=model_action_id):
+                raw = await self._bounded_world_model_complete(
+                    self.model,
+                    [{"role": "user", "content": prompt}],
+                    purpose="proactive",
+                    temperature=0.7,
                 )
         except Exception as exc:
             self._fail_world_model_call(model_action_id, str(exc))
@@ -3301,13 +3749,7 @@ class CompanionEngine:
                     }
                 )
             if decision.should_send and decision.message:
-                affect_violation = affect_reply_violation(
-                    modulation if isinstance(modulation, dict) else {},
-                    candidate_message,
-                    snapshot.get("last_affect_display")
-                    if isinstance(snapshot.get("last_affect_display"), dict)
-                    else None,
-                )
+                affect_violation = proactive_plan.validate(candidate_message)
                 if affect_violation:
                     decision = decision.model_copy(
                         update={
@@ -4268,3 +4710,30 @@ def _promise_followup_delay(text: str) -> timedelta | None:
     if "回头" in normalized or "之后" in normalized:
         return timedelta(hours=6)
     return None
+
+
+def _observed_reply_delay_seconds(
+    history: list[dict[str, object]], observed_at: datetime
+) -> float | None:
+    """Derive platform reply delay only from a prior recorded outbound turn."""
+    prior = next(
+        (
+            item
+            for item in reversed(history[:-1])
+            if isinstance(item, dict) and item.get("direction") == "out"
+        ),
+        None,
+    )
+    if prior is None:
+        return None
+    raw = prior.get("sent_at") or prior.get("observed_at")
+    if not raw:
+        return None
+    try:
+        prior_at = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    if prior_at.tzinfo is None or observed_at.tzinfo is None:
+        return None
+    seconds = (observed_at - prior_at).total_seconds()
+    return seconds if 0 <= seconds <= 604800 else None

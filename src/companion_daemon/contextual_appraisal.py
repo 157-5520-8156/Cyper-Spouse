@@ -105,6 +105,7 @@ async def propose_contextual_appraisal(
     text: str,
     recent_messages: Sequence[Mapping[str, object]],
     relationship_stage: str,
+    interaction_evidence: Mapping[str, object] | None = None,
 ) -> tuple[str, ContextualAppraisal]:
     context = [
         {
@@ -137,6 +138,12 @@ async def propose_contextual_appraisal(
             "severity": "1..4",
         },
     }
+    if interaction_evidence:
+        prompt["interaction_evidence"] = {
+            key: value
+            for key, value in interaction_evidence.items()
+            if key != "text" and value not in (None, (), [], "")
+        }
     raw = await model.complete(
         [{"role": "user", "content": json.dumps(prompt, ensure_ascii=False)}],
         temperature=0.0,
@@ -161,9 +168,16 @@ def validate_contextual_appraisal(raw: str, *, text: str) -> ContextualAppraisal
     confidence = float(value.get("confidence") or 0.0)
     if not 0.0 <= confidence <= 1.0:
         raise ValueError("contextual confidence must be between zero and one")
-    evidence = tuple(str(item)[:120] for item in value.get("evidence_spans", []))
+    raw_evidence = value.get("evidence_spans", [])
+    raw_acts = value.get("acts", [])
+    if not isinstance(raw_evidence, list) or not isinstance(raw_acts, list):
+        raise ValueError("contextual evidence_spans and acts must be arrays")
+    evidence = tuple(str(item)[:120] for item in raw_evidence)
     if not evidence or any(not span or span not in text for span in evidence):
         raise ValueError("contextual evidence must quote the current message")
+    alternative = str(value.get("alternative_appraisal") or "").strip()[:240]
+    if not alternative:
+        raise ValueError("contextual appraisal requires an alternative interpretation")
     severity = _bounded_int(value, "severity", 1, 4)
     compact_evidence = tuple(re.sub(r"\s+", "", span) for span in evidence)
     supported_harm = (
@@ -177,7 +191,7 @@ def validate_contextual_appraisal(raw: str, *, text: str) -> ContextualAppraisal
     accepted_appraisal = (
         appraisal if confidence >= 0.75 and supported_harm else "ordinary_message"
     )
-    acts = tuple(str(item)[:40] for item in value.get("acts", [])[:6])
+    acts = tuple(str(item)[:40] for item in raw_acts[:6])
     return ContextualAppraisal(
         proposed_appraisal=appraisal,
         appraisal=accepted_appraisal,
@@ -194,7 +208,7 @@ def validate_contextual_appraisal(raw: str, *, text: str) -> ContextualAppraisal
         severity=severity,
         acts=acts,
         evidence_spans=evidence,
-        alternative_appraisal=str(value.get("alternative_appraisal") or "")[:240],
+        alternative_appraisal=alternative,
     )
 
 

@@ -82,6 +82,22 @@ def test_28_day_replay_repairs_without_false_harm_or_infinite_escalation(
         appraisal = event.kind
         if appraisal == "repair_attempt":
             appraisal = classify_repair_appraisal(text) or appraisal
+        repair_evidence = {}
+        if appraisal == "boundary_respected":
+            violation_id = str(
+                world.snapshot(started.world_id)["emotion_modulation"].get(
+                    "repair_target_reference"
+                )
+                or ""
+            )
+            repair_evidence = {
+                "repair_evidence": {
+                    "violation_id": violation_id,
+                    "commitment_id": f"commitment:{violation_id}",
+                    "opportunity_id": f"longitudinal-opportunity:{day + 1}",
+                    "behavior_key": "honor_boundary",
+                }
+            }
         world.submit(
             {
                 "type": "appraise_turn",
@@ -92,6 +108,7 @@ def test_28_day_replay_repairs_without_false_harm_or_infinite_escalation(
                     "severity": event.intensity,
                     "acts": list(event.acts),
                     "evidence_spans": list(event.evidence_spans),
+                    **repair_evidence,
                 },
                 "intent_id": f"longitudinal-intent:{day + 1}",
                 "message_id": f"longitudinal-{day + 1}",

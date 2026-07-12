@@ -22,7 +22,9 @@ from companion_daemon.action_coordinator import (
     UserInterjectionKind,
 )
 from companion_daemon.affect_display import plan_affect_display
+from companion_daemon.expression_plan import ExpressionPlan, compile_expression_plan
 from companion_daemon.life_simulation import LifeSimulation
+from companion_daemon.life_appraisal import appraise_committed_life_outcome
 from companion_daemon.life_evolution import LifeEvolution
 from companion_daemon.time import utc_now
 from companion_daemon.world_interaction_rules import (
@@ -103,6 +105,36 @@ class WorldDecision:
 
 
 @dataclass(frozen=True)
+class CommittedAppraisal:
+    kind: str
+    severity: int = 3
+    target: str = "general"
+    acts: tuple[str, ...] = ()
+    evidence_spans: tuple[str, ...] = ()
+    dimensions: dict[str, object] | None = None
+
+    def interaction_payload(self) -> dict[str, object]:
+        return {
+            "severity": self.severity,
+            "target": self.target,
+            "acts": list(self.acts),
+            "evidence_spans": list(self.evidence_spans),
+            **dict(self.dimensions or {}),
+        }
+
+
+@dataclass(frozen=True)
+class AcceptedTurn:
+    world_id: str
+    user_id: str
+    message_id: str
+    intent_id: str
+    appraisal: CommittedAppraisal
+    expected_revision: int
+    causation_id: str | None = None
+
+
+@dataclass(frozen=True)
 class ProjectionReport:
     world_id: str
     projection_name: str
@@ -141,6 +173,24 @@ class WorldKernel:
     """The sole write seam for virtual-world facts, plans, and settled actions."""
 
     SNAPSHOT_INTERVAL = 25
+
+    def accept_turn(self, turn: AcceptedTurn) -> WorldDecision:
+        """Atomically commit one typed Appraisal without exposing command schema."""
+        return self.submit(
+            {
+                "type": "appraise_turn",
+                "world_id": turn.world_id,
+                "appraisal": turn.appraisal.kind,
+                "interaction": turn.appraisal.interaction_payload(),
+                "intent_id": turn.intent_id,
+                "message_id": turn.message_id,
+                "user_id": turn.user_id,
+                "actor": {"kind": "companion", "id": "zhizhi"},
+                "causation_id": turn.causation_id or turn.message_id,
+                "idempotency_key": f"appraise:{turn.intent_id}",
+            },
+            expected_revision=turn.expected_revision,
+        )
     COST_POLICY = CostPolicy(
         daily_budget_units=1000,
         automatic_daily_budget_units=800,
@@ -1621,6 +1671,42 @@ class WorldKernel:
         with self.store.connect() as conn:
             _, state = self._load_state(conn, world_id)
         return state
+
+    def expression_plan(
+        self,
+        world_id: str,
+        *,
+        user_id: str,
+        purpose: str,
+        intent_id: str = "",
+        expected_revision: int | None = None,
+    ) -> ExpressionPlan:
+        """Compile a recipient- and revision-bound Display Strategy on demand."""
+        with self.store.connect() as conn:
+            revision, state = self._load_state(conn, world_id)
+        if expected_revision is not None and revision != expected_revision:
+            raise WorldError(
+                f"expression plan revision mismatch: expected {expected_revision}, got {revision}"
+            )
+        relationships = _as_dict(state.get("relationships", {}), "relationships")
+        relationship = _as_dict(
+            relationships.get(user_id, {}), "expression relationship"
+        )
+        raw_appraisal = state.get("last_appraisal")
+        appraisal = (
+            _as_dict(raw_appraisal, "last appraisal")
+            if isinstance(raw_appraisal, dict)
+            else {}
+        )
+        return compile_expression_plan(
+            _as_dict(state.get("emotion_modulation", {}), "emotion modulation"),
+            relationship,
+            _as_dict(state.get("needs", {}), "needs"),
+            current_appraisal=str(appraisal.get("appraisal") or "ordinary_message"),
+            revision=revision,
+            user_id=user_id,
+            intent_id=f"{purpose}:{intent_id}" if intent_id else purpose,
+        )
 
     def dashboard_overview(self, world_id: str) -> dict[str, object]:
         """Return the bounded, read-only view required by the world console.
@@ -3195,8 +3281,37 @@ class WorldKernel:
                         expire_threads_until(ends)
                         decay_affect_until(ends)
                     for outcome_type, outcome_payload in outcome_events:
-                        emit(outcome_type, outcome_payload)
                         if outcome_type == "ExperienceAppraised":
+                            npc_id = str(outcome_payload.get("npc_id") or "")
+                            goal_id = str(outcome_payload.get("goal_id") or "")
+                            npc_relationship = _as_dict(
+                                _as_dict(
+                                    working.get("relationships", {}), "relationships"
+                                ).get(npc_id, {}),
+                                "npc relationship",
+                            ) if npc_id else {}
+                            goal = _as_dict(
+                                _as_dict(working.get("goals", {}), "goals").get(
+                                    goal_id, {}
+                                ),
+                                "affect goal",
+                            ) if goal_id else {}
+                            cognitive_appraisal = appraise_committed_life_outcome(
+                                outcome_payload,
+                                needs=_as_dict(working.get("needs", {}), "needs"),
+                                npc_relationship=npc_relationship,
+                                goal_importance=int(
+                                    goal.get("importance")
+                                    or goal.get("priority")
+                                    or 50 if goal_id else 0
+                                ),
+                            )
+                            outcome_payload = {
+                                **outcome_payload,
+                                "dimensions": cognitive_appraisal.payload(),
+                                "rule_version": cognitive_appraisal.rule_version,
+                            }
+                            emit(outcome_type, outcome_payload)
                             affect = apply_appraisal(
                                 _as_dict(
                                     working["emotion_modulation"],
@@ -3207,7 +3322,7 @@ class WorldKernel:
                                 source_reference=str(
                                     outcome_payload["source_reference"]
                                 ),
-                                intensity=int(outcome_payload["intensity"]),
+                                intensity=cognitive_appraisal.salience,
                                 target=(
                                     f"npc:{outcome_payload['npc_id']}"
                                     if outcome_payload.get("npc_id")
@@ -3215,6 +3330,16 @@ class WorldKernel:
                                     if outcome_payload.get("goal_id")
                                     else "world"
                                 ),
+                                appraisal_dimensions={
+                                    **cognitive_appraisal.payload(),
+                                    "program_target": (
+                                        "valued_relationship"
+                                        if npc_id and cognitive_appraisal.relationship_value >= 60
+                                        else "goal"
+                                        if goal_id
+                                        else "world"
+                                    ),
+                                },
                             )
                             emit(
                                 "AffectChanged",
@@ -3225,6 +3350,8 @@ class WorldKernel:
                                 ),
                                 logical_at=ends.isoformat(),
                             )
+                        else:
+                            emit(outcome_type, outcome_payload)
                     previous = dict(_as_dict(_as_dict(working["agenda"], "agenda")[activity_id], "activity"))
 
             for action_id, action in _as_dict(working["actions"], "actions").items():
@@ -4412,6 +4539,12 @@ class WorldKernel:
                     "text": command.get("text", ""),
                     "sent_at": command.get("sent_at"),
                     "attachments": _as_list(command.get("attachments", []), "attachments"),
+                    "emoji": _as_list(command.get("emoji", []), "emoji")[:16],
+                    "sticker_kind": str(command.get("sticker_kind") or "")[:80],
+                    "reply_target": str(command.get("reply_target") or "")[:160],
+                    "source_message_ids": _as_list(
+                        command.get("source_message_ids", []), "source message ids"
+                    )[:20],
                 },
             )]
         if command_type == "settle_turn":
@@ -4480,6 +4613,89 @@ class WorldKernel:
             controllability = int(interaction.get("controllability", 50))
             norm_compatibility = int(interaction.get("norm_compatibility", 0))
             power_delta = int(interaction.get("power_delta", 0))
+            agency = str(interaction.get("agency") or "unknown")
+            self_evaluation = str(
+                interaction.get("self_evaluation") or "specific_action"
+            )
+            social_exposure = int(interaction.get("social_exposure", 0))
+            repair_evidence = (
+                _as_dict(interaction.get("repair_evidence", {}), "repair evidence")
+                if appraisal == "boundary_respected"
+                else {}
+            )
+            repair_evidence_reference = ""
+            repair_followthrough_duplicate = False
+            if appraisal == "boundary_respected":
+                violation_id = str(repair_evidence.get("violation_id") or "")
+                commitment_id = str(repair_evidence.get("commitment_id") or "")
+                opportunity_id = str(repair_evidence.get("opportunity_id") or "")
+                behavior_key = str(repair_evidence.get("behavior_key") or "")
+                active_violation = str(
+                    _as_dict(
+                        state["emotion_modulation"], "emotion modulation"
+                    ).get("repair_target_reference")
+                    or ""
+                )
+                repair_cases = _as_dict(state.get("repair_cases", {}), "repair cases")
+                repair_case = _as_dict(
+                    repair_cases.get(violation_id, {}), "repair case"
+                )
+                commitments = _as_dict(
+                    repair_case.get("commitments", {}), "repair commitments"
+                )
+                commitment = _as_dict(
+                    commitments.get(commitment_id, {}), "repair commitment"
+                )
+                opportunities = _as_dict(
+                    state.get("repair_opportunities", {}), "repair opportunities"
+                )
+                existing_opportunity = _as_dict(
+                    opportunities.get(opportunity_id, {}), "repair opportunity"
+                )
+                if (
+                    not violation_id
+                    or violation_id != active_violation
+                    or not commitment_id
+                    or not opportunity_id
+                    or not behavior_key
+                    or any(
+                        len(value) > 160
+                        for value in (
+                            violation_id,
+                            commitment_id,
+                            opportunity_id,
+                            behavior_key,
+                        )
+                    )
+                ):
+                    raise WorldError(
+                        "repair followthrough requires the active violation, commitment, opportunity, and behavior"
+                    )
+                if (
+                    not commitment
+                    or str(commitment.get("violation_id") or "") != violation_id
+                    or int(commitment.get("committed_revision") or 0)
+                    <= int(repair_case.get("violation_revision") or 0)
+                ):
+                    raise WorldError(
+                        "repair followthrough requires a committed repair commitment bound to the violation"
+                    )
+                if existing_opportunity:
+                    if (
+                        str(existing_opportunity.get("violation_id") or "")
+                        != violation_id
+                        or str(existing_opportunity.get("commitment_id") or "")
+                        != commitment_id
+                        or str(existing_opportunity.get("behavior_key") or "")
+                        != behavior_key
+                    ):
+                        raise WorldError(
+                            "repair opportunity cannot be reused for a different behavior, commitment, or violation"
+                        )
+                    repair_followthrough_duplicate = True
+                repair_evidence_reference = (
+                    f"repair:{violation_id}:{opportunity_id}:{behavior_key}"
+                )
             if not 1 <= severity <= 4 or target not in {
                 "general",
                 "companion",
@@ -4487,12 +4703,17 @@ class WorldKernel:
                 "third_party",
             } or len(acts) > 6 or not 0.0 <= confidence <= 1.0:
                 raise WorldError("interaction appraisal is outside the bounded schema")
+            if agency not in {
+                "user", "companion", "npc", "third_party", "situation", "unknown"
+            } or self_evaluation not in {"specific_action", "global_negative"}:
+                raise WorldError("interaction appraisal agency or self evaluation is invalid")
             if (
                 not 0 <= certainty <= 100
                 or not -100 <= goal_congruence <= 100
                 or not 0 <= controllability <= 100
                 or not -100 <= norm_compatibility <= 100
                 or not -100 <= power_delta <= 100
+                or not 0 <= social_exposure <= 100
             ):
                 raise WorldError("interaction appraisal dimensions are outside bounds")
             if (
@@ -4506,8 +4727,11 @@ class WorldKernel:
                 ) > 0
             ):
                 appraisal = "repeated_violation"
+            consequence_appraisal = (
+                "ordinary_message" if repair_followthrough_duplicate else appraisal
+            )
             consequence = self.interaction_rules.consequence(
-                appraisal,
+                consequence_appraisal,
                 severity=severity if has_interaction_severity else 3,
                 confidence=confidence,
             )
@@ -4526,7 +4750,9 @@ class WorldKernel:
                         "implied_attitude": str(
                             interaction.get("implied_attitude") or ""
                         )[:160],
-                        "agency": str(interaction.get("agency") or "unknown")[:40],
+                        "agency": agency,
+                        "self_evaluation": self_evaluation,
+                        "social_exposure": social_exposure,
                         "certainty": certainty,
                         "goal_congruence": goal_congruence,
                         "controllability": controllability,
@@ -4536,6 +4762,7 @@ class WorldKernel:
                         "alternative_appraisal": str(
                             interaction.get("alternative_appraisal") or ""
                         )[:240],
+                        "repair_evidence": dict(repair_evidence),
                         "policy": consequence.policy,
                         "rule_version": self.interaction_rules.RULE_VERSION,
                     },
@@ -4548,6 +4775,75 @@ class WorldKernel:
                     },
                 ),
             ]
+            message_reference = (
+                f"message:{command.get('message_id') or command.get('intent_id') or 'unknown'}"
+            )
+            active_violation = str(
+                _as_dict(state["emotion_modulation"], "emotion modulation").get(
+                    "repair_target_reference"
+                )
+                or ""
+            )
+            if appraisal in HARMFUL_INTERACTION_APPRAISALS:
+                events.append(
+                    (
+                        "RepairViolationCommitted",
+                        {
+                            "violation_id": message_reference,
+                            "message_id": str(command.get("message_id") or ""),
+                            "user_id": str(command.get("user_id") or ""),
+                            "boundary_kind": appraisal,
+                        },
+                    )
+                )
+            elif appraisal in {"repair_specific", "repair_restitution"} and active_violation:
+                repair_case = _as_dict(
+                    _as_dict(state.get("repair_cases", {}), "repair cases").get(
+                        active_violation, {}
+                    ),
+                    "repair case",
+                )
+                commitment_id = f"commitment:{active_violation}"
+                existing_commitments = _as_dict(
+                    repair_case.get("commitments", {}), "repair commitments"
+                )
+                if commitment_id not in existing_commitments:
+                    events.append(
+                        (
+                            "RepairCommitmentCommitted",
+                            {
+                                "commitment_id": commitment_id,
+                                "violation_id": active_violation,
+                                "message_id": str(command.get("message_id") or ""),
+                                "user_id": str(command.get("user_id") or ""),
+                                "promised_boundary": "honor_boundary",
+                            },
+                        )
+                    )
+            elif appraisal == "boundary_respected" and not repair_followthrough_duplicate:
+                events.extend(
+                    (
+                        (
+                            "RepairOpportunityObserved",
+                            {
+                                "opportunity_id": opportunity_id,
+                                "violation_id": violation_id,
+                                "commitment_id": commitment_id,
+                                "behavior_key": behavior_key,
+                            },
+                        ),
+                        (
+                            "RepairFollowthroughCommitted",
+                            {
+                                "opportunity_id": opportunity_id,
+                                "violation_id": violation_id,
+                                "commitment_id": commitment_id,
+                                "behavior_key": behavior_key,
+                                "evidence_reference": repair_evidence_reference,
+                            },
+                        ),
+                    )
+                )
             events.extend(
                 ("NeedChanged", {"need": need, "delta": delta})
                 for need, delta in consequence.need_deltas.items()
@@ -4568,7 +4864,9 @@ class WorldKernel:
                     {},
                 )
                 slow_warmth = relationship_slow_warmth(protagonist)
-                event_significance = relationship_event_significance(appraisal)
+                event_significance = relationship_event_significance(
+                    consequence_appraisal
+                )
                 events.append(("RelationshipAppraised", {"user_id": user_id, "appraisal": appraisal, "rule_version": self.interaction_rules.RULE_VERSION}))
                 events.extend(
                     ("RelationshipChanged", {"entity_id": user_id, "dimension": dimension, "delta": delta})
@@ -4648,7 +4946,10 @@ class WorldKernel:
                 _as_dict(state["emotion_modulation"], "emotion modulation"),
                 appraisal,
                 logical_at,
-                source_reference=f"message:{command.get('message_id') or command.get('intent_id') or 'unknown'}",
+                source_reference=(
+                    repair_evidence_reference
+                    or message_reference
+                ),
                 intensity=severity if has_interaction_severity else None,
                 target=target,
                 appraisal_dimensions={
@@ -4658,6 +4959,10 @@ class WorldKernel:
                     "norm_compatibility": norm_compatibility,
                     "power_delta": power_delta,
                     "confidence": confidence,
+                    "agency": agency,
+                    "program_target": target,
+                    "self_evaluation": self_evaluation,
+                    "social_exposure": social_exposure,
                 },
                 relationship_residue=affinity_for_affect,
             )
@@ -5189,6 +5494,64 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
             **_as_dict(next_state["emotion_modulation"], "emotion modulation"),
             **affect_payload,
         }
+    elif event.event_type == "RepairViolationCommitted":
+        repair_cases = _as_dict(next_state["repair_cases"], "repair cases")
+        for existing in repair_cases.values():
+            existing_case = _as_dict(existing, "repair case")
+            if existing_case.get("status") == "active":
+                existing_case["status"] = "superseded_by_recurrence"
+                existing_case["superseded_revision"] = event.revision
+        violation_id = str(payload["violation_id"])
+        repair_cases[violation_id] = {
+            **payload,
+            "status": "active",
+            "violation_revision": event.revision,
+            "commitments": {},
+            "opportunities": {},
+            "followthrough": {},
+        }
+    elif event.event_type == "RepairCommitmentCommitted":
+        repair_case = _as_dict(
+            _as_dict(next_state["repair_cases"], "repair cases")[
+                str(payload["violation_id"])
+            ],
+            "repair case",
+        )
+        _as_dict(repair_case["commitments"], "repair commitments")[
+            str(payload["commitment_id"])
+        ] = {**payload, "committed_revision": event.revision}
+    elif event.event_type == "RepairOpportunityObserved":
+        opportunity = {**payload, "observed_revision": event.revision}
+        _as_dict(next_state["repair_opportunities"], "repair opportunities")[
+            str(payload["opportunity_id"])
+        ] = opportunity
+        repair_case = _as_dict(
+            _as_dict(next_state["repair_cases"], "repair cases")[
+                str(payload["violation_id"])
+            ],
+            "repair case",
+        )
+        _as_dict(repair_case["opportunities"], "repair opportunities")[
+            str(payload["opportunity_id"])
+        ] = opportunity
+    elif event.event_type == "RepairFollowthroughCommitted":
+        repair_case = _as_dict(
+            _as_dict(next_state["repair_cases"], "repair cases")[
+                str(payload["violation_id"])
+            ],
+            "repair case",
+        )
+        opportunity = _as_dict(
+            _as_dict(repair_case["opportunities"], "repair opportunities")[
+                str(payload["opportunity_id"])
+            ],
+            "repair opportunity",
+        )
+        if event.revision <= int(opportunity.get("observed_revision") or 0):
+            raise WorldError("repair followthrough must occur after its opportunity")
+        _as_dict(repair_case["followthrough"], "repair followthrough")[
+            str(payload["opportunity_id"])
+        ] = {**payload, "committed_revision": event.revision}
     elif event.event_type == "ActivityPlanned":
         item = {**payload, "status": "planned"}
         _as_dict(next_state["agenda"], "agenda")[str(item["activity_id"])] = item
@@ -5752,6 +6115,8 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
             ),
             "input merge",
         )
+        if merge.get("status") != "pending":
+            merge["messages"] = []
         messages = _as_list(merge["messages"], "merge messages")
         messages.append(dict(_as_dict(payload["message"], "merge message")))
         merge.update(
@@ -5931,6 +6296,8 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "last_appraisal": None,
         "relationships": {},
         "long_term_affinity": {},
+        "repair_cases": {},
+        "repair_opportunities": {},
         "character_core_changes": [],
         "needs": {"energy": 70, "attention": 55, "security": 50, "initiative": 20, "boundary": 0},
         "daily_schedule": [],

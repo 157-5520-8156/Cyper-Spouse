@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 import secrets
 from typing import Literal
@@ -23,7 +24,13 @@ from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel
 from companion_daemon.qq_delivery import QQDelivery
 
 
-app = FastAPI(title="Girl Agent Companion Daemon")
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    yield
+    await engine.aclose()
+
+
+app = FastAPI(title="Girl Agent Companion Daemon", lifespan=lifespan)
 app.mount("/assets", StaticFiles(directory=Path(__file__).resolve().parents[2] / "assets"), name="assets")
 app.mount(
     "/dashboard-static",

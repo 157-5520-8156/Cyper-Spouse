@@ -33,6 +33,53 @@ def test_runtime_rejects_v4_pro_override() -> None:
         require_flash_model("deepseek-v4-pro", setting="DEEPSEEK_MODEL")
 
 
+@pytest.mark.asyncio
+async def test_runtime_models_share_provider_circuit_breaker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "runtime-breaker.sqlite"))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    get_settings.cache_clear()
+    try:
+        engine = build_companion_engine()
+    finally:
+        get_settings.cache_clear()
+
+    assert engine.interaction_appraisal_model is not None
+    assert engine.interaction_deep_appraisal_model is not None
+    assert engine.interaction_appraisal_model.thinking_enabled is False
+    assert engine.interaction_deep_appraisal_model.thinking_enabled is True
+    assert engine.model.circuit_breaker is not None
+    assert (
+        engine.model.circuit_breaker
+        is engine.interaction_appraisal_model.circuit_breaker
+    )
+    assert (
+        engine.model.circuit_breaker
+        is engine.interaction_deep_appraisal_model.circuit_breaker
+    )
+    assert engine.model.client is engine.interaction_appraisal_model.client
+    assert engine.model.client is engine.interaction_deep_appraisal_model.client
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
+async def test_runtime_engine_closes_its_shared_model_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("DATABASE_PATH", str(tmp_path / "runtime-close.sqlite"))
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
+    get_settings.cache_clear()
+    try:
+        engine = build_companion_engine()
+        client = engine.model.client
+        await engine.aclose()
+    finally:
+        get_settings.cache_clear()
+
+    assert client.is_closed is True
+
+
 def test_removed_world_runtime_switch_cannot_disable_the_world(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

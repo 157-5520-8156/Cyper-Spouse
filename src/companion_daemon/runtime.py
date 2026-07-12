@@ -1,6 +1,8 @@
 from pathlib import Path
 import logging
 
+import httpx
+
 from companion_daemon.character import load_character
 from companion_daemon.config import get_settings
 from companion_daemon.conversation import SillyTavernConversationCore
@@ -9,7 +11,12 @@ from companion_daemon.attachment_cache import AttachmentCache
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine
 from companion_daemon.image_generation import OpenAIImageGenerator
-from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel, ModelCallUsage
+from companion_daemon.llm import (
+    DeepSeekChatModel,
+    FakeCompanionModel,
+    ModelCallUsage,
+    ProviderCircuitBreaker,
+)
 from companion_daemon.multimodal_analysis import MultimodalAnalyzer, OpenAIMultimodalAnalyzer
 from companion_daemon.stickers import load_stickers
 from companion_daemon.world import WorldKernel
@@ -53,10 +60,22 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             cache_miss_tokens=usage.cache_miss_tokens,
             total_tokens=usage.total_tokens,
             error=usage.error,
+            world_id=usage.world_id,
+            turn_id=usage.turn_id,
+            action_id=usage.action_id,
+            cadence=usage.cadence,
+            attempt=usage.attempt,
         )
 
     interaction_appraisal_model = None
+    interaction_deep_appraisal_model = None
+    shared_model_client = None
     if settings.deepseek_api_key and not use_fake_model:
+        provider_circuit = ProviderCircuitBreaker(
+            failure_threshold=1,
+            cooldown_seconds=30,
+        )
+        shared_model_client = httpx.AsyncClient(timeout=45, trust_env=False)
         model = DeepSeekChatModel(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
@@ -64,14 +83,28 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             thinking_enabled=settings.deepseek_thinking_enabled,
             reasoning_effort=settings.deepseek_reasoning_effort,
             usage_observer=record_model_usage,
+            circuit_breaker=provider_circuit,
+            client=shared_model_client,
         )
         interaction_appraisal_model = DeepSeekChatModel(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            model="deepseek-v4-flash",
+            thinking_enabled=False,
+            reasoning_effort="high",
+            usage_observer=record_model_usage,
+            circuit_breaker=provider_circuit,
+            client=shared_model_client,
+        )
+        interaction_deep_appraisal_model = DeepSeekChatModel(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
             model="deepseek-v4-flash",
             thinking_enabled=True,
             reasoning_effort="high",
             usage_observer=record_model_usage,
+            circuit_breaker=provider_circuit,
+            client=shared_model_client,
         )
     else:
         model = FakeCompanionModel()
@@ -128,6 +161,8 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             thinking_enabled=settings.deepseek_thinking_enabled,
             reasoning_effort=settings.deepseek_reasoning_effort,
             usage_observer=record_model_usage,
+            circuit_breaker=provider_circuit,
+            client=shared_model_client,
         )
     return CompanionEngine(
         store,
@@ -145,5 +180,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         world_id=world_id,
         world_grounding_audit_model=model if world_kernel else None,
         interaction_appraisal_model=interaction_appraisal_model,
+        interaction_deep_appraisal_model=interaction_deep_appraisal_model,
         attachment_cache=AttachmentCache(settings.attachment_cache_path),
+        managed_async_resources=(shared_model_client,) if shared_model_client else (),
     )

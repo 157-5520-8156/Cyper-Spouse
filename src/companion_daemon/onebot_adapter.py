@@ -102,6 +102,9 @@ def parse_onebot_event(event: dict[str, Any]) -> IncomingMessage | None:
 
     text_parts: list[str] = []
     attachments: list[MessageAttachment] = []
+    emoji: list[str] = []
+    sticker_kind: str | None = None
+    reply_target: str | None = None
 
     if isinstance(segments, str):
         text_parts.append(segments)
@@ -113,6 +116,16 @@ def parse_onebot_event(event: dict[str, Any]) -> IncomingMessage | None:
             sdata = seg.get("data", {})
             if stype == "text":
                 text_parts.append(str(sdata.get("text", "")))
+            elif stype == "face":
+                face_id = str(sdata.get("id") or "").strip()
+                if face_id:
+                    emoji.append(f"qq-face:{face_id}")
+            elif stype in {"mface", "market_face"}:
+                sticker_kind = str(
+                    sdata.get("summary") or sdata.get("emoji_id") or "qq-market-face"
+                )[:80]
+            elif stype == "reply":
+                reply_target = str(sdata.get("id") or "").strip()[:160] or None
             elif stype == "image":
                 attachments.append(MessageAttachment(
                     kind="image", url=sdata.get("url"),
@@ -134,7 +147,7 @@ def parse_onebot_event(event: dict[str, Any]) -> IncomingMessage | None:
                 ))
 
     text = raw_message if raw_message else "".join(text_parts)
-    if not text and not attachments:
+    if not text and not attachments and not emoji and not sticker_kind:
         return None
 
     channel_id = str(event.get("group_id") or "") if event.get("message_type") == "group" else None
@@ -146,6 +159,9 @@ def parse_onebot_event(event: dict[str, Any]) -> IncomingMessage | None:
         channel_id=channel_id or None,
         message_id=message_id,
         attachments=attachments,
+        emoji=emoji[:16],
+        sticker_kind=sticker_kind,
+        reply_target=reply_target,
     )
 
 

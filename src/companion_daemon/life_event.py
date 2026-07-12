@@ -115,8 +115,32 @@ async def run(
     generate_image: bool,
     image_kind: str,
 ) -> bool:
-    settings = get_settings()
     engine = build_companion_engine()
+    try:
+        return await _run_with_engine(
+            engine,
+            user_id=user_id,
+            send=send,
+            sandbox=sandbox,
+            generate_image=generate_image,
+            image_kind=image_kind,
+        )
+    finally:
+        close = getattr(engine, "aclose", None)
+        if callable(close):
+            await close()
+
+
+async def _run_with_engine(
+    engine,
+    *,
+    user_id: str,
+    send: bool,
+    sandbox: bool,
+    generate_image: bool,
+    image_kind: str,
+) -> bool:
+    settings = get_settings()
     if getattr(engine, "world_kernel", None) and getattr(engine, "world_id", None):
         return await _run_world_life_event(engine, user_id=user_id, send=send, sandbox=sandbox)
     state = engine.store.get_mood_state(user_id)
