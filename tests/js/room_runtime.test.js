@@ -206,49 +206,72 @@ test('attached objects follow parent hiding while solo keeps required ancestors'
   assert.deepEqual(runtime.visibleObjects().map(item => item.id), ['sofa', 'table']);
 });
 
-test('desk decor deletion audits keep siblings and paths stable', () => {
-  const objectIds = [
-    'desk-laptop', 'desk-stationery-cluster', 'desk-book-cluster',
-    'desk-wall-shelf', 'desk-wall-books', 'desk-wall-plants',
-    'desk-wall-photo-cluster',
-  ];
-  const routeStart = [7, 4, 0], routeEnd = [5, 7, 0];
-  const hiddenWithDescendants = {
-    'desk-wall-shelf': new Set(['desk-wall-shelf', 'desk-wall-books', 'desk-wall-plants']),
+test('every declared art-draft hidden and solo audit preserves ownership and routes', () => {
+  const draftObjects = bundle.artDraft.objects;
+  const byId = new Map(draftObjects.map(object => [object.id, object]));
+  const descendantsOf = objectId => new Set(draftObjects
+    .filter(candidate => {
+      let current = candidate;
+      while (current?.attachedTo) {
+        if (current.attachedTo === objectId) return true;
+        current = byId.get(current.attachedTo);
+      }
+      return false;
+    })
+    .map(candidate => candidate.id));
+  const ancestorsOf = objectId => {
+    const ancestors = new Set();
+    let current = byId.get(objectId);
+    while (current?.attachedTo) {
+      ancestors.add(current.attachedTo);
+      current = byId.get(current.attachedTo);
+    }
+    return ancestors;
   };
+  const routeProfile = runtime => Object.values(runtime.scene.interactions).map(interaction =>
+    runtime.pathfind(runtime.scene.anchors.rug, interaction.approach, interaction.allowOccupiedBy || [])
+  );
 
-  for (const objectId of objectIds) {
-    const runtime = new DashboardRoomRuntime(fakeCanvas(), bundle, {});
-    const beforePath = runtime.pathfind(routeStart, routeEnd);
-    runtime.activatePreview(new URLSearchParams('demo=art-draft'));
-    const baselineVisible = runtime.visibleObjects().map(item => item.id);
-    runtime.activatePreview(new URLSearchParams(`demo=atomization&art=draft&object=${objectId}&mode=hidden`));
-    const visible = runtime.visibleObjects().map(item => item.id);
-    const hidden = hiddenWithDescendants[objectId] || new Set([objectId]);
+  const baselineRuntime = new DashboardRoomRuntime(fakeCanvas(), bundle, {});
+  baselineRuntime.activatePreview(new URLSearchParams('demo=art-draft'));
+  const baselineIds = baselineRuntime.visibleObjects().map(object => object.id);
+  const baselineRoutes = routeProfile(baselineRuntime);
 
+  for (const object of draftObjects) {
+    assert.equal(object.audits?.hidden, true, `${object.id} must declare a hidden audit`);
+    assert.equal(object.audits?.solo, true, `${object.id} must declare a solo audit`);
+
+    const hiddenRuntime = new DashboardRoomRuntime(fakeCanvas(), bundle, {});
+    hiddenRuntime.activatePreview(new URLSearchParams(
+      `demo=atomization&art=draft&object=${object.id}&mode=hidden`
+    ));
+    const hiddenIds = hiddenRuntime.visibleObjects().map(candidate => candidate.id);
+    const removed = new Set([object.id, ...descendantsOf(object.id)]);
     assert.deepEqual(
-      visible,
-      baselineVisible.filter(id => !hidden.has(id)),
-      `${objectId} should preserve all unrelated object order`,
+      hiddenIds,
+      baselineIds.filter(id => !removed.has(id)),
+      `${object.id} hidden audit must remove only its attachment subtree`,
     );
-    assert.deepEqual(runtime.pathfind(routeStart, routeEnd), beforePath, `${objectId} should not alter paths`);
-  }
+    assert.deepEqual(
+      routeProfile(hiddenRuntime), baselineRoutes,
+      `${object.id} hidden audit must not change interaction routes`,
+    );
 
-  const deskRuntime = new DashboardRoomRuntime(fakeCanvas(), bundle, {});
-  deskRuntime.activatePreview(new URLSearchParams('demo=atomization&art=draft&object=desk&mode=hidden'));
-  const deskVisible = new Set(deskRuntime.visibleObjects().map(item => item.id));
-  for (const objectId of ['desk', 'desk-laptop', 'desk-stationery-cluster', 'desk-book-cluster']) {
-    assert.equal(deskVisible.has(objectId), false, `${objectId} should follow desk hiding`);
+    const soloRuntime = new DashboardRoomRuntime(fakeCanvas(), bundle, {});
+    soloRuntime.activatePreview(new URLSearchParams(
+      `demo=atomization&art=draft&object=${object.id}&mode=solo`
+    ));
+    const retained = new Set([object.id, ...ancestorsOf(object.id)]);
+    assert.deepEqual(
+      soloRuntime.visibleObjects().map(candidate => candidate.id),
+      baselineIds.filter(id => retained.has(id)),
+      `${object.id} solo audit must retain exactly its physical ancestors`,
+    );
+    assert.deepEqual(
+      routeProfile(soloRuntime), baselineRoutes,
+      `${object.id} solo audit must not change interaction routes`,
+    );
   }
-  assert.equal(deskVisible.has('desk-wall-photo-cluster'), true);
-
-  const shelfRuntime = new DashboardRoomRuntime(fakeCanvas(), bundle, {});
-  shelfRuntime.activatePreview(new URLSearchParams('demo=atomization&art=draft&object=desk-wall-shelf&mode=hidden'));
-  const shelfVisible = new Set(shelfRuntime.visibleObjects().map(item => item.id));
-  for (const objectId of ['desk-wall-shelf', 'desk-wall-books', 'desk-wall-plants']) {
-    assert.equal(shelfVisible.has(objectId), false, `${objectId} should follow shelf hiding`);
-  }
-  assert.equal(shelfVisible.has('desk-wall-photo-cluster'), true);
 });
 
 test('pathfinding only enters occupied interaction tiles declared by object id', () => {
