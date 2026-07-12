@@ -700,26 +700,47 @@ class WorldKernel:
                 )
                 trace_row_id = int(trace_row.lastrowid)
                 action_id = f"outgoing:{delivery_id}"
-                private_commitment_events: list[tuple[str, dict[str, object]]] = []
+                private_inner_events: list[tuple[str, dict[str, object]]] = []
+                expected_inner_user_id = f"user:{canonical_user_id}"
+                raw_private_impression = trace.get("private_impression")
+                if raw_private_impression is not None:
+                    impression = self._private_impression_payload(
+                        state,
+                        _as_dict(
+                            raw_private_impression,
+                            "outgoing private impression",
+                        ),
+                    )
+                    if impression["user_id"] != expected_inner_user_id:
+                        raise WorldError("outgoing private impression belongs to another user")
+                    private_inner_events.append(
+                        (
+                            "PrivateImpressionCommitted",
+                            impression,
+                        )
+                    )
                 raw_private_commitment = trace.get("private_commitment")
                 if raw_private_commitment is not None:
-                    private_commitment_events.append(
+                    commitment = self._private_commitment_payload(
+                        state,
+                        _as_dict(
+                            raw_private_commitment,
+                            "outgoing private commitment",
+                        ),
+                        pending_thread_id=str(
+                            _as_dict(
+                                trace.get("conversation_thread", {}),
+                                "outgoing conversation thread",
+                            ).get("thread_id")
+                            or ""
+                        ),
+                    )
+                    if commitment["user_id"] != expected_inner_user_id:
+                        raise WorldError("outgoing private commitment belongs to another user")
+                    private_inner_events.append(
                         (
                             "PrivateCommitmentCommitted",
-                            self._private_commitment_payload(
-                                state,
-                                _as_dict(
-                                    raw_private_commitment,
-                                    "outgoing private commitment",
-                                ),
-                                pending_thread_id=str(
-                                    _as_dict(
-                                        trace.get("conversation_thread", {}),
-                                        "outgoing conversation thread",
-                                    ).get("thread_id")
-                                    or ""
-                                ),
-                            ),
+                            commitment,
                         )
                     )
                 segmented = self.action_coordinator.plan_action(
@@ -764,7 +785,7 @@ class WorldKernel:
                             },
                         ),
                         planned_event,
-                        *private_commitment_events,
+                        *private_inner_events,
                     ],
                     idempotency_key=f"outgoing:{delivery_id}",
                     correlation_id=str(uuid4()),

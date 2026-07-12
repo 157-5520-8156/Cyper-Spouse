@@ -33,3 +33,16 @@ def test_mind_proposal_discards_non_composing_or_delayed_first_beat() -> None:
     )
 
     assert proposal.expression_beats == ()
+
+
+def test_mind_proposal_keeps_only_a_bounded_fallible_private_impression() -> None:
+    proposal = parse_mind_proposal(
+        '{"reply_text":"我听到了。",'
+        '"private_impression":{"kind":"possible_disappointment",'
+        '"summary":"我感觉他可能是被刚才的节奏伤到了。","confidence":0.7},'
+        '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+    )
+
+    assert proposal.private_impression is not None
+    assert proposal.private_impression.kind == "possible_disappointment"
+    assert proposal.private_impression.confidence == 0.7

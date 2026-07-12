@@ -83,7 +83,11 @@ from companion_daemon.model_call_policy import (
     TurnModelCallBudget,
 )
 from companion_daemon.memory import extract_memories, is_durable_user_fact
-from companion_daemon.mind_proposal import MindProposal, parse_mind_proposal
+from companion_daemon.mind_proposal import (
+    MindProposal,
+    PrivateImpressionProposal,
+    parse_mind_proposal,
+)
 from companion_daemon.models import (
     CompanionReply,
     IncomingMessage,
@@ -1874,11 +1878,6 @@ class CompanionEngine:
                         "idempotency_key": f"thread-response:{thread_id}:{message.message_id}",
                     }
                 )
-        private_impression = self._material_private_impression_proposal(
-            message=message,
-            user_id=user_id,
-            user_affect=user_affect,
-        )
         self.world_kernel.accept_turn(
             AcceptedTurn(
                 world_id=self.world_id,
@@ -1898,7 +1897,6 @@ class CompanionEngine:
                 ),
                 expected_revision=self.world_kernel.revision(self.world_id),
                 causation_id=str(message.message_id or ""),
-                private_impression=private_impression,
             )
         )
         if skip_reply:
@@ -2157,7 +2155,9 @@ class CompanionEngine:
                                 "猜测、建议和问题不是事实声明，不要为它们创建 claim："
                                 "若自然地分成 2–3 段，可额外给 expression_beats，所有 text 必须按顺序精确拼成 reply_text，"
                                 "每段可有 delay_ms(0–20000，首段为0)；不要为了结构而拆句："
-                                '{"reply_text":"...","expression_beats":[{"text":"...","delay_ms":0}],"display_strategy":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
+                                "若本轮存在显著且未解决的用户失望/困惑，可额外给 private_impression（仅 kind、summary、confidence），"
+                                "它只是可拒绝的内心猜测，绝不是用户事实："
+                                '{"reply_text":"...","expression_beats":[{"text":"...","delay_ms":0}],"display_strategy":"...","private_impression":{"kind":"possible_disappointment","summary":"...","confidence":0.6},"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
                             ),
                         },
                     ], temperature=0.75),
@@ -2772,6 +2772,16 @@ class CompanionEngine:
             }
         if mind_proposal is not None and mind_proposal.display_strategy:
             trace["display_strategy"] = mind_proposal.display_strategy
+        private_impression = self._material_private_impression_proposal(
+            message=message,
+            user_id=user_id,
+            user_affect=user_affect,
+            model_proposal=(
+                mind_proposal.private_impression if mind_proposal is not None else None
+            ),
+        )
+        if private_impression is not None:
+            trace["private_impression"] = private_impression
         if question:
             thread_id = "thread:" + sha256(
                 f"{user_id}|{message.message_id}|{question}".encode("utf-8")
@@ -2829,6 +2839,7 @@ class CompanionEngine:
         message: IncomingMessage,
         user_id: str,
         user_affect: UserAffectAppraisal | None,
+        model_proposal: PrivateImpressionProposal | None = None,
     ) -> dict[str, object] | None:
         """Return an eligible inner proposal for the same atomic turn commit."""
         if (
@@ -2849,12 +2860,16 @@ class CompanionEngine:
             if user_affect.kind == "disappointment"
             else "我感觉他可能还在困惑刚才的互动。"
         )
+        confidence = user_affect.confidence
+        if model_proposal is not None and model_proposal.kind == kind:
+            summary = model_proposal.summary
+            confidence = min(user_affect.confidence, model_proposal.confidence)
         return {
             "impression_id": f"impression:{message.message_id}",
             "user_id": user_id,
             "kind": kind,
             "summary": summary,
-            "confidence": user_affect.confidence,
+            "confidence": confidence,
             "source_event_ids": [f"message:{message.message_id}"],
             "expires_at": (self._world_logical_now() + timedelta(days=7)).isoformat(),
         }

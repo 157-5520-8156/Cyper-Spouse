@@ -22,12 +22,22 @@ class ExpressionBeat:
 
 
 @dataclass(frozen=True)
+class PrivateImpressionProposal:
+    """A fallible inner reading that still needs the World commit policy."""
+
+    kind: str
+    summary: str
+    confidence: float
+
+
+@dataclass(frozen=True)
 class MindProposal:
     """A bounded model proposal; factual authority remains outside this type."""
 
     candidate: dict[str, object]
     expression_beats: tuple[ExpressionBeat, ...] = ()
     display_strategy: str | None = None
+    private_impression: PrivateImpressionProposal | None = None
 
 
 def parse_mind_proposal(raw: str) -> MindProposal:
@@ -55,6 +65,7 @@ def parse_mind_proposal(raw: str) -> MindProposal:
             payload.get("expression_beats"), candidate["reply_text"]
         ),
         display_strategy=_parse_display_strategy(payload.get("display_strategy")),
+        private_impression=_parse_private_impression(payload.get("private_impression")),
     )
 
 
@@ -82,3 +93,22 @@ def _parse_display_strategy(raw: object) -> str | None:
     if not value or len(value) > 80:
         return None
     return value
+
+
+def _parse_private_impression(raw: object) -> PrivateImpressionProposal | None:
+    if not isinstance(raw, dict):
+        return None
+    kind = str(raw.get("kind") or "").strip()
+    summary = str(raw.get("summary") or "").strip()
+    confidence = raw.get("confidence")
+    if (
+        kind
+        not in {"possible_disappointment", "possible_confusion"}
+        or not summary
+        or len(summary) > 240
+        or "\n" in summary
+        or type(confidence) not in {float, int}
+        or not 0.0 < float(confidence) <= 1.0
+    ):
+        return None
+    return PrivateImpressionProposal(kind, summary, float(confidence))

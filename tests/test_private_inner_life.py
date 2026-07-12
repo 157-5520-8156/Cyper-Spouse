@@ -457,3 +457,113 @@ async def test_world_turn_selectively_commits_inner_impression_and_question_comm
         and item["action_id"].startswith("commitment:")
         for item in state["actions"].values()
     )
+
+
+@pytest.mark.asyncio
+async def test_model_private_impression_is_committed_atomically_with_reply_action(
+    tmp_path: Path,
+) -> None:
+    class ModelWithPrivateImpression:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return json.dumps(
+                {
+                    "reply_text": "我听出来你有点失望了，是我刚才没接住。",
+                    "private_impression": {
+                        "kind": "possible_disappointment",
+                        "summary": "我感觉他被刚才没接住的回应伤到了。",
+                        "confidence": 0.72,
+                    },
+                    "mentioned_event_ids": [],
+                    "proposed_action_ids": [],
+                    "claims": [],
+                },
+                ensure_ascii=False,
+            )
+
+    kernel, world_id = _started_kernel(tmp_path)
+    engine = CompanionEngine(
+        kernel.store,
+        ModelWithPrivateImpression(),
+        "你是沈知栀。",
+        world_kernel=kernel,
+        world_id=world_id,
+    )
+    await engine.handle_message(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="m:model-before-disappointment",
+            text="我今天有点累。",
+            sent_at=NOW,
+        )
+    )
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="m:model-disappointment",
+            text="你刚才有点敷衍，我有点失望。",
+            sent_at=NOW,
+        ),
+        defer_delivery=True,
+    )
+
+    assert reply is not None
+    state = kernel.snapshot(world_id)
+    impression = state["private_impressions"]["impression:m:model-disappointment"]
+    action = state["actions"][str(reply.world_action_id)]
+    assert impression["summary"] == "我感觉他被刚才没接住的回应伤到了。"
+    assert action["trace"]["private_impression"]["impression_id"] == impression["impression_id"]
+    assert impression["status"] == "active"
+
+
+def test_outgoing_private_inner_life_cannot_cross_user_boundaries(tmp_path: Path) -> None:
+    kernel, world_id = _started_kernel(tmp_path)
+    kernel.submit(
+        {
+            "type": "register_user",
+            "world_id": world_id,
+            "user_id": "user:other",
+            "name": "other",
+        },
+        expected_revision=kernel.revision(world_id),
+    )
+    kernel.submit(
+        {
+            "type": "observe_user_message",
+            "world_id": world_id,
+            "message_id": "m:other",
+            "user_id": "user:other",
+            "text": "我有点失望。",
+            "sent_at": NOW.isoformat(),
+        },
+        expected_revision=kernel.revision(world_id),
+    )
+
+    with pytest.raises(WorldError, match="belongs to another user"):
+        kernel.queue_outgoing_action(
+            canonical_user_id="geoff",
+            platform="qq",
+            text="我在。",
+            kind="reply",
+            expires_at=NOW + timedelta(hours=1),
+            trace={
+                "world_id": world_id,
+                "user_id": "user:geoff",
+                "appraisal": "ordinary_message",
+                "expression_policy": "test",
+                "allowed_facts": [],
+                "observable_reason": "test",
+                "private_impression": {
+                    "impression_id": "impression:cross-user",
+                    "user_id": "user:other",
+                    "kind": "possible_disappointment",
+                    "summary": "我感觉他可能失望。",
+                    "confidence": 0.7,
+                    "source_event_ids": ["message:m:other"],
+                    "expires_at": (NOW + timedelta(days=1)).isoformat(),
+                },
+            },
+        )
+
+    assert "impression:cross-user" not in kernel.snapshot(world_id)["private_impressions"]
