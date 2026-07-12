@@ -95,7 +95,9 @@ class TurnFrameCompiler:
     MAX_EXPERIENCES = 4
     MAX_THREADS = 3
     MAX_ACTIONS = 4
-    _GENERIC_PRIVATE_BIGRAMS = frozenset({"有点", "可能", "刚才", "等他", "愿意", "听完"})
+    _GENERIC_PRIVATE_BIGRAMS = frozenset(
+        {"我感", "感觉", "因为", "没有", "有点", "可能", "刚才", "等他", "他愿", "愿意", "听完", "的话", "这件"}
+    )
 
     def compile(
         self,
@@ -418,7 +420,16 @@ class TurnFrameCompiler:
             item
             for score, item in sorted(
                 (
-                    (self._inner_relevance(query, str(item["summary"])), item)
+                    (
+                        self._inner_relevance(
+                            query,
+                            self._inner_source_content(
+                                snapshot, item["source_event_ids"]
+                            )
+                            or str(item["summary"]),
+                        ),
+                        item,
+                    )
                     for item in impressions
                 ),
                 key=lambda entry: (
@@ -452,7 +463,16 @@ class TurnFrameCompiler:
             item
             for score, item in sorted(
                 (
-                    (self._inner_relevance(query, str(item["intention"])), item)
+                    (
+                        self._inner_relevance(
+                            query,
+                            self._inner_source_content(
+                                snapshot, item["source_event_ids"]
+                            )
+                            or str(item["intention"]),
+                        ),
+                        item,
+                    )
                     for item in commitments
                 ),
                 key=lambda entry: (
@@ -463,6 +483,28 @@ class TurnFrameCompiler:
             )
             if score > 0
         ]
+
+    def _inner_source_content(
+        self, snapshot: dict[str, object], source_refs: object
+    ) -> str:
+        refs = {str(item) for item in source_refs if str(item)} if isinstance(source_refs, list) else set()
+        if not refs:
+            return ""
+        content: list[str] = []
+        for raw in snapshot.get("recent_messages", []):
+            item = self._mapping(raw)
+            if f"message:{str(item.get('message_id') or '')}" in refs:
+                content.append(str(item.get("text") or ""))
+        for fact_id, raw in self._mapping(snapshot.get("facts")).items():
+            if str(fact_id) in refs:
+                content.append(str(self._mapping(raw).get("value") or ""))
+        for experience_id, raw in self._mapping(snapshot.get("experiences")).items():
+            if str(experience_id) in refs:
+                content.append(str(self._mapping(raw).get("content") or ""))
+        for thread_id, raw in self._mapping(snapshot.get("conversation_threads")).items():
+            if str(thread_id) in refs:
+                content.append(str(self._mapping(raw).get("question") or ""))
+        return "\n".join(part for part in content if part)
 
     @staticmethod
     def _inner_relevance(query: str, text: str) -> int:

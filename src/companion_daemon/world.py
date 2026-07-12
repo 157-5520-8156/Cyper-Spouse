@@ -3852,6 +3852,10 @@ class WorldKernel:
                     and _parse_at(str(item["expires_at"])) <= target_at
                 ):
                     emit("ActionExpired", {"action_id": action_id, "reason": "logical_timeout"})
+                    for event_type, event_payload in self._release_trace_private_commitment(
+                        item, reason="outgoing_action_expired"
+                    ):
+                        emit(event_type, event_payload)
             expire_threads_until(target_at)
             threads = sorted(
                 _as_dict(working.get("conversation_threads", {}), "conversation threads").items(),

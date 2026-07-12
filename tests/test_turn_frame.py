@@ -314,7 +314,9 @@ def test_turn_frame_injects_only_active_user_scoped_inner_records_as_fallible_de
             },
         },
         user_id="user:geoff",
-        message=IncomingMessage(platform="qq", platform_user_id="geoff", text="我今天有点累。"),
+        message=IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="我感觉今天有点困，想早点睡。"
+        ),
     )
     assert unrelated.private_impressions == ()
     assert unrelated.private_commitments == ()

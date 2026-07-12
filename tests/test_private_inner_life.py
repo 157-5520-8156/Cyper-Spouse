@@ -319,6 +319,27 @@ def test_interruption_and_deadline_cancel_release_linked_private_commitment(
         == "released"
     )
 
+    expiry_id, _, _ = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="我在。",
+        kind="reply",
+        expires_at=NOW + timedelta(minutes=5),
+        trace=_threaded_commitment_trace(
+            world_id, thread_id="thread:expiry", commitment_id="commitment:expiry"
+        ),
+    )
+    assert expiry_id > 0
+    kernel.advance(
+        world_id,
+        NOW + timedelta(hours=2),
+        expected_revision=kernel.revision(world_id),
+    )
+    assert (
+        kernel.snapshot(world_id)["private_commitments"]["commitment:expiry"]["status"]
+        == "released"
+    )
+
 
 @pytest.mark.asyncio
 async def test_world_turn_selectively_commits_inner_impression_and_question_commitment(
