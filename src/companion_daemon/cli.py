@@ -1,21 +1,39 @@
 import argparse
 import asyncio
+from hashlib import sha256
 
+from companion_daemon.companion_turn import CompanionTurn, ResponseBudget, TurnEnvelope
 from companion_daemon.models import IncomingMessage
 from companion_daemon.runtime import build_companion_engine
+from companion_daemon.turn_transports import CaptureTurnTransport
 
 
 async def run_simulation(text: str, fake: bool) -> None:
     engine = build_companion_engine(use_fake_model=fake)
     try:
-        reply = await engine.handle_message(
-            IncomingMessage(platform="simulator", platform_user_id="geoff", text=text)
+        message = IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id=f"simulation:{sha256(text.encode()).hexdigest()[:20]}",
+            text=text,
         )
-        if reply is None:
+        transport = CaptureTurnTransport(receipt_namespace="simulator")
+        turn = CompanionTurn(engine, transport)
+        outcome = await turn.respond(
+            TurnEnvelope.from_message(
+                message,
+                idempotency_key=(
+                    f"{message.platform}:{message.platform_user_id}:{message.message_id}"
+                ),
+            ),
+            budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        )
+        await turn.wait_for_delivery_continuations()
+        if not transport.text:
             print("[reply] no immediate reply")
             return
-        print(f"[mood={reply.mood}] {reply.text}")
-        decision = await engine.proactive_tick(reply.canonical_user_id)
+        print(f"[reply:{outcome.visible_status}] {transport.text}")
+        decision = await engine.proactive_tick("geoff")
         print(f"[private] {decision.private_thought}")
         if decision.should_send:
             print(f"[proactive:{decision.platform}] {decision.message}")

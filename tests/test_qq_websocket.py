@@ -35,7 +35,9 @@ def test_reply_msg_seq_is_positive() -> None:
 
 
 @pytest.mark.asyncio
-async def test_world_failure_is_visible_to_user_and_observable_instead_of_becoming_task_noise() -> None:
+async def test_world_failure_is_visible_to_user_and_observable_instead_of_becoming_task_noise() -> (
+    None
+):
     class FailingEngine:
         async def handle_message(
             self, _incoming: IncomingMessage, **_kwargs: object
@@ -51,7 +53,7 @@ async def test_world_failure_is_visible_to_user_and_observable_instead_of_becomi
             return {"id": "fallback-receipt"}
 
     observations: list[object] = []
-    clock = iter((10.0, 12.5))
+    clock = iter((10.0, 10.0, 12.5))
     target = FakeTarget()
     coalescer = QQMessageCoalescer(
         FailingEngine(),  # type: ignore[arg-type]
@@ -148,9 +150,7 @@ async def test_world_typing_starts_before_reply_generation() -> None:
         async def reply(self, **_kwargs: object) -> None:
             order.append("delivered")
 
-    coalescer = QQMessageCoalescer(
-        FakeEngine(), delay_seconds=0.01, human_timing=False
-    )
+    coalescer = QQMessageCoalescer(FakeEngine(), delay_seconds=0.01, human_timing=False)
     sent = await coalescer._generate_and_send(
         IncomingMessage(platform="qq", platform_user_id="user", text="在吗"),
         FakeTarget(),
@@ -480,16 +480,12 @@ async def test_coalescer_batches_rapid_messages() -> None:
 
     await coalescer.add(
         "c2c:user",
-        IncomingMessage(
-            platform="qq", platform_user_id="user", message_id="qq:1", text="第一句"
-        ),
+        IncomingMessage(platform="qq", platform_user_id="user", message_id="qq:1", text="第一句"),
         first,
     )
     await coalescer.add(
         "c2c:user",
-        IncomingMessage(
-            platform="qq", platform_user_id="user", message_id="qq:2", text="第二句"
-        ),
+        IncomingMessage(platform="qq", platform_user_id="user", message_id="qq:2", text="第二句"),
         second,
     )
     await asyncio.sleep(0.03)
@@ -648,7 +644,9 @@ async def test_coalescer_fires_emoji_reaction_before_reply_text() -> None:
 
     await coalescer.add(
         "c2c:user",
-        IncomingMessage(platform="qq", platform_user_id="user", text="超好笑的事", message_id="777"),
+        IncomingMessage(
+            platform="qq", platform_user_id="user", text="超好笑的事", message_id="777"
+        ),
         FakeTarget(),
     )
     await asyncio.sleep(0.03)
@@ -697,7 +695,9 @@ async def test_backchannel_during_split_reply_does_not_interrupt() -> None:
         def __init__(self):
             self.recorded_without_reply: list[str] = []
 
-        async def handle_message(self, incoming: IncomingMessage, **kwargs) -> CompanionReply | None:
+        async def handle_message(
+            self, incoming: IncomingMessage, **kwargs
+        ) -> CompanionReply | None:
             if kwargs.get("skip_reply"):
                 self.recorded_without_reply.append(incoming.text)
                 return None
@@ -954,11 +954,15 @@ async def test_reply_decision_defer_persists_a_read_later_task() -> None:
             self.read_later_reasons: list[str] = []
             self.deferred_reasons: list[str] = []
 
-        def create_read_later_task(self, message: IncomingMessage, *, defer_minutes: float, reason: str) -> int:
+        def create_read_later_task(
+            self, message: IncomingMessage, *, defer_minutes: float, reason: str
+        ) -> int:
             self.read_later_reasons.append(reason)
             return 11
 
-        def create_deferred_reply_task(self, message: IncomingMessage, *, defer_minutes: float, reason: str) -> int:
+        def create_deferred_reply_task(
+            self, message: IncomingMessage, *, defer_minutes: float, reason: str
+        ) -> int:
             self.deferred_reasons.append(reason)
             return 12
 
@@ -1027,11 +1031,15 @@ async def test_upset_state_ghosts_through_read_later_and_uses_ghost_context_hint
             self.read_later_reasons: list[str] = []
             self.context_hints: list[str | None] = []
 
-        def create_read_later_task(self, message: IncomingMessage, *, defer_minutes: float, reason: str) -> int:
+        def create_read_later_task(
+            self, message: IncomingMessage, *, defer_minutes: float, reason: str
+        ) -> int:
             self.read_later_reasons.append(reason)
             return 9
 
-        def create_deferred_reply_task(self, message: IncomingMessage, *, defer_minutes: float, reason: str) -> int:
+        def create_deferred_reply_task(
+            self, message: IncomingMessage, *, defer_minutes: float, reason: str
+        ) -> int:
             raise AssertionError("ghost must not use unread defer")
 
         async def handle_message(self, incoming: IncomingMessage, **kwargs) -> CompanionReply:
@@ -1168,9 +1176,7 @@ async def test_coalescer_persists_platform_message_id_before_settling_segment() 
     )
     await asyncio.sleep(0.03)
 
-    assert engine.confirmed == [
-        ("outgoing:17:segment:0", "platform:message_id:qq-message-701")
-    ]
+    assert engine.confirmed == [("outgoing:17:segment:0", "platform:message_id:qq-message-701")]
 
 
 @pytest.mark.asyncio
@@ -1384,13 +1390,134 @@ async def test_new_hot_message_cancels_and_settles_claimed_turn_before_merge_rec
     await asyncio.sleep(0.3)
 
     snapshot = world.snapshot(world_id)
-    assert snapshot["turns"]["race-1"]["status"] == "failed"
-    assert snapshot["turns"]["race-1"]["reason"] == "adapter_generation_cancelled"
+    assert snapshot["turns"]["qq:user:race-1"]["status"] == "failed"
+    assert snapshot["turns"]["qq:user:race-1"]["reason"] == "adapter_generation_cancelled"
     assert any(
         action.get("kind") == "model_call" and action.get("status") == "failed"
         for action in snapshot["actions"].values()
     )
     assert any(
-        item.get("message_id") == "race-2" and item.get("text") == "第一条\n第二条"
+        item.get("message_id") == "qq:user:race-2" and item.get("text") == "第一条\n第二条"
         for item in snapshot["recent_messages"]
+    )
+
+
+@pytest.mark.asyncio
+async def test_world_mode_uses_companion_turn_for_receipted_text_delivery(
+    tmp_path: Path,
+) -> None:
+    class ReplyModel:
+        async def complete(self, _messages, *, temperature: float) -> str:
+            return json.dumps(
+                {
+                    "reply_text": "我听见了。",
+                    "mentioned_event_ids": [],
+                    "proposed_action_ids": [],
+                    "claims": [],
+                },
+                ensure_ascii=False,
+            )
+
+    class Target:
+        def __init__(self) -> None:
+            self.contents: list[str] = []
+
+        async def reply(self, *, content: str, **_kwargs: object) -> dict[str, str]:
+            self.contents.append(content)
+            return {"message_id": "qq-v2-receipt"}
+
+    store = CompanionStore(tmp_path / "qq-v2.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        ReplyModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+    )
+    coalescer = QQMessageCoalescer(engine, delay_seconds=0.01, human_timing=False)
+    target = Target()
+
+    delivered = await coalescer._generate_and_send(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="user",
+            message_id="qq-v2-inbound",
+            text="我今天有点累。",
+        ),
+        target,
+        key="c2c:user",
+    )
+
+    assert delivered is True
+    await asyncio.sleep(0.35)
+    assert len(target.contents) >= 1
+    assert all(content.strip() for content in target.contents)
+    action = next(
+        item
+        for item in world.snapshot(world_id)["actions"].values()
+        if item.get("kind") == "outgoing_message"
+    )
+    assert action["status"] == "delivered"
+    assert all(
+        segment["external_receipt"] == "platform:message_id:qq-v2-receipt"
+        for segment in action["segment_state"]["segments"]
+    )
+    assert coalescer._active_turns == {}
+
+
+@pytest.mark.asyncio
+async def test_world_mode_does_not_start_a_turn_after_the_visible_budget_is_spent(
+    tmp_path: Path,
+) -> None:
+    class ReplyModel:
+        async def complete(self, _messages, *, temperature: float) -> str:
+            raise AssertionError("model must not run after the visible deadline")
+
+    class Target:
+        async def reply(self, **_kwargs: object) -> dict[str, str]:
+            raise AssertionError("transport must not run after the visible deadline")
+
+    store = CompanionStore(tmp_path / "qq-expired-budget.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        ReplyModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+    )
+    clock = iter((0.0, 2.0, 2.0))
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0,
+        human_timing=False,
+        response_timeout_seconds=1.0,
+        sleep=no_wait,
+        monotonic=lambda: next(clock),
+    )
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="user",
+            message_id="budget-expired",
+            text="还在吗？",
+        ),
+        Target(),
+    )
+    await asyncio.sleep(0.01)
+
+    snapshot = world.snapshot(world_id)
+    assert "qq:user:budget-expired" in snapshot["turns"]
+    assert not any(
+        action.get("kind") == "outgoing_message" for action in snapshot["actions"].values()
     )

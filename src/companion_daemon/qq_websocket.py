@@ -14,6 +14,17 @@ import botpy
 from botpy.message import C2CMessage, GroupMessage
 
 from companion_daemon.engine import CompanionEngine
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    DispatchAcceptance,
+    ResponseBudget,
+    TurnBeat,
+    TurnEnvelope,
+    TurnOptions,
+    TurnPresentation,
+    TurnPresenter,
+    TurnTransport,
+)
 from companion_daemon.config import get_settings
 from companion_daemon.models import CompanionReply, IncomingMessage, MessageAttachment
 from companion_daemon.im_timing import between_part_delay_seconds, initial_reply_delay_seconds
@@ -36,7 +47,7 @@ from companion_daemon.reply_decision import (
 from companion_daemon.time import utc_now
 from companion_daemon.turn_taking import TurnInput, TurnTakingPolicy
 from companion_daemon.runtime import build_companion_engine
-from companion_daemon.world import WorldError
+from companion_daemon.world import WorldError, WorldKernel
 
 logger = logging.getLogger(__name__)
 
@@ -55,6 +66,105 @@ GHOST_CONTEXT_HINT = (
 class ReplyTarget:
     async def reply(self, **kwargs) -> object:
         raise NotImplementedError
+
+
+class QQTurnTransport(TurnTransport):
+    """Official-QQ text adapter: a receipt is required before delivery is true."""
+
+    def __init__(
+        self, reply_target: ReplyTarget, *, on_dispatch_started: Callable[[], None] | None = None
+    ) -> None:
+        self.reply_target = reply_target
+        self.on_dispatch_started = on_dispatch_started
+
+    async def dispatch(self, beat: TurnBeat) -> DispatchAcceptance:
+        if self.on_dispatch_started:
+            self.on_dispatch_started()
+        response = await self.reply_target.reply(content=beat.text, msg_seq=_reply_msg_seq())
+        receipt = QQDelivery.receipt_candidate(response)
+        if not receipt:
+            return DispatchAcceptance(
+                status="unknown",
+                reason="qq_reply_returned_without_durable_receipt",
+            )
+        return DispatchAcceptance(status="delivered", external_receipt=receipt)
+
+
+class QQTurnPresenter(TurnPresenter):
+    """Keeps non-text expression effects ordered around the text Action."""
+
+    def __init__(
+        self,
+        engine: CompanionEngine,
+        *,
+        on_reply: Callable[[CompanionReply], Awaitable[None]] | None,
+        on_sticker: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None,
+        on_image: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None,
+        on_reaction: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None,
+        after_delivered: Callable[[CompanionReply], Awaitable[None]] | None,
+        after_terminal: Callable[[], None],
+    ) -> None:
+        self.engine = engine
+        self.on_reply = on_reply
+        self.on_sticker = on_sticker
+        self.on_image = on_image
+        self.on_reaction = on_reaction
+        self.after_delivered = after_delivered
+        self.after_terminal = after_terminal
+
+    @staticmethod
+    def _reply(presentation: TurnPresentation) -> CompanionReply:
+        return CompanionReply(
+            canonical_user_id=presentation.canonical_user_id,
+            mood="calm",
+            text="",
+            sticker_path=presentation.sticker_path,
+            image_path=presentation.image_path,
+            suggested_reaction=presentation.suggested_reaction,
+            world_action_id=presentation.action_id,
+            media_action_id=presentation.media_action_id,
+            sticker_action_id=presentation.sticker_action_id,
+        )
+
+    async def before_text(self, presentation: TurnPresentation) -> None:
+        if self.on_reaction is None or not presentation.suggested_reaction:
+            return
+        try:
+            await self.on_reaction(presentation.incoming, self._reply(presentation))
+        except Exception:
+            logger.exception("failed to send QQ reaction before text")
+
+    async def after_text(self, presentation: TurnPresentation, terminal_state: str) -> None:
+        reply = self._reply(presentation)
+        try:
+            if terminal_state != "delivered":
+                self.engine.fail_media_delivery(reply, f"text_delivery_{terminal_state}")
+                self.engine.fail_sticker_delivery(reply, f"text_delivery_{terminal_state}")
+                return
+            if self.on_sticker and reply.sticker_path:
+                try:
+                    await self.on_sticker(presentation.incoming, reply)
+                    self.engine.confirm_sticker_delivery(reply)
+                except Exception:
+                    logger.exception("failed to send QQ sticker reply")
+                    self.engine.fail_sticker_delivery(reply, "QQ sticker delivery failed")
+            elif reply.sticker_path:
+                self.engine.fail_sticker_delivery(reply, "sticker adapter unavailable")
+            if self.on_image and reply.image_path:
+                try:
+                    await self.on_image(presentation.incoming, reply)
+                    self.engine.confirm_media_delivery(reply)
+                except Exception:
+                    logger.exception("failed to send QQ image reply")
+                    self.engine.fail_media_delivery(reply, "QQ image delivery failed")
+            elif reply.image_path:
+                self.engine.fail_media_delivery(reply, "image adapter unavailable")
+            if self.on_reply:
+                await self.on_reply(reply)
+            if self.after_delivered:
+                await self.after_delivered(reply)
+        finally:
+            self.after_terminal()
 
 
 class MissingDeliveryEvidenceError(RuntimeError):
@@ -105,6 +215,7 @@ class ActiveSend:
     reply: CompanionReply | None = None
     cancel_before_next_part: bool = False
     interruption_message_id: str | None = None
+    text_dispatch_started: bool = False
 
 
 @dataclass(frozen=True)
@@ -162,6 +273,7 @@ class QQMessageCoalescer:
         self._deferred_tasks: dict[str, asyncio.Task[None]] = {}
         self._afterthought_tasks: dict[str, list[asyncio.Task[None]]] = {}
         self._active_sends: dict[str, ActiveSend] = {}
+        self._active_turns: dict[str, CompanionTurn] = {}
         self._frozen_turn_contexts: dict[str, object] = {}
         set_media_delivery_handler = getattr(self.engine, "set_media_delivery_handler", None)
         if callable(set_media_delivery_handler):
@@ -239,6 +351,63 @@ class QQMessageCoalescer:
     ) -> bool:
         active = self._active_sends[key]
         decision = classify_mid_reply_interruption(incoming.text)
+        active_turn = self._active_turns.get(key)
+        if active_turn is not None:
+            if not active.text_dispatch_started:
+                try:
+                    envelope = TurnEnvelope.from_message(
+                        incoming,
+                        idempotency_key=(
+                            f"{incoming.platform}:{incoming.platform_user_id}:{incoming.message_id}"
+                        ),
+                    )
+                    await active_turn.interrupt(envelope, kind="substantive")
+                except Exception:
+                    logger.exception("failed to cancel pre-dispatch QQ v2 Action for %s", key)
+                if not self._pending[key]:
+                    self._pending[key].append(
+                        QueuedQQMessage(incoming=active.incoming, reply_target=active.reply_target)
+                    )
+                self._pending[key].append(
+                    QueuedQQMessage(incoming=incoming, reply_target=reply_target)
+                )
+                if hasattr(self.engine, "record_input_merge_candidate"):
+                    self.engine.record_input_merge_candidate(
+                        key,
+                        incoming,
+                        self._decision_for(key),
+                        pending_count=len(self._pending[key]),
+                    )
+                existing = self._tasks.get(key)
+                if existing and not existing.done():
+                    existing.cancel()
+                self._tasks[key] = asyncio.create_task(self._flush_later(key, self.delay_seconds))
+                logger.info("superseded un-dispatched QQ v2 turn for %s", key)
+                return True
+            if decision == "backchannel":
+                await self._record_without_reply(incoming, mark_unread=False)
+                logger.info("kept sending after QQ v2 backchannel interruption for %s", key)
+                return True
+            if decision == "takeover":
+                try:
+                    envelope = TurnEnvelope.from_message(
+                        incoming,
+                        idempotency_key=(
+                            f"{incoming.platform}:{incoming.platform_user_id}:{incoming.message_id}"
+                        ),
+                    )
+                    await active_turn.interrupt(envelope, kind="substantive")
+                except Exception:
+                    logger.exception("failed to interrupt QQ v2 outgoing Action for %s", key)
+                self._pending[key].append(
+                    QueuedQQMessage(incoming=incoming, reply_target=reply_target)
+                )
+                existing = self._tasks.get(key)
+                if existing and not existing.done():
+                    existing.cancel()
+                self._tasks[key] = asyncio.create_task(self._flush_later(key, self.delay_seconds))
+                logger.info("interrupted QQ v2 remaining beats for %s", key)
+                return True
         if decision == "backchannel":
             if active.reply and hasattr(self.engine, "observe_reply_interjection"):
                 self.engine.observe_reply_interjection(
@@ -299,21 +468,17 @@ class QQMessageCoalescer:
             if not queued:
                 return
             last = queued[-1]
-            merged_text = "\n".join(item.incoming.text for item in queued if item.incoming.text.strip())
+            merged_text = "\n".join(
+                item.incoming.text for item in queued if item.incoming.text.strip()
+            )
             attachments = [
-                attachment
-                for item in queued
-                for attachment in item.incoming.attachments
+                attachment for item in queued for attachment in item.incoming.attachments
             ]
             merged = last.incoming.model_copy(
                 update={
                     "text": merged_text,
                     "attachments": attachments,
-                    "emoji": [
-                        emoji
-                        for item in queued
-                        for emoji in item.incoming.emoji
-                    ][:16],
+                    "emoji": [emoji for item in queued for emoji in item.incoming.emoji][:16],
                     "source_message_ids": [
                         str(item.incoming.message_id or item.incoming.sent_at.isoformat())
                         for item in queued
@@ -327,7 +492,9 @@ class QQMessageCoalescer:
                     task_id = self._persist_deferred_reply(
                         merged, attention.defer_minutes, attention.reason, attention.turn_trace_id
                     )
-                    self._deferred[key] = DeferredReply(merged=merged, reply_target=last.reply_target, task_id=task_id)
+                    self._deferred[key] = DeferredReply(
+                        merged=merged, reply_target=last.reply_target, task_id=task_id
+                    )
                     self._deferred_tasks[key] = asyncio.create_task(
                         self._fire_deferred_after(
                             key,
@@ -349,10 +516,9 @@ class QQMessageCoalescer:
                     self._settle_input_merge(key, queued)
                     return
 
-            world_mode = bool(
-                getattr(self.engine, "world_kernel", None)
-                and getattr(self.engine, "world_id", None)
-            )
+            world_mode = isinstance(
+                getattr(self.engine, "world_kernel", None), WorldKernel
+            ) and bool(getattr(self.engine, "world_id", None))
             if self.enable_reply_decision and not world_mode:
                 has_unread = False
                 mood_state = None
@@ -387,15 +553,22 @@ class QQMessageCoalescer:
                     # At this point phone attention already said "read now", so this
                     # is the read-but-sidetracked case rather than an unread defer.
                     task_id = self._persist_read_later(
-                        merged, action.defer_minutes, action.reason, attention.turn_trace_id if 'attention' in locals() else None
+                        merged,
+                        action.defer_minutes,
+                        action.reason,
+                        attention.turn_trace_id if "attention" in locals() else None,
                     )
-                    self._deferred[key] = DeferredReply(merged=merged, reply_target=last.reply_target, task_id=task_id)
+                    self._deferred[key] = DeferredReply(
+                        merged=merged, reply_target=last.reply_target, task_id=task_id
+                    )
                     self._deferred_tasks[key] = asyncio.create_task(
                         self._fire_deferred_after(key, action.defer_minutes, action)
                     )
                     logger.info(
                         "deferred reply for %s by %.1f min (%s)",
-                        key, action.defer_minutes, action.reason,
+                        key,
+                        action.defer_minutes,
+                        action.reason,
                     )
                     self._settle_input_merge(key, queued)
                     return
@@ -403,22 +576,55 @@ class QQMessageCoalescer:
             frozen_context = self._frozen_turn_contexts.pop(key, None)
             response_budget = self.response_timeout_seconds
             if response_budget is None:
-                heat = str(
-                    getattr(getattr(frozen_context, "cadence", None), "heat", "cold")
-                )
-                response_budget = {"hot": 5.0, "warm": 8.0, "cold": 12.0}.get(
-                    heat, 12.0
-                )
+                heat = str(getattr(getattr(frozen_context, "cadence", None), "heat", "cold"))
+                response_budget = {"hot": 5.0, "warm": 8.0, "cold": 12.0}.get(heat, 12.0)
             # The deadline is user-perceived turn time, not a fresh budget
             # granted after coalescing has already consumed several seconds.
-            generation_budget = max(0.05, response_budget - max(0.0, wait_seconds))
-            async with asyncio.timeout(generation_budget):
+            generation_budget = response_budget - (self.monotonic() - started_at)
+            if world_mode and generation_budget <= 0:
+                expired_turn = TurnEnvelope.from_message(
+                    merged,
+                    idempotency_key=(
+                        f"{merged.platform}:{merged.platform_user_id}:{merged.message_id}"
+                    ),
+                )
+                await CompanionTurn(
+                    self.engine,
+                    QQTurnTransport(last.reply_target),
+                    sleep=self.sleep,
+                ).observe_expired(expired_turn)
+                self._settle_input_merge(key, queued)
+                self._observe_turn(
+                    TurnRuntimeObservation(
+                        key=key,
+                        outcome="response_budget_expired_before_dispatch",
+                        elapsed_seconds=max(0.0, self.monotonic() - started_at),
+                        failure_type="TimeoutError",
+                        failure_reason="user_perceived_budget_exhausted",
+                    )
+                )
+                return
+            generation_budget = max(0.05, generation_budget)
+            v2_budget = ResponseBudget(
+                first_visible_by_ms=max(50, int(generation_budget * 1_000)),
+                complete_by_ms=max(50, int(generation_budget * 1_000)),
+            )
+            if world_mode:
                 delivered = await self._generate_and_send(
                     merged,
                     last.reply_target,
                     key=key,
                     turn_context=frozen_context,
+                    budget=v2_budget,
                 )
+            else:
+                async with asyncio.timeout(generation_budget):
+                    delivered = await self._generate_and_send(
+                        merged,
+                        last.reply_target,
+                        key=key,
+                        turn_context=frozen_context,
+                    )
             self._settle_input_merge(key, queued)
             self._observe_turn(
                 TurnRuntimeObservation(
@@ -428,6 +634,20 @@ class QQMessageCoalescer:
                 )
             )
         except (WorldError, TimeoutError) as exc:
+            if "world_mode" in locals() and world_mode:
+                logger.exception("CompanionTurn failed for %s without adapter fallback", key)
+                if "queued" in locals():
+                    self._settle_input_merge(key, queued)
+                self._observe_turn(
+                    TurnRuntimeObservation(
+                        key=key,
+                        outcome="companion_turn_failed",
+                        elapsed_seconds=max(0.0, self.monotonic() - started_at),
+                        failure_type=type(exc).__name__,
+                        failure_reason=str(exc)[:240],
+                    )
+                )
+                return
             logger.exception("world reply failed for %s; delivering bounded adapter fallback", key)
             delivered = False
             if "last" in locals() and "merged" in locals():
@@ -450,9 +670,7 @@ class QQMessageCoalescer:
                     response = await last.reply_target.reply(
                         content=fallback_text, msg_seq=_reply_msg_seq()
                     )
-                    if segment_id and hasattr(
-                        self.engine, "confirm_reply_part_delivery"
-                    ):
+                    if segment_id and hasattr(self.engine, "confirm_reply_part_delivery"):
                         receipt = QQDelivery.receipt_candidate(response)
                         if not receipt:
                             raise MissingDeliveryEvidenceError(
@@ -498,11 +716,17 @@ class QQMessageCoalescer:
                 )
             )
         except asyncio.CancelledError:
-            if "merged" in locals() and hasattr(
-                self.engine, "settle_cancelled_world_turn"
-            ):
+            if "merged" in locals() and hasattr(self.engine, "settle_cancelled_world_turn"):
                 try:
-                    self.engine.settle_cancelled_world_turn(merged)
+                    cancelled_message = merged
+                    if key in self._active_turns:
+                        cancelled_message = TurnEnvelope.from_message(
+                            merged,
+                            idempotency_key=(
+                                f"{merged.platform}:{merged.platform_user_id}:{merged.message_id}"
+                            ),
+                        ).message
+                    self.engine.settle_cancelled_world_turn(cancelled_message)
                 except Exception:
                     logger.exception("failed to settle cancelled world turn for %s", key)
             return
@@ -529,13 +753,9 @@ class QQMessageCoalescer:
 
     def _settle_input_merge(self, key: str, queued: list[QueuedQQMessage]) -> None:
         if hasattr(self.engine, "settle_input_merge"):
-            self.engine.settle_input_merge(
-                key, tuple(item.incoming for item in queued)
-            )
+            self.engine.settle_input_merge(key, tuple(item.incoming for item in queued))
 
-    async def _fire_deferred_after(
-        self, key: str, minutes: float, decision: ReplyDecision
-    ) -> None:
+    async def _fire_deferred_after(self, key: str, minutes: float, decision: ReplyDecision) -> None:
         try:
             await self.sleep(minutes * 60)
             deferred = self._deferred.pop(key, None)
@@ -544,7 +764,9 @@ class QQMessageCoalescer:
                 return
             logger.info("firing deferred reply for %s", key)
             context_hint = (
-                GHOST_CONTEXT_HINT if decision.reason == "emotional_ghost" else DEFERRED_CONTEXT_HINT
+                GHOST_CONTEXT_HINT
+                if decision.reason == "emotional_ghost"
+                else DEFERRED_CONTEXT_HINT
             )
             delivered = await self._generate_and_send(
                 deferred.merged, deferred.reply_target, key=key, context_hint=context_hint
@@ -563,7 +785,11 @@ class QQMessageCoalescer:
             self.engine.cancel_deferred_reply_task(deferred.task_id)
 
     def _persist_deferred_reply(
-        self, message: IncomingMessage, minutes: float, reason: str, turn_trace_id: int | None = None
+        self,
+        message: IncomingMessage,
+        minutes: float,
+        reason: str,
+        turn_trace_id: int | None = None,
     ) -> int | None:
         if not hasattr(self.engine, "create_deferred_reply_task"):
             return None
@@ -572,13 +798,19 @@ class QQMessageCoalescer:
                 message, defer_minutes=minutes, reason=reason, turn_trace_id=turn_trace_id
             )
         except TypeError:
-            return self.engine.create_deferred_reply_task(message, defer_minutes=minutes, reason=reason)
+            return self.engine.create_deferred_reply_task(
+                message, defer_minutes=minutes, reason=reason
+            )
         except Exception:
             logger.exception("failed to persist deferred reply; keeping in-memory fallback")
             return None
 
     def _persist_read_later(
-        self, message: IncomingMessage, minutes: float, reason: str, turn_trace_id: int | None = None
+        self,
+        message: IncomingMessage,
+        minutes: float,
+        reason: str,
+        turn_trace_id: int | None = None,
     ) -> int | None:
         if not hasattr(self.engine, "create_read_later_task"):
             return self._persist_deferred_reply(message, minutes, reason, turn_trace_id)
@@ -592,6 +824,71 @@ class QQMessageCoalescer:
             logger.exception("failed to persist read-later task; keeping in-memory fallback")
             return None
 
+    async def _generate_and_send_v2(
+        self,
+        merged: IncomingMessage,
+        reply_target: ReplyTarget,
+        *,
+        key: str,
+        context_hint: str | None,
+        turn_context: object | None,
+        budget: ResponseBudget | None,
+    ) -> bool:
+        """World-mode text path: CompanionTurn owns every text Action transition."""
+        response_seconds = self.response_timeout_seconds or 12.0
+        resolved_budget = budget or ResponseBudget(
+            first_visible_by_ms=max(50, int(response_seconds * 1_000)),
+            complete_by_ms=max(50, int(response_seconds * 1_000)),
+        )
+
+        def terminal() -> None:
+            self._active_sends.pop(key, None)
+            self._active_turns.pop(key, None)
+
+        async def delivered(reply: CompanionReply) -> None:
+            self._schedule_afterthought(key, merged, reply_target, utc_now())
+
+        presenter = QQTurnPresenter(
+            self.engine,
+            on_reply=self.on_reply,
+            on_sticker=self.on_sticker,
+            on_image=self.on_image,
+            on_reaction=self.on_reaction,
+            after_delivered=delivered,
+            after_terminal=terminal,
+        )
+        active_send = ActiveSend(incoming=merged, reply_target=reply_target)
+        self._active_sends[key] = active_send
+        runtime = CompanionTurn(
+            self.engine,
+            QQTurnTransport(
+                reply_target,
+                on_dispatch_started=lambda: setattr(active_send, "text_dispatch_started", True),
+            ),
+            sleep=self.sleep,
+            presenter=presenter,
+        )
+        self._active_turns[key] = runtime
+        await runtime.start()
+        try:
+            outcome = await runtime.respond(
+                TurnEnvelope.from_message(
+                    merged,
+                    idempotency_key=(
+                        f"{merged.platform}:{merged.platform_user_id}:{merged.message_id}"
+                    ),
+                ),
+                budget=resolved_budget,
+                options=TurnOptions(context_hint=context_hint, turn_context=turn_context),
+            )
+        except Exception:
+            terminal()
+            raise
+        if outcome.visible_status in {"failed", "unknown"}:
+            terminal()
+            return False
+        return True
+
     async def _generate_and_send(
         self,
         merged: IncomingMessage,
@@ -600,15 +897,29 @@ class QQMessageCoalescer:
         key: str = "",
         context_hint: str | None = None,
         turn_context: object | None = None,
+        budget: ResponseBudget | None = None,
     ) -> bool:
         if hasattr(self.engine, "mark_phone_read_for_message"):
             self.engine.mark_phone_read_for_message(merged)
-        world_mode = bool(
-            getattr(self.engine, "world_kernel", None)
-            and getattr(self.engine, "world_id", None)
+        has_world_runtime = bool(
+            getattr(self.engine, "world_kernel", None) and getattr(self.engine, "world_id", None)
         )
-        typing_started = world_mode
-        if not world_mode and hasattr(self.engine, "begin_world_typing"):
+        world_v2 = (
+            isinstance(getattr(self.engine, "world_kernel", None), WorldKernel)
+            and has_world_runtime
+        )
+        if world_v2:
+            return await self._generate_and_send_v2(
+                merged,
+                reply_target,
+                key=key,
+                context_hint=context_hint,
+                turn_context=turn_context,
+                budget=budget,
+            )
+        world_mode = has_world_runtime
+        typing_started = has_world_runtime
+        if not has_world_runtime and hasattr(self.engine, "begin_world_typing"):
             try:
                 self.engine.begin_world_typing(merged)
                 typing_started = True
@@ -662,7 +973,9 @@ class QQMessageCoalescer:
             # first be scheduled as a world action; an immediately dispatched
             # reply has no adapter-side delay to simulate.
             if self.human_timing and not world_mode:
-                await self.sleep(initial_reply_delay_seconds(merged, reply, state=timing_state, rng=self.rng))
+                await self.sleep(
+                    initial_reply_delay_seconds(merged, reply, state=timing_state, rng=self.rng)
+                )
             self._active_sends[key] = ActiveSend(
                 incoming=merged, reply_target=reply_target, reply=reply
             )
@@ -671,9 +984,7 @@ class QQMessageCoalescer:
 
             def before_part(index: int, _part: str) -> None:
                 if hasattr(self.engine, "begin_reply_part_delivery"):
-                    segment_id = self.engine.begin_reply_part_delivery(
-                        reply, position=index
-                    )
+                    segment_id = self.engine.begin_reply_part_delivery(reply, position=index)
                     if segment_id:
                         claimed_segments[index] = segment_id
 
@@ -698,7 +1009,11 @@ class QQMessageCoalescer:
                 sleep=self.sleep,
                 rng=self.rng,
                 human_timing=self.human_timing,
-                should_continue=lambda: not self._active_sends.get(key, ActiveSend(merged, reply_target)).cancel_before_next_part,
+                should_continue=lambda: (
+                    not self._active_sends.get(
+                        key, ActiveSend(merged, reply_target)
+                    ).cancel_before_next_part
+                ),
                 before_part=before_part,
                 after_part=after_part,
             )
@@ -716,16 +1031,22 @@ class QQMessageCoalescer:
                         user_message_id=active_send.interruption_message_id,
                     )
                 if not cancelled and hasattr(self.engine, "fail_reply_delivery"):
-                    self.engine.fail_reply_delivery(reply, "QQ reply interrupted before all parts were sent")
+                    self.engine.fail_reply_delivery(
+                        reply, "QQ reply interrupted before all parts were sent"
+                    )
                 return False
         except Exception:
             logger.exception("failed to send QQ reply")
             uncertain_reason = "QQ adapter call ended without durable delivery evidence"
-            uncertain_segments = [
-                segment_id
-                for segment_id in claimed_segments.values()
-                if segment_id not in settled_segments
-            ] if "claimed_segments" in locals() else []
+            uncertain_segments = (
+                [
+                    segment_id
+                    for segment_id in claimed_segments.values()
+                    if segment_id not in settled_segments
+                ]
+                if "claimed_segments" in locals()
+                else []
+            )
             for segment_id in uncertain_segments:
                 try:
                     _mark_claimed_reply_segment_unknown(
@@ -743,7 +1064,9 @@ class QQMessageCoalescer:
             if typing_started and hasattr(self.engine, "stop_world_typing"):
                 self.engine.stop_world_typing(
                     merged,
-                    reason="reply_sent" if 'sent_completely' in locals() and sent_completely else "reply_send_stopped",
+                    reason="reply_sent"
+                    if "sent_completely" in locals() and sent_completely
+                    else "reply_send_stopped",
                 )
             self._active_sends.pop(key, None)
         if hasattr(self.engine, "confirm_reply_delivery"):
@@ -785,10 +1108,14 @@ class QQMessageCoalescer:
         if not self.human_timing:
             return
         try:
-            canonical_user_id = self.engine.store.resolve_user(merged.platform, merged.platform_user_id)
+            canonical_user_id = self.engine.store.resolve_user(
+                merged.platform, merged.platform_user_id
+            )
             state = self.engine.store.get_mood_state(canonical_user_id)
             if state.mood in {"hurt", "guarded"} or state.boundary_level >= 20:
-                logger.info("did not schedule afterthought for %s because she is keeping a boundary", key)
+                logger.info(
+                    "did not schedule afterthought for %s because she is keeping a boundary", key
+                )
                 return
         except (AttributeError, KeyError):
             # Lightweight test doubles and adapters without a mood store do not
@@ -840,7 +1167,9 @@ class QQMessageCoalescer:
         if not hasattr(self.engine, "schedule_conversation_pulse"):
             return None
         try:
-            canonical_user_id = self.engine.store.resolve_user(merged.platform, merged.platform_user_id)
+            canonical_user_id = self.engine.store.resolve_user(
+                merged.platform, merged.platform_user_id
+            )
             return self.engine.schedule_conversation_pulse(
                 canonical_user_id=canonical_user_id,
                 platform=merged.platform,
@@ -915,8 +1244,12 @@ class QQMessageCoalescer:
     ) -> str | None:
         try:
             await self.sleep(plan.delay_seconds if delay_seconds is None else delay_seconds)
-            if hasattr(self.engine, "conversation_pulse_is_active") and not self.engine.conversation_pulse_is_active(pulse_task_id):
-                logger.info("afterthought pulse %s was cancelled by newer user activity", pulse_task_id)
+            if hasattr(
+                self.engine, "conversation_pulse_is_active"
+            ) and not self.engine.conversation_pulse_is_active(pulse_task_id):
+                logger.info(
+                    "afterthought pulse %s was cancelled by newer user activity", pulse_task_id
+                )
                 return None
             canonical_user_id = self.engine.store.resolve_user(
                 merged.platform, merged.platform_user_id
@@ -992,15 +1325,23 @@ def _afterthought_texts_overlap(candidate: str, earlier: str) -> bool:
     left, right = normalize(candidate), normalize(earlier)
     if not left or not right:
         return False
-    return left in right or right in left or len(set(left) & set(right)) / max(len(set(left)), 1) >= 0.82
+    return (
+        left in right
+        or right in left
+        or len(set(left) & set(right)) / max(len(set(left)), 1) >= 0.82
+    )
 
 
-def _pulse_remaining(plans: list[AfterthoughtPlan], previous_delay: float) -> list[dict[str, object]]:
+def _pulse_remaining(
+    plans: list[AfterthoughtPlan], previous_delay: float
+) -> list[dict[str, object]]:
     """Serialize later stages as delays relative to the stage before them."""
     remaining: list[dict[str, object]] = []
     elapsed = previous_delay
     for plan in plans:
-        remaining.append({"mode": plan.mode, "delay_seconds": max(1.0, plan.delay_seconds - elapsed)})
+        remaining.append(
+            {"mode": plan.mode, "delay_seconds": max(1.0, plan.delay_seconds - elapsed)}
+        )
         elapsed = plan.delay_seconds
     return remaining
 
@@ -1009,8 +1350,13 @@ def _afterthought_plans(text: str, rng: random.Random) -> list[AfterthoughtPlan]
     """Create restrained continuation opportunities from the user's actual turn."""
     message_type = classify_message(text)
     compact = re.sub(r"\s+", "", text)
-    explicit_farewell = any(token in compact for token in ("晚安", "睡了", "先睡", "拜拜", "回头聊", "明天聊"))
-    if message_type in {"urgent", "farewell", "withdrawal", "thinking", "reaction_pause"} or explicit_farewell:
+    explicit_farewell = any(
+        token in compact for token in ("晚安", "睡了", "先睡", "拜拜", "回头聊", "明天聊")
+    )
+    if (
+        message_type in {"urgent", "farewell", "withdrawal", "thinking", "reaction_pause"}
+        or explicit_farewell
+    ):
         return []
     if message_type in {"story", "emotional", "nonverbal_share"} or len(text.strip()) >= 35:
         return [
@@ -1029,9 +1375,13 @@ class CompanionQQClient(botpy.Client):
         super().__init__(**kwargs)
         self.engine = build_companion_engine(use_fake_model=use_fake_model)
         settings = get_settings()
-        api_base_url = "https://sandbox.api.sgroup.qq.com" if is_sandbox else "https://api.sgroup.qq.com"
+        api_base_url = (
+            "https://sandbox.api.sgroup.qq.com" if is_sandbox else "https://api.sgroup.qq.com"
+        )
         self.qq_api = (
-            QQOfficialClient(settings.qq_bot_app_id, settings.qq_bot_secret, api_base_url=api_base_url)
+            QQOfficialClient(
+                settings.qq_bot_app_id, settings.qq_bot_secret, api_base_url=api_base_url
+            )
             if settings.qq_bot_app_id and settings.qq_bot_secret
             else None
         )
@@ -1232,7 +1582,11 @@ async def _send_reply_parts(
         if should_continue and not should_continue():
             return False
         if index:
-            delay = between_part_delay_seconds(part, rng=rng) if human_timing else min(1.8, 0.45 + len(part) / 45)
+            delay = (
+                between_part_delay_seconds(part, rng=rng)
+                if human_timing
+                else min(1.8, 0.45 + len(part) / 45)
+            )
             await sleep(delay)
             if should_continue and not should_continue():
                 return False
@@ -1248,7 +1602,10 @@ def classify_mid_reply_interruption(text: str) -> str:
     stripped = re.sub(r"\s+", "", text.strip())
     if not stripped:
         return "ignore_empty"
-    if any(token in stripped for token in ("等下", "等等", "打断一下", "不是这个意思", "我不是说", "先别", "你等会")):
+    if any(
+        token in stripped
+        for token in ("等下", "等等", "打断一下", "不是这个意思", "我不是说", "先别", "你等会")
+    ):
         return "takeover"
     if _looks_like_backchannel(stripped):
         return "backchannel"
@@ -1261,7 +1618,9 @@ def classify_mid_reply_interruption(text: str) -> str:
 
 
 def _looks_like_backchannel(text: str) -> bool:
-    if re.fullmatch(r"(嗯+|哦+|噢+|喔+|啊+|哈+|哈哈+|对+|是+|确实|真的|草|笑死|好+|行+|可以+)[。！!～~]*", text):
+    if re.fullmatch(
+        r"(嗯+|哦+|噢+|喔+|啊+|哈+|哈哈+|对+|是+|确实|真的|草|笑死|好+|行+|可以+)[。！!～~]*", text
+    ):
         return True
     return text in {"对吧", "是吧", "懂了", "原来如此", "有道理"}
 

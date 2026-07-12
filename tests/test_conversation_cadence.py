@@ -398,7 +398,9 @@ async def test_qq_passes_the_same_frozen_turn_context_into_engine_generation() -
         def freeze_turn_context(self, _message: IncomingMessage) -> FrozenTurnContext:
             return frozen
 
-        async def handle_message(self, _message: IncomingMessage, **kwargs: object) -> CompanionReply:
+        async def handle_message(
+            self, _message: IncomingMessage, **kwargs: object
+        ) -> CompanionReply:
             self.received = kwargs.get("turn_context")
             self.called.set()
             return CompanionReply(canonical_user_id="geoff", mood="calm", text="在。")
@@ -490,7 +492,7 @@ async def test_real_world_qq_two_turns_freeze_hot_cadence_type_and_settle_delive
         )
         for _ in range(40):
             await asyncio.sleep(0.05)
-            turn = world.snapshot(world_id).get("turns", {}).get(f"qq-in-{index}", {})
+            turn = world.snapshot(world_id).get("turns", {}).get(f"qq:geoff:qq-in-{index}", {})
             if turn.get("status") == "delivered":
                 break
 
@@ -500,14 +502,13 @@ async def test_real_world_qq_two_turns_freeze_hot_cadence_type_and_settle_delive
     delivered = [
         action
         for action in world.snapshot(world_id)["actions"].values()
-        if action.get("kind") == "outgoing_message"
-        and action.get("status") == "delivered"
+        if action.get("kind") == "outgoing_message" and action.get("status") == "delivered"
     ]
     assert len(delivered) == 2
     first_observed = next(
         item
         for item in world.snapshot(world_id)["recent_messages"]
-        if item.get("message_id") == "qq-in-1"
+        if item.get("message_id") == "qq:geoff:qq-in-1"
     )
     assert first_observed["emoji"] == ["qq-face:178"]
     assert first_observed["sticker_kind"] == "[无语]"

@@ -19,7 +19,7 @@ from companion_daemon.companion_turn import (
 )
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
-from companion_daemon.models import IncomingMessage
+from companion_daemon.models import IncomingMessage, MessageAttachment
 from companion_daemon.world import WorldError, WorldKernel
 
 
@@ -112,6 +112,19 @@ class RecordingPresenter:
 
     async def after_text(self, presentation: TurnPresentation, terminal_state: str) -> None:
         self.events.append(f"after:{terminal_state}")
+
+
+class BlockingPresenter:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.release = asyncio.Event()
+
+    async def before_text(self, _presentation: TurnPresentation) -> None:
+        self.started.set()
+        await self.release.wait()
+
+    async def after_text(self, _presentation: TurnPresentation, _terminal_state: str) -> None:
+        return None
 
 
 def _turn_runtime(
@@ -422,7 +435,7 @@ async def test_takeover_waits_for_initial_dispatch_then_cancels_old_remainder(
             budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
         )
     )
-    await asyncio.sleep(0.01)
+    await asyncio.sleep(0)
     assert not takeover_task.done()
 
     transport.release.set()
@@ -515,7 +528,7 @@ async def test_presentation_wraps_all_text_beats_and_only_finishes_at_terminal(
         _envelope("turn-presentation"),
         budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
     )
-    await asyncio.sleep(0.01)
+    await runtime.wait_for_delivery_continuations()
 
     assert outcome.visible_status == "delivered"
     assert events == ["reaction", "text:0", "text:1", "after:delivered"]
@@ -695,3 +708,83 @@ async def test_substantive_next_turn_cancels_unsent_beats_before_new_deliberatio
         "cancelled",
     ]
     assert len(transport.beats) == 2
+
+
+@pytest.mark.asyncio
+async def test_interrupt_cancels_a_planned_action_while_presentation_is_pending(
+    tmp_path: Path,
+) -> None:
+    presenter = BlockingPresenter()
+    runtime, world, world_id = _turn_runtime(
+        tmp_path,
+        RecordingTransport(
+            DispatchAcceptance(status="delivered", external_receipt="should-not-send")
+        ),
+        presenter=presenter,
+    )
+    response = asyncio.create_task(
+        runtime.respond(
+            _envelope("turn-pre-dispatch"),
+            budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
+        )
+    )
+    await presenter.started.wait()
+
+    cancelled = await runtime.interrupt(_envelope("turn-pre-dispatch-takeover"), kind="substantive")
+    action_id = next(
+        identifier
+        for identifier, action in world.snapshot(world_id)["actions"].items()
+        if action.get("kind") == "outgoing_message"
+    )
+    action = world.snapshot(world_id)["actions"][action_id]
+
+    assert cancelled == (f"{action_id}:segment:0",)
+    assert action["status"] == "cancelled"
+    assert action["segment_state"]["segments"][0]["status"] == "cancelled"
+    response.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await response
+
+
+@pytest.mark.asyncio
+async def test_expired_observation_skips_attachment_analysis_and_model_work(
+    tmp_path: Path,
+) -> None:
+    class FailingAnalyzer:
+        async def analyze(self, _attachment: MessageAttachment) -> object:
+            raise AssertionError("expired observation must not analyze attachments")
+
+    store = CompanionStore(tmp_path / "expired-observation.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        StaticReplyModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+        multimodal_analyzer=FailingAnalyzer(),  # type: ignore[arg-type]
+    )
+    runtime = CompanionTurn(
+        engine,
+        RecordingTransport(DispatchAcceptance(status="delivered", external_receipt="unused")),
+    )
+    envelope = TurnEnvelope.from_message(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="expired-with-attachment",
+            text="看这个。",
+            attachments=[MessageAttachment(kind="image", filename="photo.png")],
+        ),
+        idempotency_key="qq:geoff:expired-with-attachment",
+    )
+
+    outcome = await runtime.observe_expired(envelope)
+
+    assert outcome.degradation_reason == "response_budget_exhausted"
+    assert (
+        world.snapshot(world_id)["turns"]["qq:geoff:expired-with-attachment"]["status"]
+        == "deferred"
+    )

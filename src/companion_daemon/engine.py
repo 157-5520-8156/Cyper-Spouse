@@ -1042,6 +1042,7 @@ class CompanionEngine:
         resume_action_id: str | None = None,
         turn_context: FrozenTurnContext | None = None,
         complete_by_observed_at: datetime | None = None,
+        fast_observe: bool = False,
     ) -> CompanionReply | None:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         if self.world_kernel and self.world_id:
@@ -1060,6 +1061,15 @@ class CompanionEngine:
             if turn_id not in turns and not self.world_kernel.claim_message_turn(
                 self.world_id, turn_id
             ):
+                return None
+            if fast_observe:
+                self.world_kernel.settle_turn(
+                    self.world_id,
+                    turn_id,
+                    status="deferred",
+                    reason="response_budget_exhausted",
+                    expected_revision=self.world_kernel.revision(self.world_id),
+                )
                 return None
             try:
                 with model_turn_scope(

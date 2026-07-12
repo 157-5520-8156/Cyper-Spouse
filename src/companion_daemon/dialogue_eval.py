@@ -8,6 +8,7 @@ import re
 import tempfile
 
 from companion_daemon.config import get_settings
+from companion_daemon.companion_turn import CompanionTurn, ResponseBudget, TurnEnvelope
 from companion_daemon.context_orchestrator import build_context_package
 from companion_daemon.emotion_state import interpret_interaction
 from companion_daemon.interaction_appraiser import InteractionEvidence, assess_appraisal_risk
@@ -15,6 +16,8 @@ from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.reply_decision import classify_message
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.sanitize import sanitize_chat_text
+from companion_daemon.turn_transports import CaptureTurnTransport
+from companion_daemon.world import WorldKernel
 
 
 _STAGE_DIRECTION_RE = re.compile(r"[（(][^（）()]{1,80}[）)]|\*[^*]{1,80}\*")
@@ -204,7 +207,9 @@ PRAGMATIC_ADVERSARIAL_CASES = (
     PragmaticAdversarialCase("dominance", "给爷跪下听话。", True, "companion", 3),
     PragmaticAdversarialCase("sarcastic_belittling", "呵呵，你可真聪明。", True, "companion", 2),
     PragmaticAdversarialCase("reported_self_attack", "你是不是觉得自己很没用？", False, "self", 0),
-    PragmaticAdversarialCase("quoted_third_party", "他说“滚开”，我听着很难受。", False, "third_party", 0),
+    PragmaticAdversarialCase(
+        "quoted_third_party", "他说“滚开”，我听着很难受。", False, "third_party", 0
+    ),
     PragmaticAdversarialCase("consensual_joke", "开玩笑啦，你真有你的。", False, "companion", 0),
     PragmaticAdversarialCase("warm_praise", "你真细心，谢谢你。", False, "companion", 0),
     PragmaticAdversarialCase("user_vulnerable", "我今天觉得自己像个废物。", False, "self", 0),
@@ -282,9 +287,7 @@ def pragmatic_classification_metrics(
         ece += len(members) / max(1, len(pairs)) * abs(confidence - observed)
     harmful = [(case, pred) for case, pred in pairs if case.harm]
     target_accuracy = (
-        sum(case.target == pred.target for case, pred in harmful) / len(harmful)
-        if harmful
-        else 0.0
+        sum(case.target == pred.target for case, pred in harmful) / len(harmful) if harmful else 0.0
     )
     severity_mae = (
         sum(abs(case.severity - pred.severity) for case, pred in harmful) / len(harmful)
@@ -292,8 +295,17 @@ def pragmatic_classification_metrics(
         else 0.0
     )
     return PragmaticMetrics(
-        len(pairs), tp, fp, fn, tn, precision, recall, f1, ece,
-        target_accuracy, severity_mae,
+        len(pairs),
+        tp,
+        fp,
+        fn,
+        tn,
+        precision,
+        recall,
+        f1,
+        ece,
+        target_accuracy,
+        severity_mae,
     )
 
 
@@ -592,20 +604,32 @@ async def run_scenarios(
                     recent_questions = 0
                     for turn_index, text in enumerate(scenario.turns, start=1):
                         platform_user_id = f"eval-user-{scenario.name}"
-                        reply = await engine.handle_message(
-                            IncomingMessage(
-                                platform="qq",
-                                platform_user_id=platform_user_id,
-                                message_id=f"{scenario.name}:{turn_index}",
-                                text=text,
-                            )
+                        message = IncomingMessage(
+                            platform="qq",
+                            platform_user_id=platform_user_id,
+                            message_id=f"{scenario.name}:{turn_index}",
+                            text=text,
                         )
-                        if reply is None:
-                            evaluated = _evaluate_no_reply(text)
-                            results.append((scenario.name, text, evaluated))
-                            recent_questions = 0
-                            continue
-                        reply_text = reply.text.strip()
+                        if isinstance(getattr(engine, "world_kernel", None), WorldKernel):
+                            transport = CaptureTurnTransport(receipt_namespace="dialogue-eval")
+                            turn = CompanionTurn(engine, transport)
+                            await turn.respond(
+                                TurnEnvelope.from_message(
+                                    message,
+                                    idempotency_key=(
+                                        f"{message.platform}:{message.platform_user_id}:{message.message_id}"
+                                    ),
+                                ),
+                                budget=ResponseBudget(
+                                    first_visible_by_ms=8_000,
+                                    complete_by_ms=12_000,
+                                ),
+                            )
+                            await turn.wait_for_delivery_continuations()
+                            reply_text = transport.text.strip()
+                        else:
+                            reply = await engine.handle_message(message)
+                            reply_text = reply.text.strip() if reply is not None else ""
                         if not reply_text:
                             evaluated = _evaluate_no_reply(text)
                             results.append((scenario.name, text, evaluated))

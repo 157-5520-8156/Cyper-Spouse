@@ -167,6 +167,7 @@ class CompanionTurn:
         self.sleep = sleep
         self.presenter = presenter
         self._continuations: set[asyncio.Task[None]] = set()
+        self._delivery_continuations: set[asyncio.Task[None]] = set()
         self._action_locks: dict[str, asyncio.Lock] = {}
         self._watchdog_keys: set[tuple[str, str]] = set()
         self._presentations: dict[str, TurnPresentation] = {}
@@ -176,6 +177,29 @@ class CompanionTurn:
         """Restore durable receipt watchdogs after the application's loop starts."""
         self._recover_receipt_watchdogs()
         await asyncio.sleep(0)
+
+    async def wait_for_delivery_continuations(self) -> None:
+        """Wait for in-process follow-up beats, never for long receipt watchdogs."""
+        while self._delivery_continuations:
+            await asyncio.gather(*tuple(self._delivery_continuations), return_exceptions=True)
+
+    async def observe_expired(self, turn: TurnEnvelope) -> TurnOutcome:
+        """Commit an inbound message after its response budget is already exhausted."""
+        existing = self._existing_outcome(turn)
+        if existing is not None:
+            return existing
+        await self.engine.handle_message(
+            turn.message,
+            skip_reply=True,
+            fast_observe=True,
+        )
+        return self._outcome(
+            turn,
+            action_ids=(),
+            status="failed",
+            degraded=True,
+            reason="response_budget_exhausted",
+        )
 
     async def respond(
         self,
@@ -575,7 +599,13 @@ class CompanionTurn:
 
         task = asyncio.create_task(run())
         self._continuations.add(task)
-        task.add_done_callback(self._continuations.discard)
+        self._delivery_continuations.add(task)
+
+        def finished(done: asyncio.Task[None]) -> None:
+            self._continuations.discard(done)
+            self._delivery_continuations.discard(done)
+
+        task.add_done_callback(finished)
 
     def _recover_receipt_watchdogs(self) -> None:
         """Re-arm accepted receipt deadlines when the seam is reconstructed."""
@@ -766,6 +796,14 @@ class CompanionTurn:
                 int(raw.get("delivery_id") or 0),
                 kind="substantive",
                 user_message_id=turn.idempotency_key,
+                expected_revision=world.revision(world_id),
+            )
+            await self._present_after_text(action_id, "cancelled")
+        elif has_planned and not has_accepted:
+            world.expire_outgoing_remainder(
+                int(raw.get("delivery_id") or 0),
+                reason="substantive user interjection before text dispatch",
+                terminal_reason=f"interrupted_by:{turn.idempotency_key}",
                 expected_revision=world.revision(world_id),
             )
             await self._present_after_text(action_id, "cancelled")
