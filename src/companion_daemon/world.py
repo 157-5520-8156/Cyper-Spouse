@@ -169,6 +169,24 @@ class LifeShareDelivery:
     revision: int
 
 
+@dataclass(frozen=True)
+class WorldTurnProjection:
+    """One coherent, bounded read model for a dialogue turn.
+
+    The projection is deliberately read-only.  It lets reply generation use
+    context, retrieval, and display strategy from exactly one ledger revision
+    without promoting any of those derived views to separate world truth.
+    """
+
+    world_id: str
+    revision: int
+    state_hash: str
+    state: dict[str, object]
+    conversation_context: dict[str, object]
+    retrieved_sources: tuple[dict[str, str], ...]
+    expression_plan: ExpressionPlan
+
+
 class WorldKernel:
     """The sole write seam for virtual-world facts, plans, and settled actions."""
 
@@ -1856,6 +1874,23 @@ class WorldKernel:
             raise WorldError(
                 f"expression plan revision mismatch: expected {expected_revision}, got {revision}"
             )
+        return self._expression_plan_from_state(
+            state,
+            revision=revision,
+            user_id=user_id,
+            purpose=purpose,
+            intent_id=intent_id,
+        )
+
+    @staticmethod
+    def _expression_plan_from_state(
+        state: dict[str, object],
+        *,
+        revision: int,
+        user_id: str,
+        purpose: str,
+        intent_id: str,
+    ) -> ExpressionPlan:
         relationships = _as_dict(state.get("relationships", {}), "relationships")
         relationship = _as_dict(
             relationships.get(user_id, {}), "expression relationship"
@@ -1874,6 +1909,46 @@ class WorldKernel:
             revision=revision,
             user_id=user_id,
             intent_id=f"{purpose}:{intent_id}" if intent_id else purpose,
+        )
+
+    def turn_projection(
+        self,
+        world_id: str,
+        *,
+        user_id: str,
+        text: str,
+        current_message_id: str | None,
+        purpose: str = "reply",
+        intent_id: str = "",
+    ) -> WorldTurnProjection:
+        """Read every prompt-facing world view from one ledger revision."""
+        with self.store.connect() as conn:
+            conn.execute("begin")
+            revision, state = self._load_state(conn, world_id)
+        return WorldTurnProjection(
+            world_id=world_id,
+            revision=revision,
+            state_hash=_state_hash(state),
+            state=state,
+            conversation_context=self._conversation_context_from_state(
+                state, world_id=world_id, user_id=user_id
+            ),
+            retrieved_sources=tuple(
+                self._conversation_sources_for_query_from_state(
+                    state,
+                    user_id=user_id,
+                    text=text,
+                    current_message_id=current_message_id,
+                    limit=4,
+                )
+            ),
+            expression_plan=self._expression_plan_from_state(
+                state,
+                revision=revision,
+                user_id=user_id,
+                purpose=purpose,
+                intent_id=intent_id,
+            ),
         )
 
     def dashboard_overview(self, world_id: str) -> dict[str, object]:
@@ -2058,6 +2133,10 @@ class WorldKernel:
     def conversation_policy(self, world_id: str) -> dict[str, object]:
         """Expose behavior-only world state; never fabricate a conversational fact."""
         state = self.snapshot(world_id)
+        return self._conversation_policy_from_state(state)
+
+    @staticmethod
+    def _conversation_policy_from_state(state: dict[str, object]) -> dict[str, object]:
         active = [item for item in _as_dict(state["agenda"], "agenda").values() if _as_dict(item, "activity").get("status") == "active"]
         logical_at = _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
         urgent = [goal_id for goal_id, goal in _as_dict(state.get("goals", {}), "goals").items() if goal.get("status") == "active" and goal.get("deadline") and _parse_at(str(goal["deadline"])) - logical_at <= timedelta(hours=48)]
@@ -2075,7 +2154,13 @@ class WorldKernel:
         referencable facts from private behaviour constraints so callers cannot
         accidentally turn a current plan into a claimed experience.
         """
-        state = self.snapshot(world_id)
+        return self._conversation_context_from_state(
+            self.snapshot(world_id), world_id=world_id, user_id=user_id
+        )
+
+    def _conversation_context_from_state(
+        self, state: dict[str, object], *, world_id: str, user_id: str
+    ) -> dict[str, object]:
         entities = _as_dict(state["entities"], "entities")
         protagonist = _as_dict(entities.get("zhizhi"), "protagonist")
         agenda = _as_dict(state["agenda"], "agenda")
@@ -2214,7 +2299,7 @@ class WorldKernel:
             "current_scene": current_scene,
             "current_scene_source": current_scene_source,
             "behavior": {
-                "policy": self.conversation_policy(world_id),
+                "policy": self._conversation_policy_from_state(state),
                 "needs": dict(_as_dict(state["needs"], "needs")),
                 "relationship": relationship,
                 "emotion_modulation": dict(_as_dict(state["emotion_modulation"], "emotion modulation")),
@@ -2256,7 +2341,24 @@ class WorldKernel:
         limit: int = 4,
     ) -> list[dict[str, str]]:
         """Retrieve older inbound messages without promoting them to permanent facts."""
-        state = self.snapshot(world_id)
+        return self._conversation_sources_for_query_from_state(
+            self.snapshot(world_id),
+            user_id=user_id,
+            text=text,
+            current_message_id=current_message_id,
+            limit=limit,
+        )
+
+    @staticmethod
+    def _conversation_sources_for_query_from_state(
+        state: dict[str, object],
+        *,
+        user_id: str,
+        text: str,
+        current_message_id: str | None,
+        limit: int = 4,
+    ) -> list[dict[str, str]]:
+        """Retrieve older inbound messages from an already coherent state."""
         candidates: list[tuple[int, int, dict[str, str]]] = []
         history = _as_list(state.get("recent_messages", []), "recent messages")
         for index, raw in enumerate(history):
@@ -5599,13 +5701,47 @@ class WorldKernel:
             )
 
     def _load_state(self, conn, world_id: str) -> tuple[int, dict[str, object]]:
-        exists = conn.execute("select 1 from worlds where world_id = ?", (world_id,)).fetchone()
-        if not exists:
+        world = conn.execute(
+            "select revision from worlds where world_id = ?", (world_id,)
+        ).fetchone()
+        if not world:
             raise WorldError(f"unknown world: {world_id}")
+        revision = int(world["revision"])
+        projection = conn.execute(
+            "select applied_revision, state_json, state_hash from world_current_state where world_id = ?",
+            (world_id,),
+        ).fetchone()
+        if projection and int(projection["applied_revision"]) == revision:
+            try:
+                state = json.loads(str(projection["state_json"]))
+                state_hash = _state_hash(state) if self._projection_state_is_usable(state) else ""
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+                state = None
+            if (
+                isinstance(state, dict)
+                and state_hash == str(projection["state_hash"])
+            ):
+                return revision, state
+        # Projection absence/lag/corruption is recoverable: the append-only
+        # event stream remains the authority and is replayed only as fallback.
         events = self._load_events(conn, world_id)
         if not events:
             raise WorldError(f"world has no event stream: {world_id}")
         return events[-1].revision, reduce_events(events)
+
+    @staticmethod
+    def _projection_state_is_usable(state: object) -> bool:
+        """Reject shape-corrupted cache rows before trusting their checksum."""
+        if not isinstance(state, dict):
+            return False
+        mappings = ("clock", "entities", "agenda", "actions", "facts", "experiences")
+        clock = state.get("clock")
+        return (
+            all(isinstance(state.get(key), dict) for key in mappings)
+            and isinstance(state.get("recent_messages"), list)
+            and isinstance(clock, dict)
+            and bool(str(clock.get("logical_at") or ""))
+        )
 
     def _load_events(self, conn, world_id: str) -> list[WorldEvent]:
         rows = conn.execute("select * from world_events where world_id = ? order by revision", (world_id,)).fetchall()

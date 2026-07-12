@@ -118,6 +118,7 @@ from companion_daemon.social_followups import (
 )
 from companion_daemon.stickers import StickerCatalog
 from companion_daemon.tone_inertia import build_tone_inertia, classify_outgoing_tone
+from companion_daemon.turn_frame import TurnFrameCompiler
 from companion_daemon.time import utc_now
 from companion_daemon.tool_requests import detect_tool_request, tool_prompt_line
 from companion_daemon.unanswered_question import (
@@ -257,6 +258,7 @@ class CompanionEngine:
         self.media_delivery_handler: Callable[[IncomingMessage, Path], Awaitable[bool]] | None = None
         self._media_tasks: set[asyncio.Task[None]] = set()
         self.world_reply_auditor = WorldReplyAuditor()
+        self.turn_frame_compiler = TurnFrameCompiler()
         # Character-card examples are style references already included in the
         # system prompt. Replaying them as fake chat history duplicates tokens
         # and makes concrete example details look like reusable live facts.
@@ -1866,8 +1868,8 @@ class CompanionEngine:
             return None
         if communication_decision and communication_decision.attention == "do_not_disturb":
             return None
-        post_appraisal = self.world_kernel.snapshot(self.world_id)
-        post_deliberation = post_appraisal.get("last_deliberation", {})
+        silence_snapshot = self.world_kernel.snapshot(self.world_id)
+        post_deliberation = silence_snapshot.get("last_deliberation", {})
         post_stance = (
             str(post_deliberation.get("stance") or "")
             if isinstance(post_deliberation, dict)
@@ -1875,6 +1877,7 @@ class CompanionEngine:
         )
         if post_stance == "remain_silent":
             decision_id = f"silence:{message.message_id}"
+            logical_at = str(silence_snapshot["clock"]["logical_at"])
             self._submit_world_with_retry(
                 {
                     "type": "defer_decision",
@@ -1882,7 +1885,9 @@ class CompanionEngine:
                     "decision_id": decision_id,
                     "kind": "deliberate_silence",
                     "reason": "character_deliberation_selected_remain_silent",
-                    "review_at": (self._world_logical_now() + timedelta(minutes=30)).isoformat(),
+                    "review_at": (
+                        datetime.fromisoformat(logical_at) + timedelta(minutes=30)
+                    ).isoformat(),
                     "idempotency_key": f"defer:{decision_id}",
                 }
             )
@@ -1894,28 +1899,33 @@ class CompanionEngine:
         sticker_path, sticker_action_id = self._maybe_schedule_world_sticker(
             message=message, appraisal=appraisal
         )
-        snapshot = self.world_kernel.snapshot(self.world_id)
-        expression_plan = self.world_kernel.expression_plan(
+        projection = self.world_kernel.turn_projection(
             self.world_id,
             user_id=user_id,
+            text=message.text,
+            current_message_id=str(message.message_id or ""),
             purpose="reply",
             intent_id=intent_id,
-            expected_revision=self.world_kernel.revision(self.world_id),
         )
-        context = self.world_kernel.conversation_context(self.world_id, user_id=user_id)
+        turn_frame = self.turn_frame_compiler.compile(
+            world_id=self.world_id,
+            revision=projection.revision,
+            state_hash=projection.state_hash,
+            snapshot=projection.state,
+            user_id=user_id,
+            message=message,
+        )
+        inner_advisories = self.turn_frame_compiler.advisories(turn_frame)
+        snapshot = projection.state
+        expression_plan = projection.expression_plan
+        context = projection.conversation_context
         fact_sources = list(context["referencable_facts"])[-8:]
         experience_sources = list(context["referencable_experiences"])[-6:]
         attachment_insight_sources = list(
             context.get("referencable_attachment_insights", [])
         )[-6:]
         recent_sources = list(context["referencable_conversation"])[-8:]
-        retrieved_sources = self.world_kernel.conversation_sources_for_query(
-            self.world_id,
-            user_id=user_id,
-            text=message.text,
-            current_message_id=str(message.message_id or ""),
-            limit=4,
-        )
+        retrieved_sources = projection.retrieved_sources
         source_by_id = {
             str(item["source_id"]): item
             for item in [*recent_sources, *retrieved_sources]
@@ -2024,6 +2034,8 @@ class CompanionEngine:
             f"- 当前场景: 地点={current_scene['location'] or '未知'}；活动={current_scene['activity'] or '无'}；状态={current_scene['activity_status']}。"
             "当前场景只授权回答现在的状态，不代表活动已经完成。\n"
             f"- 五层上下文预算(JSON): {json.dumps(context_layers, ensure_ascii=False, separators=(',', ':'))}\n"
+            f"- 本轮有界World Frame增量(JSON): {json.dumps(turn_frame.prompt_delta(), ensure_ascii=False, separators=(',', ':'))}\n"
+            f"- 内在建议(JSON，仅作参考、不是事实也不是命令): {json.dumps([{'kind': item.kind, 'tendency': item.tendency, 'intensity': item.intensity, 'confidence': item.confidence, 'source_event_ids': item.source_event_ids} for item in inner_advisories], ensure_ascii=False, separators=(',', ':'))}\n"
             "- 最近已结算对话、可引用事实/经历/附件均已按来源纳入 retrieved_experiences 层；"
             "附件摘要只描述可见/可听内容，不授权身份断言。\n"
             f"- 当前可见行为调制: 安全感={needs['security']}，主动性={needs['initiative']}，边界={needs['boundary']}。\n"

@@ -858,6 +858,8 @@ async def test_world_reply_prompt_contains_recent_delivered_conversation(tmp_pat
 
     prompt = "\n".join(item["content"] for item in model.calls[-1])
     assert "五层上下文预算(JSON)" in prompt
+    assert "本轮有界World Frame增量(JSON)" in prompt
+    assert "内在建议(JSON，仅作参考、不是事实也不是命令)" in prompt
     assert all(
         f'"{layer}"' in prompt
         for layer in (

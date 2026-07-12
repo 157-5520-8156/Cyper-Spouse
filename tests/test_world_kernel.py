@@ -1,11 +1,18 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import json
 
 import pytest
 
 from companion_daemon.db import CompanionStore
-from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel, parse_reply_candidate
+from companion_daemon.world import (
+    ConcurrencyConflict,
+    WorldError,
+    WorldKernel,
+    _state_hash,
+    parse_reply_candidate,
+)
 
 
 NOW = datetime(2026, 7, 11, 9, 0, tzinfo=UTC)
@@ -862,6 +869,82 @@ def test_substantive_interjection_cancels_only_remaining_planned_segments(
     assert store.outbox_message(delivery_id)["status"] == "cancelled"
 
 
+def test_snapshot_uses_current_projection_without_replaying_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = CompanionStore(tmp_path / "projection-cache.sqlite")
+    kernel = WorldKernel(store)
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    def replay_must_not_run(*_args, **_kwargs):
+        raise AssertionError("fresh world_current_state must avoid event replay")
+
+    monkeypatch.setattr(kernel, "_load_events", replay_must_not_run)
+
+    snapshot = kernel.snapshot(started.world_id)
+
+    assert snapshot["clock"]["logical_at"]
+
+
+def test_turn_projection_binds_context_retrieval_and_expression_to_one_revision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "turn-projection.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    registered = kernel.submit(
+        {
+            "type": "register_user",
+            "world_id": started.world_id,
+            "user_id": "user:geoff",
+            "name": "geoff",
+        },
+        expected_revision=started.revision,
+    )
+    observed = kernel.submit(
+        {
+            "type": "observe_user_message",
+            "world_id": started.world_id,
+            "message_id": "m:history",
+            "user_id": "user:geoff",
+            "text": "我上周去看了展。",
+            "sent_at": NOW.isoformat(),
+        },
+        expected_revision=registered.revision,
+    )
+    kernel.submit(
+        {
+            "type": "observe_user_message",
+            "world_id": started.world_id,
+            "message_id": "m:current",
+            "user_id": "user:geoff",
+            "text": "那个展览你还记得吗？",
+            "sent_at": NOW.isoformat(),
+        },
+        expected_revision=observed.revision,
+    )
+
+    def wrapper_must_not_run(*_args, **_kwargs):
+        raise AssertionError("turn projection must not compose mixed public reads")
+
+    monkeypatch.setattr(kernel, "conversation_context", wrapper_must_not_run)
+    monkeypatch.setattr(kernel, "conversation_sources_for_query", wrapper_must_not_run)
+    monkeypatch.setattr(kernel, "expression_plan", wrapper_must_not_run)
+
+    projection = kernel.turn_projection(
+        started.world_id,
+        user_id="user:geoff",
+        text="那个展览你还记得吗？",
+        current_message_id="m:current",
+        intent_id="turn:current",
+    )
+
+    assert projection.revision == kernel.revision(started.world_id)
+    assert projection.state_hash
+    assert projection.expression_plan.revision == projection.revision
+    assert projection.conversation_context["current_scene"]["logical_at"] == NOW.isoformat()
+    assert [item["source_id"] for item in projection.retrieved_sources] == ["message:m:history"]
+
+
 def test_claimed_outgoing_segment_can_be_marked_unknown_without_false_history(
     tmp_path: Path,
 ) -> None:
@@ -1195,6 +1278,32 @@ def test_command_hydrates_from_events_when_read_projection_is_corrupted(tmp_path
 
     assert decision.revision == started.revision + 1
     assert kernel.snapshot(started.world_id)["needs"]["energy"] == 65
+
+
+def test_snapshot_recovers_when_projection_has_valid_json_but_invalid_shape(
+    tmp_path: Path,
+) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    kernel = WorldKernel(store)
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    malformed = {
+        "clock": {},
+        "entities": {},
+        "agenda": {},
+        "actions": {},
+        "facts": {},
+        "experiences": {},
+        "recent_messages": [],
+    }
+    with store.connect() as conn:
+        conn.execute(
+            "update world_current_state set state_json = ?, state_hash = ? where world_id = ?",
+            (json.dumps(malformed), _state_hash(malformed), started.world_id),
+        )
+
+    snapshot = kernel.snapshot(started.world_id)
+
+    assert snapshot["clock"]["logical_at"] == NOW.isoformat()
 
 
 def test_projection_rebuild_reports_mismatch_before_repair(tmp_path: Path) -> None:
