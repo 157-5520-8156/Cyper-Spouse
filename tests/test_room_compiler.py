@@ -64,8 +64,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "depth": {"relativeTo": "dining", "layer": "above-front"},
     }
     assert bundle["inventory"]["summary"] == {
-        "total": 65, "planned": 57, "partial": 6, "atomized": 0,
-        "verified": 1, "excluded": 1,
+        "total": 64, "planned": 56, "partial": 7, "atomized": 0,
+        "verified": 0, "excluded": 1,
     }
     assert {item["id"]: item["status"] for item in bundle["inventory"]["items"]}["desk"] == "partial"
     assert bundle["behavior"]["actionDefinitions"]["read_phone"]["interaction"] == "phone"
@@ -98,7 +98,7 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "kitchen-utensil-rail", "kitchen-bin", "desk-rug", "dining-rug",
         "bed-rug", "living-rug", "desk-floor-plant", "living-large-plant",
         "desk-lamp", "bedside-table", "bedside-lamp", "bedside-decor-cluster",
-        "dining-side-table", "dining-side-plant", "foreground-ottoman", "living-floor-lamp",
+        "dining-side-table", "dining-side-plant", "teal-stool", "living-floor-lamp",
         "foreground-console", "foreground-table-lamp", "foreground-console-plants",
         "window-view", "window-frame", "wall-art-window-upper",
         "wall-art-window-lower", "wall-art-bedside",
@@ -118,6 +118,17 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     assert all(item["occupancy"] == {"kind": "none", "tiles": []} for item in rugs)
     assert all([layer["role"] for layer in item["layers"]] == ["body"] for item in rugs)
     draft_by_id = {item["id"]: item for item in bundle["artDraft"]["objects"]}
+    assert "foreground-ottoman" not in draft_by_id
+    draft_stool = draft_by_id["teal-stool"]
+    assert draft_stool["occupancy"] == {"kind": "none", "tiles": []}
+    assert draft_stool["layers"] == [{
+        "role": "front", "image": "tealStoolFront0Draft", "origin": [626, 900], "depthBias": 500,
+    }]
+    assert draft_stool["provenance"] == {
+        "method": "imagegen-background-extraction",
+        "reference": "zhizhi-room-isometric-v2.png",
+        "source": "sources/teal-stool-chroma-v2.png",
+    }
     desk_plant = draft_by_id["desk-floor-plant"]
     living_plant = draft_by_id["living-large-plant"]
     assert desk_plant["category"] == living_plant["category"] == "plant"
@@ -220,6 +231,7 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     assert inventory_status["window-hanging-plant"] == "planned"
     assert inventory_status["window-string-lights"] == "planned"
     assert inventory_status["kitchen-pendant-light"] == "excluded"
+    assert inventory_status["teal-stool"] == "partial"
 
     master = Image.open(ROOT / "assets/dashboard/zhizhi-room-isometric-v2.png").convert("RGBA")
     matte = Image.open(ROOT / "assets/dashboard/layers/desk-front-v1.png").convert("RGBA")
@@ -273,7 +285,7 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
                 "bedside-table-draft.png", "bedside-lamp-front-draft.png",
                 "bedside-lamp-light-draft.png", "bedside-decor-cluster-draft.png",
                 "dining-side-table-draft.png", "dining-side-plant-draft.png",
-                "foreground-ottoman-draft.png", "living-floor-lamp-draft.png",
+                "teal-stool-draft.png", "living-floor-lamp-draft.png",
                 "foreground-console-draft.png",
             "foreground-table-lamp-front-draft.png",
             "foreground-table-lamp-light-draft.png",

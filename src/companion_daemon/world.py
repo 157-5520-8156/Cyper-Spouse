@@ -4264,7 +4264,7 @@ class WorldKernel:
             entities = _as_dict(state["entities"], "entities")
             if (
                 not request_id or request_id in media or not topic or len(topic) > 120 or not reason or len(reason) > 160
-                or media_kind not in {"creative_image", "selfie"}
+                or media_kind not in {"creative_image", "selfie", "relationship_private"}
                 or _as_dict(entities.get(user_id), "media user").get("kind") != "user"
             ):
                 raise WorldError("media request requires a registered user, new id, supported kind, bounded topic and reason")

@@ -35,6 +35,8 @@ def test_dashboard_serves_local_control_panel() -> None:
     assert "The visual home remains usable" in response.text
     assert "状态同步失败 · 可稍后重试" in response.text
     assert "/debug/users" in response.text
+    assert "世界审计" in response.text
+    assert "/world-runtime/enablement" in response.text
 
 
 def test_dashboard_room_runtime_is_served_as_an_independent_module() -> None:

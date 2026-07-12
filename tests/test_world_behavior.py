@@ -160,3 +160,33 @@ def test_world_media_policy_uses_world_relation_and_boundary_not_moodstate() -> 
     assert denied.reason == "boundary_high_under_pressure"
     assert allowed.allowed is True
     assert allowed.kind == "selfie"
+
+
+def test_world_media_policy_marks_explicit_intimate_request_as_relationship_private() -> None:
+    policy = WorldMediaPolicy()
+    request = detect_image_request("能发一张私密自拍吗")
+
+    decision = policy.image_decision(
+        {"needs": {"boundary": 0, "security": 70}, "relationships": {"user:geoff": {"stage": "lover", "closeness": 15, "respect": 12}}},
+        user_id="user:geoff", request=request, user_text="能发一张私密自拍吗",
+    )
+
+    assert decision.allowed is True
+    assert decision.kind == "relationship_private"
+
+
+def test_world_media_policy_requires_stronger_world_state_for_bold_relationship_media() -> None:
+    policy = WorldMediaPolicy()
+    request = detect_image_request("能发一张大胆一点的私密自拍吗")
+    not_ready = policy.image_decision(
+        {"needs": {"boundary": 0, "security": 70}, "relationships": {"user:geoff": {"stage": "lover", "closeness": 15, "respect": 8}}},
+        user_id="user:geoff", request=request, user_text="能发一张大胆一点的私密自拍吗",
+    )
+    allowed = policy.image_decision(
+        {"needs": {"boundary": 10, "security": 70}, "relationships": {"user:geoff": {"stage": "lover", "closeness": 22, "respect": 14}}},
+        user_id="user:geoff", request=request, user_text="能发一张大胆一点的私密自拍吗",
+    )
+
+    assert not_ready.reason == "relationship_tier_bold_not_ready"
+    assert allowed.allowed is True
+    assert allowed.intimacy_tier == "bold"

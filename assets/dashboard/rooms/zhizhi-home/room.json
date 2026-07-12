@@ -1364,10 +1364,10 @@
         "interactions": [], "audits": {"hidden": true, "solo": true, "behind": false, "front": false}, "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"}, "audit": {}
       },
       {
-        "id": "foreground-ottoman", "category": "furniture", "assetMode": "layered",
+        "id": "teal-stool", "category": "furniture", "assetMode": "layered",
         "depthTile": [5.5, 7, 0], "occupancy": {"kind": "none", "tiles": []},
-        "layers": [{"role": "front", "source": "sources/foreground-ottoman-chroma-v1.png", "sourceTransform": {"crop": [209, 225, 1049, 1008], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [95, 88]}, "output": "foreground-ottoman-draft.png", "origin": [645, 895], "depthBias": 500}],
-        "interactions": [], "audits": {"hidden": true, "solo": true, "behind": false, "front": false}, "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"}, "audit": {}
+        "layers": [{"role": "front", "source": "sources/teal-stool-chroma-v2.png", "sourceTransform": {"crop": [360, 330, 900, 940], "chromaKey": "#ff00ff", "transparentThreshold": 12, "opaqueThreshold": 220, "despill": true, "resize": [120, 135]}, "output": "teal-stool-draft.png", "origin": [626, 900], "depthBias": 500}],
+        "interactions": [], "audits": {"hidden": true, "solo": true, "behind": false, "front": false}, "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png", "source": "sources/teal-stool-chroma-v2.png"}, "audit": {}
       },
       {
         "id": "living-floor-lamp", "category": "lighting", "assetMode": "layered",

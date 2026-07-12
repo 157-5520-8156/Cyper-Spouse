@@ -270,6 +270,7 @@ DASHBOARD_HTML = r"""<!doctype html>
       <section class="panel wide"><h2>今天的轨迹</h2><div class="timeline" id="timeline"></div></section>
       <section class="panel wide"><h2>时间账本 · 前 15 天 / 后 15 天</h2><div class="calendar-grid" id="calendarDays" aria-label="选择查看日期"></div><div class="calendar-list" id="calendar"></div></section>
       <section class="panel wide"><h2>还没收住的事</h2><div id="tasks"></div></section>
+      <section class="panel wide"><h2>世界审计</h2><div id="worldAudit" class="result">未启用世界模式。</div></section>
       <details class="wide"><summary>查看原始 daemon 状态</summary><pre id="state"></pre></details>
     </aside>
   </main>
@@ -337,6 +338,7 @@ DASHBOARD_HTML = r"""<!doctype html>
         if (!response.ok) throw new Error(`状态同步失败 (${response.status})`);
         snapshot = await response.json();
         render();
+        loadWorldAudit();
       } catch (error) {
         document.getElementById('updated').textContent = '状态同步失败 · 可稍后重试';
         document.getElementById('gameAction').textContent = '小屋待机中';
@@ -345,6 +347,20 @@ DASHBOARD_HTML = r"""<!doctype html>
       } finally {
         loading = false;
       }
+    }
+    async function loadWorldAudit() {
+      const target = document.getElementById('worldAudit');
+      try {
+        const response = await fetch('/world-runtime/enablement');
+        if (!response.ok) throw new Error('audit unavailable');
+        const audit = await response.json();
+        if (!audit.enabled) { target.textContent = '未启用世界模式；当前面板只显示旧运行时。'; return; }
+        const state = audit.ready ? '可启用' : '暂不允许启用';
+        const receipts = audit.delivery_receipts_supported ? '有平台回执' : '无可查询平台回执';
+        const pending = audit.open_action_ids.length ? `开放行动：${audit.open_action_ids.join(', ')}` : '没有开放行动';
+        const unknown = audit.unknown_action_ids.length ? `待对账：${audit.unknown_action_ids.join(', ')}` : '没有未知投递';
+        target.textContent = `${state} · ${receipts} · ${pending} · ${unknown}`;
+      } catch (_) { target.textContent = '世界审计暂不可用。'; }
     }
     function render() {
       const d = snapshot.dashboard, scene = d.scene, runtime = snapshot.life_runtime;

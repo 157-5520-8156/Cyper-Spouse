@@ -1,4 +1,5 @@
 .venv/
+.venv-train/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
@@ -7,13 +8,21 @@ __pycache__/
 
 data/
 logs/
-botpy.log
+botpy.log*
 assets/life/
+training/runs/
+training/datasets/
+
+.DS_Store
+.idea/
 
 external/SillyTavern/
 external/SillyTavern/node_modules/
 external/SillyTavern/config.yaml
 external/SillyTavern/data/
+external/snowluma/
 external/napcat/
+external/napcat/node_modules/
+external/diffusers/
 
 .env

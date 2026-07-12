@@ -163,6 +163,25 @@ class QQMessageCoalescer:
         self._afterthought_tasks: dict[str, list[asyncio.Task[None]]] = {}
         self._active_sends: dict[str, ActiveSend] = {}
         self._frozen_turn_contexts: dict[str, object] = {}
+        set_media_delivery_handler = getattr(self.engine, "set_media_delivery_handler", None)
+        if callable(set_media_delivery_handler):
+            set_media_delivery_handler(self._deliver_background_media)
+
+    async def _deliver_background_media(self, incoming: IncomingMessage, image_path: Path) -> bool:
+        """Send an image after its text reply, outside the reply-generation latency path."""
+        if self.on_image is None:
+            return False
+        canonical_user_id = self.engine.store.resolve_user(
+            incoming.platform, incoming.platform_user_id
+        )
+        reply = CompanionReply(
+            canonical_user_id=canonical_user_id,
+            mood="calm",
+            text="",
+            image_path=str(image_path),
+        )
+        await self.on_image(incoming, reply)
+        return True
 
     async def add(self, key: str, incoming: IncomingMessage, reply_target: ReplyTarget) -> None:
         self._cancel_afterthought(key)

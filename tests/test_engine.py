@@ -431,6 +431,54 @@ async def test_world_image_request_uses_generation_and_delivery_actions(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_world_image_can_send_after_text_via_background_adapter(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id,
+        image_generator=FakeImageGenerator(), image_output_dir=tmp_path / "images",
+    )
+    user_id = engine._ensure_world_user("geoff")
+    for index in range(1, 55):
+        world.submit(
+            {
+                "type": "appraise_turn", "world_id": world_id,
+                "appraisal": "warmth_received", "intent_id": f"async-warmth:{index}",
+                "message_id": f"async-warmth:{index}", "user_id": user_id,
+                "idempotency_key": f"async-warmth:{index}",
+            },
+            expected_revision=world.revision(world_id),
+        )
+        if world.snapshot(world_id)["relationships"][user_id]["stage"] == "close_friend":
+            break
+    sent: list[Path] = []
+
+    async def deliver(_incoming: IncomingMessage, path: Path) -> bool:
+        sent.append(path)
+        return True
+
+    engine.set_media_delivery_handler(deliver)
+    image_path, action_id, reason = await engine._maybe_generate_world_image(
+        user_id=user_id,
+        message=IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="能发一张自拍吗", message_id="async-media"
+        ),
+    )
+
+    assert (image_path, action_id, reason) == (None, None, "media_generation_pending")
+    for _ in range(30):
+        if sent:
+            break
+        await asyncio.sleep(0.01)
+    assert len(sent) == 1 and sent[0].exists()
+    media = next(iter(world.snapshot(world_id)["media"].values()))
+    assert media["status"] == "shared"
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
 async def test_world_sticker_selection_and_delivery_are_world_actions(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)

@@ -46,7 +46,13 @@ from companion_daemon.memory_consolidation import (
     consolidate_memories,
 )
 from companion_daemon.image_agency import decide_image_agency, image_agency_prompt_line
-from companion_daemon.image_generation import OpenAIImageGenerator, life_image_prompt
+from companion_daemon.image_generation import (
+    ImageGenerator,
+    ImageQualityGate,
+    life_image_prompt,
+    render_character_image,
+    visual_reference_paths,
+)
 from companion_daemon.image_prompt_builder import ChatImageMessage, build_image_prompt
 from companion_daemon.image_requests import detect_image_request
 from companion_daemon.impression import apply_repeated_interaction_drift, apply_user_impression
@@ -209,7 +215,8 @@ class CompanionEngine:
         multimodal_analyzer: MultimodalAnalyzer | None = None,
         conversation_core: ConversationCore | None = None,
         character_profile: CharacterProfile | None = None,
-        image_generator: OpenAIImageGenerator | None = None,
+        image_generator: ImageGenerator | None = None,
+        image_quality_gate: ImageQualityGate | None = None,
         budget_gate: BudgetGate | None = None,
         visual_identity_path: Path | None = Path("configs/visual_identity.yaml"),
         image_output_dir: Path = Path("assets/life"),
@@ -231,6 +238,7 @@ class CompanionEngine:
         self.multimodal_analyzer = multimodal_analyzer or MultimodalAnalyzer()
         self.character_profile = character_profile
         self.image_generator = image_generator
+        self.image_quality_gate = image_quality_gate
         self.budget_gate = budget_gate
         self.visual_identity_path = visual_identity_path
         self.image_output_dir = image_output_dir
@@ -246,6 +254,8 @@ class CompanionEngine:
         self.attachment_cache = attachment_cache
         self.attachment_fetcher = attachment_fetcher or self._fetch_attachment
         self.managed_async_resources = managed_async_resources
+        self.media_delivery_handler: Callable[[IncomingMessage, Path], Awaitable[bool]] | None = None
+        self._media_tasks: set[asyncio.Task[None]] = set()
         self.world_reply_auditor = WorldReplyAuditor()
         # Character-card examples are style references already included in the
         # system prompt. Replaying them as fake chat history duplicates tokens
@@ -317,6 +327,11 @@ class CompanionEngine:
 
     async def aclose(self) -> None:
         """Close runtime-owned asynchronous resources exactly once per object."""
+        tasks = tuple(self._media_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         seen: set[int] = set()
         for resource in self.managed_async_resources:
             if resource is None or id(resource) in seen:
@@ -325,6 +340,13 @@ class CompanionEngine:
             close = getattr(resource, "aclose", None)
             if callable(close):
                 await close()
+
+    def set_media_delivery_handler(
+        self,
+        handler: Callable[[IncomingMessage, Path], Awaitable[bool]] | None,
+    ) -> None:
+        """Enable text-first image delivery for an adapter owning the outbound send."""
+        self.media_delivery_handler = handler
 
     @staticmethod
     async def _fetch_attachment(url: str) -> bytes:
@@ -750,7 +772,7 @@ class CompanionEngine:
         )
 
     async def _maybe_generate_world_image(
-        self, *, user_id: str, message: IncomingMessage
+        self, *, user_id: str, message: IncomingMessage, _background: bool = False
     ) -> tuple[str | None, str | None, str | None]:
         """Generate a requested image only through media generation/delivery actions."""
         assert self.world_kernel and self.world_id
@@ -771,7 +793,10 @@ class CompanionEngine:
         if isinstance(existing, dict):
             if existing.get("status") in {"generated", "shared"} and existing.get("artifact_path"):
                 return str(existing["artifact_path"]), f"media-delivery:{request_id}", "existing_media_request"
-            if existing.get("status") in {"requested", "generation_failed", "delivery_failed", "rejected"}:
+            if (
+                not _background
+                and existing.get("status") in {"requested", "generation_failed", "delivery_failed", "rejected"}
+            ):
                 return None, None, f"existing_media_{existing['status']}"
         if not decision.allowed:
             self._submit_world_with_retry(
@@ -801,15 +826,19 @@ class CompanionEngine:
                     }
                 )
                 return None, None, decision.reason
-        self._submit_world_with_retry(
-            {
-                "type": "request_media", "world_id": self.world_id,
-                "request_id": request_id, "user_id": user_id, "media_kind": decision.kind,
-                "topic": decision.prompt_topic, "reason": decision.reason,
-                "rule_version": self.world_media_policy.RULE_VERSION,
-                "idempotency_key": f"media-request:{request_id}",
-            }
-        )
+        if not _background:
+            self._submit_world_with_retry(
+                {
+                    "type": "request_media", "world_id": self.world_id,
+                    "request_id": request_id, "user_id": user_id, "media_kind": decision.kind,
+                    "topic": decision.prompt_topic, "reason": decision.reason,
+                    "rule_version": self.world_media_policy.RULE_VERSION,
+                    "idempotency_key": f"media-request:{request_id}",
+                }
+            )
+            if self.media_delivery_handler:
+                self._schedule_world_media_generation(user_id=user_id, message=message)
+                return None, None, "media_generation_pending"
         action_id = f"media-generation:{request_id}"
         if not self.image_generator:
             self._submit_world_with_retry(
@@ -830,14 +859,27 @@ class CompanionEngine:
                 }
             )
             return None, None, "budget_gate_blocked"
+        profile = "relationship_private" if decision.kind == "relationship_private" else "everyday_selfie"
         prompt = life_image_prompt(
             decision.prompt_topic,
-            kind="selfie" if decision.kind == "selfie" else "life",
+            kind="selfie" if decision.kind in {"selfie", "relationship_private"} else "life",
+            profile=profile,
+            relationship_tier=decision.intimacy_tier,
             visual_identity_path=self.visual_identity_path,
         )
         output_path = self.image_output_dir / f"world-{request_id}.png"
         try:
-            generated = await self.image_generator.generate(prompt, output_path=output_path)
+            generated = await render_character_image(
+                self.image_generator,
+                prompt,
+                output_path=output_path,
+                reference_images=visual_reference_paths(
+                    self.visual_identity_path,
+                    profile=profile,
+                    relationship_tier=decision.intimacy_tier,
+                ),
+                quality_gate=self.image_quality_gate,
+            )
         except Exception as exc:
             self._submit_world_with_retry(
                 {
@@ -868,6 +910,52 @@ class CompanionEngine:
             }
         )
         return artifact_path, f"media-delivery:{request_id}", decision.reason
+
+    def _schedule_world_media_generation(self, *, user_id: str, message: IncomingMessage) -> None:
+        task = asyncio.create_task(
+            self._complete_world_media_generation(user_id=user_id, message=message)
+        )
+        self._media_tasks.add(task)
+        task.add_done_callback(self._media_tasks.discard)
+
+    async def _complete_world_media_generation(
+        self, *, user_id: str, message: IncomingMessage
+    ) -> None:
+        try:
+            image_path, action_id, _reason = await self._maybe_generate_world_image(
+                user_id=user_id, message=message, _background=True
+            )
+        except Exception:
+            logger.exception("background world media generation failed")
+            return
+        if not image_path or not action_id or not self.media_delivery_handler:
+            return
+        try:
+            delivered = await self.media_delivery_handler(message, Path(image_path))
+        except Exception as exc:
+            logger.exception("background world media delivery failed")
+            delivered = False
+            failure = str(exc)[:300]
+        else:
+            failure = "adapter reported image delivery failure"
+        if delivered:
+            self._submit_world_with_retry(
+                {
+                    "type": "record_external_result", "world_id": self.world_id,
+                    "action_id": action_id,
+                    "result": {"kind": "media_delivery", "status": "delivered"},
+                    "idempotency_key": f"media-delivered:{action_id}",
+                }
+            )
+        else:
+            self._submit_world_with_retry(
+                {
+                    "type": "record_external_result", "world_id": self.world_id,
+                    "action_id": action_id,
+                    "result": {"kind": "media_delivery", "status": "failed", "reason": failure},
+                    "idempotency_key": f"media-failed:{action_id}",
+                }
+            )
 
     def _maybe_schedule_world_sticker(
         self, *, message: IncomingMessage, appraisal: str
@@ -3415,7 +3503,13 @@ class CompanionEngine:
             visual_identity_path=self.visual_identity_path,
         )
         output_path = self.image_output_dir / f"reply-{canonical_user_id}-{int(utc_now().timestamp())}.png"
-        generated = await self.image_generator.generate(payload.prompt, output_path=output_path)
+        generated = await render_character_image(
+            self.image_generator,
+            payload.prompt,
+            output_path=output_path,
+            reference_images=visual_reference_paths(self.visual_identity_path),
+            quality_gate=self.image_quality_gate,
+        )
         if self.budget_gate:
             self.budget_gate.record(estimate, note=f"chat_image:{payload.mode}:{payload.directive[:40]}")
         self.store.upsert_memory(
@@ -4505,9 +4599,12 @@ class CompanionEngine:
         kind = "selfie" if state.relationship_stage in {"close_friend", "ambiguous", "lover"} and state.trust >= 55 else "life"
         topic = decision.message or decision.private_thought
         output_path = self.image_output_dir / f"proactive-{canonical_user_id}-{int(utc_now().timestamp())}.png"
-        generated = await self.image_generator.generate(
+        generated = await render_character_image(
+            self.image_generator,
             life_image_prompt(topic, kind=kind, visual_identity_path=self.visual_identity_path),
             output_path=output_path,
+            reference_images=visual_reference_paths(self.visual_identity_path),
+            quality_gate=self.image_quality_gate,
         )
         if self.budget_gate:
             self.budget_gate.record(estimate, note=f"proactive_image:{kind}:{topic[:40]}")

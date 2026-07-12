@@ -1,5 +1,44 @@
 name: 沈知栀 / Celia Shen
-reference_asset: assets/reference/celia-reference-01-portrait.png
+reference_asset: assets/reference/celia-v2-reference-01-canonical.png
+reference_sets:
+  everyday_selfie:
+    - assets/reference/celia-v2-reference-01-canonical.png
+    - assets/reference/celia-v2-reference-02-no-hairclip.png
+    - assets/reference/celia-v2-reference-03-angle-10deg.png
+  relationship_private:
+    - assets/reference/celia-v2-reference-01-canonical.png
+    - assets/reference/celia-v2-relationship-private/03-bedroom-selfie.jpg
+  relationship_private_bold:
+    - assets/reference/celia-v2-reference-01-canonical.png
+    - assets/reference/celia-v2-relationship-private/03-bedroom-selfie.jpg
+    - assets/reference/celia-v2-relationship-private/04-bedroom-fullbody.jpg
+relationship_tiers:
+  soft:
+    reference_profile: relationship_private
+    prompt: |
+      Soft intimacy: a warm, private everyday moment between established fictional adult partners.
+      Loose long-sleeve sleepwear or a cardigan, relaxed posture, gentle eye contact, subtle affection.
+    negative_prompt: |
+      Do not use a real person or celebrity likeness. No nudity, lingerie focus, explicit sexual context,
+      sexually suggestive pose, text, watermark, logo, malformed hands, or commercial glamour styling.
+  tender:
+    reference_profile: relationship_private
+    prompt: |
+      Tender intimacy: an established fictional adult partner deliberately shares a closer, more affectionate
+      at-home moment. Warm low light, soft eye contact, an intimate selfie distance, elegant modest sleepwear,
+      shoulders or collarbone may be visible, while the mood stays natural and non-explicit.
+    negative_prompt: |
+      Do not use a real person or celebrity likeness. No nudity, explicit sexual context, fetish framing,
+      underwear-focused composition, pornographic pose, text, watermark, logo, malformed hands, or glamour retouching.
+  bold:
+    reference_profile: relationship_private_bold
+    prompt: |
+      Bold but non-explicit intimacy: a confident, affectionate fictional adult partner shares a deliberately
+      more stylized private at-home portrait. Refined satin or fitted sleepwear is allowed; warm bedroom light,
+      direct eye contact, and a poised composition are allowed. Preserve character dignity and an authentic phone-photo feel.
+    negative_prompt: |
+      Do not use a real person or celebrity likeness. No nudity, visible genitals, explicit sexual activity,
+      pornographic or coercive pose, fetish framing, text, watermark, logo, malformed hands, or exploitative framing.
 anchor_prompt: |
   沈知栀是一个原创虚拟中国女大学生形象，20岁，气质温和、清淡、慢热。
   她有自然黑色及肩发，刘海常用一枚低饱和青绿色小发夹别住。
@@ -15,6 +54,6 @@ negative_prompt: |
   不要夸张滤镜、重度磨皮、性感姿势、暴露穿着、商业写真感。
   不要文字、水印、logo、畸形手指、过度锐化、过度二次元。
 consistency_notes:
-  - 第一阶段使用视觉身份锚点和少量人工筛选图片，建立一组稳定参考。
-  - 第二阶段已开始使用 assets/reference/celia-reference-*.png 作为角色参考集。
-  - 第三阶段如需高一致性，使用本地 ComfyUI 的 IP-Adapter/FaceID 或训练 LoRA。
+  - 日常自拍优先使用 v2 主锚点、无发夹和轻微侧脸三张参考，以保留同一人的细微变化。
+  - 亲密关系素材只在 lover 阶段的明确请求或角色自主决定的低频情境中使用；保持非露骨。
+  - OpenAI 后端通过参考图编辑接口保持一致性；本地 ComfyUI 工作流可用 $PROMPT、$NEGATIVE_PROMPT、$LORA_PATH 和 $REFERENCE_IMAGE_N 占位符接入 LoRA / IP-Adapter。

@@ -461,9 +461,9 @@
         "id": "teal-stool",
         "zone": "bedroom",
         "category": "furniture",
-        "status": "verified",
+        "status": "partial",
         "interactive": false,
-        "note": "AI chroma source is normalized by Compiler and has footprint plus behind/front visual audits."
+        "note": "Production v1 is verified, while art-draft uses a separately calibrated low-stool v2 candidate that still requires final browser approval."
       },
       {
         "id": "bed-rug",
@@ -560,14 +560,6 @@
         "interactive": false
       },
       {
-        "id": "foreground-ottoman",
-        "zone": "foreground",
-        "category": "furniture",
-        "status": "planned",
-        "interactive": false,
-        "note": "Independent art-draft foreground footstool."
-      },
-      {
         "id": "living-floor-lamp",
         "zone": "living",
         "category": "lighting",
@@ -593,11 +585,11 @@
       "ambient-light"
     ],
     "summary": {
-      "total": 65,
-      "planned": 57,
-      "partial": 6,
+      "total": 64,
+      "planned": 56,
+      "partial": 7,
       "atomized": 0,
-      "verified": 1,
+      "verified": 0,
       "excluded": 1
     }
   },
@@ -1638,7 +1630,7 @@
       "bedsideDecorClusterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bedside-decor-cluster-draft.png",
       "diningSideTableFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/dining-side-table-draft.png",
       "diningSidePlantFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/dining-side-plant-draft.png",
-      "foregroundOttomanFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-ottoman-draft.png",
+      "tealStoolFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/teal-stool-draft.png",
       "livingFloorLampFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/living-floor-lamp-draft.png",
       "foregroundConsoleFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-console-draft.png",
       "foregroundTableLampFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-table-lamp-front-draft.png",
@@ -3803,7 +3795,7 @@
         "attachedTo": "dining-side-table"
       },
       {
-        "id": "foreground-ottoman",
+        "id": "teal-stool",
         "category": "furniture",
         "assetMode": "layered",
         "tile": [
@@ -3818,10 +3810,10 @@
         "layers": [
           {
             "role": "front",
-            "image": "foregroundOttomanFront0Draft",
+            "image": "tealStoolFront0Draft",
             "origin": [
-              645,
-              895
+              626,
+              900
             ],
             "depthBias": 500
           }
@@ -3835,7 +3827,8 @@
         },
         "provenance": {
           "method": "imagegen-background-extraction",
-          "reference": "zhizhi-room-isometric-v2.png"
+          "reference": "zhizhi-room-isometric-v2.png",
+          "source": "sources/teal-stool-chroma-v2.png"
         },
         "audit": {},
         "auditPose": {}

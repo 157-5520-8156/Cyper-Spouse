@@ -388,11 +388,26 @@
     },
     {
       "id": "wave5-remaining-floor-assets-chroma-v1",
-      "targets": ["dining-side-table", "dining-side-plant", "foreground-ottoman", "living-floor-lamp"],
+      "targets": ["dining-side-table", "dining-side-plant", "living-floor-lamp"],
       "status": "needs-art", "method": "imagegen-background-extraction",
-      "sources": ["sources/dining-side-table-chroma-v1.png", "sources/dining-side-plant-chroma-v1.png", "sources/foreground-ottoman-chroma-v1.png", "sources/living-floor-lamp-chroma-v1.png"],
+      "sources": ["sources/dining-side-table-chroma-v1.png", "sources/dining-side-plant-chroma-v1.png", "sources/living-floor-lamp-chroma-v1.png"],
       "generation": {"reference": "zhizhi-room-isometric-v2.png", "background": "flat #ff00ff chroma", "alphaPostprocess": {"helper": "imagegen/scripts/remove_chroma_key.py", "keying": {"autoKey": "border", "transparentThreshold": 50, "opaqueThreshold": 160, "softMatte": true, "despill": true}}},
-      "note": "Dining plant attaches only to its side table. Ottoman and floor lamp are freestanding ground assets; the lamp is explicitly floor-standing and never ceiling- or roof-mounted."
+      "note": "Dining plant attaches only to its side table; the floor lamp is explicitly floor-standing and never ceiling- or roof-mounted. The generated foreground ottoman was rejected because it replaces the reference's distinct teal stool with the wrong geometry."
+    },
+    {
+      "id": "wave6-sofa-reference-crop-chroma-v2",
+      "targets": ["sofa"],
+      "status": "rejected", "method": "imagegen-background-extraction",
+      "sources": ["sources/sofa-frame-chroma-v2.png"],
+      "note": "A sofa generated from a tight reference crop still changes the source silhouette enough that it cannot replace the calibrated v1 layer. Retained only as rejected provenance; it is not in runtime."
+    },
+    {
+      "id": "wave6-teal-stool-reference-crop-chroma-v2",
+      "targets": ["teal-stool"],
+      "status": "needs-art", "method": "imagegen-background-extraction",
+      "sources": ["sources/teal-stool-chroma-v2.png"],
+      "generation": {"reference": "zhizhi-room-isometric-v2.png", "inputCrop": [580, 860, 760, 1040], "background": "flat #ff00ff chroma", "alphaPostprocess": {"helper": "imagegen/scripts/remove_chroma_key.py", "keying": {"autoKey": "border", "transparentThreshold": 12, "opaqueThreshold": 220, "softMatte": true, "despill": true}}},
+      "note": "Tight reference-crop candidate for the low teal footstool; it replaces a high-leg generated stool only in art-draft and must pass position/angle browser review before final approval."
     }
   ],
   "items": [
@@ -448,7 +463,7 @@
     {"id":"bedside-table","zone":"bedroom","category":"furniture","status":"planned","interactive":false},
     {"id":"bedside-lamp","zone":"bedroom","category":"lighting","status":"planned","interactive":false},
     {"id":"bedside-decor-cluster","zone":"bedroom","category":"decor-cluster","status":"planned","interactive":false},
-    {"id":"teal-stool","zone":"bedroom","category":"furniture","status":"verified","interactive":false,"note":"AI chroma source is normalized by Compiler and has footprint plus behind/front visual audits."},
+    {"id":"teal-stool","zone":"bedroom","category":"furniture","status":"partial","interactive":false,"note":"Production v1 is verified, while art-draft uses a separately calibrated low-stool v2 candidate that still requires final browser approval."},
     {"id":"bed-rug","zone":"bedroom","category":"soft-furnishing","status":"planned","interactive":false},
     {"id":"divider","zone":"bedroom","category":"furniture","status":"partial","interactive":false,"note":"Logical object and front matte exist; full RGB remains in master."},
     {"id":"bed-divider-content-cluster","zone":"bedroom","category":"decor-cluster","status":"planned","interactive":false},
@@ -463,7 +478,6 @@
     {"id":"foreground-console","zone":"foreground","category":"furniture","status":"planned","interactive":false},
     {"id":"foreground-console-plants","zone":"foreground","category":"plant","status":"planned","interactive":false},
     {"id":"foreground-table-lamp","zone":"foreground","category":"lighting","status":"planned","interactive":false},
-    {"id":"foreground-ottoman","zone":"foreground","category":"furniture","status":"planned","interactive":false,"note":"Independent art-draft foreground footstool."},
     {"id":"living-floor-lamp","zone":"living","category":"lighting","status":"planned","interactive":false,"note":"Independent floor-standing art-draft lamp; never ceiling- or roof-mounted."},
     {"id":"living-large-plant","zone":"living","category":"plant","status":"planned","interactive":false}
   ]

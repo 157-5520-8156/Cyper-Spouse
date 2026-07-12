@@ -101,6 +101,13 @@ class Settings(BaseSettings):
     vision_model: str = Field(default="gpt-4o-mini", alias="VISION_MODEL")
     transcription_model: str = Field(default="gpt-4o-mini-transcribe", alias="TRANSCRIPTION_MODEL")
     image_model: str = Field(default="gpt-image-2", alias="IMAGE_MODEL")
+    image_backend: Literal["auto", "openai", "comfyui"] = Field(
+        default="auto", alias="IMAGE_BACKEND"
+    )
+    comfyui_base_url: str = Field(default="http://127.0.0.1:8188", alias="COMFYUI_BASE_URL")
+    comfyui_workflow_path: Path | None = Field(default=None, alias="COMFYUI_WORKFLOW_PATH")
+    comfyui_lora_path: str | None = Field(default=None, alias="COMFYUI_LORA_PATH")
+    image_quality_gate_enabled: bool = Field(default=False, alias="IMAGE_QUALITY_GATE_ENABLED")
     visual_identity_path: Path = Field(
         default=Path("configs/visual_identity.yaml"),
         alias="VISUAL_IDENTITY_PATH",

@@ -10,14 +10,14 @@
 
 ## Phase B: Reference Set
 
-已生成第一组 GPT 参考图，作为 LoRA/IP-Adapter 之前的视觉基准：
+v2 参考集是当前唯一的身份基线；旧的 `celia-reference-*` 仅保留作视觉开发对照，不能混进 v2 LoRA 数据。
 
-- `assets/reference/celia-reference-01-portrait.png`: 图书馆窗边正脸参考。
-- `assets/reference/celia-reference-02-campus.png`: 校园半身参考。
-- `assets/reference/celia-reference-03-desk-selfie.png`: 桌面前置自拍参考。
-- `assets/reference/celia-reference-04-cafe-profile.png`: 咖啡店半侧脸参考。
+- `celia-v2-reference-01-canonical.png`: 主脸、青绿色发夹和两颗痣的身份锚点。
+- `celia-v2-reference-02-no-hairclip.png`: 移除发夹的单变量检查图。
+- `celia-v2-reference-03-angle-10deg.png`: 轻微侧脸检查图。
+- `celia-v2-hairstyle-variants/`: 松散低丸子头——它是及肩短发长出后盘起的造型，不是第二个长发身份。
 
-这组图还不是 LoRA。它的作用是先固定脸型、发夹、发色、穿搭色系和气质，让后续所有自拍/生活照有一个人工筛选基准。真正训练 LoRA 前，建议继续扩到 8-12 张，剔除脸部漂移明显的图，再做裁切和标签。
+日常自拍使用前三张；亲密关系资料是独立的受限集，不参与基础 LoRA 训练，也不会响应普通自拍请求。
 
 ## Phase C: Local Consistency Workflow
 
@@ -27,7 +27,29 @@
 - IP-Adapter/FaceID：更轻，适合用参考图做身份约束，但稳定度通常低于训练 LoRA。
 - Reference-only prompt：最便宜，但漂移最大，只适合早期试用。
 
-项目当前处于 Phase B 初版：参考图已经落库，LoRA/FaceID 尚未训练。这样可以先低成本验证“沈知栀长什么样”，再决定是否进入本地训练。
+当前实现支持两条逐步切换的渲染路径：
+
+- `IMAGE_BACKEND=openai`：OpenAI 图片编辑接口携带 v2 参考图，适合立即试用。
+- `IMAGE_BACKEND=comfyui`：提交本机 ComfyUI API 工作流，适合随后接入 SDXL LoRA、IP-Adapter 或 FaceID。
+- `IMAGE_BACKEND=auto`：若配置了本地工作流，先尝试本机；失败后回退 OpenAI。
+
+最小环境配置如下：
+
+```bash
+ALLOW_AUTO_IMAGE_GENERATION=true
+IMAGE_BACKEND=auto
+OPENAI_API_KEY=...
+# 等本地 LoRA 可用后再设置：
+COMFYUI_BASE_URL=http://127.0.0.1:8188
+COMFYUI_WORKFLOW_PATH=configs/comfyui/celia-v2-api-workflow.json
+COMFYUI_LORA_PATH=models/loras/celia-v2.safetensors
+```
+
+本地工作流是从 ComfyUI 导出的 API JSON；字符串值可使用 `$PROMPT`、`$NEGATIVE_PROMPT`、`$LORA_PATH`、`$REFERENCE_IMAGE_1` 等占位符。这样图节点和 LoRA/IP-Adapter 节点仍由 ComfyUI 管理，而不是硬编码在服务里。
+
+可选设置 `IMAGE_QUALITY_GATE_ENABLED=true`：图片会先经视觉检查，若脸、手、文字水印或主题不合格则重试一次。它会额外产生视觉调用，因此默认关闭。
+
+QQ 适配器使用“文字先到、图片后到”的路径：它会先把角色的文字回复送出，再在后台完成生成并单独发送图片，同时以实际平台发送结果结算媒体 action。HTTP 调试接口仍同步返回图片，方便现有调用方和人工验收。
 
 ## Selfie Agency
 
@@ -37,6 +59,18 @@
 - 用户语气有压迫感时，她会守住边界，不生成图片。
 - 关系和情绪允许时，才会把自拍请求交给图像生成器。
 - 主动消息里，她可以很少地因为“突然想分享当下”发生活照或自拍，但仍受预算闸门限制。
+
+`relationship_private` 目前只允许处于 `lover` 阶段、含有明确私密/亲密语境的自拍请求；若仍有高强度未解决伤害，必须先通过角色的自主 deliberation。生成提示固定为虚构成年人、非露骨、全程着装，不把争执修复或用户施压当作交换图片的机制。
+
+### Relationship-media tiers
+
+`relationship_private` 不是单一强度。用户可在明确的私密自拍请求中写 `soft`、`tender` 或 `bold`（中文“大方/大胆”也会选中 `bold`）；未写时默认 `soft`。
+
+- `soft`：恋人阶段即可，暖光、宽松睡衣、克制的晚安自拍。
+- `tender`：需要 closeness ≥ 12、respect ≥ 5、security ≥ 45、boundary < 35；允许更近的构图、肩颈和明确的温柔氛围。
+- `bold`：必须由用户明确写出，且需要 closeness ≥ 20、respect ≥ 12、security ≥ 60、boundary ≤ 20，不能有 unresolved 负面情绪。它允许更自信的私密造型，但仍禁止裸露、明确性行为、胁迫或物化镜头。
+
+三个档位分别有提示词、负面提示和参考集；不会因为单纯升级关系阶段而静默提高强度，也不会由主动消息自动触发 `bold`。
 
 ## Asset Strategy
 

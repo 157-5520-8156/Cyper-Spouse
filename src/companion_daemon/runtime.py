@@ -10,7 +10,12 @@ from companion_daemon.budget import BudgetGate
 from companion_daemon.attachment_cache import AttachmentCache
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine
-from companion_daemon.image_generation import OpenAIImageGenerator
+from companion_daemon.image_generation import (
+    ComfyUIImageGenerator,
+    FallbackImageGenerator,
+    OpenAIImageQualityGate,
+    OpenAIImageGenerator,
+)
 from companion_daemon.llm import (
     DeepSeekChatModel,
     FakeCompanionModel,
@@ -154,12 +159,44 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             allow_transcription=settings.allow_auto_transcription,
         )
     image_generator = None
-    if settings.allow_auto_image_generation and settings.openai_api_key:
-        image_generator = OpenAIImageGenerator(
-            settings.openai_api_key,
-            base_url=settings.openai_base_url,
-            model=settings.image_model,
+    image_quality_gate = None
+    if settings.allow_auto_image_generation:
+        openai_generator = (
+            OpenAIImageGenerator(
+                settings.openai_api_key,
+                base_url=settings.openai_base_url,
+                model=settings.image_model,
+            )
+            if settings.openai_api_key
+            else None
         )
+        comfy_generator = (
+            ComfyUIImageGenerator(
+                base_url=settings.comfyui_base_url,
+                workflow_path=settings.comfyui_workflow_path,
+                lora_path=settings.comfyui_lora_path,
+            )
+            if settings.comfyui_workflow_path and settings.comfyui_workflow_path.is_file()
+            else None
+        )
+        if settings.image_backend == "openai":
+            image_generator = openai_generator
+        elif settings.image_backend == "comfyui":
+            image_generator = comfy_generator
+        elif comfy_generator and openai_generator:
+            image_generator = FallbackImageGenerator(comfy_generator, openai_generator)
+        else:
+            image_generator = comfy_generator or openai_generator
+        if image_generator is None:
+            logger.warning(
+                "automatic image generation is enabled but no selected backend is configured"
+            )
+        if settings.image_quality_gate_enabled and settings.openai_api_key:
+            image_quality_gate = OpenAIImageQualityGate(
+                settings.openai_api_key,
+                base_url=settings.openai_base_url,
+                model=settings.vision_model,
+            )
     rewrite_model = None
     if settings.enable_reply_rewrite and settings.deepseek_api_key and not use_fake_model:
         rewrite_model = DeepSeekChatModel(
@@ -184,6 +221,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         conversation_core=conversation_core,
         character_profile=character,
         image_generator=image_generator,
+        image_quality_gate=image_quality_gate,
         budget_gate=budget_gate,
         visual_identity_path=settings.visual_identity_path,
         rewrite_model=rewrite_model,
