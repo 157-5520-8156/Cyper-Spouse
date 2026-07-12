@@ -1278,6 +1278,91 @@
         "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
         "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
         "audit": {}
+      },
+      {
+        "id": "window-curtains",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "generated/window-curtains-alpha-v1.png",
+          "output": "window-curtains-draft.png",
+          "origin": [965, 120]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "window-planter-left",
+        "category": "plant",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "generated/window-planter-left-alpha-v1.png",
+          "output": "window-planter-left-draft.png",
+          "origin": [1025, 290]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "window-planter-right",
+        "category": "plant",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "generated/window-planter-right-alpha-v1.png",
+          "output": "window-planter-right-draft.png",
+          "origin": [1110, 325]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "window-hanging-plant",
+        "category": "plant",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "generated/window-hanging-plant-alpha-v1.png",
+          "output": "window-hanging-plant-draft.png",
+          "origin": [1200, 185]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "window-string-lights",
+        "category": "lighting",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "generated/window-string-lights-alpha-v1.png",
+          "output": "window-string-lights-draft.png",
+          "origin": [1215, 190]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
       }
     ]
   },

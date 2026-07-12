@@ -210,16 +210,52 @@
         }
       },
       "note": "Each decor group attaches to its direct carrier and contains no carrier or lamp pixels."
+    },
+    {
+      "id": "wave3-window-soft-decor-chroma-v1",
+      "targets": [
+        "window-curtains",
+        "window-planter-left",
+        "window-planter-right",
+        "window-hanging-plant",
+        "window-string-lights"
+      ],
+      "status": "needs-art",
+      "method": "imagegen-background-extraction",
+      "sources": [
+        "sources/window-curtains-chroma-v1.png",
+        "sources/window-planter-left-chroma-v1.png",
+        "sources/window-planter-right-chroma-v1.png",
+        "sources/window-hanging-plant-chroma-v1.png",
+        "sources/window-string-lights-chroma-v1.png",
+        "generated/window-curtains-alpha-v1.png",
+        "generated/window-planter-left-alpha-v1.png",
+        "generated/window-planter-right-alpha-v1.png",
+        "generated/window-hanging-plant-alpha-v1.png",
+        "generated/window-string-lights-alpha-v1.png"
+      ],
+      "generation": {
+        "reference": "zhizhi-room-isometric-v2.png",
+        "background": "flat #ff00ff chroma",
+        "prompts": {
+          "window-curtains-chroma-v1.png": "Paired teal gathered window curtains with tiebacks, dark wooden rod, finials and rings; curtains only, excluding window, frame, wall and plants.",
+          "window-planter-left-chroma-v1.png": "Compact leafy green terracotta potted plant from the window sill; plant only, excluding sill and window.",
+          "window-planter-right-chroma-v1.png": "Low rectangular wooden flower box with compact foliage and tiny warm flowers; planter only, excluding sill and window.",
+          "window-hanging-plant-chroma-v1.png": "Leafy hanging basket with cords and a small vertical-wall hook; explicitly wall-mounted, never ceiling-mounted.",
+          "window-string-lights-chroma-v1.png": "Irregular vertical loop of warm bulbs, wire and wall pins with only tight local halos; explicitly wall-mounted, never ceiling-mounted."
+        }
+      },
+      "note": "Window soft decor is split into five replaceable wall/sill assets. Window frame, glass/view and all ceiling/roof-mounted content are excluded from these candidates."
     }
   ],
   "items": [
     {"id":"window-view","zone":"window","category":"structural-sub-layer","status":"planned","interactive":false},
     {"id":"window-frame","zone":"window","category":"structural-sub-layer","status":"planned","interactive":false},
-    {"id":"window-curtains","zone":"window","category":"soft-furnishing","status":"planned","interactive":false},
-    {"id":"window-planter-left","zone":"window","category":"plant","status":"planned","interactive":false},
-    {"id":"window-planter-right","zone":"window","category":"plant","status":"planned","interactive":false},
-    {"id":"window-hanging-plant","zone":"window","category":"plant","status":"planned","interactive":false},
-    {"id":"window-string-lights","zone":"window","category":"lighting","status":"planned","interactive":false},
+    {"id":"window-curtains","zone":"window","category":"soft-furnishing","status":"planned","interactive":false,"note":"Art-draft asset exists: paired curtains and rod only; excludes the frame, view and wall."},
+    {"id":"window-planter-left","zone":"window","category":"plant","status":"planned","interactive":false,"note":"Art-draft asset exists: independent sill plant with no floor-path occupancy."},
+    {"id":"window-planter-right","zone":"window","category":"plant","status":"planned","interactive":false,"note":"Art-draft asset exists: independent sill flower box with no floor-path occupancy."},
+    {"id":"window-hanging-plant","zone":"window","category":"plant","status":"planned","interactive":false,"note":"Art-draft asset exists and mounts to a vertical wall hook, not the ceiling."},
+    {"id":"window-string-lights","zone":"window","category":"lighting","status":"planned","interactive":false,"note":"Art-draft wall-mounted decorative light loop; not roof- or ceiling-mounted."},
     {"id":"wall-art-window-upper","zone":"window","category":"wall-decoration","status":"planned","interactive":false},
     {"id":"wall-art-window-lower","zone":"window","category":"wall-decoration","status":"planned","interactive":false},
     {"id":"wall-art-bedside","zone":"bedroom","category":"wall-decoration","status":"planned","interactive":false},

@@ -93,6 +93,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "bed-rug", "living-rug", "desk-floor-plant", "living-large-plant",
         "desk-lamp", "bedside-table", "bedside-lamp", "bedside-decor-cluster",
         "foreground-console", "foreground-table-lamp", "foreground-console-plants",
+        "window-curtains", "window-planter-left", "window-planter-right",
+        "window-hanging-plant", "window-string-lights",
     ]
     assert bundle["artDraft"]["objects"][0]["layers"][0]["image"] == "sofaFront0Draft"
     bookcase = next(item for item in bundle["artDraft"]["objects"] if item["id"] == "tall-bookcase")
@@ -152,6 +154,22 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     assert draft_by_id["foreground-console"]["audit"] == {
         "behind": [4.5, 7, 0],
     }
+    window_objects = [draft_by_id[item_id] for item_id in (
+        "window-curtains", "window-planter-left", "window-planter-right",
+        "window-hanging-plant", "window-string-lights",
+    )]
+    assert all(item["occupancy"] == {"kind": "wall", "tiles": []} for item in window_objects)
+    assert all([layer["role"] for layer in item["layers"]] == ["body"] for item in window_objects)
+    assert all(item["audits"] == {
+        "hidden": True, "solo": True, "behind": False, "front": False,
+    } for item in window_objects)
+    assert draft_by_id["window-string-lights"]["category"] == "lighting"
+    inventory_status = {
+        item["id"]: item["status"] for item in bundle["inventory"]["items"]
+    }
+    assert inventory_status["window-hanging-plant"] == "planned"
+    assert inventory_status["window-string-lights"] == "planned"
+    assert inventory_status["kitchen-pendant-light"] == "excluded"
 
     master = Image.open(ROOT / "assets/dashboard/zhizhi-room-isometric-v2.png").convert("RGBA")
     matte = Image.open(ROOT / "assets/dashboard/layers/desk-front-v1.png").convert("RGBA")
@@ -196,6 +214,9 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
             "foreground-table-lamp-front-draft.png",
             "foreground-table-lamp-light-draft.png",
             "foreground-console-plants-draft.png",
+            "window-curtains-draft.png", "window-planter-left-draft.png",
+            "window-planter-right-draft.png", "window-hanging-plant-draft.png",
+            "window-string-lights-draft.png",
         )
     )
 

@@ -117,35 +117,40 @@
         "zone": "window",
         "category": "soft-furnishing",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft asset exists: paired curtains and rod only; excludes the frame, view and wall."
       },
       {
         "id": "window-planter-left",
         "zone": "window",
         "category": "plant",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft asset exists: independent sill plant with no floor-path occupancy."
       },
       {
         "id": "window-planter-right",
         "zone": "window",
         "category": "plant",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft asset exists: independent sill flower box with no floor-path occupancy."
       },
       {
         "id": "window-hanging-plant",
         "zone": "window",
         "category": "plant",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft asset exists and mounts to a vertical wall hook, not the ceiling."
       },
       {
         "id": "window-string-lights",
         "zone": "window",
         "category": "lighting",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft wall-mounted decorative light loop; not roof- or ceiling-mounted."
       },
       {
         "id": "wall-art-window-upper",
@@ -1611,7 +1616,12 @@
       "foregroundConsoleFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-console-draft.png",
       "foregroundTableLampFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-table-lamp-front-draft.png",
       "foregroundTableLampLight1Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-table-lamp-light-draft.png",
-      "foregroundConsolePlantsFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-console-plants-draft.png"
+      "foregroundConsolePlantsFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-console-plants-draft.png",
+      "windowCurtainsBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/window-curtains-draft.png",
+      "windowPlanterLeftBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/window-planter-left-draft.png",
+      "windowPlanterRightBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/window-planter-right-draft.png",
+      "windowHangingPlantBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/window-hanging-plant-draft.png",
+      "windowStringLightsBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/window-string-lights-draft.png"
     },
     "objects": [
       {
@@ -3553,6 +3563,196 @@
         "audit": {},
         "auditPose": {},
         "attachedTo": "foreground-console"
+      },
+      {
+        "id": "window-curtains",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "windowCurtainsBody0Draft",
+            "origin": [
+              965,
+              120
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "window-planter-left",
+        "category": "plant",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "windowPlanterLeftBody0Draft",
+            "origin": [
+              1025,
+              290
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "window-planter-right",
+        "category": "plant",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "windowPlanterRightBody0Draft",
+            "origin": [
+              1110,
+              325
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "window-hanging-plant",
+        "category": "plant",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "windowHangingPlantBody0Draft",
+            "origin": [
+              1200,
+              185
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "window-string-lights",
+        "category": "lighting",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "windowStringLightsBody0Draft",
+            "origin": [
+              1215,
+              190
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
       }
     ]
   }

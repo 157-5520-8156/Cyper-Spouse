@@ -12,7 +12,7 @@
 - [x] 波次 0：通用对象 `layers / occupancy / audits / provenance` schema；`teal-stool` 已作为无互动原生对象接入，旧对象经 Compiler 归一化到同一 bundle 契约。
 - [ ] 波次 1：主要遮挡家具（进行中：clean shell 与 16 个家具/附属对象已进入可编译 `artDraft`，仍需逐件校准和删除测试）。
 - [x] 波次 2：厨房与大型收纳草稿功能闭环（29 个对象、36 个构建资产；全部厨房对象可删除，父子联动、适用遮挡与餐厨动作/路径通过；素材仍保持 `needs-art`，终稿基线在波次 6 统一批准）。
-- [ ] 波次 3：地毯、灯具、植物与窗区（进行中：四块地毯、两株落地植物、三盏台灯、两件承载柜及两组直属 decor 已进入草稿，现为 42 对象、52 个构建资产；所有屋顶对象排除，其余植物和窗区待处理）。
+- [ ] 波次 3：地毯、灯具、植物与窗区（进行中：四块地毯、两株落地植物、三盏台灯、两件承载柜、两组直属 decor，以及五件窗区软装/植物/墙灯已进入草稿，现为 47 对象、57 个构建资产；所有屋顶对象继续排除，窗框/窗景结构层与其余植物待处理）。
 - [ ] 波次 4–6：decor、路径动作与最终验收。
 
 ### 波次 0 验收记录
@@ -47,6 +47,12 @@
 - 四块区域地毯与两株落地植物已进入统一对象契约；书柜内容裁掉重复植物像素，草稿现为 35 个对象、42 个构建资产。
 - 书桌盆栽不占新增路径格，且其不可达后侧明确为 `false`；大型植物占据 `[7,4]`，地毯锚点与 tour 改从 `[7,5]` 绕行。
 - AI 生成意图与 reference 已记录在 inventory。对象仍为 `planned / needs-art`；详细定位、视觉审计和动态 tour 证据见 `docs/dashboard-visual-worklog.md`。
+
+### 波次 3 窗区软装与墙面植物草稿记录
+
+- `window-curtains`、两件窗台 planter、`window-hanging-plant` 与 `window-string-lights` 已成为五个独立 `body` 对象；窗帘只含布料/帘杆，盆栽不含窗台，壁挂植物带垂直墙钩，灯串带墙钉和窄局部光晕。
+- 五件对象均使用 `occupancy.kind=wall` 且没有路径格；它们不会改变 walkable、tour 或地面 footprint。壁挂植物和墙灯明确固定在右墙，不属于屋顶/天花板物件。
+- 浏览器完成五件 solo、五件 hidden、整屋装配与动态 tour。删除时窗框/窗景和其他对象保留，solo 时没有夹带窗框、城市景观或墙面；对象仍保持 `planned / needs-art`，等待窗结构层和波次 6 基线统一批准。
 
 ## 用户目标
 
@@ -336,7 +342,7 @@ Runtime 不包含家具名称特判。层角色、depthTile、occupancy 与 inte
 
 验收：灯具隐藏会同时移除其局部光效；地毯不阻塞路径；窗帘与植物深度正确。
 
-当前进度：四块地毯与两株落地植物已通过草稿检查点。`desk-lamp / bedside-lamp / foreground-table-lamp` 均以 `front + light` 双层对象接入，并分别附着到书桌、床头柜和前景长柜；`bedside-decor-cluster / foreground-console-plants` 也只含直属摆件像素并附着到各自载体。两组 decor 的父 hidden、子 solo、整屋位置和 tour 已通过。clean shell 候选移除了烙在墙地面的局部灯斑。餐厨吊灯及所有屋顶对象按用户观测规则排除。当前共 42 个草稿对象、52 个构建资产。
+当前进度：四块地毯与两株落地植物已通过草稿检查点。`desk-lamp / bedside-lamp / foreground-table-lamp` 均以 `front + light` 双层对象接入，并分别附着到书桌、床头柜和前景长柜；`bedside-decor-cluster / foreground-console-plants` 也只含直属摆件像素并附着到各自载体。窗帘、左右窗台 planter、右墙壁挂植物和右墙灯串已各自成为 `wall` 占用的单体对象，五组 hidden/solo、整屋位置和 tour 已通过。clean shell 候选移除了烙在墙地面的局部灯斑。餐厨吊灯及所有屋顶对象按用户观测规则排除。当前共 47 个草稿对象、57 个构建资产。
 
 ### 波次 4：桌面、柜内和墙面 decor clusters
 

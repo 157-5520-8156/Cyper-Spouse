@@ -167,6 +167,15 @@
 - 床头灯缩小并移到柜面右侧，为左侧闹钟留出独立所有权；前景植物放在长柜左/中段，台灯保留右端。草稿暂增至 42 个对象、52 个构建资产。
 - Compiler 已生成独立 alpha 层，单层检查无洋红残边。浏览器验证床头摆件右移后落在柜面左侧，前景植物落在长柜左/中段；两组父 hidden 会关闭全部子项，子 solo 只保留直接载体与目标，连续 tour 无变化。
 
+## 全资产原子化 · 窗区软装与墙面植物草稿（2026-07-12）
+
+- 以视觉母版为 reference 分别生成 `window-curtains`、左右窗台 planter、`window-hanging-plant` 和 `window-string-lights`。五张源图保留洋红 chroma 原稿与经标准 helper 生成的 alpha 候选，提示词、reference、原稿及 alpha 路径均写入 machine-readable `artCandidates`。
+- 所有权边界明确：窗帘只含成对布帘、绑带和帘杆，不含窗框/玻璃/城市景观；两个 planter 不含窗台；壁挂植物只含花篮、叶片、绳索和垂直墙钩；灯串只含墙钉、导线、灯泡及 1–2 像素局部光晕。
+- 用户要求的屋顶排除规则继续作为硬约束。壁挂植物与灯串均固定在右侧垂直墙面，挂点低于屋顶轮廓；没有生成、恢复或渲染任何吊灯、顶灯或屋顶悬挂物。
+- 五件对象均声明 `occupancy.kind=wall`、`body` 层、空 interactions、hidden/solo 审计，不认领任何 walkable 格。草稿由 42 增至 47 个对象，构建资产由 52 增至 57。
+- 浏览器完成五件 solo 与五件 hidden：solo 不夹带窗框、窗景、墙面或相邻植物，hidden 只删除目标；整屋装配中窗帘包围原窗框，两个 planter 落在窗台，右墙植物位于灯串环内。动态 tour 经过工作区、厨房与客厅，路径没有因窗区资产改变。
+- 自动验证：Room Compiler Python 26 项、Room Runtime JS 20 项通过；对象继续保持 `planned / needs-art`，窗框/窗景结构子层与最终逐像素基线尚未收口。
+
 ## 后续扩展规则
 
 - 后续若新增家具或新动作，必须同时添加 `behind/front` 或动作巡检入口，不能只改 daemon 映射。
