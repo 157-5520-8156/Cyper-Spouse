@@ -55,6 +55,7 @@ from companion_daemon.image_generation import (
 )
 from companion_daemon.image_prompt_builder import ChatImageMessage, build_image_prompt
 from companion_daemon.image_requests import detect_image_request
+from companion_daemon.invariant_guard import InvariantGuard
 from companion_daemon.impression import apply_repeated_interaction_drift, apply_user_impression
 from companion_daemon.life_continuity import build_life_continuity
 from companion_daemon.life_runtime import (
@@ -261,6 +262,7 @@ class CompanionEngine:
         self._media_tasks: set[asyncio.Task[None]] = set()
         self.world_reply_auditor = WorldReplyAuditor()
         self.turn_frame_compiler = TurnFrameCompiler()
+        self.invariant_guard = InvariantGuard()
         # Character-card examples are style references already included in the
         # system prompt. Replaying them as fake chat history duplicates tokens
         # and makes concrete example details look like reusable live facts.
@@ -2209,9 +2211,15 @@ class CompanionEngine:
         ]
         try:
             parsed_candidate = parse_reply_candidate(raw)
-            candidate = self.world_kernel.validate_reply_candidate(
-                self.world_id, parsed_candidate, user_id=user_id
+            guard_resolution = self.invariant_guard.resolve(
+                self.world_kernel,
+                self.world_id,
+                parsed_candidate,
+                user_id=user_id,
             )
+            if guard_resolution.disposition == "hard_reject":
+                raise WorldError(guard_resolution.reason or "hard invariant rejected reply")
+            candidate = dict(guard_resolution.candidate or {})
             if occurrence_candidate:
                 candidate = self.world_kernel.validate_reply_candidate(
                     self.world_id, occurrence_candidate, user_id=user_id
