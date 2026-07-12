@@ -59,6 +59,7 @@ def test_world_communication_attention_and_typing_are_event_sourced(tmp_path: Pa
         expected_revision=started.revision,
     )
     assert kernel.snapshot(started.world_id)["communication"]["attention"] == "unread"
+    assert kernel.snapshot(started.world_id)["recent_messages"][-1]["attachments"] == []
 
     deferred = kernel.submit(
         {
@@ -151,6 +152,44 @@ def test_world_user_relationship_and_emotion_are_reduced_from_turn_appraisal(tmp
     }
 
 
+def test_world_turn_records_deliberation_instead_of_treating_user_request_as_command(
+    tmp_path: Path,
+) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    user = kernel.submit(
+        {"type": "register_user", "world_id": started.world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=started.revision,
+    )
+    observed = kernel.submit(
+        {
+            "type": "observe_user_message", "world_id": started.world_id,
+            "message_id": "m-no-advice", "user_id": "user:geoff",
+            "text": "别劝我，我就准备继续熬。", "sent_at": NOW.isoformat(),
+        },
+        expected_revision=user.revision,
+    )
+
+    decision = kernel.submit(
+        {
+            "type": "appraise_turn", "world_id": started.world_id,
+            "intent_id": "turn:no-advice", "message_id": "m-no-advice",
+            "appraisal": "ordinary_message", "user_id": "user:geoff",
+        },
+        expected_revision=observed.revision,
+    )
+
+    event_types = [event.event_type for event in decision.events]
+    assert event_types[-3:] == [
+        "UserRequestAppraised", "MotiveConflictEvaluated", "StanceSelected"
+    ]
+    snapshot = kernel.snapshot(started.world_id)
+    assert snapshot["last_user_request"]["kind"] == "no_advice"
+    assert snapshot["last_deliberation"]["stance"] in {
+        "comply", "comply_then_revisit", "disagree_gently", "refuse_to_affirm", "defer"
+    }
+
+
 def test_world_dashboard_projection_is_self_contained_and_never_needs_legacy_runtime(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
     started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
@@ -206,8 +245,26 @@ def test_seeded_character_core_and_confirmed_user_profile_are_separate_projectio
     assert "真诚比漂亮话重要" in context["self_core"]["values"]
     assert "中文短句，像 QQ 或微信私聊" in context["self_core"]["speech_anchors"]
     assert context["user_profile"] == [
-        {"source_id": "user:tea", "value": "用户喜欢桂花乌龙。", "reference_state": "confirmed"}
+        {
+            "source_id": "user:tea",
+            "source": "user_message:test",
+            "source_type": "fact",
+            "subject": "user:geoff",
+            "logical_at": "2026-07-11T09:00:00+08:00",
+            "purpose": "personalize",
+            "value": "用户喜欢桂花乌龙。",
+            "reference_state": "confirmed",
+            "status": "current",
+            "conflict_key": "",
+            "pinned": False,
+            "importance": 50,
+        }
     ]
+    assert context["self_core"]["source"] == "world_event:WorldStarted"
+    assert context["self_core"]["subject"] == "zhizhi"
+    assert context["self_core"]["logical_at"] == "2026-07-11T09:00:00+08:00"
+    assert context["current_scene_source"]["subject"] == "zhizhi"
+    assert context["current_scene_source"]["logical_at"] == "2026-07-11T09:00:00+08:00"
 
 
 def test_world_deferred_decision_has_review_action_and_terminal_resolution(tmp_path: Path) -> None:
@@ -680,7 +737,173 @@ def test_outbox_trace_and_world_action_are_created_in_one_world_transaction(tmp_
     assert store.outbox_message(delivery_id)["status"] == "planned"
     assert store.recent_turn_traces("geoff")[-1]["id"] == trace_id
     assert kernel.snapshot("zhizhi-v1")["actions"][action_id]["delivery_id"] == delivery_id
-    assert kernel.revision("zhizhi-v1") == started.revision + 1
+    assert kernel.revision("zhizhi-v1") == started.revision + 4
+    assert [event.event_type for event in kernel.events("zhizhi-v1")[-4:]] == [
+        "OutboundActionAllowed",
+        "CostReservationDecided",
+        "ActionScheduled",
+        "ActionSegmentsPlanned",
+    ]
+
+
+def test_segmented_outgoing_action_commits_only_delivered_segments_to_history(
+    tmp_path: Path,
+) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.resolve_user("qq", "user")
+    kernel = WorldKernel(store)
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+
+    delivery_id, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="第一句。第二句。",
+        text_parts=["第一句。", "第二句。"],
+        kind="reply",
+        expires_at=NOW + timedelta(hours=1),
+        trace={
+            "world_id": started.world_id,
+            "appraisal": "ordinary_message",
+            "expression_policy": "自然接话。",
+            "allowed_facts": [],
+            "short_lived_constraint": None,
+            "observable_reason": "用户发来一条普通消息。",
+        },
+    )
+
+    action = kernel.snapshot(started.world_id)["actions"][action_id]
+    assert [item["status"] for item in action["segment_state"]["segments"]] == [
+        "planned",
+        "planned",
+    ]
+
+    claimed = kernel.claim_outgoing_segment(
+        delivery_id, expected_revision=kernel.revision(started.world_id)
+    )
+    assert claimed is not None
+    assert claimed.position == 0
+    kernel.settle_outgoing_segment(
+        delivery_id,
+        claimed.segment_id,
+        delivered=True,
+        expected_revision=kernel.revision(started.world_id),
+    )
+
+    snapshot = kernel.snapshot(started.world_id)
+    assert [item["text"] for item in snapshot["recent_messages"] if item["direction"] == "out"] == [
+        "第一句。"
+    ]
+    assert [item["status"] for item in snapshot["actions"][action_id]["segment_state"]["segments"]] == [
+        "delivered",
+        "planned",
+    ]
+    assert [row["text"] for row in store.recent_messages("geoff") if row["direction"] == "out"] == [
+        "第一句。"
+    ]
+
+
+def test_substantive_interjection_cancels_only_remaining_planned_segments(
+    tmp_path: Path,
+) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.resolve_user("qq", "user")
+    kernel = WorldKernel(store)
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    delivery_id, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="一。二。三。",
+        text_parts=["一。", "二。", "三。"],
+        kind="reply",
+        expires_at=NOW + timedelta(hours=1),
+        trace={
+            "world_id": started.world_id,
+            "appraisal": "ordinary_message",
+            "expression_policy": "test",
+            "allowed_facts": [],
+            "observable_reason": "test",
+        },
+    )
+    first = kernel.claim_outgoing_segment(
+        delivery_id, expected_revision=kernel.revision(started.world_id)
+    )
+    assert first is not None
+    kernel.settle_outgoing_segment(
+        delivery_id,
+        first.segment_id,
+        delivered=True,
+        expected_revision=kernel.revision(started.world_id),
+    )
+
+    assert kernel.observe_outgoing_interjection(
+        delivery_id,
+        kind="backchannel",
+        user_message_id="m-backchannel",
+        expected_revision=kernel.revision(started.world_id),
+    ) == ()
+    cancelled = kernel.observe_outgoing_interjection(
+        delivery_id,
+        kind="substantive",
+        user_message_id="m-takeover",
+        expected_revision=kernel.revision(started.world_id),
+    )
+
+    assert cancelled == (
+        f"{action_id}:segment:1",
+        f"{action_id}:segment:2",
+    )
+    action = kernel.snapshot(started.world_id)["actions"][action_id]
+    assert [item["status"] for item in action["segment_state"]["segments"]] == [
+        "delivered",
+        "cancelled",
+        "cancelled",
+    ]
+    assert action["status"] == "cancelled"
+    assert store.outbox_message(delivery_id)["status"] == "cancelled"
+
+
+def test_claimed_outgoing_segment_can_be_marked_unknown_without_false_history(
+    tmp_path: Path,
+) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.resolve_user("qq", "user")
+    kernel = WorldKernel(store)
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    delivery_id, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="也许发出去了。下一句。",
+        text_parts=["也许发出去了。", "下一句。"],
+        kind="reply",
+        expires_at=NOW + timedelta(hours=1),
+        trace={
+            "world_id": started.world_id,
+            "appraisal": "ordinary_message",
+            "expression_policy": "test",
+            "allowed_facts": [],
+            "observable_reason": "test",
+        },
+    )
+    claimed = kernel.claim_outgoing_segment(
+        delivery_id, expected_revision=kernel.revision(started.world_id)
+    )
+    assert claimed is not None
+
+    assert kernel.mark_outgoing_segment_unknown(
+        delivery_id,
+        claimed.segment_id,
+        reason="adapter connection dropped after send",
+        expected_revision=kernel.revision(started.world_id),
+    ) is True
+
+    action = kernel.snapshot(started.world_id)["actions"][action_id]
+    assert [item["status"] for item in action["segment_state"]["segments"]] == [
+        "unknown",
+        "planned",
+    ]
+    assert action["status"] == "unknown"
+    assert not [item for item in kernel.snapshot(started.world_id)["recent_messages"] if item["direction"] == "out"]
+    assert not [row for row in store.recent_messages("geoff") if row["direction"] == "out"]
 
 
 def test_rebuilding_projection_from_the_ledger_matches_live_projection(tmp_path: Path) -> None:
@@ -816,6 +1039,60 @@ def test_only_explicit_fact_confirmation_enters_the_world_fact_index(tmp_path: P
 
     assert confirmed.events[-1].event_type == "FactConfirmed"
     assert kernel.snapshot("zhizhi-v1")["facts"]["user-city"]["value"] == "用户明确说自己在成都。"
+
+
+def test_new_conflicting_user_fact_supersedes_old_grounding_without_deleting_history(
+    tmp_path: Path,
+) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    first = kernel.submit(
+        {
+            "type": "confirm_fact",
+            "world_id": started.world_id,
+            "fact_id": "user-city-chengdu",
+            "subject": "geoff",
+            "conflict_key": "location:current",
+            "value": "用户明确说自己现在住在成都。",
+            "source": "qq:one",
+        },
+        expected_revision=started.revision,
+    )
+    kernel.submit(
+        {
+            "type": "confirm_fact",
+            "world_id": started.world_id,
+            "fact_id": "user-city-shanghai",
+            "subject": "geoff",
+            "conflict_key": "location:current",
+            "value": "用户明确说自己现在住在上海。",
+            "source": "qq:two",
+        },
+        expected_revision=first.revision,
+    )
+
+    facts = kernel.snapshot(started.world_id)["facts"]
+    assert facts["user-city-chengdu"]["status"] == "superseded"
+    assert facts["user-city-chengdu"]["superseded_by"] == "user-city-shanghai"
+    assert facts["user-city-shanghai"]["status"] == "current"
+    assert facts["user-city-shanghai"]["conflict_key"] == "location:current"
+
+    context = kernel.conversation_context(started.world_id, user_id="geoff")
+    assert [item["source_id"] for item in context["user_profile"]] == ["user-city-shanghai"]
+    assert "user-city-chengdu" not in {
+        item["source_id"] for item in context["referencable_facts"]
+    }
+    with pytest.raises(WorldError, match="uncommitted world records"):
+        kernel.validate_reply_candidate(
+            started.world_id,
+            {
+                "reply_text": "你现在住在成都。",
+                "mentioned_event_ids": ["user-city-chengdu"],
+                "proposed_action_ids": [],
+            },
+            user_id="geoff",
+        )
+    assert kernel.verify_ledger(started.world_id)["valid"] is True
 
 
 def test_only_verified_facts_are_carried_into_a_fresh_world_epoch(tmp_path: Path) -> None:
@@ -1135,6 +1412,96 @@ def test_life_share_scheduling_is_idempotent_until_delivery(tmp_path: Path) -> N
     again = kernel.schedule_life_share_delivery(world_id=started.world_id, canonical_user_id="geoff", platform="qq", expires_at=NOW + timedelta(hours=1), expected_revision=selected.revision)
     assert selected is not None and again is not None
     assert selected.delivery_id == again.delivery_id
+
+
+def test_world_outbound_policy_records_allowed_reply_and_ignores_unanswered_budget(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    user_id = "user:geoff"
+    kernel.submit(
+        {
+            "type": "register_user", "world_id": started.world_id,
+            "user_id": user_id, "name": "Geoff",
+        },
+        expected_revision=started.revision,
+    )
+    for index in range(2):
+        delivery_id, _, _ = kernel.queue_outgoing_action(
+            canonical_user_id="geoff", platform="qq", text=f"先前主动消息 {index}", kind="proactive",
+            expires_at=NOW + timedelta(hours=1),
+            trace={"world_id": started.world_id, "direction": "proactive", "appraisal": "pulse", "expression_policy": "test", "allowed_facts": [], "observable_reason": "test"},
+        )
+        kernel.settle_outgoing_action(delivery_id, delivered=True)
+        logical_at = datetime.fromisoformat(str(kernel.snapshot(started.world_id)["clock"]["logical_at"]))
+        kernel.advance(started.world_id, logical_at + timedelta(minutes=6), expected_revision=kernel.revision(started.world_id))
+
+    kernel.queue_outgoing_action(
+        canonical_user_id="geoff", platform="qq", text="这是对用户当前消息的回复", kind="reply",
+        expires_at=NOW + timedelta(hours=1),
+        trace={"world_id": started.world_id, "user_id": user_id, "input_message_id": "input-1", "direction": "incoming_reply", "appraisal": "reply", "expression_policy": "test", "allowed_facts": [], "observable_reason": "test"},
+    )
+
+    policy_events = [event for event in kernel.events(started.world_id) if event.event_type == "OutboundActionAllowed"]
+    assert policy_events[-1].payload["kind"] == "reply"
+    assert policy_events[-1].payload["checks"]["unanswered_budget"]["passed"] is True
+    assert policy_events[-1].payload["projection"]["unanswered_outbound_count"] == 2
+
+
+def test_world_outbound_policy_rejects_third_unanswered_pulse_without_scheduling_action(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    for index in range(2):
+        delivery_id, _, _ = kernel.queue_outgoing_action(
+            canonical_user_id="geoff", platform="qq", text=f"主动消息 {index}", kind="proactive",
+            expires_at=NOW + timedelta(hours=1),
+            trace={"world_id": started.world_id, "direction": "proactive", "appraisal": f"pulse-{index}", "expression_policy": "test", "allowed_facts": [], "observable_reason": "test"},
+        )
+        kernel.settle_outgoing_action(delivery_id, delivered=True)
+        logical_at = datetime.fromisoformat(str(kernel.snapshot(started.world_id)["clock"]["logical_at"]))
+        kernel.advance(started.world_id, logical_at + timedelta(minutes=6), expected_revision=kernel.revision(started.world_id))
+
+    action_count = len(kernel.snapshot(started.world_id)["actions"])
+    with pytest.raises(WorldError, match="unanswered_budget"):
+        kernel.queue_outgoing_action(
+            canonical_user_id="geoff", platform="qq", text="第三次主动消息", kind="proactive",
+            expires_at=NOW + timedelta(hours=1),
+            trace={"world_id": started.world_id, "direction": "proactive", "appraisal": "pulse-3", "expression_policy": "test", "allowed_facts": [], "observable_reason": "test"},
+        )
+
+    assert len(kernel.snapshot(started.world_id)["actions"]) == action_count
+    rejected = [event for event in kernel.events(started.world_id) if event.event_type == "OutboundActionRejected"][-1]
+    assert rejected.payload["reasons"] == ["unanswered_budget"]
+
+
+def test_world_outbound_policy_allows_costly_audited_override_of_soft_budget(tmp_path: Path) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
+    started = kernel.submit({"type": "start_world", "seed": world_seed()}, expected_revision=0)
+    for index in range(2):
+        delivery_id, _, _ = kernel.queue_outgoing_action(
+            canonical_user_id="geoff", platform="qq", text=f"主动消息 {index}", kind="proactive",
+            expires_at=NOW + timedelta(hours=1),
+            trace={"world_id": started.world_id, "direction": "proactive", "appraisal": f"pulse-{index}", "expression_policy": "test", "allowed_facts": [], "observable_reason": "test"},
+        )
+        kernel.settle_outgoing_action(delivery_id, delivered=True)
+        logical_at = datetime.fromisoformat(str(kernel.snapshot(started.world_id)["clock"]["logical_at"]))
+        kernel.advance(started.world_id, logical_at + timedelta(minutes=6), expected_revision=kernel.revision(started.world_id))
+
+    _, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff", platform="qq", text="这次我还是决定主动说一句", kind="proactive",
+        expires_at=NOW + timedelta(hours=2),
+        trace={
+            "world_id": started.world_id, "direction": "proactive", "appraisal": "repair_impulse",
+            "expression_policy": "test", "allowed_facts": [], "observable_reason": "test",
+            "outbound_override": {"reason": "角色选择承担打扰风险来修复关系", "cost": 25, "strike": 1},
+        },
+    )
+
+    assert kernel.snapshot(started.world_id)["actions"][action_id]["status"] == "scheduled"
+    overridden = [event for event in kernel.events(started.world_id) if event.event_type == "OutboundSoftGateOverridden"][-1]
+    assert overridden.payload["override"] == {
+        "reason": "角色选择承担打扰风险来修复关系", "cost": 25, "strike": 1,
+        "overridden_gates": ["unanswered_budget"],
+    }
 
 
 def test_delivered_life_share_consumes_daily_limit(tmp_path: Path) -> None:

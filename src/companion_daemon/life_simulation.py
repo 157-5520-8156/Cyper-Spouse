@@ -20,11 +20,28 @@ class LifeSimulation:
             self._apply(working, events)
         return emitted
 
-    def choose_template(self, state: dict[str, Any], activity: dict[str, Any], alternatives: list[str]) -> tuple[dict[str, Any], str | None]:
+    def choose_template(
+        self,
+        state: dict[str, Any],
+        activity: dict[str, Any],
+        alternatives: list[str],
+        *,
+        priority_scores: dict[str, int] | None = None,
+    ) -> tuple[dict[str, Any], str | None]:
         """Choose the first seed-authorized template that can begin this activity."""
         candidates = [str(activity.get("template_id") or ""), *alternatives]
         starts_at = datetime.fromisoformat(str(activity["starts_at"]))
-        ranked = sorted(enumerate(candidates), key=lambda item: (-self._goal_priority(state, item[1], starts_at), item[0]))
+        ranked = sorted(
+            enumerate(candidates),
+            key=lambda item: (
+                -(
+                    int(priority_scores.get(item[1], -10_000))
+                    if priority_scores is not None
+                    else self._goal_priority(state, item[1], starts_at)
+                ),
+                item[0],
+            ),
+        )
         for _, template_id in ranked:
             spec = state.get("life_outcome_templates", {}).get(template_id)
             if not isinstance(spec, dict) or state.get("needs", {}).get("energy", 0) < int(spec.get("energy_cost", 0)):
@@ -33,6 +50,20 @@ class LifeSimulation:
             npc_id = spec.get("npc_id")
             goal = state.get("goals", {}).get(spec.get("goal_id")) if spec.get("goal_id") else None
             if npc_id and not self._available(state.get("entities", {}), str(npc_id), starts_at, ends_at):
+                continue
+            day = starts_at.date().isoformat()
+            if npc_id and any(
+                item.get("npc_id") == npc_id
+                and str(item.get("starts_at", ""))[:10] == day
+                for item in state.get("outcomes", {}).values()
+            ):
+                continue
+            if sum(
+                1
+                for item in state.get("outcomes", {}).values()
+                if item.get("template_id") == template_id
+                and str(item.get("starts_at", ""))[:10] == day
+            ) >= int(spec.get("max_per_day", 1)):
                 continue
             if spec.get("goal_id") and (not goal or goal.get("status") != "active" or (goal.get("deadline") and ends_at > datetime.fromisoformat(str(goal["deadline"])))):
                 continue

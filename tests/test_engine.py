@@ -616,7 +616,7 @@ async def test_world_mode_withheld_proactive_is_a_reviewable_world_decision(tmp_
 
 
 @pytest.mark.asyncio
-async def test_world_proactive_does_not_bypass_an_open_conversation_thread(tmp_path: Path) -> None:
+async def test_world_proactive_treats_an_open_conversation_thread_as_costly_soft_pressure(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
     world = WorldKernel(store)
@@ -645,7 +645,63 @@ async def test_world_proactive_does_not_bypass_an_open_conversation_thread(tmp_p
     decision = await engine.proactive_tick("geoff")
 
     assert decision.should_send is False
-    assert "open_conversation_thread" in decision.private_thought
+    proactive_prompt = "\n".join(item["content"] for item in engine.model.calls[-1])
+    assert "当前主动软压力: open_conversation_thread" in proactive_prompt
+    assert "越过代价: 20; strike: 1" in proactive_prompt
+
+
+@pytest.mark.asyncio
+async def test_world_proactive_can_deliberately_override_open_thread_soft_pressure(tmp_path: Path) -> None:
+    class StubbornButBoundedModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"private_thought":"我知道刚问过，但还是想把这点在意说出来。",'
+                '"should_send":true,"platform":"qq","message_type":"text",'
+                '"message":"刚才那句你不用急着答，但我还是有点想知道。",'
+                '"cooldown_minutes":45}'
+            )
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store, StubbornButBoundedModel(), TEST_PROMPT, world_kernel=world, world_id=world_id
+    )
+    await engine.handle_message(
+        IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="在吗", message_id="override-thread-input"
+        )
+    )
+    logical_now = engine._world_logical_now()
+    delivery_id, _, _ = world.queue_outgoing_action(
+        canonical_user_id="geoff", platform="qq", text="你还好吗？", kind="reply",
+        expires_at=logical_now + timedelta(hours=12),
+        trace={
+            "world_id": world_id, "appraisal": "ordinary_message", "expression_policy": "test",
+            "allowed_facts": [], "observable_reason": "test",
+            "conversation_thread": {
+                "thread_id": "override-thread", "user_id": "user:geoff", "question": "你还好吗？",
+                "expires_at": (logical_now + timedelta(hours=12)).isoformat(),
+            },
+        },
+    )
+    world.settle_outgoing_action(delivery_id, delivered=True)
+
+    decision = await engine.proactive_tick("geoff")
+
+    assert decision.should_send is True
+    assert decision.world_action_id is not None
+    snapshot = world.snapshot(world_id)
+    assert snapshot["actions"][decision.world_action_id]["status"] == "scheduled"
+    overrides = [
+        event for event in world.events(world_id) if event.event_type == "OutboundSoftGateOverridden"
+    ]
+    assert overrides
+    override = overrides[-1].payload["override"]
+    assert override["cost"] == 20
+    assert override["strike"] == 1
+    assert "open_conversation_thread" in str(override["reason"])
 
 
 @pytest.mark.asyncio
@@ -661,7 +717,15 @@ async def test_world_proactive_feedback_becomes_a_versioned_turn_consequence(tmp
     delivery_id, _, _ = world.queue_outgoing_action(
         canonical_user_id="geoff", platform="qq", text="今天还顺利吗？", kind="proactive",
         expires_at=engine._world_logical_now() + timedelta(hours=12),
-        trace={"world_id": world_id, "direction": "proactive", "appraisal": "checkin", "expression_policy": "test", "allowed_facts": [], "observable_reason": "test"},
+            trace={
+                "world_id": world_id, "direction": "proactive", "appraisal": "checkin",
+                "expression_policy": "test", "allowed_facts": [], "observable_reason": "test",
+                "outbound_override": {
+                    "reason": "test models a deliberate check-in despite the recent reply",
+                    "cost": 10,
+                    "strike": 1,
+                },
+            },
     )
     world.settle_outgoing_action(delivery_id, delivered=True)
 
@@ -671,7 +735,7 @@ async def test_world_proactive_feedback_becomes_a_versioned_turn_consequence(tmp
 
     snapshot = world.snapshot(world_id)
     assert snapshot["last_appraisal"]["appraisal"] == "warmth_received"
-    assert snapshot["last_appraisal"]["rule_version"] == "world-interaction-v1"
+    assert snapshot["last_appraisal"]["rule_version"] == "world-interaction-v2"
     assert snapshot["relationships"]["user:geoff"]["closeness"] >= 4
 
 

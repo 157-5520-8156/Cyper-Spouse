@@ -24,6 +24,12 @@ from companion_daemon.onebot_adapter import (
     send_onebot_emoji_like,
 )
 from companion_daemon.qq_websocket import QQMessageCoalescer
+from companion_daemon.process_lock import AlreadyRunningError
+from companion_daemon.qq_outbound_owner import (
+    QQOutboundOwnerLease,
+    qq_outbound_owner_lock_path,
+    validate_qq_outbound_configuration,
+)
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.turn_taking import TurnTakingPolicy
 
@@ -32,6 +38,10 @@ logger = logging.getLogger(__name__)
 
 def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> FastAPI:
     settings = get_settings()
+    validate_qq_outbound_configuration(
+        configured_adapter=settings.qq_adapter,
+        launched_adapter=adapter,
+    )
     if adapter == "napcat":
         api_url = settings.napcat_api_url
         access_token = settings.napcat_access_token or None
@@ -187,9 +197,17 @@ def _run_cli(*, default_adapter: str) -> None:
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
-    uvicorn.run(
-        create_app(adapter=args.adapter, use_fake_model=args.fake), host=args.host, port=args.port
-    )
+    settings = get_settings()
+    lock_path = qq_outbound_owner_lock_path(settings.database_path)
+    try:
+        with QQOutboundOwnerLease(lock_path, adapter=args.adapter):
+            uvicorn.run(
+                create_app(adapter=args.adapter, use_fake_model=args.fake),
+                host=args.host,
+                port=args.port,
+            )
+    except AlreadyRunningError as exc:
+        raise SystemExit(f"QQ outbound adapter cannot start: {exc}") from exc
 
 
 if __name__ == "__main__":

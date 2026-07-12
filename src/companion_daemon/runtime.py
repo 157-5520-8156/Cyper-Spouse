@@ -5,9 +5,9 @@ from companion_daemon.character import load_character
 from companion_daemon.config import get_settings
 from companion_daemon.conversation import SillyTavernConversationCore
 from companion_daemon.budget import BudgetGate
+from companion_daemon.attachment_cache import AttachmentCache
 from companion_daemon.db import CompanionStore
-from companion_daemon.engine import CompanionEngine, seed_user
-from companion_daemon.emotion_personality import initial_mood_for_character
+from companion_daemon.engine import CompanionEngine
 from companion_daemon.image_generation import OpenAIImageGenerator
 from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel
 from companion_daemon.multimodal_analysis import MultimodalAnalyzer, OpenAIMultimodalAnalyzer
@@ -20,16 +20,15 @@ logger = logging.getLogger(__name__)
 def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
     settings = get_settings()
     store = CompanionStore(Path(settings.database_path), primary_user_id=settings.primary_user_id)
-    world_kernel = None
-    world_id = None
-    if settings.world_runtime_enabled:
-        world_kernel = WorldKernel(store)
-        world_id = world_kernel.ensure_seed_file(settings.world_seed_path).world_id
-        world_kernel.import_verified_facts(world_id, store.active_fact_lines(settings.primary_user_id))
+    # Production is world-only.  Persist the fail-closed write guard before
+    # any startup work so initialization itself cannot seed the legacy mood,
+    # calendar, social-task, message, or memory models.
+    store.enable_world_mode()
+    world_kernel = WorldKernel(store)
+    world_id = world_kernel.ensure_seed_file(settings.world_seed_path).world_id
+    world_kernel.import_verified_facts(world_id, store.active_fact_lines(settings.primary_user_id))
     character = load_character(str(settings.character_path))
-    seed_user(store, settings.primary_user_id, initial_mood_for_character(character))
-    if settings.world_runtime_enabled:
-        store.enable_world_mode()
+    store.map_account("simulator", "geoff", settings.primary_user_id)
     stickers = load_stickers(str(settings.stickers_path))
     if settings.deepseek_api_key and not use_fake_model:
         model = DeepSeekChatModel(
@@ -106,4 +105,5 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         world_kernel=world_kernel,
         world_id=world_id,
         world_grounding_audit_model=model if world_kernel else None,
+        attachment_cache=AttachmentCache(settings.attachment_cache_path),
     )

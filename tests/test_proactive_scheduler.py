@@ -69,6 +69,7 @@ async def test_world_due_reply_recovery_settles_original_action(tmp_path, monkey
     seed_user(store)
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    logical_at = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
     engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。", world_kernel=world, world_id=world_id)
     message = IncomingMessage(
         platform="qq", platform_user_id="openid", text="晚点说", message_id="recover-1",
@@ -87,7 +88,6 @@ async def test_world_due_reply_recovery_settles_original_action(tmp_path, monkey
 
     monkeypatch.setattr(proactive_scheduler, "QQDelivery", FakeDelivery)
     monkeypatch.setattr(proactive_scheduler, "get_settings", lambda: SimpleNamespace())
-    logical_at = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
     world.advance(world_id, logical_at.replace(minute=logical_at.minute + 2), expected_revision=world.revision(world_id))
     recovered = await recover_world_due_replies(engine, send=True, sandbox=True)
 
@@ -105,7 +105,6 @@ async def test_policy_deferred_reply_recovery_does_not_cancel_itself_or_reobserv
     seed_user(store)
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
-    logical_at = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
     world.submit(
         {"type": "change_need", "world_id": world_id, "need": "energy", "delta": -50},
         expected_revision=world.revision(world_id),
@@ -125,7 +124,14 @@ async def test_policy_deferred_reply_recovery_does_not_cancel_itself_or_reobserv
 
     monkeypatch.setattr(proactive_scheduler, "QQDelivery", FakeDelivery)
     monkeypatch.setattr(proactive_scheduler, "get_settings", lambda: SimpleNamespace())
-    world.advance(world_id, logical_at + timedelta(minutes=21), expected_revision=world.revision(world_id))
+    due_at = datetime.fromisoformat(
+        str(world.snapshot(world_id)["actions"][action_id]["payload"]["due_at"])
+    )
+    world.advance(
+        world_id,
+        due_at + timedelta(minutes=1),
+        expected_revision=world.revision(world_id),
+    )
 
     recovered = await recover_world_due_replies(engine, send=True, sandbox=True)
 

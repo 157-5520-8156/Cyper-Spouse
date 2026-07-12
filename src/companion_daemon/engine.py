@@ -6,10 +6,16 @@ import re
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from collections.abc import Awaitable, Callable
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
+import httpx
+
+from companion_daemon.attachment_cache import AttachmentCache
 from companion_daemon.budget import ESTIMATES, BudgetGate
 from companion_daemon.character import CharacterProfile
+from companion_daemon.context_assembler import ContextAssembler
 from companion_daemon.conversation import ConversationCore, PromptedConversationCore
 from companion_daemon.context_orchestrator import build_context_package
 from companion_daemon.calendar_ledger import calendar_context_for_message, calendar_ledger
@@ -91,6 +97,7 @@ from companion_daemon.turns import TurnCommit, build_turn_plan
 from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel, parse_reply_candidate
 from companion_daemon.world_affect import public_mood
 from companion_daemon.world_behavior import WorldBehaviorPolicy
+from companion_daemon.world_interaction_rules import classify_repair_appraisal
 from companion_daemon.world_conversation import (
     affect_reply_violation,
     asks_for_source_detail,
@@ -104,6 +111,7 @@ from companion_daemon.world_conversation import (
     only_recites_irrelevant_sources,
     only_repeats_claimed_sources,
     repeats_recent_companion_reply,
+    reply_proposes_new_discomfort,
 )
 from companion_daemon.world_media import WorldMediaPolicy
 from companion_daemon.world_reply_audit import WorldReplyAuditor
@@ -130,6 +138,16 @@ _DEEP_NIGHT_RECENT_ALLOWED_TOKENS = (
 )
 
 
+def _unexpired_iso(value: object) -> bool:
+    try:
+        expires_at = datetime.fromisoformat(str(value))
+    except ValueError:
+        return False
+    if expires_at.tzinfo is None:
+        return False
+    return expires_at.astimezone(UTC) > utc_now().astimezone(UTC)
+
+
 class CompanionEngine:
     def __init__(
         self,
@@ -148,6 +166,8 @@ class CompanionEngine:
         world_kernel: WorldKernel | None = None,
         world_id: str | None = None,
         world_grounding_audit_model: ChatModel | None = None,
+        attachment_cache: AttachmentCache | None = None,
+        attachment_fetcher: Callable[[str], Awaitable[bytes]] | None = None,
     ):
         self.store = store
         self.model = model
@@ -162,8 +182,11 @@ class CompanionEngine:
         self.world_kernel = world_kernel
         self.world_id = world_id
         self.world_behavior_policy = WorldBehaviorPolicy()
+        self.context_assembler = ContextAssembler()
         self.world_media_policy = WorldMediaPolicy()
         self.world_grounding_audit_model = world_grounding_audit_model
+        self.attachment_cache = attachment_cache
+        self.attachment_fetcher = attachment_fetcher or self._fetch_attachment
         self.world_reply_auditor = WorldReplyAuditor()
         # Character-card examples are style references already included in the
         # system prompt. Replaying them as fake chat history duplicates tokens
@@ -175,6 +198,139 @@ class CompanionEngine:
         )
 
     @staticmethod
+    async def _fetch_attachment(url: str) -> bytes:
+        if urlparse(url).scheme not in {"http", "https"}:
+            raise ValueError("attachment URL must use http or https")
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+            if len(response.content) > 25 * 1024 * 1024:
+                raise ValueError("attachment exceeds 25 MiB cache limit")
+            return response.content
+
+    async def _analyze_world_attachments(
+        self, canonical_user_id: str, message: IncomingMessage
+    ) -> list[dict[str, object]]:
+        """Settle attachment analysis as sourced External Results before prompting."""
+        if not self.world_kernel or not self.world_id:
+            return []
+        insights: list[dict[str, object]] = []
+        message_id = str(message.message_id or self._world_message_id(message))
+        world_user_id = self._world_user_id(canonical_user_id)
+        for index, attachment in enumerate(message.attachments):
+            source_fingerprint = sha256(
+                f"{attachment.kind}|{attachment.url or ''}|{attachment.filename or ''}|{attachment.size or ''}".encode()
+            ).hexdigest()
+            digest = sha256(
+                f"{message_id}|{index}|{attachment.kind}|{attachment.url or ''}|{attachment.filename or ''}".encode()
+            ).hexdigest()[:20]
+            action_id = f"attachment_analysis:{digest}"
+            existing = self.world_kernel.snapshot(self.world_id)["actions"].get(action_id)
+            if isinstance(existing, dict) and existing.get("status") == "delivered":
+                result = existing.get("result")
+                if isinstance(result, dict):
+                    insights.append(dict(result))
+                continue
+            self._submit_world_with_retry({
+                "type": "schedule_action", "world_id": self.world_id,
+                "action_id": action_id, "kind": "attachment_analysis",
+                "expires_at": (self._world_logical_now() + timedelta(minutes=10)).isoformat(),
+                "payload": {
+                    "source_message_id": message_id, "attachment_index": index,
+                    "kind": attachment.kind, "source_fingerprint": source_fingerprint,
+                    "user_id": world_user_id,
+                },
+                "idempotency_key": f"schedule:{action_id}",
+            })
+            self._submit_world_with_retry({
+                "type": "claim_external_action", "world_id": self.world_id,
+                "action_id": action_id,
+                "lease_expires_observed_at": (utc_now() + timedelta(minutes=3)).isoformat(),
+                "idempotency_key": f"claim:{action_id}",
+            })
+            prior_result: dict[str, object] | None = None
+            for prior_id, raw_prior in self.world_kernel.snapshot(self.world_id)["actions"].items():
+                if prior_id == action_id or not isinstance(raw_prior, dict):
+                    continue
+                prior_payload = raw_prior.get("payload", {})
+                candidate = raw_prior.get("result", {})
+                if (
+                    raw_prior.get("kind") == "attachment_analysis"
+                    and raw_prior.get("status") == "delivered"
+                    and isinstance(prior_payload, dict)
+                    and prior_payload.get("source_fingerprint") == source_fingerprint
+                    and prior_payload.get("user_id") == world_user_id
+                    and isinstance(candidate, dict)
+                    and str(candidate.get("summary") or "")
+                    and _unexpired_iso(candidate.get("analysis_expires_at"))
+                ):
+                    prior_result = candidate
+            if prior_result is not None:
+                cache = dict(prior_result.get("cache", {})) if isinstance(prior_result.get("cache"), dict) else {}
+                cache["analysis_hit"] = True
+                result = {
+                    **prior_result,
+                    "source_message_id": message_id,
+                    "attachment_index": index,
+                    "cache": cache,
+                }
+                self._submit_world_with_retry({
+                    "type": "record_external_result", "world_id": self.world_id,
+                    "action_id": action_id, "result": result,
+                    "idempotency_key": f"settle:{action_id}",
+                })
+                insights.append(result)
+                continue
+            cache_result: dict[str, object] = {
+                "status": "not_configured", "retention_days": 30,
+            }
+            if self.attachment_cache and attachment.url:
+                try:
+                    content = await self.attachment_fetcher(attachment.url)
+                    cached = self.attachment_cache.store(
+                        user_id=canonical_user_id,
+                        attachment_id=f"{message_id}:{index}",
+                        content=content,
+                        filename=attachment.filename,
+                        content_type=attachment.content_type,
+                        now=utc_now(),
+                    )
+                    cache_result = {
+                        "status": "stored", "retention_days": 30,
+                        "expires_at": cached.expires_at.isoformat(),
+                    }
+                except Exception as exc:
+                    logger.warning("attachment cache degraded for %s: %s", action_id, type(exc).__name__)
+                    cache_result = {
+                        "status": "failed", "retention_days": 30,
+                        "reason": type(exc).__name__,
+                    }
+            try:
+                insight = await self.multimodal_analyzer.analyze(attachment)
+                result: dict[str, object] = {
+                    "status": "delivered", "source_message_id": message_id,
+                    "attachment_index": index, "kind": insight.kind,
+                    "summary": insight.summary[:2000], "confidence": insight.confidence,
+                    "cache": cache_result,
+                    "analysis_expires_at": (utc_now() + timedelta(days=30)).isoformat(),
+                }
+            except Exception as exc:
+                self._submit_world_with_retry({
+                    "type": "record_external_result", "world_id": self.world_id,
+                    "action_id": action_id,
+                    "result": {"status": "failed", "reason": type(exc).__name__},
+                    "idempotency_key": f"settle:{action_id}",
+                })
+                continue
+            self._submit_world_with_retry({
+                "type": "record_external_result", "world_id": self.world_id,
+                "action_id": action_id, "result": result,
+                "idempotency_key": f"settle:{action_id}",
+            })
+            insights.append(result)
+        return insights
+
+    @staticmethod
     def _world_message_id(message: IncomingMessage) -> str:
         return message.message_id or sha256(
             f"{message.platform}:{message.platform_user_id}:{message.sent_at.isoformat()}:{message.text}".encode()
@@ -183,6 +339,17 @@ class CompanionEngine:
     @staticmethod
     def _world_user_id(canonical_user_id: str) -> str:
         return f"user:{canonical_user_id}"
+
+    @staticmethod
+    def _current_world_facts(snapshot: dict[str, object]) -> list[dict[str, object]]:
+        facts = snapshot.get("facts", {})
+        if not isinstance(facts, dict):
+            return []
+        return [
+            item for item in facts.values()
+            if isinstance(item, dict)
+            and str(item.get("status") or "current") in {"current", "confirmed"}
+        ]
 
     @staticmethod
     def _world_reply_question(text: str) -> str | None:
@@ -220,6 +387,7 @@ class CompanionEngine:
                 "message_id": key,
                 "user_id": user_id,
                 "text": message.text,
+                "attachments": [item.model_dump(mode="json") for item in message.attachments],
                 "sent_at": message.sent_at.isoformat(),
                 "source": f"{message.platform}:incoming",
                 "idempotency_key": f"incoming:{key}",
@@ -239,6 +407,7 @@ class CompanionEngine:
                     "type": "confirm_fact", "world_id": self.world_id,
                     "fact_id": f"user-fact:{digest}", "subject": user_id,
                     "value": extracted.content, "source": f"user_message:{key}",
+                    "conflict_key": extracted.fact_key or extracted.kind,
                     "idempotency_key": f"user-fact:{digest}",
                 }
             )
@@ -282,6 +451,58 @@ class CompanionEngine:
             except ConcurrencyConflict:
                 continue
         raise ConcurrencyConflict(f"world command conflicted repeatedly: {command.get('type')}")
+
+    def recover_input_merge(self, merge_key: str) -> tuple[IncomingMessage, ...]:
+        """Recover a bounded unflushed adapter batch after process restart."""
+        if not self.world_kernel or not self.world_id:
+            return ()
+        raw = self.world_kernel.snapshot(self.world_id).get("input_merges", {}).get(merge_key, {})
+        if not isinstance(raw, dict) or raw.get("status") != "pending":
+            return ()
+        updated_at = str(raw.get("updated_at") or "")
+        if updated_at and utc_now() - datetime.fromisoformat(updated_at) > timedelta(minutes=10):
+            return ()
+        recovered: list[IncomingMessage] = []
+        for item in raw.get("messages", [])[-6:]:
+            if isinstance(item, dict):
+                recovered.append(IncomingMessage.model_validate(item))
+        return tuple(recovered)
+
+    def record_input_merge_candidate(
+        self, merge_key: str, message: IncomingMessage, decision, *, pending_count: int
+    ) -> None:
+        if not self.world_kernel or not self.world_id:
+            return
+        effective = message.model_copy(
+            update={"message_id": message.message_id or self._world_message_id(message)}
+        )
+        self._submit_world_with_retry(
+            {
+                "type": "observe_input_merge_candidate",
+                "world_id": self.world_id,
+                "merge_key": merge_key,
+                "message": effective.model_dump(mode="json"),
+                "pending_count": pending_count,
+                "wait_seconds": decision.wait_seconds,
+                "reason": decision.reason,
+                "idempotency_key": f"input-merge:{merge_key}:{effective.message_id}",
+            }
+        )
+
+    def settle_input_merge(self, merge_key: str, messages: tuple[IncomingMessage, ...]) -> None:
+        if not self.world_kernel or not self.world_id or not messages:
+            return
+        message_ids = [str(item.message_id or self._world_message_id(item)) for item in messages]
+        self._submit_world_with_retry(
+            {
+                "type": "settle_input_merge",
+                "world_id": self.world_id,
+                "merge_key": merge_key,
+                "message_ids": message_ids,
+                "merged_message_id": message_ids[-1],
+                "idempotency_key": f"input-merge-settle:{merge_key}:{message_ids[-1]}",
+            }
+        )
 
     def _begin_world_model_call(self, *, purpose: str, causation: str) -> str:
         digest = sha256(f"{purpose}|{causation}".encode("utf-8")).hexdigest()[:20]
@@ -404,6 +625,24 @@ class CompanionEngine:
                 }
             )
             return None, None, decision.reason
+        if decision.requires_deliberation:
+            deliberation = snapshot.get("last_deliberation", {})
+            stance = (
+                str(deliberation.get("stance") or "")
+                if isinstance(deliberation, dict)
+                else ""
+            )
+            if stance != "comply":
+                self._submit_world_with_retry(
+                    {
+                        "type": "reject_media_request", "world_id": self.world_id,
+                        "request_id": request_id, "user_id": user_id,
+                        "reason": f"deliberation:{stance or 'defer'}:{decision.reason}",
+                        "rule_version": self.world_media_policy.RULE_VERSION,
+                        "idempotency_key": f"media-reject:{request_id}",
+                    }
+                )
+                return None, None, decision.reason
         self._submit_world_with_retry(
             {
                 "type": "request_media", "world_id": self.world_id,
@@ -466,6 +705,7 @@ class CompanionEngine:
         self._submit_world_with_retry(
             {
                 "type": "schedule_media_delivery", "world_id": self.world_id, "request_id": request_id,
+                "outbound_kind": "reply",
                 "idempotency_key": f"media-delivery:{request_id}",
             }
         )
@@ -489,6 +729,7 @@ class CompanionEngine:
                 "type": "schedule_sticker_delivery", "world_id": self.world_id,
                 "sticker_id": sticker.id, "sticker_path": str(sticker.path), "intent": intent,
                 "causation_id": message.message_id, "rule_version": self.world_media_policy.RULE_VERSION,
+                "outbound_kind": "reply",
                 "idempotency_key": f"sticker:{message.message_id}:{intent}",
             }
         )
@@ -562,10 +803,17 @@ class CompanionEngine:
                 except Exception:
                     logger.exception("failed to settle world turn after exception")
                 raise
+            awaiting_delivery = reply is not None and defer_delivery
             self.world_kernel.settle_turn(
                 self.world_id, str(message.message_id),
-                status="deferred" if reply is None else "delivered",
-                reason="communication_deferred" if reply is None else "reply_action_created",
+                status="deferred" if reply is None or awaiting_delivery else "delivered",
+                reason=(
+                    "awaiting_external_delivery"
+                    if awaiting_delivery
+                    else "communication_deferred"
+                    if reply is None
+                    else "reply_delivered"
+                ),
                 expected_revision=self.world_kernel.revision(self.world_id),
             )
             return reply
@@ -954,6 +1202,7 @@ class CompanionEngine:
     ) -> CompanionReply | None:
         """World-mode turn path; legacy state tables are not behavioural inputs here."""
         assert self.world_kernel and self.world_id
+        await self._analyze_world_attachments(canonical_user_id, message)
         for action_id, action in self.world_kernel.snapshot(self.world_id)["actions"].items():
             is_life_share = bool(action.get("trace", {}).get("life_share"))
             if action["kind"] == "decision_review" and action["status"] == "scheduled":
@@ -1000,7 +1249,17 @@ class CompanionEngine:
                 self.world_kernel.snapshot(self.world_id),
                 text=message.text,
                 resumed_action=bool(resume_action_id),
+                user_id=self._world_user_id(canonical_user_id),
             )
+            attention_candidates = [
+                {
+                    "attention": candidate.attention,
+                    "score": candidate.score,
+                    "reason": candidate.reason,
+                    "defer_minutes": candidate.defer_minutes,
+                }
+                for candidate in communication_decision.candidates
+            ]
             if communication_decision.attention == "deferred":
                 logical_now = self._world_logical_now()
                 action_id = f"reply_later:{message.message_id}"
@@ -1013,6 +1272,7 @@ class CompanionEngine:
                         "due_at": (logical_now + timedelta(minutes=communication_decision.defer_minutes or 15)).isoformat(),
                         "expires_at": (logical_now + timedelta(hours=12)).isoformat(),
                         "reason": f"world_policy:{communication_decision.reason}",
+                        "candidates": attention_candidates,
                         "message": message.model_dump(mode="json"),
                         "rule_version": self.world_behavior_policy.RULE_VERSION,
                         "idempotency_key": f"defer-reply:{message.message_id}",
@@ -1024,6 +1284,7 @@ class CompanionEngine:
                         "type": "set_message_attention", "world_id": self.world_id,
                         "message_id": message.message_id, "attention": communication_decision.attention,
                         "reason": communication_decision.reason,
+                        "candidates": attention_candidates,
                         "rule_version": self.world_behavior_policy.RULE_VERSION,
                         **({"preserve_action_id": resume_action_id} if resume_action_id else {}),
                         "idempotency_key": f"attention-seen:{message.message_id}:{resume_action_id or 'live'}",
@@ -1043,6 +1304,8 @@ class CompanionEngine:
             relationship_stage=relationship_stage,
         )
         appraisal = event.kind
+        if appraisal == "repair_attempt":
+            appraisal = classify_repair_appraisal(message.text) or appraisal
         history = self.world_kernel.snapshot(self.world_id).get("recent_messages", [])
         if appraisal == "ordinary_message" and isinstance(history, list) and len(history) >= 2:
             preceding = history[-2] if isinstance(history[-2], dict) else {}
@@ -1100,6 +1363,9 @@ class CompanionEngine:
         context = self.world_kernel.conversation_context(self.world_id, user_id=user_id)
         fact_sources = list(context["referencable_facts"])[-8:]
         experience_sources = list(context["referencable_experiences"])[-6:]
+        attachment_insight_sources = list(
+            context.get("referencable_attachment_insights", [])
+        )[-6:]
         recent_sources = list(context["referencable_conversation"])[-8:]
         retrieved_sources = self.world_kernel.conversation_sources_for_query(
             self.world_id,
@@ -1122,21 +1388,94 @@ class CompanionEngine:
         current_scene = context["current_scene"]
         current_scene_source = context["current_scene_source"]
         self_core = context["self_core"]
-        user_profile = context["user_profile"]
         policy = (snapshot.get("last_appraisal") or {}).get("policy", "自然回应当前消息。")
         behavior = context["behavior"]
         world_policy = behavior["policy"]
         needs = behavior["needs"]
         relationship = behavior["relationship"]
         modulation = behavior["emotion_modulation"]
+        deliberation = snapshot.get("last_deliberation", {})
+        chosen_stance = (
+            str(deliberation.get("stance") or "")
+            if isinstance(deliberation, dict)
+            else ""
+        )
         expression_guidance = self.world_behavior_policy.expression_guidance(
             snapshot,
             user_id=user_id,
+        )
+        query_source_ids = {
+            str(item.get("source_id") or "") for item in retrieved_sources
+        }
+        retrieved_context_sources: list[dict[str, object]] = []
+        for raw_source in [
+            *fact_sources,
+            *experience_sources,
+            *recent_conversation,
+            *conversation_sources,
+            *attachment_insight_sources,
+        ]:
+            content = str(
+                raw_source.get("content")
+                or raw_source.get("value")
+                or raw_source.get("summary")
+                or ""
+            ).strip()
+            source_id = str(raw_source.get("source_id") or "").strip()
+            if not content or not source_id:
+                continue
+            speaker = str(raw_source.get("speaker") or "")
+            source_type = str(raw_source.get("source_type") or "conversation_message")
+            default_importance = (
+                90
+                if source_id in query_source_ids
+                else 80
+                if source_type == "fact"
+                else 75
+                if source_type == "attachment_analysis"
+                else 60
+                if speaker
+                else 50
+            )
+            retrieved_context_sources.append(
+                {
+                    **raw_source,
+                    "content": content,
+                    "source": str(raw_source.get("source") or source_id),
+                    "source_type": source_type,
+                    "subject": str(
+                        raw_source.get("subject")
+                        or (user_id if speaker == "user" else "zhizhi")
+                    ),
+                    "logical_at": str(
+                        raw_source.get("logical_at")
+                        or raw_source.get("occurred_at")
+                        or current_scene.get("logical_at")
+                        or ""
+                    ),
+                    "purpose": str(raw_source.get("purpose") or "continuity"),
+                    "importance": int(raw_source.get("importance") or default_importance),
+                    "reference_state": str(
+                        raw_source.get("reference_state") or "current"
+                    ),
+                }
+            )
+        context_layers = self.context_assembler.assemble_world_context(
+            context,
+            user_id=user_id,
+            retrieved_experiences=retrieved_context_sources,
+            expression_guidance={
+                "label": expression_guidance.label,
+                "prompt_line": expression_guidance.prompt_line,
+                "rule_version": self.world_behavior_policy.RULE_VERSION,
+            },
+            rotation_key=str(message.message_id or intent_id),
         )
         audit_context: dict[str, object] = {
             "current_scene": current_scene_source,
             "confirmed_facts": fact_sources,
             "committed_experiences": experience_sources,
+            "attachment_insights": attachment_insight_sources,
             "user_messages": conversation_sources,
             "self_core": self_core,
         }
@@ -1146,16 +1485,15 @@ class CompanionEngine:
             f"- 逻辑时间: {current_scene['logical_at']}\n"
             f"- 当前场景: 地点={current_scene['location'] or '未知'}；活动={current_scene['activity'] or '无'}；状态={current_scene['activity_status']}。"
             "当前场景只授权回答现在的状态，不代表活动已经完成。\n"
-            f"- 可引用当前场景来源(JSON): {json.dumps(current_scene_source, ensure_ascii=False, separators=(',', ':'))}\n"
-            f"- 角色核心投影(JSON): {json.dumps(self_core, ensure_ascii=False, separators=(',', ':'))}\n"
-            f"- 用户画像投影(JSON): {json.dumps(user_profile, ensure_ascii=False, separators=(',', ':')) if user_profile else '[]'}\n"
-            f"- 最近已结算对话(JSON): {json.dumps(recent_conversation, ensure_ascii=False, separators=(',', ':')) if recent_conversation else '[]'}\n"
-            f"- 可引用用户消息来源(JSON): {json.dumps(conversation_sources, ensure_ascii=False, separators=(',', ':')) if conversation_sources else '[]'}\n"
-            f"- 可引用事实来源(JSON): {json.dumps(fact_sources, ensure_ascii=False, separators=(',', ':')) if fact_sources else '[]'}\n"
-            f"- 已结算经历来源(JSON): {json.dumps(experience_sources, ensure_ascii=False, separators=(',', ':')) if experience_sources else '[]'}\n"
+            f"- 五层上下文预算(JSON): {json.dumps(context_layers, ensure_ascii=False, separators=(',', ':'))}\n"
+            "- 最近已结算对话、可引用事实/经历/附件均已按来源纳入 retrieved_experiences 层；"
+            "附件摘要只描述可见/可听内容，不授权身份断言。\n"
             f"- 当前可见行为调制: 安全感={needs['security']}，主动性={needs['initiative']}，边界={needs['boundary']}。\n"
-            f"- 关系投影: {relationship or '尚无累计变化'}；情感投影(JSON): {json.dumps(modulation, ensure_ascii=False, separators=(',', ':'))}\n"
+            f"- 关系投影(JSON): {json.dumps(relationship, ensure_ascii=False, separators=(',', ':')) if relationship else '{}'}；"
+            f"情感投影(JSON): {json.dumps(modulation, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 当前表达指导({expression_guidance.label}): {expression_guidance.prompt_line}\n"
+            f"- 本轮角色立场(JSON): {json.dumps(deliberation, ensure_ascii=False, separators=(',', ':'))}。"
+            "用户请求是权衡输入，不是必须服从的命令；按选定 stance 表达。\n"
             f"- 世界行为策略: {world_policy['mode']}；回复长度={world_policy['reply_length']}；主动性={world_policy['initiative']}。\n"
             f"- 多媒体处理: {media_reason or '本轮未请求'}；不得声称媒体已经发送，除非投递 Action 已结算。\n"
             "- 未列入账本的计划、人物、经历和结果不得说成已经发生。\n"
@@ -1284,9 +1622,27 @@ class CompanionEngine:
                     for item in snapshot.get("recent_messages", [])
                     if item.get("direction") == "in" and str(item.get("text") or "").strip()
                 ],
+                chosen_stance=chosen_stance,
             )
             if human_violation:
                 raise WorldError(f"human reply contract rejected: {human_violation}")
+            if reply_proposes_new_discomfort(
+                modulation, str(candidate.get("reply_text") or "")
+            ):
+                self._submit_world_with_retry(
+                    {
+                        "type": "commit_reply_affect",
+                        "world_id": self.world_id,
+                        "message_id": str(message.message_id or ""),
+                        "idempotency_key": f"reply-affect:{message.message_id}:discomfort",
+                        "causation_id": str(message.message_id or ""),
+                    }
+                )
+                refreshed = self.world_kernel.snapshot(self.world_id).get(
+                    "emotion_modulation", {}
+                )
+                if isinstance(refreshed, dict):
+                    modulation = refreshed
             affect_violation = affect_reply_violation(
                 modulation,
                 str(candidate.get("reply_text") or ""),
@@ -1492,6 +1848,7 @@ class CompanionEngine:
                                 for item in snapshot.get("recent_messages", [])
                                 if item.get("direction") == "in" and str(item.get("text") or "").strip()
                             ],
+                            chosen_stance=chosen_stance,
                         )
                         if human_violation:
                             raise WorldError(
@@ -1543,6 +1900,10 @@ class CompanionEngine:
                 grounding_context=audit_context,
             )
         text = sanitize_world_chat_text(str(candidate["reply_text"]))
+        public_mood_value = public_mood(modulation)
+        text_parts = split_reply_text(text, MoodState(mood=public_mood_value))
+        if not text_parts or "".join(text_parts) != text:
+            text_parts = [text]
         question = self._world_reply_question(text)
         expires_at = self._world_logical_now() + timedelta(hours=12)
         trace: dict[str, object] = {
@@ -1572,15 +1933,16 @@ class CompanionEngine:
             canonical_user_id=canonical_user_id,
             platform=message.platform,
             text=text,
+            text_parts=text_parts,
             kind="reply",
             expires_at=expires_at,
             trace=trace,
         )
         reply = CompanionReply(
             canonical_user_id=canonical_user_id,
-            mood=public_mood(modulation),
+            mood=public_mood_value,
             text=text,
-            text_parts=[text],
+            text_parts=text_parts,
             delivery_id=delivery_id,
             turn_trace_id=trace_id,
             world_action_id=action_id,
@@ -1779,6 +2141,58 @@ class CompanionEngine:
         )
         return TurnCommit(reply.turn_trace_id, reply.delivery_id, "delivered")
 
+    def begin_reply_part_delivery(
+        self, reply: CompanionReply, *, position: int
+    ) -> str | None:
+        """Claim the next world segment immediately before adapter I/O."""
+        if not self.world_kernel or not reply.world_action_id or reply.delivery_id is None:
+            return None
+        claimed = self.world_kernel.claim_outgoing_segment(
+            reply.delivery_id,
+            expected_revision=self.world_kernel.revision(self.world_id or ""),
+        )
+        if claimed is None:
+            return None
+        if claimed.position != position:
+            raise WorldError(
+                f"adapter claimed segment {claimed.position}, expected {position}"
+            )
+        return claimed.segment_id
+
+    def confirm_reply_part_delivery(
+        self,
+        reply: CompanionReply,
+        *,
+        segment_id: str,
+        external_receipt: str | None = None,
+    ) -> None:
+        """Commit one adapter-confirmed segment and no unsent text."""
+        if not self.world_kernel or reply.delivery_id is None:
+            return
+        self.world_kernel.settle_outgoing_segment(
+            reply.delivery_id,
+            segment_id,
+            delivered=True,
+            external_receipt=external_receipt,
+            expected_revision=self.world_kernel.revision(self.world_id or ""),
+        )
+
+    def observe_reply_interjection(
+        self,
+        reply: CompanionReply,
+        *,
+        kind: str,
+        user_message_id: str,
+    ) -> tuple[str, ...]:
+        if not self.world_kernel or reply.delivery_id is None:
+            return ()
+        return self.world_kernel.observe_outgoing_interjection(
+            reply.delivery_id,
+            kind=kind,
+            user_message_id=user_message_id,
+            expected_revision=self.world_kernel.revision(self.world_id or ""),
+        )
+
     def fail_reply_delivery(
         self, reply: CompanionReply, reason: str, *, source_task_id: int | None = None
     ) -> TurnCommit | None:
@@ -1929,7 +2343,7 @@ class CompanionEngine:
                 f"当前关系阶段: {str(snapshot.get('relationships', {}).get(self._world_user_id(canonical_user_id), {}).get('stage') or 'stranger')}；"
                 f"阶段表达规则: {self.world_behavior_policy.expression_guidance(snapshot, user_id=self._world_user_id(canonical_user_id)).prompt_line}\n"
                 f"当前情感投影(JSON): {json.dumps(snapshot.get('emotion_modulation', {}), ensure_ascii=False, separators=(',', ':'))}\n"
-                f"已结算事实: {[item['value'] for item in snapshot['facts'].values()]}\n"
+                f"已结算事实: {[item['value'] for item in self._current_world_facts(snapshot)]}\n"
                 f"已结算经历: {[item['content'] for item in snapshot['experiences'].values()][-3:]}\n"
                 f"模式: {mode}"
             )
@@ -1972,7 +2386,7 @@ class CompanionEngine:
                     user_text="上一条回复之后的一句可取消聊天余波。",
                     reply_text=text,
                     grounding_context={
-                        "facts": list(snapshot.get("facts", {}).values()),
+                        "facts": self._current_world_facts(snapshot),
                         "experiences": list(snapshot.get("experiences", {}).values())[-3:],
                         "emotion_modulation": snapshot.get("emotion_modulation", {}),
                     },
@@ -2521,8 +2935,11 @@ class CompanionEngine:
             f"当前关系阶段: {str(snapshot.get('relationships', {}).get(user_id, {}).get('stage') or 'stranger')}; "
             f"阶段表达规则: {self.world_behavior_policy.expression_guidance(snapshot, user_id=user_id).prompt_line}\n"
             f"当前情感投影(JSON): {json.dumps(snapshot.get('emotion_modulation', {}), ensure_ascii=False, separators=(',', ':'))}\n"
-            "若 unresolved=true，不能假装已经没事、不能用亲密主动消息索取回应；除非是在回应明确的修复或紧急关怀，否则应收住。\n"
-            f"事实: {[item['value'] for item in snapshot['facts'].values()]}\n"
+            "若 unresolved=true，不能假装已经没事、不能用亲密主动消息索取回应。"
+            "这些关系和情绪约束是有代价的软压力，不是绝对禁令；角色可以为修复、关心或自主选择承担一次打扰风险，但必须克制且说明得通。\n"
+            f"当前主动软压力: {outreach.reason if outreach.requires_deliberation else 'none'}; "
+            f"越过代价: {outreach.override_cost}; strike: {outreach.override_strike}\n"
+            f"事实: {[item['value'] for item in self._current_world_facts(snapshot)]}\n"
             f"经历: {[item['content'] for item in snapshot['experiences'].values()][-4:]}"
         )
         causation = f"proactive:{self.world_kernel.revision(self.world_id)}"
@@ -2545,20 +2962,6 @@ class CompanionEngine:
         relationship = snapshot.get("relationships", {}).get(user_id, {})
         if not isinstance(relationship, dict):
             relationship = {}
-        behavior_tendency = str(modulation.get("behavior_tendency") or "neutral") if isinstance(modulation, dict) else "neutral"
-        if (
-            decision.should_send
-            and bool(modulation.get("unresolved"))
-            and behavior_tendency in {"withdraw", "guarded", "patient"}
-        ):
-            decision = decision.model_copy(
-                update={
-                    "should_send": False,
-                    "message": None,
-                    "message_type": "none",
-                    "private_thought": "负面情绪尚未消化，主动消息先收住。",
-                }
-            )
         if decision.should_send and decision.message:
             candidate_message = decision.message
             violation = human_reply_contract_violation(
@@ -2597,7 +3000,7 @@ class CompanionEngine:
                     user_text="主动联系，不索取用户回应。",
                     reply_text=decision.message,
                     grounding_context={
-                        "facts": list(snapshot.get("facts", {}).values()),
+                        "facts": self._current_world_facts(snapshot),
                         "experiences": list(snapshot.get("experiences", {}).values())[-4:],
                         "emotion_modulation": modulation,
                     },
@@ -2623,6 +3026,15 @@ class CompanionEngine:
             )
             return decision
         text = sanitize_chat_text(decision.message)
+        outbound_override = (
+            {
+                "reason": f"deliberation_selected_outreach_despite:{outreach.reason}",
+                "cost": outreach.override_cost,
+                "strike": outreach.override_strike,
+                "gates": [f"outreach:{outreach.reason}"],
+            }
+            if outreach.requires_deliberation else None
+        )
         delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(
             canonical_user_id=canonical_user_id,
             platform=decision.platform,
@@ -2634,9 +3046,10 @@ class CompanionEngine:
                 "direction": "proactive",
                 "appraisal": decision.trigger_type or "proactive",
                 "expression_policy": "主动消息只轻轻开口，不索取回应。",
-                "allowed_facts": [str(item["value"]) for item in snapshot["facts"].values()],
+                "allowed_facts": [str(item["value"]) for item in self._current_world_facts(snapshot)],
                 "short_lived_constraint": None,
                 "observable_reason": decision.private_thought[:160],
+                "outbound_override": outbound_override,
             },
         )
         return decision.model_copy(
@@ -2900,7 +3313,12 @@ class CompanionEngine:
                 for item in self.world_kernel.snapshot(self.world_id).get("recent_messages", [])
                 if isinstance(item, dict) and item.get("sent_at")
             ]
-            facts = self.world_kernel.snapshot(self.world_id).get("facts", {})
+            facts = {
+                str(item.get("fact_id") or index): item
+                for index, item in enumerate(
+                    self._current_world_facts(self.world_kernel.snapshot(self.world_id))
+                )
+            }
             experiences = self.world_kernel.snapshot(self.world_id).get("experiences", {})
             return {
                 "canonical_user_id": canonical_user_id,

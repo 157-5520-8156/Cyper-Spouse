@@ -9,7 +9,6 @@ from companion_daemon.config import get_settings
 from companion_daemon.dashboard_ui import DASHBOARD_HTML
 from companion_daemon.world_console_ui import WORLD_CONSOLE_HTML
 from companion_daemon.models import CompanionReply, IncomingMessage, ProactiveDecision
-from companion_daemon.life_runtime import synchronize_life_runtime
 from companion_daemon.qq_official import (
     QQ_CALLBACK_VALIDATION_OP,
     ack_response,
@@ -119,31 +118,12 @@ def debug_users() -> dict[str, list[str]]:
 
 @app.post("/debug/{canonical_user_id}/state")
 def debug_update_state(canonical_user_id: str, patch: StatePatch) -> dict[str, object]:
-    if get_settings().world_runtime_enabled:
-        raise HTTPException(status_code=409, detail="world runtime forbids direct state mutation")
-    current = engine.store.get_mood_state(canonical_user_id)
-    allowed = set(type(current).model_fields)
-    updates = {key: value for key, value in patch.updates.items() if key in allowed}
-    if not updates:
-        return {"state": current.model_dump(mode="json"), "updated": []}
-    updated = current.model_copy(update=updates)
-    engine.store.save_mood_state(canonical_user_id, updated)
-    synchronize_life_runtime(engine.store, canonical_user_id, updated)
-    return {"state": updated.model_dump(mode="json"), "updated": sorted(updates)}
+    raise HTTPException(status_code=409, detail="world runtime forbids direct state mutation")
 
 
 @app.post("/debug/{canonical_user_id}/memories")
 def debug_upsert_memory(canonical_user_id: str, patch: MemoryPatch) -> dict[str, object]:
-    if get_settings().world_runtime_enabled:
-        raise HTTPException(status_code=409, detail="world runtime forbids direct memory mutation")
-    engine.store.upsert_memory(
-        canonical_user_id,
-        kind=patch.kind,
-        content=patch.content,
-        source=patch.source,
-        confidence=patch.confidence,
-    )
-    return {"ok": True}
+    raise HTTPException(status_code=409, detail="world runtime forbids direct memory mutation")
 
 
 @app.delete("/debug/{canonical_user_id}/memories")
@@ -152,10 +132,7 @@ def debug_delete_memory(
     kind: str = Query(...),
     content: str = Query(...),
 ) -> dict[str, object]:
-    if get_settings().world_runtime_enabled:
-        raise HTTPException(status_code=409, detail="world runtime forbids direct memory mutation")
-    deleted = engine.store.delete_memory(canonical_user_id, kind=kind, content=content)
-    return {"deleted": deleted}
+    raise HTTPException(status_code=409, detail="world runtime forbids direct memory mutation")
 
 
 @app.get("/world/{world_id}")

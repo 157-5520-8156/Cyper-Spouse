@@ -349,7 +349,7 @@ def test_unresolved_hurt_blocks_intimate_media_even_when_relationship_is_ready()
         user_text="能发一张自拍吗",
     )
 
-    assert decision.allowed is False
+    assert decision.allowed is True
     assert decision.reason == "unresolved_negative_affect"
 
 
@@ -366,8 +366,9 @@ def test_unresolved_patient_affect_also_blocks_unsolicited_outreach() -> None:
         user_id="user:geoff",
     )
 
-    assert decision.allowed is False
+    assert decision.allowed is True
     assert decision.reason == "unresolved_negative_affect"
+    assert decision.requires_deliberation is True
 
 
 def test_world_affect_is_adapted_to_existing_client_moods() -> None:

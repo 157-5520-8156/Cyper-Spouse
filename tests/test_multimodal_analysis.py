@@ -97,3 +97,36 @@ async def test_openai_image_analysis_skips_when_budget_denies(tmp_path) -> None:
 
     assert "控制费用" in insight.summary
     assert store.usage_count("vision", "month", datetime.now(UTC)) == 0
+
+
+@pytest.mark.asyncio
+async def test_image_summary_does_not_promote_model_identity_guess_to_fact(tmp_path) -> None:
+    async def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "这是用户本人的自拍，正在卧室里。"}}]},
+        )
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    analyzer = OpenAIMultimodalAnalyzer(
+        api_key="test-key",
+        base_url="https://api.example.test/v1",
+        vision_model="vision-test",
+        transcription_model="stt-test",
+        budget_gate=BudgetGate(
+            store,
+            monthly_budget_cny=80,
+            daily_budget_cny=3,
+            soft_daily_budget_cny=2,
+            monthly_image_limit=20,
+            monthly_vision_limit=120,
+            monthly_audio_limit=60,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    insight = await analyzer.analyze(MessageAttachment(kind="image", url="https://cdn/a.png"))
+
+    assert insight.identity_status == "unverified"
+    assert "用户本人" not in insight.summary
+    assert "人物身份未经确认" in insight.summary

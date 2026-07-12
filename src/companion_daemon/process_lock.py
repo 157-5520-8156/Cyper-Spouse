@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import time
 from pathlib import Path
 
 
@@ -9,6 +10,8 @@ class AlreadyRunningError(RuntimeError):
 
 
 class SingleInstanceLock:
+    _INITIALIZATION_GRACE_SECONDS = 2.0
+
     def __init__(self, path: Path):
         self.path = path
         self.acquired = False
@@ -24,6 +27,8 @@ class SingleInstanceLock:
                     raise AlreadyRunningError(
                         f"another process is already running with pid {existing_pid}"
                     )
+                if existing_pid is None and self._is_fresh():
+                    raise AlreadyRunningError("another process lock is still being initialized")
                 self.path.unlink(missing_ok=True)
                 continue
             with os.fdopen(fd, "w") as handle:
@@ -33,7 +38,8 @@ class SingleInstanceLock:
 
     def __exit__(self, exc_type, exc, tb) -> None:
         if self.acquired:
-            self.path.unlink(missing_ok=True)
+            if self._read_pid() == os.getpid():
+                self.path.unlink(missing_ok=True)
             self.acquired = False
 
     def _read_pid(self) -> int | None:
@@ -45,6 +51,13 @@ class SingleInstanceLock:
             return int(raw)
         except ValueError:
             return None
+
+    def _is_fresh(self) -> bool:
+        try:
+            age = time.time() - self.path.stat().st_mtime
+        except OSError:
+            return True
+        return age < self._INITIALIZATION_GRACE_SECONDS
 
 
 def _pid_is_alive(pid: int) -> bool:

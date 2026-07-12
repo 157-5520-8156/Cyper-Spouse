@@ -1,4 +1,4 @@
-from companion_daemon.world_behavior import WorldBehaviorPolicy
+from companion_daemon.world_behavior import WorldBehaviorPolicy, outbound_projection
 from companion_daemon.image_requests import detect_image_request
 from companion_daemon.world_media import WorldMediaPolicy
 
@@ -26,6 +26,50 @@ def test_communication_policy_uses_do_not_disturb_for_pressure_and_high_boundary
     assert decision.attention == "do_not_disturb"
 
 
+def test_attention_is_ranked_from_world_facts_instead_of_a_fixed_hurt_timer() -> None:
+    policy = WorldBehaviorPolicy()
+    base = {
+        "agenda": {},
+        "needs": {"energy": 55, "security": 35, "boundary": 35, "attention": 50},
+        "emotion_modulation": {
+            "behavior_tendency": "withdraw",
+            "vector": {"hurt": 45},
+            "unresolved": True,
+        },
+        "relationships": {"user:geoff": {"stage": "friend", "trust": 35}},
+    }
+
+    first = policy.communication_decision(base, text="你在吗", user_id="user:geoff")
+    tired = policy.communication_decision(
+        {**base, "needs": {**base["needs"], "energy": 20}},
+        text="你在吗",
+        user_id="user:geoff",
+    )
+
+    assert first.attention == "deferred"
+    assert {candidate.attention for candidate in first.candidates} == {
+        "seen", "deferred", "do_not_disturb"
+    }
+    assert first.candidates[0].attention == first.attention
+    assert tired.defer_minutes != first.defer_minutes
+    assert tired.candidates[0].score > first.candidates[0].score
+    assert policy.communication_decision(base, text="你在吗", user_id="user:geoff") == first
+
+
+def test_urgent_or_vulnerable_turn_wins_ranking_without_erasing_other_candidates() -> None:
+    decision = WorldBehaviorPolicy().communication_decision(
+        {
+            "needs": {"energy": 15, "security": 15, "boundary": 60},
+            "emotion_modulation": {"behavior_tendency": "withdraw", "vector": {"hurt": 80}},
+        },
+        text="我真的撑不住了，能回一下吗",
+    )
+
+    assert decision.attention == "seen"
+    assert decision.candidates[0].reason == "user_vulnerable_turn"
+    assert len(decision.candidates) == 3
+
+
 def test_outreach_constraint_uses_only_world_threads_actions_and_needs() -> None:
     policy = WorldBehaviorPolicy()
     state = {
@@ -38,8 +82,26 @@ def test_outreach_constraint_uses_only_world_threads_actions_and_needs() -> None
 
     blocked = policy.outreach_constraint(state, user_id="user:geoff")
 
-    assert blocked.allowed is False
+    assert blocked.allowed is True
     assert blocked.reason == "open_conversation_thread"
+    assert blocked.requires_deliberation is True
+    assert blocked.override_cost == 20
+
+
+def test_outbound_projection_counts_only_messages_after_the_latest_user_turn() -> None:
+    projection = outbound_projection(
+        {
+            "actions": {},
+            "recent_messages": [
+                {"direction": "out", "logical_at": "2026-07-11T08:00:00+00:00", "text": "旧消息"},
+                {"direction": "in", "logical_at": "2026-07-11T09:00:00+00:00", "text": "用户回来了"},
+                {"direction": "out", "logical_at": "2026-07-11T09:01:00+00:00", "text": "第一条"},
+                {"direction": "out", "logical_at": "2026-07-11T09:02:00+00:00", "text": "第二条"},
+            ],
+        }
+    )
+
+    assert projection.unanswered_outbound_count == 2
 
 
 def test_expression_guidance_is_derived_from_world_state_without_private_memory() -> None:
@@ -75,7 +137,7 @@ def test_relationship_stage_changes_expression_and_outreach_constraints() -> Non
     assert friend_guidance.label == "friend"
     assert policy.outreach_constraint(
         {"relationships": {"user:geoff": {"stage": "stranger"}}}, user_id="user:geoff"
-    ).allowed is False
+    ).requires_deliberation is True
     assert policy.outreach_constraint(
         {"relationships": {"user:geoff": {"stage": "acquaintance"}}}, user_id="user:geoff"
     ).allowed is True

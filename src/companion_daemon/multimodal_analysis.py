@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import httpx
 
@@ -13,6 +13,7 @@ class AttachmentInsight:
     kind: str
     summary: str
     confidence: float
+    identity_status: Literal["not_applicable", "unverified", "user_claimed"] = "not_applicable"
 
 
 class MultimodalAnalyzer:
@@ -24,6 +25,7 @@ class MultimodalAnalyzer:
                 kind="image",
                 summary="用户发来了一张图片；当前已记录图片链接和元信息，内容识别需要配置视觉模型。",
                 confidence=0.3,
+                identity_status="unverified",
             )
         if attachment.kind == "audio":
             return AttachmentInsight(
@@ -96,6 +98,7 @@ class OpenAIMultimodalAnalyzer(MultimodalAnalyzer):
                 "image",
                 f"用户发来了一张图片；为了控制费用，本次没有调用视觉模型（{decision.reason}）。",
                 0.25,
+                "unverified",
             )
         async with self._client(timeout=45) as client:
             response = await client.post(
@@ -137,7 +140,9 @@ class OpenAIMultimodalAnalyzer(MultimodalAnalyzer):
             response.raise_for_status()
         summary = _chat_completion_text(response.json())
         self.budget_gate.record(estimate, note=f"image:{attachment.filename or attachment.url}")
-        return AttachmentInsight("image", f"图片内容：{summary}", 0.82)
+        if _asserts_unverified_identity(summary):
+            summary = "图片中可见一位人物；人物身份未经确认。"
+        return AttachmentInsight("image", f"图片内容：{summary}", 0.82, "unverified")
 
     async def _transcribe_audio(self, attachment: MessageAttachment) -> AttachmentInsight:
         estimate = ESTIMATES["transcription"]
@@ -202,3 +207,18 @@ def _looks_like_text_file(attachment: MessageAttachment) -> bool:
         ".yaml",
         ".yml",
     }
+
+
+def _asserts_unverified_identity(summary: str) -> bool:
+    compact = "".join(summary.split()).lower()
+    return any(
+        claim in compact
+        for claim in (
+            "用户本人",
+            "这是用户",
+            "图中是用户",
+            "用户的自拍",
+            "用户自拍",
+            "theuser",
+        )
+    )

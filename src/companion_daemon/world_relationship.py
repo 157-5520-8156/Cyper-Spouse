@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal, cast
 
 
@@ -22,6 +23,58 @@ _THRESHOLDS: dict[RelationshipStage, tuple[int, int, int]] = {
     "ambiguous": (70, 55, 55),
     "lover": (120, 70, 75),
 }
+
+
+@dataclass(frozen=True)
+class ControlledTransgression:
+    """Auditable allowance for a character choice that carries social cost."""
+
+    allowed: bool
+    relationship_cost: int
+    affect_cost: int
+    reason: str
+    cooldown_seconds: int
+
+
+def evaluate_controlled_transgression(
+    relationship: dict[str, object],
+    *,
+    unresolved_affect: bool,
+    seconds_since_last: int | None,
+    safety_ok: bool = True,
+    consent_ok: bool = True,
+) -> ControlledTransgression:
+    """Price a small relational risk without turning closeness into permission.
+
+    Ordinary stubbornness or boundary-testing remains available at every stage;
+    early relationships pay more. Safety and consent remain hard invariants, and
+    a cooldown prevents “personality” from becoming repetitive harassment.
+    """
+    if not safety_ok:
+        return ControlledTransgression(False, 0, 0, "safety_invariant", 0)
+    if not consent_ok:
+        return ControlledTransgression(False, 0, 0, "consent_required", 0)
+    stage = str(relationship.get("stage") or "stranger")
+    stage_cost = {
+        "stranger": 9,
+        "acquaintance": 7,
+        "friend": 5,
+        "close_friend": 3,
+        "ambiguous": 3,
+        "lover": 2,
+    }.get(stage, 9)
+    respect = int(relationship.get("respect") or 0)
+    cooldown = 6 * 3600 if respect >= 40 else 12 * 3600
+    if seconds_since_last is not None and max(0, int(seconds_since_last)) < cooldown:
+        return ControlledTransgression(False, stage_cost, 3, "transgression_cooldown", cooldown)
+    affect_cost = 4 if unresolved_affect else 1
+    return ControlledTransgression(
+        True,
+        stage_cost + (3 if unresolved_affect else 0),
+        affect_cost,
+        "relational_risk_accepted",
+        cooldown,
+    )
 
 
 def evaluate_relationship_stage(

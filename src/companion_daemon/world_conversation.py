@@ -337,10 +337,13 @@ def affect_reply_violation(affect: dict[str, object], reply_text: str) -> str | 
     positive_total = sum(
         int(vector.get(key, 0) or 0) for key in ("warmth", "joy")
     )
+    explicitly_preserves_negative = bool(
+        re.search(r"(?:没事|没关系|过去了)[^。！？]{0,8}(?:不等于|但|可是|并不)[^。！？]{0,12}(?:生气|介意|不舒服|难过|没感觉)", reply_text)
+    )
     if bool(affect.get("unresolved")) and negative_total > 0 and any(
         marker in reply_text
         for marker in ("没事", "没关系", "完全不介意", "已经过去", "一点都不")
-    ):
+    ) and not explicitly_preserves_negative:
         return "unresolved_affect_denied"
 
     negative_claim = re.search(
@@ -377,6 +380,24 @@ def affect_reply_violation(affect: dict[str, object], reply_text: str) -> str | 
     if sadness_claim and not supports_sadness:
         return "uncommitted_companion_affect"
     return None
+
+
+def reply_proposes_new_discomfort(affect: dict[str, object], reply_text: str) -> bool:
+    """Return whether current-turn prose proposes a small sourced negative appraisal."""
+    vector = affect.get("vector")
+    vector = vector if isinstance(vector, dict) else {}
+    already_supported = any(
+        int(vector.get(key, 0) or 0) >= 4
+        for key in ("hurt", "anger", "sadness", "anxiety", "resentment")
+    )
+    if already_supported:
+        return False
+    return bool(
+        re.search(
+            r"(?:我|我这会儿|刚才)[^。！？]{0,10}(?:不舒服|介意|不高兴|有点生气|有点难过)",
+            reply_text,
+        )
+    )
 
 
 def asks_for_source_detail(user_text: str) -> bool:
@@ -465,6 +486,7 @@ def human_reply_contract_violation(
     epistemic_honesty_requested: bool = False,
     opinion_requested: bool = False,
     recent_user_texts: list[str] | None = None,
+    chosen_stance: str | None = None,
 ) -> str | None:
     """Return a high-confidence speech-act, voice, or relationship violation.
 
@@ -483,7 +505,12 @@ def human_reply_contract_violation(
         "你应该", "建议你", "你得", "不如先", "先休息", "早点休息",
         "喝点温水", "缓一缓", "别硬撑", "慢慢处理",
     )
-    if asks_for_presence_not_advice and any(marker in reply for marker in advice_markers):
+    advice_allowed_stances = {"disagree_gently", "refuse_to_affirm", "care_override"}
+    if (
+        asks_for_presence_not_advice
+        and any(marker in reply for marker in advice_markers)
+        and chosen_stance not in advice_allowed_stances
+    ):
         return "advice_ignores_requested_speech_act"
     if (
         asks_for_presence_not_advice
@@ -649,7 +676,15 @@ def human_reply_contract_violation(
         ]
         early_relationship = not numeric_relationship or sum(numeric_relationship) / len(numeric_relationship) < 60
     premature_intimacy = ("宝宝", "宝贝", "老婆", "永远爱你", "只属于你", "离不开你")
-    if early_relationship and any(marker in reply for marker in premature_intimacy):
+    quoted_or_rejected_address = bool(
+        re.search(r"(?:别|不要|不许)叫[^。！？]{0,6}(?:宝宝|宝贝|老婆|亲爱的)", reply)
+        or re.search(r"(?:宝宝|宝贝|老婆|亲爱的)[^。！？]{0,12}(?:没认|不认|只是你叫|是你先叫)", reply)
+    )
+    if (
+        early_relationship
+        and any(marker in reply for marker in premature_intimacy)
+        and not quoted_or_rejected_address
+    ):
         return "relationship_language_exceeds_current_closeness"
 
     lecture_markers = sum(marker in reply for marker in ("首先", "其次", "再次", "最后", "综上"))

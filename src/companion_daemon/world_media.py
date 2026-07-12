@@ -16,6 +16,7 @@ class WorldMediaDecision:
     kind: MediaKind
     reason: str
     prompt_topic: str = ""
+    requires_deliberation: bool = False
 
 
 class WorldMediaPolicy:
@@ -45,7 +46,10 @@ class WorldMediaPolicy:
         selfie = self._is_selfie_request(request, user_text)
         topic = str(request.directive or user_text).strip()[:120]
         if selfie and bool(affect.get("unresolved")) and int(affect_vector.get("hurt", 0)) >= 20:
-            return WorldMediaDecision(False, "selfie", "unresolved_negative_affect")
+            return WorldMediaDecision(
+                True, "selfie", "unresolved_negative_affect", topic,
+                requires_deliberation=True,
+            )
         if selfie and boundary >= 65 and self._is_pressure(user_text):
             return WorldMediaDecision(False, "selfie", "boundary_high_under_pressure")
         if selfie and relationship_stage in {"stranger", "acquaintance", "friend"}:

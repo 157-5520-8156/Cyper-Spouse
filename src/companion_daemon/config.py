@@ -1,5 +1,6 @@
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -16,7 +17,12 @@ class Settings(BaseSettings):
     deepseek_reasoning_effort: str = Field(default="high", alias="DEEPSEEK_REASONING_EFFORT")
     enable_reply_rewrite: bool = Field(default=False, alias="ENABLE_REPLY_REWRITE")
     enable_reply_decision: bool = Field(default=True, alias="ENABLE_REPLY_DECISION")
-    qq_adapter: str = Field(default="official", alias="QQ_ADAPTER")
+    qq_adapter: Literal["official", "napcat", "onebot"] = Field(
+        default="official", alias="QQ_ADAPTER"
+    )
+    wechat_adapter: Literal["disabled", "fake"] = Field(
+        default="disabled", alias="WECHAT_ADAPTER"
+    )
     napcat_api_url: str = Field(
         default="http://127.0.0.1:3000",
         validation_alias=AliasChoices("NAPCAT_API_URL"),
@@ -53,7 +59,9 @@ class Settings(BaseSettings):
     conversation_core: str = Field(default="prompt", alias="CONVERSATION_CORE")
     sillytavern_base_url: str = Field(default="http://127.0.0.1:8000", alias="SILLYTAVERN_BASE_URL")
     database_path: Path = Path("data/companion.sqlite")
-    world_runtime_enabled: bool = Field(default=False, alias="WORLD_RUNTIME_ENABLED")
+    attachment_cache_path: Path = Field(
+        default=Path("data/attachments"), alias="ATTACHMENT_CACHE_PATH"
+    )
     world_seed_path: Path = Field(default=Path("configs/world_seed.yaml"), alias="WORLD_SEED_PATH")
     character_path: Path = Path("configs/character.yaml")
     stickers_path: Path = Path("configs/stickers.yaml")

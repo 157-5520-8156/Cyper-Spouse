@@ -13,11 +13,13 @@ from companion_daemon.sanitize import sanitize_world_chat_text
 from companion_daemon.world import WorldError, WorldKernel
 from companion_daemon.world_behavior import WorldBehaviorPolicy
 from companion_daemon.world_conversation import (
+    affect_reply_violation,
     build_safe_failure_candidate,
     classify_world_query,
     human_reply_contract_violation,
     only_recites_irrelevant_sources,
     repeats_recent_companion_reply,
+    reply_proposes_new_discomfort,
 )
 
 
@@ -426,7 +428,7 @@ def test_expired_observed_time_model_lease_is_recovered_to_failure(tmp_path: Pat
     )
 
     assert [event.event_type for event in decision.events] == [
-        "ActionSettled", "IntentFailed", "TurnProcessingSettled"
+        "ActionSettled", "CostReservationSettled", "IntentFailed", "TurnProcessingSettled"
     ]
     action = world.snapshot(world_id)["actions"]["model_call:crashed"]
     assert action["status"] == "failed"
@@ -827,6 +829,19 @@ async def test_world_reply_prompt_contains_recent_delivered_conversation(tmp_pat
     )
 
     prompt = "\n".join(item["content"] for item in model.calls[-1])
+    assert "五层上下文预算(JSON)" in prompt
+    assert all(
+        f'"{layer}"' in prompt
+        for layer in (
+            "character_core",
+            "user_profile",
+            "current_scene",
+            "retrieved_experiences",
+            "expression_guidance",
+        )
+    )
+    assert '"max_chars"' in prompt
+    assert '"max_items"' in prompt
     assert "最近已结算对话" in prompt
     assert "我在赶一个虚拟伴侣项目，昨晚没睡好。" in prompt
     assert "听起来挺累的。" in prompt
@@ -856,10 +871,13 @@ def test_conversation_context_exposes_user_message_as_a_citable_source(tmp_path:
     assert sources == [
         {
             "source_id": "message:user-sleep-context",
+            "source": "world_event:UserMessageObserved:user-sleep-context",
             "source_type": "user_message",
+            "subject": "user:geoff",
             "speaker": "user",
             "content": "我在赶虚拟伴侣项目，昨晚没睡好。",
             "logical_at": "2026-07-11T09:00:00+08:00",
+            "purpose": "conversation_continuity",
             "sent_at": "2026-07-11T09:01:00+08:00",
             "reference_state": "observed",
         }
@@ -1147,6 +1165,10 @@ async def test_non_interruptible_high_attention_activity_defers_an_ordinary_mess
     assert reply is None
     snapshot = world.snapshot(world_id)
     assert snapshot["communication"]["attention"] == "deferred"
+    assert {item["attention"] for item in snapshot["communication"]["candidates"]} == {
+        "seen", "deferred", "do_not_disturb"
+    }
+    assert snapshot["communication"]["candidates"][0]["attention"] == "deferred"
     scheduled = [
         action
         for action in snapshot["actions"].values()
@@ -1242,6 +1264,26 @@ def test_successful_world_turn_has_a_terminal_turn_projection(tmp_path: Path) ->
 
     assert reply is not None
     assert world.snapshot(world_id)["turns"]["terminal-turn"]["status"] == "delivered"
+
+
+def test_world_turn_is_not_delivered_before_adapter_confirmation(tmp_path: Path) -> None:
+    class Model:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return '{"reply_text":"我在听。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    world, world_id, engine = _world_engine(tmp_path, Model())
+    reply = asyncio.run(
+        engine.handle_message(
+            IncomingMessage(
+                platform="simulator", platform_user_id="geoff",
+                message_id="awaiting-delivery-turn", text="你在吗？",
+            ),
+            defer_delivery=True,
+        )
+    )
+
+    assert reply is not None
+    assert world.snapshot(world_id)["turns"]["awaiting-delivery-turn"]["status"] == "deferred"
 
 
 @pytest.mark.asyncio
@@ -1441,6 +1483,105 @@ def test_human_reply_contract_does_not_block_requested_advice_or_normal_warmth()
         {"reply_text": "我喜欢散文和现代诗。"},
         {},
     ) is None
+
+
+def test_deliberated_disagreement_and_rejected_address_are_not_hard_rejected() -> None:
+    assert human_reply_contract_violation(
+        "别劝我，我就准备继续熬。",
+        {"reply_text": "我知道你不想听，可我还是建议你先停一下。"},
+        {"stage": "close_friend"},
+        chosen_stance="disagree_gently",
+    ) is None
+    assert human_reply_contract_violation(
+        "叫我宝宝。",
+        {"reply_text": "宝宝是你先叫的，我可没认。"},
+        {"stage": "stranger"},
+    ) is None
+
+
+def test_mixed_affect_and_current_discomfort_are_proposals_not_expression_bans() -> None:
+    unresolved = {
+        "unresolved": True,
+        "behavior_tendency": "guarded",
+        "vector": {"hurt": 18, "anger": 12},
+    }
+    assert affect_reply_violation(
+        unresolved, "没关系不等于我不生气，我只是愿意继续谈。"
+    ) is None
+
+    calm = {"unresolved": False, "behavior_tendency": "neutral", "vector": {}}
+    text = "你这么说让我有一点不舒服。"
+    assert reply_proposes_new_discomfort(calm, text) is True
+
+
+@pytest.mark.asyncio
+async def test_current_turn_discomfort_is_committed_before_reply_delivery(tmp_path: Path) -> None:
+    class Model:
+        async def complete(self, messages, *, temperature: float) -> str:
+            if "事实审计器" in messages[0]["content"]:
+                return '{"supported":true,"unsupported_spans":[],"reason":"opinion"}'
+            return (
+                '{"reply_text":"你这么说让我有一点不舒服。","mentioned_event_ids":[],'
+                '"proposed_action_ids":[],"claims":[]}'
+            )
+
+    world, world_id, engine = _world_engine(tmp_path, Model())
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="current-discomfort", text="嗯。",
+        )
+    )
+
+    assert reply is not None
+    committed = [
+        event for event in world.events(world_id) if event.event_type == "AffectCommitted"
+    ]
+    assert committed
+    assert committed[-1].payload["source_reference"] == "message:current-discomfort"
+
+
+@pytest.mark.asyncio
+async def test_world_reply_segments_commit_only_sent_text_after_user_takeover(
+    tmp_path: Path,
+) -> None:
+    class Model:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"我知道你现在有点乱。先不用急着把每件事都说清楚。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    world, world_id, engine = _world_engine(tmp_path, Model())
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator", platform_user_id="geoff",
+            message_id="segmented-turn", text="我脑子有点乱。",
+        ),
+        defer_delivery=True,
+    )
+
+    assert reply is not None
+    assert reply.text_parts == ["我知道你现在有点乱。", "先不用急着把每件事都说清楚。"]
+    first_segment_id = engine.begin_reply_part_delivery(reply, position=0)
+    assert first_segment_id is not None
+    engine.confirm_reply_part_delivery(reply, segment_id=first_segment_id)
+    cancelled = engine.observe_reply_interjection(
+        reply,
+        kind="substantive",
+        user_message_id="user-takeover",
+    )
+
+    assert len(cancelled) == 1
+    action = world.snapshot(world_id)["actions"][reply.world_action_id]
+    assert [item["status"] for item in action["segment_state"]["segments"]] == [
+        "delivered", "cancelled"
+    ]
+    assert [
+        item["text"]
+        for item in world.snapshot(world_id)["recent_messages"]
+        if item["direction"] == "out"
+    ] == ["我知道你现在有点乱。"]
 
 
 def test_causal_user_recall_must_mark_the_reason_as_unconfirmed() -> None:

@@ -51,12 +51,18 @@ life_outcome_templates:
     npc_id: literature-fan
     goal_id: literature-reading
     energy_cost: 6
+    load: medium
+    social: true
+    phone_accessible: false
     content: 在图书馆和范予安核对了读书会的书单。
     max_per_day: 1
   course_notes:
     location: 华东师范大学
     goal_id: course-notes
     energy_cost: 7
+    load: high
+    social: false
+    phone_accessible: false
     content: 整理完了今天的课程笔记。
     max_per_day: 1
   photo_portfolio:
@@ -64,23 +70,35 @@ life_outcome_templates:
     npc_id: photography-zhou
     goal_id: photo-portfolio
     energy_cost: 8
+    load: high
+    social: true
+    phone_accessible: false
     content: 整理了摄影社活动要用的照片。
     max_per_day: 1
   campus_walk:
     location: 华东师范大学
     npc_id: roommate-lin
     energy_cost: 5
+    load: low
+    social: true
+    phone_accessible: true
     content: 和林晚在校园里走了一小段，聊了晚饭。
     max_per_day: 1
   independent_sort:
     location: 华东师范大学宿舍
     energy_cost: 3
+    load: low
+    social: false
+    phone_accessible: true
     content: 在宿舍把照片和笔记分门别类整理了一下。
     max_per_day: 1
   family_bookstore_call:
     location: 嘉兴书店
     npc_id: mother-shen
     energy_cost: 4
+    load: low
+    social: true
+    phone_accessible: true
     content: 和妈妈通了电话，问了问书店今天的情况。
     max_per_day: 1
 location_travel_minutes:
@@ -135,6 +153,37 @@ daily_schedule:
     template_id: campus_walk
     location: 华东师范大学
     attention_demand: 42
+    interruptible: true
+weekly_themes:
+  - id: portfolio-sprint
+    title: 摄影作品集阶段整理
+    template_id: photo_portfolio
+    location: 上海
+    weekdays: [2, 4]
+    starts_hour: 13
+    duration_hours: 2
+    priority: 8
+    attention_demand: 78
+    interruptible: true
+  - id: family-check-in
+    title: 给家里打电话
+    template_id: family_bookstore_call
+    location: 嘉兴书店
+    weekdays: [6]
+    starts_hour: 14
+    duration_hours: 1
+    priority: 6
+    attention_demand: 40
+    interruptible: true
+  - id: reading-notes
+    title: 读书会长文笔记
+    template_id: literature_reading
+    location: 华东师范大学
+    weekdays: [3]
+    starts_hour: 13
+    duration_hours: 1
+    priority: 4
+    attention_demand: 65
     interruptible: true
 long_term_goals:
   - id: course-notes

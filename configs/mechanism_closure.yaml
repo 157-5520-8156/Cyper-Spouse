@@ -1,0 +1,255 @@
+schema_version: 1
+terminal_state_vocabulary: [delivered, failed, cancelled, expired, unknown]
+world_only_scopes:
+  - src/companion_daemon/runtime.py::build_companion_engine
+  - src/companion_daemon/engine.py::CompanionEngine._handle_world_message
+  - src/companion_daemon/engine.py::CompanionEngine._world_proactive_tick
+  - src/companion_daemon/world.py
+  - src/companion_daemon/world_affect.py
+  - src/companion_daemon/world_affinity.py
+  - src/companion_daemon/world_behavior.py
+  - src/companion_daemon/world_conversation.py
+  - src/companion_daemon/world_interaction_rules.py
+  - src/companion_daemon/world_media.py
+  - src/companion_daemon/world_relationship.py
+  - src/companion_daemon/character_deliberation.py
+  - src/companion_daemon/context_assembler.py
+  - src/companion_daemon/action_coordinator.py
+  - src/companion_daemon/outbound_policy.py
+  - src/companion_daemon/tool_action.py
+legacy_behavior_writers:
+  - CompanionStore.save_incoming
+  - CompanionStore.queue_outgoing
+  - CompanionStore.queue_outgoing_with_turn_trace
+  - CompanionStore.mark_outgoing_delivered
+  - CompanionStore.mark_outgoing_failed
+  - CompanionStore.resolve_outgoing_and_turn_trace
+  - CompanionStore.create_turn_trace
+  - CompanionStore.complete_turn_trace
+  - CompanionStore.resolve_turn_trace
+  - CompanionStore.save_outgoing
+  - CompanionStore.save_mood_state
+  - CompanionStore.save_life_runtime
+  - CompanionStore.record_life_event
+  - CompanionStore.complete_active_life_events
+  - CompanionStore.correct_active_life_event
+  - CompanionStore.create_calendar_event
+  - CompanionStore.save_calendar_week
+  - CompanionStore.update_calendar_event_status
+  - CompanionStore.postpone_next_calendar_event
+  - CompanionStore.cancel_next_calendar_event
+  - CompanionStore.sync_calendar_event_memory
+  - CompanionStore.delete_calendar_events_by_source_prefix
+  - CompanionStore.cancel_elapsed_calendar_plans
+  - CompanionStore.normalize_single_day_weekly_plans
+  - CompanionStore.mark_life_event_shared
+  - CompanionStore.save_life_day_plan
+  - CompanionStore.update_life_day_plan_status
+  - CompanionStore.activate_life_day_plan_item
+  - CompanionStore.adjust_next_life_day_plan_item
+  - CompanionStore.create_social_task
+  - CompanionStore.cancel_social_task
+  - CompanionStore.resolve_social_task
+  - CompanionStore.cancel_active_social_tasks
+  - CompanionStore.claim_due_social_tasks
+  - CompanionStore.defer_social_task
+  - CompanionStore.upsert_memory
+  - CompanionStore.delete_memory
+  - CompanionStore.record_fact_observation
+  - CompanionStore.record_interaction_event
+  - CompanionStore.save_proactive_event
+  - advance_life_runtime
+  - maybe_apply_planned_life_result
+  - synchronize_life_runtime
+mechanisms:
+  - id: world-ledger-and-projections
+    status: closed
+    sources: [WorldSeed, Command, ExternalResult]
+    events: [WorldStarted, ExternalResultRecorded]
+    reducers: [src/companion_daemon/world.py::reduce_event]
+    projections: [world_snapshot, projection_checkpoints]
+    decision_consumers: [WorldKernel]
+    actions: []
+    terminal_states: []
+    adapters: [world-console]
+    tests: [tests/test_world_kernel.py::test_rebuilding_projection_from_the_ledger_matches_live_projection]
+
+  - id: character-deliberation
+    status: closed
+    sources: [Situation, CharacterCore, UserRequest, Affect, Relationship]
+    events: [UserRequestAppraised, MotiveConflictEvaluated, StanceSelected]
+    reducers: [src/companion_daemon/world.py::reduce_event]
+    projections: [turn_deliberation]
+    decision_consumers: [CharacterDeliberation]
+    actions: []
+    terminal_states: []
+    adapters: []
+    tests: [tests/test_character_deliberation.py::test_no_advice_is_a_weighted_request_and_character_may_disagree_gently]
+
+  - id: affect-and-affinity
+    status: partial
+    sources: [TurnAppraisal, SettledInteraction, LogicalTime]
+    events: [AffectCommitted, AffinityInteractionSettled]
+    reducers: [src/companion_daemon/world.py::reduce_event]
+    projections: [affect, affinity]
+    decision_consumers: [CharacterDeliberation, ExpressionPlanner]
+    actions: []
+    terminal_states: []
+    adapters: []
+    tests: [tests/test_world_affinity.py::test_world_records_affinity_only_when_a_turn_is_delivered]
+
+  - id: sourced-memory-and-context
+    status: partial
+    sources: [CharacterFact, UserFact, CommittedExperience, CurrentScene]
+    events: [FactConfirmed, ExperienceCommitted, CharacterCoreChanged, CharacterCoreChangeRejected]
+    reducers: [src/companion_daemon/world.py::reduce_event]
+    projections: [character_core, user_profile, current_scene, retrieved_experiences]
+    decision_consumers: [ContextAssembler, reply-model]
+    actions: []
+    terminal_states: []
+    adapters: []
+    tests: [tests/test_context_assembler.py::test_assembler_exposes_exact_five_layers_with_character_and_item_budgets, tests/test_character_core_evolution.py::test_world_commits_versioned_core_change_only_after_repeated_lived_evidence]
+
+  - id: communication-attention-and-turns
+    status: partial
+    sources: [UserMessageObserved, CurrentActivity, Affect, Relationship]
+    events: [InputMergeCandidateObserved, InputMergeSettled, MessageAttentionDecided, TurnProcessingClaimed, TurnProcessingSettled]
+    reducers: [src/companion_daemon/world.py::reduce_event]
+    projections: [input_merges, turns, communication]
+    decision_consumers: [QQMessageCoalescer, CompanionEngine]
+    actions: [reply-later]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [qq-official, napcat, onebot, http]
+    tests: [tests/test_world_conversation_experience.py::test_non_interruptible_high_attention_activity_defers_an_ordinary_message, tests/test_world_input_merge.py::test_pending_input_merge_is_auditable_and_recovers_after_engine_restart]
+
+  - id: segmented-outbound-actions
+    status: closed
+    sources: [ExpressionPlanned, UserInterjection, PlatformReceipt]
+    events: [ActionSegmentsPlanned, ActionSegmentDispatchClaimed, ActionSegmentSettled]
+    reducers: [src/companion_daemon/world.py::reduce_event]
+    projections: [outbox, delivered_conversation]
+    decision_consumers: [ActionCoordinator, platform-sender]
+    actions: [reply, media, reaction, proactive]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [qq-official, napcat, onebot, http]
+    tests: [tests/test_action_coordinator.py::test_unknown_segment_blocks_later_segments_until_receipt_reconciliation]
+
+  - id: shared-outbound-policy
+    status: partial
+    sources: [OutboundCandidate, Cooldowns, UnansweredBudget, GenerationLease]
+    events: [OutboundActionAllowed, OutboundActionRejected, OutboundSoftGateOverridden, ControlledTransgressionCommitted]
+    reducers: [src/companion_daemon/world.py::reduce_event]
+    projections: [outbound_budget, generation_locks, controlled_transgressions]
+    decision_consumers: [ActionCoordinator, proactive-scheduler]
+    actions: [reply, pulse, life-share, follow-up, media, reaction, tool]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [qq-official, napcat, onebot]
+    tests: [tests/test_outbound_policy.py::test_every_outbound_kind_passes_through_all_shared_guards]
+
+  - id: unified-world-cost-ledger
+    status: closed
+    sources: [ExternalActionCandidate, LogicalDay, AutomaticPolicy, CacheKey]
+    events: [CostReservationDecided, CostReservationSettled, CostReservationReleased]
+    reducers: [src/companion_daemon/world.py::reduce_event]
+    projections: [cost_ledger]
+    decision_consumers: [WorldKernel, external-action-coordinator]
+    actions: []
+    terminal_states: []
+    adapters: []
+    tests: [tests/test_world_cost_integration.py::test_every_external_action_is_cost_reserved_and_terminally_settled]
+
+  - id: virtual-life-and-goals
+    status: partial
+    sources: [WorldSeed, LogicalTime, UserEvent, GoalPriority]
+    events: [ActivityPlanned, ActivityCompleted, GoalProgressed, ExperienceCommitted]
+    reducers: [src/companion_daemon/world.py::reduce_event]
+    projections: [agenda, goals, experiences]
+    decision_consumers: [WorldKernel, life-share-planner]
+    actions: [life-share]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [proactive-scheduler]
+    tests: [tests/test_world_kernel.py::test_week_long_life_simulation_rebuilds_deterministically]
+
+  - id: multimedia-analysis-and-generation
+    status: partial
+    sources: [AttachmentObserved, MediaRequest, PrivacyDecision]
+    events: [MediaRequested, MediaGenerated, MediaShared]
+    reducers: [src/companion_daemon/world.py::reduce_event]
+    projections: [media_actions, attachment_summaries]
+    decision_consumers: [multimodal-analyzer, image-generator, CharacterDeliberation]
+    actions: [vision, transcription, image-generation, media-delivery]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [qq-official, napcat, onebot]
+    tests: [tests/test_world_kernel.py::test_media_generation_and_delivery_are_separate_world_actions]
+
+  - id: attachment-retention
+    status: structure
+    sources: [AttachmentObserved, UserDeletionRequest, LogicalTime]
+    events: []
+    reducers: []
+    projections: [attachment_manifest]
+    decision_consumers: [multimodal-analyzer, retention-cleaner]
+    actions: []
+    terminal_states: []
+    adapters: [qq-official, napcat, onebot]
+    tests: [tests/test_attachment_cache.py::test_cached_attachment_expires_after_thirty_days_by_default]
+
+  - id: confirmed-tool-actions
+    status: structure
+    sources: [ToolProposal, UserConfirmation, ToolAuthorization]
+    events: [ToolProposed, ToolAuthorized, ExternalResultRecorded]
+    reducers: [src/companion_daemon/world.py::reduce_event]
+    projections: [tool_actions]
+    decision_consumers: [tool-coordinator]
+    actions: [tool-execution]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [fake-tool]
+    tests: [tests/test_tool_action.py::test_authorized_fake_tool_execution_records_result_settlement_and_safe_summary]
+
+  - id: qq-single-outbound-owner
+    status: structure
+    sources: [RuntimeConfiguration, ProcessLease]
+    events: []
+    reducers: []
+    projections: [qq-outbound-owner-lock]
+    decision_consumers: [qq-official-cli, napcat-cli, onebot-cli]
+    actions: [qq-send]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [qq-official, napcat, onebot]
+    tests: [tests/test_process_lock.py::test_single_instance_lock_rejects_second_live_owner]
+
+  - id: wechat-platform-seam
+    status: structure
+    sources: [FakeOutboundEnvelope, ScriptedFakeSettlement]
+    events: []
+    reducers: []
+    projections: [fake-wechat-dispatches, fake-wechat-receipts]
+    decision_consumers: [OutboundPlatformAdapter-contract-test]
+    actions: [fake-wechat-send]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [disabled, fake-wechat]
+    tests: [tests/test_wechat_adapter.py::test_fake_wechat_adapter_satisfies_contract_without_a_live_account]
+
+  - id: long-horizon-replay
+    status: partial
+    sources: [WorldLedger, RecordedExternalResults, LogicalTime]
+    events: [ClockAdvanced, ActivityCompleted]
+    reducers: [src/companion_daemon/world.py::reduce_event]
+    projections: [world_snapshot, ledger_hash]
+    decision_consumers: [replay-auditor]
+    actions: []
+    terminal_states: []
+    adapters: []
+    tests: [tests/test_world_kernel.py::test_two_week_world_replay_has_no_duplicate_experiences_or_open_actions]
+
+  - id: observability-and-human-evaluation
+    status: structure
+    sources: [WorldLedger, DialogueScenario, HumanAnnotation]
+    events: []
+    reducers: []
+    projections: [five_turn_variant_comparison, dialogue_evaluation, world_overview]
+    decision_consumers: [human-reviewer, regression-gate]
+    actions: []
+    terminal_states: []
+    adapters: [world-console, evaluation-cli]
+    tests: [tests/test_experience_evaluation.py::test_ab_report_keeps_surface_diversity_diagnostic_separate_from_human_judgment, tests/test_world_replays.py::test_world_replay_preserves_appraisal_and_settled_action]

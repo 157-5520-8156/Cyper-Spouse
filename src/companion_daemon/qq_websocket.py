@@ -18,8 +18,13 @@ from companion_daemon.config import get_settings
 from companion_daemon.models import CompanionReply, IncomingMessage, MessageAttachment
 from companion_daemon.im_timing import between_part_delay_seconds, initial_reply_delay_seconds
 from companion_daemon.multimodal import attachment_kind
-from companion_daemon.process_lock import AlreadyRunningError, SingleInstanceLock
+from companion_daemon.process_lock import AlreadyRunningError
 from companion_daemon.qq_client import QQOfficialClient
+from companion_daemon.qq_outbound_owner import (
+    QQOutboundOwnerLease,
+    qq_outbound_owner_lock_path,
+    validate_qq_outbound_configuration,
+)
 from companion_daemon.reply_decision import (
     ReplyAction,
     ReplyDecision,
@@ -67,7 +72,9 @@ class DeferredReply:
 class ActiveSend:
     incoming: IncomingMessage
     reply_target: ReplyTarget
+    reply: CompanionReply | None = None
     cancel_before_next_part: bool = False
+    interruption_message_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -117,6 +124,15 @@ class QQMessageCoalescer:
             handled = await self._handle_mid_reply_interruption(key, incoming, reply_target)
             if handled:
                 return
+        if not self._pending[key] and hasattr(self.engine, "recover_input_merge"):
+            recovered = self.engine.recover_input_merge(key)
+            current_id = str(incoming.message_id or "")
+            for prior in recovered:
+                if current_id and str(prior.message_id or "") == current_id:
+                    continue
+                self._pending[key].append(
+                    QueuedQQMessage(incoming=prior, reply_target=reply_target)
+                )
         if key in self._deferred:
             self._cancel_deferred(key)
             deferred = self._deferred.pop(key, None)
@@ -136,6 +152,10 @@ class QQMessageCoalescer:
 
         self._pending[key].append(QueuedQQMessage(incoming=incoming, reply_target=reply_target))
         decision = self._decision_for(key)
+        if hasattr(self.engine, "record_input_merge_candidate"):
+            self.engine.record_input_merge_candidate(
+                key, incoming, decision, pending_count=len(self._pending[key])
+            )
         existing = self._tasks.get(key)
         if existing and not existing.done():
             existing.cancel()
@@ -150,11 +170,26 @@ class QQMessageCoalescer:
         active = self._active_sends[key]
         decision = classify_mid_reply_interruption(incoming.text)
         if decision == "backchannel":
+            if active.reply and hasattr(self.engine, "observe_reply_interjection"):
+                self.engine.observe_reply_interjection(
+                    active.reply,
+                    kind="backchannel",
+                    user_message_id=str(incoming.message_id or incoming.sent_at.isoformat()),
+                )
             await self._record_without_reply(incoming, mark_unread=False)
             logger.info("kept sending after backchannel interruption for %s", key)
             return True
         if decision == "takeover":
             active.cancel_before_next_part = True
+            active.interruption_message_id = str(
+                incoming.message_id or incoming.sent_at.isoformat()
+            )
+            if active.reply and hasattr(self.engine, "observe_reply_interjection"):
+                self.engine.observe_reply_interjection(
+                    active.reply,
+                    kind="substantive",
+                    user_message_id=active.interruption_message_id,
+                )
             self._pending[key].append(QueuedQQMessage(incoming=incoming, reply_target=reply_target))
             existing = self._tasks.get(key)
             if existing and not existing.done():
@@ -220,6 +255,7 @@ class QQMessageCoalescer:
                         attention.defer_minutes,
                         attention.reason,
                     )
+                    self._settle_input_merge(key, queued)
                     return
 
             world_mode = bool(
@@ -254,6 +290,7 @@ class QQMessageCoalescer:
                     await self.engine.handle_message(
                         merged, skip_reply=True, mark_unread=action.mark_unread
                     )
+                    self._settle_input_merge(key, queued)
                     return
                 if action.action == ReplyAction.DEFER and action.defer_minutes:
                     # At this point phone attention already said "read now", so this
@@ -269,15 +306,23 @@ class QQMessageCoalescer:
                         "deferred reply for %s by %.1f min (%s)",
                         key, action.defer_minutes, action.reason,
                     )
+                    self._settle_input_merge(key, queued)
                     return
 
             await self._generate_and_send(merged, last.reply_target, key=key)
+            self._settle_input_merge(key, queued)
         except asyncio.CancelledError:
             return
         finally:
             task = self._tasks.get(key)
             if task is asyncio.current_task():
                 self._tasks.pop(key, None)
+
+    def _settle_input_merge(self, key: str, queued: list[QueuedQQMessage]) -> None:
+        if hasattr(self.engine, "settle_input_merge"):
+            self.engine.settle_input_merge(
+                key, tuple(item.incoming for item in queued)
+            )
 
     async def _fire_deferred_after(
         self, key: str, minutes: float, decision: ReplyDecision
@@ -387,7 +432,26 @@ class QQMessageCoalescer:
             # reply has no adapter-side delay to simulate.
             if self.human_timing and not world_mode:
                 await self.sleep(initial_reply_delay_seconds(merged, reply, state=timing_state, rng=self.rng))
-            self._active_sends[key] = ActiveSend(incoming=merged, reply_target=reply_target)
+            self._active_sends[key] = ActiveSend(
+                incoming=merged, reply_target=reply_target, reply=reply
+            )
+            claimed_segments: dict[int, str] = {}
+
+            def before_part(index: int, _part: str) -> None:
+                if hasattr(self.engine, "begin_reply_part_delivery"):
+                    segment_id = self.engine.begin_reply_part_delivery(
+                        reply, position=index
+                    )
+                    if segment_id:
+                        claimed_segments[index] = segment_id
+
+            def after_part(index: int, _part: str) -> None:
+                segment_id = claimed_segments.get(index)
+                if segment_id and hasattr(self.engine, "confirm_reply_part_delivery"):
+                    self.engine.confirm_reply_part_delivery(
+                        reply, segment_id=segment_id
+                    )
+
             sent_completely = await _send_reply_parts(
                 reply_target,
                 reply.text_parts or [reply.text],
@@ -395,9 +459,23 @@ class QQMessageCoalescer:
                 rng=self.rng,
                 human_timing=self.human_timing,
                 should_continue=lambda: not self._active_sends.get(key, ActiveSend(merged, reply_target)).cancel_before_next_part,
+                before_part=before_part,
+                after_part=after_part,
             )
             if not sent_completely:
-                if hasattr(self.engine, "fail_reply_delivery"):
+                active_send = self._active_sends.get(key)
+                cancelled = ()
+                if (
+                    active_send
+                    and active_send.interruption_message_id
+                    and hasattr(self.engine, "observe_reply_interjection")
+                ):
+                    cancelled = self.engine.observe_reply_interjection(
+                        reply,
+                        kind="substantive",
+                        user_message_id=active_send.interruption_message_id,
+                    )
+                if not cancelled and hasattr(self.engine, "fail_reply_delivery"):
                     self.engine.fail_reply_delivery(reply, "QQ reply interrupted before all parts were sent")
                 return False
         except Exception:
@@ -846,6 +924,8 @@ async def _send_reply_parts(
     rng: random.Random | None = None,
     human_timing: bool = True,
     should_continue: Callable[[], bool] | None = None,
+    before_part: Callable[[int, str], None] | None = None,
+    after_part: Callable[[int, str], None] | None = None,
 ) -> bool:
     rng = rng or random.Random()
     for index, part in enumerate(parts):
@@ -856,7 +936,11 @@ async def _send_reply_parts(
             await sleep(delay)
             if should_continue and not should_continue():
                 return False
+        if before_part:
+            before_part(index, part)
         await reply_target.reply(content=part, msg_seq=_reply_msg_seq())
+        if after_part:
+            after_part(index, part)
     return True
 
 
@@ -910,13 +994,17 @@ def main() -> None:
 
     logging.basicConfig(level=logging.INFO)
     settings = get_settings()
+    validate_qq_outbound_configuration(
+        configured_adapter=settings.qq_adapter,
+        launched_adapter="official",
+    )
     if not settings.qq_bot_app_id or not settings.qq_bot_secret:
         raise SystemExit("QQ_BOT_APP_ID and QQ_BOT_SECRET are required")
 
     intents = botpy.Intents(public_messages=True)
-    lock_path = Path(settings.database_path).parent / "companion-qq-ws.lock"
+    lock_path = qq_outbound_owner_lock_path(settings.database_path)
     try:
-        with SingleInstanceLock(lock_path):
+        with QQOutboundOwnerLease(lock_path, adapter="official"):
             client = CompanionQQClient(
                 intents=intents,
                 is_sandbox=args.sandbox,
@@ -924,7 +1012,7 @@ def main() -> None:
             )
             client.run(appid=settings.qq_bot_app_id, secret=settings.qq_bot_secret)
     except AlreadyRunningError as exc:
-        raise SystemExit(f"companion-qq-ws is already running: {exc}") from exc
+        raise SystemExit(f"QQ outbound adapter cannot start: {exc}") from exc
 
 
 if __name__ == "__main__":
