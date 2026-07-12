@@ -14,7 +14,7 @@ import shutil
 import tempfile
 from typing import Any
 
-from PIL import Image
+from PIL import Image, ImageFilter
 
 
 class RoomCompileError(ValueError):
@@ -128,6 +128,51 @@ def _image_key(object_id: str, role: str, index: int) -> str:
 
 def _source_path(manifest_dir: Path, value: str) -> Path:
     return (manifest_dir / value).resolve()
+
+
+def _resolve_manifest_image(
+    manifest_dir: Path, spec: dict[str, Any]
+) -> Image.Image:
+    """Resolve a manifest image, including a reproducible local AI patch."""
+
+    image = Image.open(_source_path(manifest_dir, spec["source"])).convert("RGBA")
+    patch_spec = spec.get("compositePatch")
+    if not patch_spec:
+        return image
+    patch = Image.open(
+        _source_path(manifest_dir, patch_spec["source"])
+    ).convert("RGBA")
+    if patch.size != image.size:
+        raise RoomCompileError([
+            f"composite patch size {patch.size} must match base image {image.size}"
+        ])
+    bounds = patch_spec.get("mask")
+    if (
+        not isinstance(bounds, list)
+        or len(bounds) != 4
+        or any(not isinstance(value, int) for value in bounds)
+    ):
+        raise RoomCompileError(["compositePatch mask must contain four integers"])
+    left, top, right, bottom = bounds
+    if not (0 <= left < right <= image.width and 0 <= top < bottom <= image.height):
+        raise RoomCompileError(["compositePatch mask exceeds its base image"])
+    blur = patch_spec.get("gaussianBlur", 0)
+    if not isinstance(blur, (int, float)) or isinstance(blur, bool) or blur < 0:
+        raise RoomCompileError(["compositePatch gaussianBlur must be non-negative"])
+    mask = Image.new("L", image.size, 0)
+    mask.paste(255, tuple(bounds))
+    if blur:
+        mask = mask.filter(ImageFilter.GaussianBlur(blur))
+    image = Image.composite(patch, image, mask)
+    if approved_value := patch_spec.get("approved"):
+        approved = Image.open(
+            _source_path(manifest_dir, approved_value)
+        ).convert("RGBA")
+        if approved.size != image.size or approved.tobytes() != image.tobytes():
+            raise RoomCompileError([
+                "compositePatch output does not match its approved image"
+            ])
+    return image
 
 
 @dataclass(frozen=True)
@@ -339,6 +384,12 @@ def _validate_sources_and_grid(
     for name, image in manifest["images"].items():
         if not _source_path(manifest_dir, image["source"]).is_file():
             errors.append(f"image {name!r} source does not exist")
+        if patch := image.get("compositePatch"):
+            if not _source_path(manifest_dir, patch.get("source", "")).is_file():
+                errors.append(f"image {name!r} composite patch source does not exist")
+            if approved := patch.get("approved"):
+                if not _source_path(manifest_dir, approved).is_file():
+                    errors.append(f"image {name!r} approved composite does not exist")
     for item in all_objects:
         for spec in item["layers"]:
             role = f"{spec['role']} layer"
@@ -560,16 +611,22 @@ def _emit_runtime(
     inventory: dict[str, Any],
 ) -> tuple[Path, ...]:
     draft_shell_image = manifest.get("artDraft", {}).get("shell", {}).get("image")
+    runtime_base_url = manifest["runtimeBaseUrl"].rstrip("/")
     runtime_images = {
         name: spec["url"]
         for name, spec in manifest["images"].items()
         if name != draft_shell_image
     }
-    draft_images = (
-        {draft_shell_image: manifest["images"][draft_shell_image]["url"]}
-        if draft_shell_image else {}
-    )
-    runtime_base_url = manifest["runtimeBaseUrl"].rstrip("/")
+    draft_images = {}
+    derived_shell_spec = None
+    if draft_shell_image:
+        derived_shell_spec = manifest["images"][draft_shell_image]
+        if patch := derived_shell_spec.get("compositePatch"):
+            draft_images[draft_shell_image] = (
+                f"{runtime_base_url}/art-shell/{patch['output']}"
+            )
+        else:
+            draft_images[draft_shell_image] = derived_shell_spec["url"]
     generated_assets: list[Path] = []
     def emit_objects(
         source_objects: list[dict[str, Any]],
@@ -627,6 +684,11 @@ def _emit_runtime(
     draft_objects = emit_objects(
         manifest.get("_draftObjects", []), "draft-layers", draft_images, "Draft"
     )
+    if derived_shell_spec and (patch := derived_shell_spec.get("compositePatch")):
+        target = build_dir / "art-shell" / patch["output"]
+        target.parent.mkdir(parents=True, exist_ok=True)
+        _resolve_manifest_image(manifest_dir, derived_shell_spec).save(target)
+        generated_assets.append(target)
 
     bundle = {
         "schemaVersion": manifest["schemaVersion"],
@@ -712,7 +774,7 @@ def compile_room(manifest_path: Path | str, output_dir: Path | str) -> CompileRe
     shell_image = manifest["shell"].get("image")
     if shell_image not in manifest["images"]:
         raise RoomCompileError([f"shell references unknown image {shell_image!r}"])
-    shell = Image.open(_source_path(manifest_dir, manifest["images"][shell_image]["source"]))
+    shell = _resolve_manifest_image(manifest_dir, manifest["images"][shell_image])
     if shell.size != master.size:
         raise RoomCompileError(
             [f"shell image size {shell.size} must match visual master {master.size}"]
@@ -723,8 +785,8 @@ def compile_room(manifest_path: Path | str, output_dir: Path | str) -> CompileRe
             raise RoomCompileError(
                 [f"art draft shell references unknown image {draft_shell_image!r}"]
             )
-        draft_shell = Image.open(
-            _source_path(manifest_dir, manifest["images"][draft_shell_image]["source"])
+        draft_shell = _resolve_manifest_image(
+            manifest_dir, manifest["images"][draft_shell_image]
         )
         if draft_shell.size != master.size:
             raise RoomCompileError([

@@ -103,14 +103,16 @@
         "zone": "window",
         "category": "structural-sub-layer",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Independent art-draft city-view/window-opening layer; first magenta-key attempt rejected."
       },
       {
         "id": "window-frame",
         "zone": "window",
         "category": "structural-sub-layer",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Independent art-draft wood frame/mullion/sill carries curtains plus both sill planters."
       },
       {
         "id": "window-curtains",
@@ -118,7 +120,7 @@
         "category": "soft-furnishing",
         "status": "planned",
         "interactive": false,
-        "note": "Art-draft asset exists: paired curtains and rod only; excludes the frame, view and wall."
+        "note": "Art-draft paired curtains and rod attach to window-frame; pixels exclude frame, view and wall."
       },
       {
         "id": "window-planter-left",
@@ -126,7 +128,7 @@
         "category": "plant",
         "status": "planned",
         "interactive": false,
-        "note": "Art-draft asset exists: independent sill plant with no floor-path occupancy."
+        "note": "Art-draft sill plant is attached to window-frame and has no floor-path occupancy."
       },
       {
         "id": "window-planter-right",
@@ -134,7 +136,7 @@
         "category": "plant",
         "status": "planned",
         "interactive": false,
-        "note": "Art-draft asset exists: independent sill flower box with no floor-path occupancy."
+        "note": "Art-draft sill flower box is attached to window-frame and has no floor-path occupancy."
       },
       {
         "id": "window-hanging-plant",
@@ -157,21 +159,24 @@
         "zone": "window",
         "category": "wall-decoration",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Independent art-draft wall picture left of the window."
       },
       {
         "id": "wall-art-window-lower",
         "zone": "window",
         "category": "wall-decoration",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Independent art-draft wall picture left of the window."
       },
       {
         "id": "wall-art-bedside",
         "zone": "bedroom",
         "category": "wall-decoration",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Independent art-draft wall picture on the far right bedside wall."
       },
       {
         "id": "desk",
@@ -1571,7 +1576,7 @@
     "background": "cleanShellCandidate",
     "status": "needs-art",
     "images": {
-      "cleanShellCandidate": "/assets/dashboard/rooms/zhizhi-home/sources/clean-shell-neutral-light-aligned-v1.png",
+      "cleanShellCandidate": "/assets/dashboard/rooms/zhizhi-home/runtime/art-shell/clean-shell-windowless-composite-v1.png",
       "sofaFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/sofa-frame-draft.png",
       "bedFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-frame-draft.png",
       "bedBeddingFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-bedding-draft.png",
@@ -1617,6 +1622,11 @@
       "foregroundTableLampFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-table-lamp-front-draft.png",
       "foregroundTableLampLight1Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-table-lamp-light-draft.png",
       "foregroundConsolePlantsFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-console-plants-draft.png",
+      "windowViewBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/window-view-draft.png",
+      "windowFrameBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/window-frame-draft.png",
+      "wallArtWindowUpperBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/wall-art-window-upper-draft.png",
+      "wallArtWindowLowerBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/wall-art-window-lower-draft.png",
+      "wallArtBedsideBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/wall-art-bedside-draft.png",
       "windowCurtainsBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/window-curtains-draft.png",
       "windowPlanterLeftBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/window-planter-left-draft.png",
       "windowPlanterRightBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/window-planter-right-draft.png",
@@ -3565,6 +3575,196 @@
         "attachedTo": "foreground-console"
       },
       {
+        "id": "window-view",
+        "category": "structural-sub-layer",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "windowViewBody0Draft",
+            "origin": [
+              1018,
+              175
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "window-frame",
+        "category": "structural-sub-layer",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "windowFrameBody0Draft",
+            "origin": [
+              1005,
+              155
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "wall-art-window-upper",
+        "category": "wall-decoration",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "wallArtWindowUpperBody0Draft",
+            "origin": [
+              895,
+              140
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "wall-art-window-lower",
+        "category": "wall-decoration",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "wallArtWindowLowerBody0Draft",
+            "origin": [
+              892,
+              245
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "wall-art-bedside",
+        "category": "wall-decoration",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "wallArtBedsideBody0Draft",
+            "origin": [
+              1300,
+              355
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
         "id": "window-curtains",
         "category": "soft-furnishing",
         "assetMode": "layered",
@@ -3600,7 +3800,8 @@
           "reference": "zhizhi-room-isometric-v2.png"
         },
         "audit": {},
-        "auditPose": {}
+        "auditPose": {},
+        "attachedTo": "window-frame"
       },
       {
         "id": "window-planter-left",
@@ -3638,7 +3839,8 @@
           "reference": "zhizhi-room-isometric-v2.png"
         },
         "audit": {},
-        "auditPose": {}
+        "auditPose": {},
+        "attachedTo": "window-frame"
       },
       {
         "id": "window-planter-right",
@@ -3676,7 +3878,8 @@
           "reference": "zhizhi-room-isometric-v2.png"
         },
         "audit": {},
-        "auditPose": {}
+        "auditPose": {},
+        "attachedTo": "window-frame"
       },
       {
         "id": "window-hanging-plant",

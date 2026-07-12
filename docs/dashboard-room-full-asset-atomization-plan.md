@@ -12,7 +12,7 @@
 - [x] 波次 0：通用对象 `layers / occupancy / audits / provenance` schema；`teal-stool` 已作为无互动原生对象接入，旧对象经 Compiler 归一化到同一 bundle 契约。
 - [ ] 波次 1：主要遮挡家具（进行中：clean shell 与 16 个家具/附属对象已进入可编译 `artDraft`，仍需逐件校准和删除测试）。
 - [x] 波次 2：厨房与大型收纳草稿功能闭环（29 个对象、36 个构建资产；全部厨房对象可删除，父子联动、适用遮挡与餐厨动作/路径通过；素材仍保持 `needs-art`，终稿基线在波次 6 统一批准）。
-- [ ] 波次 3：地毯、灯具、植物与窗区（进行中：四块地毯、两株落地植物、三盏台灯、两件承载柜、两组直属 decor，以及五件窗区软装/植物/墙灯已进入草稿，现为 47 对象、57 个构建资产；所有屋顶对象继续排除，窗框/窗景结构层与其余植物待处理）。
+- [ ] 波次 3：地毯、灯具、植物与窗区（进行中：四块地毯、两株落地植物、三盏台灯、两件承载柜、两组直属 decor、窗结构 sibling/attachment 模型、五件窗区软装/植物/墙灯及三幅墙画已进入草稿，现为 52 对象、63 个构建资产；所有屋顶对象继续排除，其余植物待处理）。
 - [ ] 波次 4–6：decor、路径动作与最终验收。
 
 ### 波次 0 验收记录
@@ -52,7 +52,14 @@
 
 - `window-curtains`、两件窗台 planter、`window-hanging-plant` 与 `window-string-lights` 已成为五个独立 `body` 对象；窗帘只含布料/帘杆，盆栽不含窗台，壁挂植物带垂直墙钩，灯串带墙钉和窄局部光晕。
 - 五件对象均使用 `occupancy.kind=wall` 且没有路径格；它们不会改变 walkable、tour 或地面 footprint。壁挂植物和墙灯明确固定在右墙，不属于屋顶/天花板物件。
-- 浏览器完成五件 solo、五件 hidden、整屋装配与动态 tour。删除时窗框/窗景和其他对象保留，solo 时没有夹带窗框、城市景观或墙面；对象仍保持 `planned / needs-art`，等待窗结构层和波次 6 基线统一批准。
+- 浏览器完成五件 solo、五件 hidden、整屋装配与动态 tour。首次独立检查证明 source 本身没有夹带窗框、城市景观或墙面；接入结构 DAG 后，窗帘/planter 的 solo 会按物理关系保留必要的 view + frame 祖先。对象仍保持 `planned / needs-art`，等待波次 6 基线统一批准。
+
+### 波次 3 窗结构与墙画草稿记录
+
+- clean shell 的整图无窗 AI 编辑因目标区外约 9.5% 像素变化被拒绝；接受版本只把 AI 补出的局部墙面合成到既有 shell，窗区外沿用原像素。右墙现在可在隐藏整个窗口子树后显示连续、无洞的墙面。
+- `window-view` 与 `window-frame` 是可各自删除的 sibling；`window-frame → window-curtains / window-planter-left / window-planter-right` 构成显式 attachment 子树。隐藏 view 只删除景色，隐藏 frame 会关闭框及其真正承载的窗帘/窗台物，solo 窗帘或 planter 则保留 frame 祖先。
+- 首个品红键窗景因粉紫天空与 key 冲突被拒绝；绿色键 v2 作为独立 view，木框/中梃/窗台作为独立 frame。三幅墙画也各自成为 `wall-decoration`，不夹带墙面或家具像素。
+- 浏览器完成五件结构/墙画 hidden/solo、窗口父子级联、整屋组合与位置检查；全部为 `wall` occupancy，不影响路径。候选仍为 `planned / needs-art`，等待终稿基线批准。
 
 ## 用户目标
 
@@ -342,7 +349,7 @@ Runtime 不包含家具名称特判。层角色、depthTile、occupancy 与 inte
 
 验收：灯具隐藏会同时移除其局部光效；地毯不阻塞路径；窗帘与植物深度正确。
 
-当前进度：四块地毯与两株落地植物已通过草稿检查点。`desk-lamp / bedside-lamp / foreground-table-lamp` 均以 `front + light` 双层对象接入，并分别附着到书桌、床头柜和前景长柜；`bedside-decor-cluster / foreground-console-plants` 也只含直属摆件像素并附着到各自载体。窗帘、左右窗台 planter、右墙壁挂植物和右墙灯串已各自成为 `wall` 占用的单体对象，五组 hidden/solo、整屋位置和 tour 已通过。clean shell 候选移除了烙在墙地面的局部灯斑。餐厨吊灯及所有屋顶对象按用户观测规则排除。当前共 47 个草稿对象、57 个构建资产。
+当前进度：四块地毯与两株落地植物已通过草稿检查点。`desk-lamp / bedside-lamp / foreground-table-lamp` 均以 `front + light` 双层对象接入，并分别附着到书桌、床头柜和前景长柜；`bedside-decor-cluster / foreground-console-plants` 也只含直属摆件像素并附着到各自载体。窗景与窗框可各自删除，窗框只承载窗帘和左右窗台 planter；右墙壁挂植物、右墙灯串和三幅墙画为独立 `wall` 对象。相关 hidden/solo、父子级联、整屋位置和 tour 已通过。clean shell 候选移除了烙在墙地面的局部灯斑，并由 Compiler 以声明式局部 AI 补墙复现无窗 shell。餐厨吊灯及所有屋顶对象按用户观测规则排除。当前共 52 个草稿对象、63 个构建资产（含 Compiler 生成的 art shell）。
 
 ### 波次 4：桌面、柜内和墙面 decor clusters
 

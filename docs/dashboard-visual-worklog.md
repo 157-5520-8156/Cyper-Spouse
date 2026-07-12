@@ -176,6 +176,14 @@
 - 浏览器完成五件 solo 与五件 hidden：solo 不夹带窗框、窗景、墙面或相邻植物，hidden 只删除目标；整屋装配中窗帘包围原窗框，两个 planter 落在窗台，右墙植物位于灯串环内。动态 tour 经过工作区、厨房与客厅，路径没有因窗区资产改变。
 - 自动验证：Room Compiler Python 26 项、Room Runtime JS 20 项通过；对象继续保持 `planned / needs-art`，窗框/窗景结构子层与最终逐像素基线尚未收口。
 
+## 全资产原子化 · 窗结构与墙画草稿（2026-07-12）
+
+- 首次无窗 clean-shell 精确编辑仍使目标窗区外约 9.5% 像素产生明显变化，未直接接入。最终候选以既有 neutral-light shell 为底，只合成 AI 生成的局部无窗墙面；右墙窗口区域被补成连续墙体，其他房间像素保持旧 shell。
+- 窗景首次使用品红 key，粉紫夕阳与 key 冲突产生大量半透明天空，明确拒绝；v2 改用亮绿色 key 后仅有正常边缘半透明像素。木窗框/中梃/窗台另存独立 alpha 层，窗帘和 planter source 不含其像素。
+- `window-view` 与 `window-frame` 保持 sibling，满足隐藏景色时不改变其他对象；attachment DAG 只表达真实承载关系 `window-frame → window-curtains / window-planter-left / window-planter-right`。浏览器确认：隐藏 view 只删除景色；隐藏 frame 会连同窗帘与 planter 关闭；solo 窗帘或 planter 自动保留 frame 祖先。
+- `wall-art-window-upper / lower / bedside` 三幅画各自成为单层 `wall-decoration`，分别贴回窄墙上/下位置和床侧右墙；hidden 只删除目标，solo 不夹带墙面或家具。
+- 整屋装配为 52 个草稿对象、63 个构建资产（含 Compiler 复现的 art shell）。窗景位于 frame 下层，窗帘包住 frame，窗台植物覆盖窗台，三幅画不侵入灯具、床或窗口。所有新增对象均为 `wall` occupancy；没有生成任何屋顶/天花安装物。
+
 ## 后续扩展规则
 
 - 后续若新增家具或新动作，必须同时添加 `behind/front` 或动作巡检入口，不能只改 daemon 映射。

@@ -22,7 +22,14 @@
     },
     "cleanShellCandidate": {
       "source": "sources/clean-shell-neutral-light-aligned-v1.png",
-      "url": "/assets/dashboard/rooms/zhizhi-home/sources/clean-shell-neutral-light-aligned-v1.png"
+      "url": "/assets/dashboard/rooms/zhizhi-home/runtime/art-shell/clean-shell-windowless-composite-v1.png",
+      "compositePatch": {
+        "source": "sources/clean-shell-windowless-aligned-v1.png",
+        "approved": "sources/clean-shell-windowless-composite-v1.png",
+        "mask": [985, 125, 1225, 460],
+        "gaussianBlur": 8,
+        "output": "clean-shell-windowless-composite-v1.png"
+      }
     }
   },
   "sprites": {
@@ -1280,7 +1287,93 @@
         "audit": {}
       },
       {
+        "id": "window-view",
+        "category": "structural-sub-layer",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "generated/window-view-alpha-v2.png",
+          "output": "window-view-draft.png",
+          "origin": [1018, 175]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "window-frame",
+        "category": "structural-sub-layer",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "generated/window-frame-alpha-v1.png",
+          "output": "window-frame-draft.png",
+          "origin": [1005, 155]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "wall-art-window-upper",
+        "category": "wall-decoration",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "generated/wall-art-window-upper-alpha-v1.png",
+          "output": "wall-art-window-upper-draft.png",
+          "origin": [895, 140]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "wall-art-window-lower",
+        "category": "wall-decoration",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "generated/wall-art-window-lower-alpha-v1.png",
+          "output": "wall-art-window-lower-draft.png",
+          "origin": [892, 245]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "wall-art-bedside",
+        "category": "wall-decoration",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "generated/wall-art-bedside-alpha-v1.png",
+          "output": "wall-art-bedside-draft.png",
+          "origin": [1300, 355]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
         "id": "window-curtains",
+        "attachedTo": "window-frame",
         "category": "soft-furnishing",
         "assetMode": "layered",
         "depthTile": [0, 0, 0],
@@ -1298,6 +1391,7 @@
       },
       {
         "id": "window-planter-left",
+        "attachedTo": "window-frame",
         "category": "plant",
         "assetMode": "layered",
         "depthTile": [0, 0, 0],
@@ -1315,6 +1409,7 @@
       },
       {
         "id": "window-planter-right",
+        "attachedTo": "window-frame",
         "category": "plant",
         "assetMode": "layered",
         "depthTile": [0, 0, 0],

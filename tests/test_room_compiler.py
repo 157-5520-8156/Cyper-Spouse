@@ -20,6 +20,10 @@ def editable_manifest(tmp_path: Path) -> tuple[dict, Path]:
     manifest["inventory"] = str((ROOM_MANIFEST.parent / manifest["inventory"]).resolve())
     for image in manifest["images"].values():
         image["source"] = str((ROOM_MANIFEST.parent / image["source"]).resolve())
+        if patch := image.get("compositePatch"):
+            patch["source"] = str((ROOM_MANIFEST.parent / patch["source"]).resolve())
+            if approved := patch.get("approved"):
+                patch["approved"] = str((ROOM_MANIFEST.parent / approved).resolve())
     for item in [*manifest["objects"], *manifest.get("artDraft", {}).get("objects", [])]:
         specs = item.get("layers", []) or [
             spec for spec in (item.get("backLayer"), item.get("frontOccluder")) if spec
@@ -76,7 +80,7 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     assert bundle["artDraft"]["background"] == "cleanShellCandidate"
     assert "cleanShellCandidate" not in bundle["images"]
     assert bundle["artDraft"]["images"]["cleanShellCandidate"].endswith(
-        "/sources/clean-shell-neutral-light-aligned-v1.png"
+        "/runtime/art-shell/clean-shell-windowless-composite-v1.png"
     )
     assert set(bundle["artDraft"]["images"]).isdisjoint(bundle["images"])
     assert [item["id"] for item in bundle["artDraft"]["objects"]] == [
@@ -93,6 +97,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "bed-rug", "living-rug", "desk-floor-plant", "living-large-plant",
         "desk-lamp", "bedside-table", "bedside-lamp", "bedside-decor-cluster",
         "foreground-console", "foreground-table-lamp", "foreground-console-plants",
+        "window-view", "window-frame", "wall-art-window-upper",
+        "wall-art-window-lower", "wall-art-bedside",
         "window-curtains", "window-planter-left", "window-planter-right",
         "window-hanging-plant", "window-string-lights",
     ]
@@ -155,6 +161,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "behind": [4.5, 7, 0],
     }
     window_objects = [draft_by_id[item_id] for item_id in (
+        "window-view", "window-frame", "wall-art-window-upper",
+        "wall-art-window-lower", "wall-art-bedside",
         "window-curtains", "window-planter-left", "window-planter-right",
         "window-hanging-plant", "window-string-lights",
     )]
@@ -164,6 +172,11 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "hidden": True, "solo": True, "behind": False, "front": False,
     } for item in window_objects)
     assert draft_by_id["window-string-lights"]["category"] == "lighting"
+    assert "attachedTo" not in draft_by_id["window-view"]
+    assert "attachedTo" not in draft_by_id["window-frame"]
+    assert draft_by_id["window-curtains"]["attachedTo"] == "window-frame"
+    assert draft_by_id["window-planter-left"]["attachedTo"] == "window-frame"
+    assert draft_by_id["window-planter-right"]["attachedTo"] == "window-frame"
     inventory_status = {
         item["id"]: item["status"] for item in bundle["inventory"]["items"]
     }
@@ -181,6 +194,14 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     stool_occluder = Image.open(tmp_path / "layers/teal-stool-front.png").convert("RGBA")
     assert stool_occluder.size == (120, 120)
     assert stool_occluder.getchannel("A").getextrema() == (0, 255)
+    derived_shell = Image.open(
+        tmp_path / "art-shell/clean-shell-windowless-composite-v1.png"
+    ).convert("RGBA")
+    approved_shell = Image.open(
+        ROOT / "assets/dashboard/rooms/zhizhi-home/sources/clean-shell-windowless-composite-v1.png"
+    ).convert("RGBA")
+    assert derived_shell.size == approved_shell.size
+    assert derived_shell.tobytes() == approved_shell.tobytes()
     assert report.generated_assets == tuple(
         tmp_path / f"layers/{name}-front.png"
         for name in ("desk", "bed", "sofa", "table", "dining", "divider", "teal-stool")
@@ -214,11 +235,14 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
             "foreground-table-lamp-front-draft.png",
             "foreground-table-lamp-light-draft.png",
             "foreground-console-plants-draft.png",
+            "window-view-draft.png", "window-frame-draft.png",
+            "wall-art-window-upper-draft.png", "wall-art-window-lower-draft.png",
+            "wall-art-bedside-draft.png",
             "window-curtains-draft.png", "window-planter-left-draft.png",
             "window-planter-right-draft.png", "window-hanging-plant-draft.png",
             "window-string-lights-draft.png",
         )
-    )
+    ) + (tmp_path / "art-shell/clean-shell-windowless-composite-v1.png",)
 
 
 def test_chroma_despill_uses_the_declared_key_channels() -> None:
@@ -412,7 +436,8 @@ def test_compile_room_replaces_stale_runtime_as_one_complete_output(
 
     assert report.bundle_path == output_dir / "room.bundle.json"
     assert not stale.exists()
-    assert len(report.generated_assets) == expected_layer_count
+    assert len(report.generated_assets) == expected_layer_count + 1
+    assert output_dir / "art-shell/clean-shell-windowless-composite-v1.png" in report.generated_assets
 
 
 @pytest.mark.parametrize(
@@ -528,11 +553,25 @@ def test_compile_room_rejects_art_draft_shell_geometry_drift(tmp_path: Path) -> 
     wrong_shell = tmp_path / "wrong-draft-shell.png"
     Image.new("RGBA", (100, 80), (0, 0, 0, 255)).save(wrong_shell)
     manifest["images"]["cleanShellCandidate"]["source"] = str(wrong_shell)
+    manifest["images"]["cleanShellCandidate"].pop("compositePatch")
     manifest_path.write_text(json.dumps(manifest))
 
     with pytest.raises(
         RoomCompileError,
         match="art draft shell image size .* must match visual master",
+    ):
+        compile_room(manifest_path, tmp_path / "runtime")
+
+
+def test_compile_room_rejects_drifted_composite_patch(tmp_path: Path) -> None:
+    manifest, manifest_path = editable_manifest(tmp_path)
+    patch = manifest["images"]["cleanShellCandidate"]["compositePatch"]
+    patch["mask"] = [980, 125, 1225, 460]
+    manifest_path.write_text(json.dumps(manifest))
+
+    with pytest.raises(
+        RoomCompileError,
+        match="compositePatch output does not match its approved image",
     ):
         compile_room(manifest_path, tmp_path / "runtime")
 

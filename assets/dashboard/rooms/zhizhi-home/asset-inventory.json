@@ -243,22 +243,104 @@
           "window-planter-right-chroma-v1.png": "Low rectangular wooden flower box with compact foliage and tiny warm flowers; planter only, excluding sill and window.",
           "window-hanging-plant-chroma-v1.png": "Leafy hanging basket with cords and a small vertical-wall hook; explicitly wall-mounted, never ceiling-mounted.",
           "window-string-lights-chroma-v1.png": "Irregular vertical loop of warm bulbs, wire and wall pins with only tight local halos; explicitly wall-mounted, never ceiling-mounted."
+        },
+        "alphaPostprocess": {
+          "helper": "imagegen/scripts/remove_chroma_key.py",
+          "keying": {"autoKey": "border", "transparentThreshold": 12, "opaqueThreshold": 220, "softMatte": true, "despill": true},
+          "sprites": {
+            "window-curtains-alpha-v1.png": {"crop": [295, 50, 1200, 1070], "resize": [270, 330]},
+            "window-planter-left-alpha-v1.png": {"crop": [320, 280, 920, 990], "resize": [65, 78]},
+            "window-planter-right-alpha-v1.png": {"crop": [320, 215, 1100, 890], "resize": [120, 85]},
+            "window-hanging-plant-alpha-v1.png": {"crop": [295, 100, 975, 1140], "resize": [120, 185]},
+            "window-string-lights-alpha-v1.png": {"crop": [370, 70, 815, 1285], "resize": [95, 220]}
+          }
         }
       },
       "note": "Window soft decor is split into five replaceable wall/sill assets. Window frame, glass/view and all ceiling/roof-mounted content are excluded from these candidates."
+    },
+    {
+      "id": "wave3-window-structure-shell-v1",
+      "targets": ["shell", "window-view", "window-frame"],
+      "status": "needs-art",
+      "method": "imagegen-precise-object-edit-and-background-extraction",
+      "sources": [
+        "sources/clean-shell-windowless-ai-v1.png",
+        "sources/clean-shell-windowless-aligned-v1.png",
+        "sources/clean-shell-windowless-composite-v1.png",
+        "sources/window-view-chroma-magenta-v1.png",
+        "sources/window-view-chroma-v2.png",
+        "sources/window-frame-chroma-v1.png",
+        "generated/window-view-alpha-v2.png",
+        "generated/window-frame-alpha-v1.png"
+      ],
+      "generation": {
+        "reference": "sources/clean-shell-neutral-light-aligned-v1.png and zhizhi-room-isometric-v2.png",
+        "prompts": {
+          "clean-shell-windowless-ai-v1.png": "Remove only the right-wall window assembly and reconstruct seamless warm plaster; preserve all room geometry and all pixels outside the edit region.",
+          "window-view-chroma-magenta-v1.png": "Evening city view panel with purple-pink sky, dark buildings, lit windows and treetops; view only on flat #ff00ff.",
+          "window-view-chroma-v2.png": "Same isolated evening city view regenerated on flat #00ff00 because the pink sky conflicted with magenta keying.",
+          "window-frame-chroma-v1.png": "Warm dark-wood outer window frame, central mullion, bevels, latch and projecting sill; frame only on flat #ff00ff."
+        },
+        "shellPostprocess": {
+          "alignResize": [1391, 1086],
+          "acceptedComposite": {"base": "sources/clean-shell-neutral-light-aligned-v1.png", "patch": "sources/clean-shell-windowless-aligned-v1.png", "mask": [985, 125, 1225, 460], "gaussianBlur": 8}
+        },
+        "alphaPostprocess": {
+          "helper": "imagegen/scripts/remove_chroma_key.py",
+          "keying": {"autoKey": "border", "transparentThreshold": 50, "opaqueThreshold": 160, "softMatte": true, "despill": true},
+          "sprites": {
+            "window-view-alpha-v2.png": {"source": "sources/window-view-chroma-v2.png", "crop": [130, 60, 880, 1490], "resize": [140, 225]},
+            "window-frame-alpha-v1.png": {"source": "sources/window-frame-chroma-v1.png", "crop": [330, 35, 1080, 1075], "resize": [165, 270]}
+          }
+        }
+      },
+      "note": "The full AI shell edit changed 9.5% of pixels outside the intended window region and was rejected as a direct replacement. The accepted composite uses only its local wall patch over the prior shell. The first magenta window view was also rejected because its sunset sky conflicted with the key color."
+    },
+    {
+      "id": "wave4-window-wall-art-chroma-v1",
+      "targets": ["wall-art-window-upper", "wall-art-window-lower", "wall-art-bedside"],
+      "status": "needs-art",
+      "method": "imagegen-background-extraction",
+      "sources": [
+        "sources/wall-art-window-upper-chroma-v1.png",
+        "sources/wall-art-window-lower-chroma-v1.png",
+        "sources/wall-art-bedside-chroma-v1.png",
+        "generated/wall-art-window-upper-alpha-v1.png",
+        "generated/wall-art-window-lower-alpha-v1.png",
+        "generated/wall-art-bedside-alpha-v1.png"
+      ],
+      "generation": {
+        "reference": "zhizhi-room-isometric-v2.png",
+        "background": "flat #ff00ff chroma",
+        "prompts": {
+          "wall-art-window-upper-chroma-v1.png": "Small upper blue-gray botanical framed print from the wall left of the window; framed artwork only.",
+          "wall-art-window-lower-chroma-v1.png": "Lower warm wood framed rust-orange and teal botanical landscape print; framed artwork only.",
+          "wall-art-bedside-chroma-v1.png": "Small muted teal framed botanical picture from the far right bedside wall; framed artwork only."
+        },
+        "alphaPostprocess": {
+          "helper": "imagegen/scripts/remove_chroma_key.py",
+          "keying": {"autoKey": "border", "transparentThreshold": 50, "opaqueThreshold": 160, "softMatte": true, "despill": true},
+          "sprites": {
+            "wall-art-window-upper-alpha-v1.png": {"crop": [370, 150, 890, 1100], "resize": [45, 90]},
+            "wall-art-window-lower-alpha-v1.png": {"crop": [250, 160, 870, 1230], "resize": [55, 95]},
+            "wall-art-bedside-alpha-v1.png": {"crop": [410, 190, 855, 1045], "resize": [45, 80]}
+          }
+        }
+      },
+      "note": "Three wall pictures remain independent wall objects and contain no wall, furniture, lighting, ceiling or roof pixels."
     }
   ],
   "items": [
-    {"id":"window-view","zone":"window","category":"structural-sub-layer","status":"planned","interactive":false},
-    {"id":"window-frame","zone":"window","category":"structural-sub-layer","status":"planned","interactive":false},
-    {"id":"window-curtains","zone":"window","category":"soft-furnishing","status":"planned","interactive":false,"note":"Art-draft asset exists: paired curtains and rod only; excludes the frame, view and wall."},
-    {"id":"window-planter-left","zone":"window","category":"plant","status":"planned","interactive":false,"note":"Art-draft asset exists: independent sill plant with no floor-path occupancy."},
-    {"id":"window-planter-right","zone":"window","category":"plant","status":"planned","interactive":false,"note":"Art-draft asset exists: independent sill flower box with no floor-path occupancy."},
+    {"id":"window-view","zone":"window","category":"structural-sub-layer","status":"planned","interactive":false,"note":"Independent art-draft city-view/window-opening layer; first magenta-key attempt rejected."},
+    {"id":"window-frame","zone":"window","category":"structural-sub-layer","status":"planned","interactive":false,"note":"Independent art-draft wood frame/mullion/sill carries curtains plus both sill planters."},
+    {"id":"window-curtains","zone":"window","category":"soft-furnishing","status":"planned","interactive":false,"note":"Art-draft paired curtains and rod attach to window-frame; pixels exclude frame, view and wall."},
+    {"id":"window-planter-left","zone":"window","category":"plant","status":"planned","interactive":false,"note":"Art-draft sill plant is attached to window-frame and has no floor-path occupancy."},
+    {"id":"window-planter-right","zone":"window","category":"plant","status":"planned","interactive":false,"note":"Art-draft sill flower box is attached to window-frame and has no floor-path occupancy."},
     {"id":"window-hanging-plant","zone":"window","category":"plant","status":"planned","interactive":false,"note":"Art-draft asset exists and mounts to a vertical wall hook, not the ceiling."},
     {"id":"window-string-lights","zone":"window","category":"lighting","status":"planned","interactive":false,"note":"Art-draft wall-mounted decorative light loop; not roof- or ceiling-mounted."},
-    {"id":"wall-art-window-upper","zone":"window","category":"wall-decoration","status":"planned","interactive":false},
-    {"id":"wall-art-window-lower","zone":"window","category":"wall-decoration","status":"planned","interactive":false},
-    {"id":"wall-art-bedside","zone":"bedroom","category":"wall-decoration","status":"planned","interactive":false},
+    {"id":"wall-art-window-upper","zone":"window","category":"wall-decoration","status":"planned","interactive":false,"note":"Independent art-draft wall picture left of the window."},
+    {"id":"wall-art-window-lower","zone":"window","category":"wall-decoration","status":"planned","interactive":false,"note":"Independent art-draft wall picture left of the window."},
+    {"id":"wall-art-bedside","zone":"bedroom","category":"wall-decoration","status":"planned","interactive":false,"note":"Independent art-draft wall picture on the far right bedside wall."},
 
     {"id":"desk","zone":"work","category":"furniture","status":"partial","interactive":true,"note":"Logical object and front matte exist; full RGB remains in master."},
     {"id":"office-chair","zone":"work","category":"furniture","status":"planned","interactive":false},
