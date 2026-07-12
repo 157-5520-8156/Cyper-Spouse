@@ -101,6 +101,19 @@
         "sources/kitchen-stove-counter-decor-chroma-v1.png"
       ],
       "note": "Counter decor is split by physical parent so hiding either base cabinet cannot leave props floating."
+    },
+    {
+      "id": "wave3-rugs-chroma-v1",
+      "targets": ["desk-rug", "dining-rug", "bed-rug", "living-rug"],
+      "status": "needs-art",
+      "method": "imagegen-background-extraction",
+      "sources": [
+        "sources/desk-rug-chroma-v1.png",
+        "sources/dining-rug-chroma-v1.png",
+        "sources/bed-rug-chroma-v1.png",
+        "sources/living-rug-chroma-v1.png"
+      ],
+      "note": "Four zone-specific floor rugs use independent body layers and never claim path occupancy."
     }
   ],
   "items": [

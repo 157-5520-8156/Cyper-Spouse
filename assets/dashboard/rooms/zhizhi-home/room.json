@@ -953,6 +953,110 @@
         "audits": {"hidden": true, "solo": true, "behind": false, "front": true},
         "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
         "audit": {"front": [1.25, 4.25, 0]}
+      },
+      {
+        "id": "desk-rug",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "depthTile": [1, 5, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "sources/desk-rug-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [25, 125, 1385, 925],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 50,
+            "opaqueThreshold": 160,
+            "despill": true,
+            "resize": [440, 280]
+          },
+          "output": "desk-rug-draft.png",
+          "origin": [105, 455],
+          "depthBias": -100
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "dining-rug",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "depthTile": [2, 1, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "sources/dining-rug-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [55, 185, 1360, 930],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 50,
+            "opaqueThreshold": 160,
+            "despill": true,
+            "resize": [340, 200]
+          },
+          "output": "dining-rug-draft.png",
+          "origin": [655, 410],
+          "depthBias": -100
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "bed-rug",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "depthTile": [6, 1, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "sources/bed-rug-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [145, 235, 1275, 870],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 50,
+            "opaqueThreshold": 160,
+            "despill": true,
+            "resize": [260, 130]
+          },
+          "output": "bed-rug-draft.png",
+          "origin": [1070, 620],
+          "depthBias": -100
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "living-rug",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "depthTile": [5, 6, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "sources/living-rug-chroma-v1.png",
+          "sourceTransform": {
+            "crop": [10, 125, 1410, 950],
+            "chromaKey": "#ff00ff",
+            "transparentThreshold": 50,
+            "opaqueThreshold": 160,
+            "despill": true,
+            "resize": [700, 345]
+          },
+          "output": "living-rug-draft.png",
+          "origin": [320, 690],
+          "depthBias": -100
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
       }
     ]
   },

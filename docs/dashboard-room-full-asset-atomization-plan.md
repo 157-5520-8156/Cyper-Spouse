@@ -12,7 +12,8 @@
 - [x] 波次 0：通用对象 `layers / occupancy / audits / provenance` schema；`teal-stool` 已作为无互动原生对象接入，旧对象经 Compiler 归一化到同一 bundle 契约。
 - [ ] 波次 1：主要遮挡家具（进行中：clean shell 与 16 个家具/附属对象已进入可编译 `artDraft`，仍需逐件校准和删除测试）。
 - [x] 波次 2：厨房与大型收纳草稿功能闭环（29 个对象、36 个构建资产；全部厨房对象可删除，父子联动、适用遮挡与餐厨动作/路径通过；素材仍保持 `needs-art`，终稿基线在波次 6 统一批准）。
-- [ ] 波次 3–6：软装/灯/植物、decor、路径动作与最终验收。
+- [ ] 波次 3：地毯、灯具、植物与窗区（进行中：四块独立地毯已接入，草稿增至 33 对象、40 个构建资产；灯具、植物和窗区待处理）。
+- [ ] 波次 4–6：decor、路径动作与最终验收。
 
 ### 波次 0 验收记录
 
@@ -322,6 +323,8 @@ Runtime 不包含家具名称特判。层角色、depthTile、occupancy 与 inte
 - 四块地毯、所有落地/台面/吊灯、主要盆栽、窗帘、窗台植物、吊篮与灯串。
 
 验收：灯具隐藏会同时移除其局部光效；地毯不阻塞路径；窗帘与植物深度正确。
+
+当前进度：`desk-rug / dining-rug / bed-rug / living-rug` 已作为四个 `soft-furnishing` 对象接入，统一使用 `body` 图层与 `occupancy.kind=none`。浏览器完成八项 hidden/solo 矩阵，每个 hidden 只移除目标、每个 solo 只保留目标；实际 tour 经过工作区与客厅地毯，路径和家具遮挡未改变。四件素材仍为 `planned / needs-art`，灯具、植物和窗区尚未开始。
 
 ### 波次 4：桌面、柜内和墙面 decor clusters
 

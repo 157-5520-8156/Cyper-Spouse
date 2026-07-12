@@ -1587,7 +1587,11 @@
       "ovenFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/oven-draft.png",
       "kitchenShelfBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-shelf-draft.png",
       "kitchenUtensilRailBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-utensil-rail-draft.png",
-      "kitchenBinFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-bin-draft.png"
+      "kitchenBinFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/kitchen-bin-draft.png",
+      "deskRugBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-rug-draft.png",
+      "diningRugBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/dining-rug-draft.png",
+      "bedRugBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-rug-draft.png",
+      "livingRugBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/living-rug-draft.png"
     },
     "objects": [
       {
@@ -2954,6 +2958,158 @@
             0
           ]
         },
+        "auditPose": {}
+      },
+      {
+        "id": "desk-rug",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "tile": [
+          1,
+          5,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "deskRugBody0Draft",
+            "origin": [
+              105,
+              455
+            ],
+            "depthBias": -100
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "dining-rug",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "tile": [
+          2,
+          1,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "diningRugBody0Draft",
+            "origin": [
+              655,
+              410
+            ],
+            "depthBias": -100
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "bed-rug",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "tile": [
+          6,
+          1,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "bedRugBody0Draft",
+            "origin": [
+              1070,
+              620
+            ],
+            "depthBias": -100
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "living-rug",
+        "category": "soft-furnishing",
+        "assetMode": "layered",
+        "tile": [
+          5,
+          6,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "livingRugBody0Draft",
+            "origin": [
+              320,
+              690
+            ],
+            "depthBias": -100
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
         "auditPose": {}
       }
     ]

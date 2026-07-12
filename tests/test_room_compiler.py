@@ -88,12 +88,21 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "kitchen-wall-cabinet-decor", "kitchen-sink-counter",
         "kitchen-stove-counter", "kitchen-sink-counter-decor",
         "kitchen-stove-counter-decor", "fridge", "oven", "kitchen-shelf",
-        "kitchen-utensil-rail", "kitchen-bin",
+        "kitchen-utensil-rail", "kitchen-bin", "desk-rug", "dining-rug",
+        "bed-rug", "living-rug",
     ]
     assert bundle["artDraft"]["objects"][0]["layers"][0]["image"] == "sofaFront0Draft"
     bookcase = next(item for item in bundle["artDraft"]["objects"] if item["id"] == "tall-bookcase")
     assert [layer["role"] for layer in bookcase["layers"]] == ["front"]
     assert bookcase["audits"]["behind"] and bookcase["audits"]["front"]
+    rugs = [
+        item for item in bundle["artDraft"]["objects"]
+        if item["id"] in {"desk-rug", "dining-rug", "bed-rug", "living-rug"}
+    ]
+    assert len(rugs) == 4
+    assert all(item["category"] == "soft-furnishing" for item in rugs)
+    assert all(item["occupancy"] == {"kind": "none", "tiles": []} for item in rugs)
+    assert all([layer["role"] for layer in item["layers"]] == ["body"] for item in rugs)
 
     master = Image.open(ROOT / "assets/dashboard/zhizhi-room-isometric-v2.png").convert("RGBA")
     matte = Image.open(ROOT / "assets/dashboard/layers/desk-front-v1.png").convert("RGBA")
@@ -128,6 +137,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
             "kitchen-stove-counter-decor-draft.png", "fridge-draft.png",
             "oven-draft.png", "kitchen-shelf-draft.png",
             "kitchen-utensil-rail-draft.png", "kitchen-bin-draft.png",
+            "desk-rug-draft.png", "dining-rug-draft.png",
+            "bed-rug-draft.png", "living-rug-draft.png",
         )
     )
 
@@ -315,10 +326,15 @@ def test_compile_room_replaces_stale_runtime_as_one_complete_output(
     stale.write_bytes(b"old")
 
     report = compile_room(ROOM_MANIFEST, output_dir)
+    bundle = json.loads(report.bundle_path.read_text())
+    expected_layer_count = sum(
+        len(item["layers"])
+        for item in [*bundle["objects"], *bundle["artDraft"]["objects"]]
+    )
 
     assert report.bundle_path == output_dir / "room.bundle.json"
     assert not stale.exists()
-    assert len(report.generated_assets) == 36
+    assert len(report.generated_assets) == expected_layer_count
 
 
 @pytest.mark.parametrize(
