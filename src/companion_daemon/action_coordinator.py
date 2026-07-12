@@ -25,6 +25,7 @@ class OutgoingSegment:
     segment_id: str
     position: int
     text: str
+    delay_before_ms: int = 0
     status: DeliveryStatus = DeliveryStatus.PLANNED
     external_receipt: str | None = None
     terminal_reason: str | None = None
@@ -52,18 +53,31 @@ class SegmentedOutgoingAction:
 class SegmentedActionCoordinator:
     """Pure state machine for one ordered, interruptible outgoing Action."""
 
-    def plan_action(self, *, action_id: str, texts: Sequence[str]) -> SegmentedOutgoingAction:
+    def plan_action(
+        self,
+        *,
+        action_id: str,
+        texts: Sequence[str],
+        delays_before_ms: Sequence[int] | None = None,
+    ) -> SegmentedOutgoingAction:
         if not action_id.strip():
             raise ValueError("action_id must not be blank")
         if not texts:
             raise ValueError("an outgoing action needs at least one segment")
         if any(not text.strip() for text in texts):
             raise ValueError("outgoing segments must not be blank")
+        delays = tuple(delays_before_ms or (0,) * len(texts))
+        if len(delays) != len(texts) or any(
+            type(delay) is not int or not 0 <= delay <= 20_000
+            for delay in delays
+        ):
+            raise ValueError("outgoing segment delays must match bounded texts")
         segments = tuple(
             OutgoingSegment(
                 segment_id=f"{action_id}:segment:{position}",
                 position=position,
                 text=text,
+                delay_before_ms=delays[position],
             )
             for position, text in enumerate(texts)
         )
@@ -188,6 +202,7 @@ class SegmentedActionCoordinator:
                     "segment_id": segment.segment_id,
                     "position": segment.position,
                     "text": segment.text,
+                    "delay_before_ms": segment.delay_before_ms,
                     "status": segment.status.value,
                     "external_receipt": segment.external_receipt,
                     "terminal_reason": segment.terminal_reason,
@@ -205,11 +220,15 @@ class SegmentedActionCoordinator:
         for raw_segment in raw_segments:
             if not isinstance(raw_segment, Mapping):
                 raise ValueError("action projection segment must be an object")
+            delay_before_ms = int(raw_segment.get("delay_before_ms") or 0)
+            if not 0 <= delay_before_ms <= 20_000:
+                raise ValueError("action projection segment delay is out of bounds")
             segments.append(
                 OutgoingSegment(
                     segment_id=str(raw_segment["segment_id"]),
                     position=int(raw_segment["position"]),
                     text=str(raw_segment["text"]),
+                    delay_before_ms=delay_before_ms,
                     status=DeliveryStatus(str(raw_segment["status"])),
                     external_receipt=(
                         str(raw_segment["external_receipt"])

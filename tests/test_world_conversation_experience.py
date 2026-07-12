@@ -50,6 +50,42 @@ def _world_engine(tmp_path: Path, model: object) -> tuple[WorldKernel, str, Comp
     return world, world_id, engine
 
 
+@pytest.mark.asyncio
+async def test_world_reply_uses_model_selected_expression_beats_as_one_action(
+    tmp_path: Path,
+) -> None:
+    class BeatModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"先骂两句。再慢慢说。",'
+                '"expression_beats":[{"text":"先骂两句。","delay_ms":0},'
+                '{"text":"再慢慢说。","delay_ms":1200}],'
+                '"display_strategy":"陪伴后追问",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    world, world_id, engine = _world_engine(tmp_path, BeatModel())
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="model-beats",
+            text="这个需求真烦，我想先骂两句。",
+        ),
+        defer_delivery=True,
+    )
+
+    assert reply is not None
+    assert reply.text_parts == ["先骂两句。", "再慢慢说。"]
+    assert reply.part_delays_ms == [0, 1200]
+    action = world.snapshot(world_id)["actions"][str(reply.world_action_id)]
+    assert [item["delay_before_ms"] for item in action["segment_state"]["segments"]] == [
+        0,
+        1200,
+    ]
+    assert action["trace"]["display_strategy"] == "陪伴后追问"
+
+
 def test_production_world_seed_materializes_the_activity_active_at_epoch_start(
     tmp_path: Path,
 ) -> None:

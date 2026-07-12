@@ -53,6 +53,7 @@ class CompanionReply(BaseModel):
     mood: Mood
     text: str
     text_parts: list[str] = Field(default_factory=list)
+    part_delays_ms: list[int] = Field(default_factory=list)
     platform_context: str | None = None
     sticker_path: str | None = None
     image_path: str | None = None

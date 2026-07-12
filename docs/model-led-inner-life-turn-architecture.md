@@ -263,6 +263,17 @@ class MindProposal:
 `UserMeaningHypothesis` 是角色的有置信度理解，不是 User Fact。`MindProposal` 是 Proposal，
 不能直接写 World 或调用平台。
 
+当前迁移实现先提供向后兼容的 `MindProposalJSON` 外壳：旧的四字段
+`WorldReplyJSON` 仍等价于一个只有 `candidate` 的 Proposal；可选
+`expression_beats` 最多三段，必须精确拼回 `reply_text`，首段延迟为零，后续段延迟被限制在
+0–20 秒并写入同一 Action 的 segment projection。平台回执和用户插话仍逐段结算/取消。该
+外壳不保存自由推理文本；`private_impressions` 和 `private_commitments` 的模型提案会在下一
+迁移切片接入既有的原子 Commit Policy，不能因为出现在 JSON 中就直接持久化。
+
+每个 Beat 仍受该 turn 的 `complete_by` deadline 约束：若请求的自然间隔已无法在剩余预算内
+完成，系统取消未发 remainder，而不是拖住下一轮或伪造已送达。等待期间不会持有 Action
+锁，用户的实质插话可以立即取消后续 Beat。
+
 ### 6.4 `PrivateImpression`
 
 角色对用户、关系或事件的可错解释，例如“我怀疑他刚才有点失望”。它必须带来源、置信度、

@@ -75,6 +75,7 @@ class TurnBeat:
     text: str
     platform: str
     canonical_user_id: str
+    delay_before_ms: int = 0
 
 
 @dataclass(frozen=True)
@@ -349,7 +350,16 @@ class CompanionTurn:
     async def settle(self, observation: ExternalObservation) -> SettlementOutcome:
         self._recover_receipt_watchdogs()
         async with self._action_locks.setdefault(observation.action_id, asyncio.Lock()):
-            return await self._settle(observation, advance=True)
+            settled = await self._settle(observation, advance=False)
+        if observation.status == "delivered" and settled.terminal_state is None:
+            return await self._advance_after_cadence(
+                action_id=observation.action_id,
+                delivery_id=observation.delivery_id,
+                observed_at=observation.observed_at,
+                idempotency_prefix=observation.idempotency_key,
+                advance=True,
+            )
+        return settled
 
     async def interrupt(
         self, turn: TurnEnvelope, *, kind: Literal["backchannel", "substantive"]
@@ -390,14 +400,6 @@ class CompanionTurn:
                 )
             ):
                 terminal: TerminalState | None = "delivered"
-            elif advance:
-                return await self._advance_after_cadence(
-                    action_id=observation.action_id,
-                    delivery_id=observation.delivery_id,
-                    observed_at=observation.observed_at,
-                    idempotency_prefix=observation.idempotency_key,
-                    advance=True,
-                )
             else:
                 terminal = None
         elif observation.status == "failed":
@@ -508,6 +510,7 @@ class CompanionTurn:
             text=str(raw_segment.get("text") or ""),
             platform=str(action.get("platform") or ""),
             canonical_user_id=str(action.get("canonical_user_id") or ""),
+            delay_before_ms=int(raw_segment.get("delay_before_ms") or 0),
         )
         try:
             if remaining_seconds is None:
@@ -586,14 +589,13 @@ class CompanionTurn:
     ) -> None:
         async def run() -> None:
             try:
-                async with self._action_locks.setdefault(action_id, asyncio.Lock()):
-                    await self._advance_after_cadence(
-                        action_id=action_id,
-                        delivery_id=delivery_id,
-                        observed_at=observed_at,
-                        idempotency_prefix=idempotency_prefix,
-                        advance=True,
-                    )
+                await self._advance_after_cadence(
+                    action_id=action_id,
+                    delivery_id=delivery_id,
+                    observed_at=observed_at,
+                    idempotency_prefix=idempotency_prefix,
+                    advance=True,
+                )
             except (WorldError, ValueError):
                 return
 
@@ -700,29 +702,79 @@ class CompanionTurn:
         idempotency_prefix: str,
         advance: bool,
     ) -> SettlementOutcome:
-        await self.sleep(self.cadence_delay_seconds)
-        if not self._has_planned_beat(action_id):
-            action = self._action(action_id)
-            state = str(action.get("status") or "")
-            terminal: TerminalState | None = None
-            if state in {"delivered", "failed", "cancelled", "unknown"}:
-                terminal = state  # type: ignore[assignment]
-            if terminal is not None:
-                await self._present_after_text(action_id, terminal)
-            world = self.engine.world_kernel
-            assert world is not None
-            return SettlementOutcome(
+        delay_seconds = self._next_beat_delay_seconds(action_id)
+        action = self._action(action_id)
+        deadline_raw = str(action.get("complete_by_observed_at") or "")
+        if deadline_raw:
+            remaining = (datetime.fromisoformat(deadline_raw) - utc_now()).total_seconds()
+            if remaining <= 0 or delay_seconds >= remaining:
+                world = self.engine.world_kernel
+                world_id = self.engine.world_id
+                assert world is not None and world_id is not None
+                world.expire_outgoing_remainder(
+                    delivery_id,
+                    reason="next expression beat cannot fit completion deadline",
+                    expected_revision=world.revision(world_id),
+                )
+                await self._present_after_text(action_id, "cancelled")
+                return SettlementOutcome(
+                    action_id=action_id,
+                    terminal_state="cancelled",
+                    committed_revision=world.revision(world_id),
+                )
+        # Do not hold the Action lock while a natural beat interval elapses:
+        # a substantive user interjection must be able to cancel the remainder.
+        await self.sleep(delay_seconds)
+        async with self._action_locks.setdefault(action_id, asyncio.Lock()):
+            if not self._has_planned_beat(action_id):
+                action = self._action(action_id)
+                state = str(action.get("status") or "")
+                terminal: TerminalState | None = None
+                if state in {"delivered", "failed", "cancelled", "unknown"}:
+                    terminal = state  # type: ignore[assignment]
+                if terminal is not None:
+                    await self._present_after_text(action_id, terminal)
+                world = self.engine.world_kernel
+                assert world is not None
+                return SettlementOutcome(
+                    action_id=action_id,
+                    terminal_state=terminal,
+                    committed_revision=world.revision(self.engine.world_id or ""),
+                )
+            dispatched = await self._dispatch_next(
                 action_id=action_id,
-                terminal_state=terminal,
-                committed_revision=world.revision(self.engine.world_id or ""),
+                delivery_id=delivery_id,
+                observed_at=observed_at,
+                idempotency_prefix=idempotency_prefix,
+                advance=advance,
             )
-        return await self._dispatch_next(
-            action_id=action_id,
-            delivery_id=delivery_id,
-            observed_at=observed_at,
-            idempotency_prefix=idempotency_prefix,
-            advance=advance,
+            if dispatched.terminal_state is None and self._has_planned_beat(action_id):
+                self._start_continuation(
+                    action_id=action_id,
+                    delivery_id=delivery_id,
+                    observed_at=observed_at,
+                    idempotency_prefix=idempotency_prefix,
+                )
+            return dispatched
+
+    def _next_beat_delay_seconds(self, action_id: str) -> float:
+        """Use a model-selected bounded pause, otherwise retain cadence."""
+        action = self._action(action_id)
+        segments = action.get("segment_state", {}).get("segments", [])
+        if not isinstance(segments, list):
+            return self.cadence_delay_seconds
+        next_segment = next(
+            (
+                item
+                for item in segments
+                if isinstance(item, dict) and item.get("status") == "planned"
+            ),
+            None,
         )
+        if not isinstance(next_segment, dict):
+            return 0.0
+        delay_ms = int(next_segment.get("delay_before_ms") or 0)
+        return delay_ms / 1000 if delay_ms > 0 else self.cadence_delay_seconds
 
     async def _cancel_interrupted_actions(self, turn: TurnEnvelope, *, force: bool = False) -> None:
         """A substantive new user turn takes over any partially delivered reply."""

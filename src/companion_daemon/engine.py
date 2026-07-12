@@ -83,6 +83,7 @@ from companion_daemon.model_call_policy import (
     TurnModelCallBudget,
 )
 from companion_daemon.memory import extract_memories, is_durable_user_fact
+from companion_daemon.mind_proposal import MindProposal, parse_mind_proposal
 from companion_daemon.models import (
     CompanionReply,
     IncomingMessage,
@@ -2151,10 +2152,12 @@ class CompanionEngine:
                             "role": "user",
                             "content": (
                                 f"{context_block}\n\n用户: {message.text}\n"
-                                "WorldReplyJSON: 只返回 JSON。事实或经历声明要把来源的 source_id 放入 mentioned_event_ids；"
+                                "MindProposalJSON: 只返回 JSON。旧 WorldReplyJSON 也兼容。事实或经历声明要把来源的 source_id 放入 mentioned_event_ids；"
                                 "claims.text 必须逐字复制来源证据，claims.assertion 必须逐字复制 reply_text 中对应的自然陈述。"
                                 "猜测、建议和问题不是事实声明，不要为它们创建 claim："
-                                '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
+                                "若自然地分成 2–3 段，可额外给 expression_beats，所有 text 必须按顺序精确拼成 reply_text，"
+                                "每段可有 delay_ms(0–20000，首段为0)；不要为了结构而拆句："
+                                '{"reply_text":"...","expression_beats":[{"text":"...","delay_ms":0}],"display_strategy":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
                             ),
                         },
                     ], temperature=0.75),
@@ -2192,6 +2195,7 @@ class CompanionEngine:
             "proposed_action_ids": [],
             "claims": [],
         }
+        mind_proposal: MindProposal | None = None
         fallback_needs_audit = False
         related_npc_experiences: list[dict[str, object]] = []
         action_settlement_ids: tuple[str, ...] = ()
@@ -2235,7 +2239,8 @@ class CompanionEngine:
             )
         ]
         try:
-            parsed_candidate = parse_reply_candidate(raw)
+            mind_proposal = parse_mind_proposal(raw)
+            parsed_candidate = mind_proposal.candidate
             candidate, guard_resolution = self._guard_reply_candidate(
                 parsed_candidate, user_id=user_id
             )
@@ -2561,10 +2566,12 @@ class CompanionEngine:
                     )
                     try:
                         try:
-                            repaired_candidate = parse_reply_candidate(repaired_raw)
+                            mind_proposal = parse_mind_proposal(repaired_raw)
+                            repaired_candidate = mind_proposal.candidate
                         except WorldError:
                             try:
                                 repaired_candidate = recover_structured_reply(repaired_raw)
+                                mind_proposal = None
                             except (ValueError, json.JSONDecodeError) as recovery_error:
                                 raise WorldError(
                                     "reply repair did not contain recoverable JSON"
@@ -2724,9 +2731,25 @@ class CompanionEngine:
             action_settlement_ids = ()
         text = sanitize_world_chat_text(str(candidate["reply_text"]))
         public_mood_value = public_mood(modulation)
-        text_parts = split_reply_text(text, MoodState(mood=public_mood_value))
+        proposed_parts = (
+            [beat.text for beat in mind_proposal.expression_beats]
+            if mind_proposal is not None
+            and str(mind_proposal.candidate.get("reply_text") or "")
+            == str(candidate.get("reply_text") or "")
+            else []
+        )
+        proposed_delays = (
+            [beat.delay_ms for beat in mind_proposal.expression_beats]
+            if proposed_parts
+            else []
+        )
+        text_parts = proposed_parts or split_reply_text(
+            text, MoodState(mood=public_mood_value)
+        )
         if not text_parts or "".join(text_parts) != text:
             text_parts = [text]
+            proposed_delays = []
+        part_delays_ms = proposed_delays or [0] * len(text_parts)
         question = self._world_reply_question(text)
         expires_at = self._world_logical_now() + timedelta(hours=12)
         trace: dict[str, object] = {
@@ -2747,6 +2770,8 @@ class CompanionEngine:
                 "action_ids": list(action_settlement_ids),
                 "status": "pending_guard_settlement",
             }
+        if mind_proposal is not None and mind_proposal.display_strategy:
+            trace["display_strategy"] = mind_proposal.display_strategy
         if question:
             thread_id = "thread:" + sha256(
                 f"{user_id}|{message.message_id}|{question}".encode("utf-8")
@@ -2774,6 +2799,7 @@ class CompanionEngine:
             platform=message.platform,
             text=text,
             text_parts=text_parts,
+            part_delays_ms=part_delays_ms,
             kind="reply",
             expires_at=expires_at,
             trace=trace,
@@ -2784,6 +2810,7 @@ class CompanionEngine:
             mood=public_mood_value,
             text=text,
             text_parts=text_parts,
+            part_delays_ms=part_delays_ms,
             delivery_id=delivery_id,
             turn_trace_id=trace_id,
             world_action_id=action_id,

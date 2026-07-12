@@ -1006,6 +1006,7 @@ class QQMessageCoalescer:
             sent_completely = await _send_reply_parts(
                 reply_target,
                 reply.text_parts or [reply.text],
+                part_delays_ms=reply.part_delays_ms,
                 sleep=self.sleep,
                 rng=self.rng,
                 human_timing=self.human_timing,
@@ -1570,6 +1571,7 @@ async def _send_reply_parts(
     reply_target: ReplyTarget,
     parts: list[str],
     *,
+    part_delays_ms: list[int] | None = None,
     sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     rng: random.Random | None = None,
     human_timing: bool = True,
@@ -1578,14 +1580,21 @@ async def _send_reply_parts(
     after_part: Callable[[int, str, object], None] | None = None,
 ) -> bool:
     rng = rng or random.Random()
+    planned_delays = part_delays_ms or [0] * len(parts)
+    if len(planned_delays) != len(parts):
+        planned_delays = [0] * len(parts)
     for index, part in enumerate(parts):
         if should_continue and not should_continue():
             return False
         if index:
             delay = (
-                between_part_delay_seconds(part, rng=rng)
-                if human_timing
-                else min(1.8, 0.45 + len(part) / 45)
+                planned_delays[index] / 1000
+                if planned_delays[index] > 0
+                else (
+                    between_part_delay_seconds(part, rng=rng)
+                    if human_timing
+                    else min(1.8, 0.45 + len(part) / 45)
+                )
             )
             await sleep(delay)
             if should_continue and not should_continue():

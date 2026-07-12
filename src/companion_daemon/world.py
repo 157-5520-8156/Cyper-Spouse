@@ -583,6 +583,7 @@ class WorldKernel:
         platform: str,
         text: str,
         text_parts: list[str] | tuple[str, ...] | None = None,
+        part_delays_ms: list[int] | tuple[int, ...] | None = None,
         kind: str,
         expires_at: datetime,
         trace: dict[str, object],
@@ -592,6 +593,12 @@ class WorldKernel:
         parts = tuple(text_parts or (text,))
         if "".join(parts) != text:
             raise WorldError("outgoing text_parts must concatenate to text")
+        delays = tuple(part_delays_ms or (0,) * len(parts))
+        if len(delays) != len(parts) or any(
+            type(delay) is not int or not 0 <= delay <= 20_000
+            for delay in delays
+        ):
+            raise WorldError("outgoing part delays must match bounded text parts")
         world_id = str(trace.get("world_id") or "")
         if not world_id:
             raise WorldError("world delivery trace requires world_id")
@@ -716,7 +723,9 @@ class WorldKernel:
                         )
                     )
                 segmented = self.action_coordinator.plan_action(
-                    action_id=action_id, texts=parts
+                    action_id=action_id,
+                    texts=parts,
+                    delays_before_ms=delays,
                 )
                 segment_projection = self.action_coordinator.to_projection(segmented)
                 planned_event = self.action_coordinator.planned_world_event(segmented)

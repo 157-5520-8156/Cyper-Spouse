@@ -40,6 +40,16 @@ class MultiBeatReplyModel:
         )
 
 
+class TimedMultiBeatReplyModel:
+    async def complete(self, messages, *, temperature: float) -> str:
+        return (
+            '{"reply_text":"第一句先到。第二句隔一会儿。",'
+            '"expression_beats":[{"text":"第一句先到。","delay_ms":0},'
+            '{"text":"第二句隔一会儿。","delay_ms":1200}],'
+            '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+        )
+
+
 class RecordingTransport:
     def __init__(self, acceptance: DispatchAcceptance) -> None:
         self.acceptance = acceptance
@@ -134,6 +144,7 @@ def _turn_runtime(
     model: object | None = None,
     presenter: TurnPresenter | None = None,
     cadence_delay_seconds: float = 0.3,
+    sleep=None,
 ) -> tuple[CompanionTurn, WorldKernel, str]:
     store = CompanionStore(tmp_path / "companion-turn.sqlite")
     seed_user(store)
@@ -152,6 +163,7 @@ def _turn_runtime(
             transport,
             presenter=presenter,
             cadence_delay_seconds=cadence_delay_seconds,
+            **({"sleep": sleep} if sleep is not None else {}),
         ),
         world,
         world_id,
@@ -535,6 +547,102 @@ async def test_presentation_wraps_all_text_beats_and_only_finishes_at_terminal(
     presentation = presenter.presentations[0]
     assert presentation.action_id == outcome.action_ids[0]
     assert presentation.incoming.message_id == "qq:geoff:turn-presentation"
+
+
+@pytest.mark.asyncio
+async def test_v2_continuation_uses_persisted_model_beat_delay(tmp_path: Path) -> None:
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    transport = SequencedTransport(
+        [
+            DispatchAcceptance(status="delivered", external_receipt="receipt:timed:1"),
+            DispatchAcceptance(status="delivered", external_receipt="receipt:timed:2"),
+        ]
+    )
+    runtime, _, _ = _turn_runtime(
+        tmp_path,
+        transport,
+        model=TimedMultiBeatReplyModel(),
+        sleep=fake_sleep,
+    )
+
+    await runtime.respond(
+        _envelope("turn-model-delay"),
+        budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
+    )
+    await runtime.wait_for_delivery_continuations()
+
+    assert [beat.position for beat in transport.beats] == [0, 1]
+    assert transport.beats[1].delay_before_ms == 1200
+    assert delays == [1.2]
+
+
+@pytest.mark.asyncio
+async def test_v2_interruption_cancels_a_delayed_beat_without_waiting_for_its_sleep(
+    tmp_path: Path,
+) -> None:
+    class HeldSleep:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def __call__(self, _seconds: float) -> None:
+            self.started.set()
+            await self.release.wait()
+
+    held_sleep = HeldSleep()
+    transport = SequencedTransport(
+        [
+            DispatchAcceptance(status="delivered", external_receipt="receipt:interrupt-delay:1"),
+            DispatchAcceptance(status="delivered", external_receipt="receipt:interrupt-delay:2"),
+        ]
+    )
+    runtime, world, world_id = _turn_runtime(
+        tmp_path,
+        transport,
+        model=TimedMultiBeatReplyModel(),
+        sleep=held_sleep,
+    )
+    outcome = await runtime.respond(
+        _envelope("turn-delay-interrupt"),
+        budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
+    )
+    await held_sleep.started.wait()
+
+    cancelled = await runtime.interrupt(
+        _envelope("turn-delay-interrupt-takeover"), kind="substantive"
+    )
+    held_sleep.release.set()
+    await runtime.wait_for_delivery_continuations()
+
+    assert cancelled == (f"{outcome.action_ids[0]}:segment:1",)
+    assert len(transport.beats) == 1
+    action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
+    assert action["segment_state"]["segments"][1]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_v2_drops_a_model_delayed_remainder_that_cannot_fit_the_deadline(
+    tmp_path: Path,
+) -> None:
+    transport = SequencedTransport(
+        [DispatchAcceptance(status="delivered", external_receipt="receipt:deadline-delay:1")]
+    )
+    runtime, world, world_id = _turn_runtime(
+        tmp_path, transport, model=TimedMultiBeatReplyModel()
+    )
+    outcome = await runtime.respond(
+        _envelope("turn-delay-deadline"),
+        budget=ResponseBudget(first_visible_by_ms=300, complete_by_ms=500),
+    )
+    await runtime.wait_for_delivery_continuations()
+
+    action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
+    assert len(transport.beats) == 1
+    assert action["segment_state"]["segments"][1]["status"] == "cancelled"
 
 
 @pytest.mark.asyncio

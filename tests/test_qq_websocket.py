@@ -1104,6 +1104,32 @@ async def test_send_reply_parts_uses_human_delay_between_parts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_send_reply_parts_honors_a_model_selected_bounded_delay() -> None:
+    class FakeTarget:
+        def __init__(self) -> None:
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs) -> None:
+            self.replies.append(kwargs["content"])
+
+    delays: list[float] = []
+
+    async def fake_sleep(seconds: float) -> None:
+        delays.append(seconds)
+
+    sent = await _send_reply_parts(
+        FakeTarget(),
+        ["先说。", "再补一句。"],
+        part_delays_ms=[0, 1200],
+        sleep=fake_sleep,
+        human_timing=True,
+    )
+
+    assert sent is True
+    assert delays == [1.2]
+
+
+@pytest.mark.asyncio
 async def test_send_reply_parts_reports_interruption_after_a_partial_delivery() -> None:
     class FakeTarget:
         def __init__(self):

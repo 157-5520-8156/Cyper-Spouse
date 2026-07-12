@@ -22,7 +22,6 @@ def test_outgoing_action_plans_ordered_segments_and_claims_only_the_first() -> N
         DeliveryStatus.PLANNED,
         DeliveryStatus.PLANNED,
     ]
-
     action, claimed = coordinator.claim_next(action)
 
     assert claimed.segment_id == "outgoing:42:segment:0"
@@ -33,6 +32,19 @@ def test_outgoing_action_plans_ordered_segments_and_claims_only_the_first() -> N
         DeliveryStatus.PLANNED,
         DeliveryStatus.PLANNED,
     ]
+
+
+def test_outgoing_action_preserves_model_selected_segment_delays() -> None:
+    coordinator = SegmentedActionCoordinator()
+
+    action = coordinator.plan_action(
+        action_id="outgoing:timed",
+        texts=("先说这句。", "这句稍后。"),
+        delays_before_ms=(0, 1200),
+    )
+    restored = coordinator.from_projection(coordinator.to_projection(action))
+
+    assert [segment.delay_before_ms for segment in restored.segments] == [0, 1200]
 
 
 def test_substantive_user_interjection_cancels_unsent_segments_after_first_delivery() -> None:
@@ -239,6 +251,7 @@ def test_action_projection_round_trip_preserves_delivery_evidence() -> None:
                 "segment_id": "outgoing:53:segment:0",
                 "position": 0,
                 "text": "已确认送达。",
+                "delay_before_ms": 0,
                 "status": "delivered",
                 "external_receipt": "qq:message-404",
                 "terminal_reason": None,
@@ -247,6 +260,7 @@ def test_action_projection_round_trip_preserves_delivery_evidence() -> None:
                 "segment_id": "outgoing:53:segment:1",
                 "position": 1,
                 "text": "仍在计划。",
+                "delay_before_ms": 0,
                 "status": "planned",
                 "external_receipt": None,
                 "terminal_reason": None,
@@ -272,6 +286,7 @@ def test_planned_segments_expose_a_stable_world_event_payload() -> None:
                     "segment_id": "outgoing:54:segment:0",
                     "position": 0,
                     "text": "先发这一句。",
+                    "delay_before_ms": 0,
                     "status": "planned",
                     "external_receipt": None,
                     "terminal_reason": None,
@@ -280,6 +295,7 @@ def test_planned_segments_expose_a_stable_world_event_payload() -> None:
                     "segment_id": "outgoing:54:segment:1",
                     "position": 1,
                     "text": "再发这一句。",
+                    "delay_before_ms": 0,
                     "status": "planned",
                     "external_receipt": None,
                     "terminal_reason": None,
