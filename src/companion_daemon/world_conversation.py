@@ -137,8 +137,29 @@ def classify_world_query(text: str) -> WorldQueryScope:
 def build_safe_failure_candidate(
     user_text: str,
     grounded: dict[str, object] | None,
+    affect: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Preserve the user's speech act when both bounded model attempts fail."""
+    if affect and bool(affect.get("unresolved")) and not any(
+        marker in user_text
+        for marker in (
+            "什么", "谁", "哪", "为什么", "记得", "上午", "下午",
+            "发生", "完成", "计划", "项目", "胃", "数据", "在做", "在哪",
+        )
+    ):
+        behavior = str(affect.get("behavior_tendency") or "")
+        state_backed_fallbacks = {
+            "withdraw": "我还没完全缓过来，先说短一点；不是在惩罚你。",
+            "guarded": "刚才那件事我还在消化，不想装作完全没事。",
+            "patient": "我还在消化，不急着把这件事解释成什么。",
+            "repair_open": "我愿意继续聊，但情绪还没一下子过去。",
+            "caring": "你可以先不用解释完整，我在这儿听着。",
+        }
+        if behavior in state_backed_fallbacks:
+            return {
+                "reply_text": state_backed_fallbacks[behavior],
+                "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
+            }
     asks_for_missing_detail = asks_for_source_detail(user_text)
     if "为什么" in user_text and any(
         marker in user_text for marker in ("没睡", "睡不好", "失眠")
@@ -165,6 +186,11 @@ def build_safe_failure_candidate(
     if _EPISTEMIC_INSTRUCTION.search("".join(user_text.split())):
         return {
             "reply_text": "我没有足够依据，不继续猜。",
+            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
+        }
+    if "机制" in user_text and any(marker in user_text for marker in ("接不上", "不像人", "人味")):
+        return {
+            "reply_text": "嗯，我也同意。机制再多，接不住这句话，最后还是像在执行流程。",
             "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
         }
     if _OPINION_QUERY.search("".join(user_text.split())) and "人味" in user_text:
@@ -298,6 +324,59 @@ def build_safe_failure_candidate(
         "proposed_action_ids": [],
         "claims": [],
     }
+
+
+def affect_reply_violation(affect: dict[str, object], reply_text: str) -> str | None:
+    """Reject emotion claims that contradict or outrun the world projection."""
+    vector = affect.get("vector")
+    vector = vector if isinstance(vector, dict) else {}
+    negative_total = sum(
+        int(vector.get(key, 0) or 0)
+        for key in ("hurt", "anger", "sadness", "loneliness", "anxiety", "resentment")
+    )
+    positive_total = sum(
+        int(vector.get(key, 0) or 0) for key in ("warmth", "joy")
+    )
+    if bool(affect.get("unresolved")) and negative_total > 0 and any(
+        marker in reply_text
+        for marker in ("没事", "没关系", "完全不介意", "已经过去", "一点都不")
+    ):
+        return "unresolved_affect_denied"
+
+    negative_claim = re.search(
+        r"(?:我|我这会儿|刚才|是有|[^。！？]{0,8}里)[^。！？]{0,10}"
+        r"(?:不舒服|介意|生气|难过|委屈|不高兴|烦|压着火|闷着|不想理|"
+        r"失落|孤独|心里发紧|被[^。！？]{0,8}(?:硌|刺|伤|戳))",
+        reply_text,
+    )
+    positive_claim = re.search(
+        r"(?:我|我这会儿|刚才|是有|[^。！？]{0,8}里)[^。！？]{0,10}"
+        r"(?:开心|高兴|踏实|安心|温暖|放松|笑出声|笑了|松了口气)",
+        reply_text,
+    )
+    anger_claim = re.search(r"(?:我|我这会儿|刚才)[^。！？]{0,8}(?:压着火|气得|很生气|闷着|不想理)", reply_text)
+    sadness_claim = re.search(r"(?:我|我这会儿|刚才)[^。！？]{0,8}(?:失落|孤独|心里发紧|很难过)", reply_text)
+    behavior = str(affect.get("behavior_tendency") or "neutral")
+    supports_negative = any(
+        int(vector.get(key, 0) or 0) >= 4
+        for key in ("hurt", "anger", "sadness", "loneliness", "anxiety", "resentment")
+    ) or behavior in {"withdraw", "guarded"} or (
+        bool(affect.get("unresolved")) and behavior in {"patient", "repair_open"}
+    )
+    supports_positive = positive_total >= 3 or behavior in {"caring", "warm", "open"}
+    supports_anger = int(vector.get("anger", 0) or 0) >= 8 or behavior in {"withdraw", "guarded"}
+    supports_sadness = any(
+        int(vector.get(key, 0) or 0) >= 3 for key in ("sadness", "loneliness", "anxiety", "hurt")
+    ) or (bool(affect.get("unresolved")) and behavior in {"patient", "repair_open"})
+    if negative_claim and not supports_negative:
+        return "uncommitted_companion_affect"
+    if positive_claim and not supports_positive:
+        return "uncommitted_companion_affect"
+    if anger_claim and not supports_anger:
+        return "uncommitted_companion_affect"
+    if sadness_claim and not supports_sadness:
+        return "uncommitted_companion_affect"
+    return None
 
 
 def asks_for_source_detail(user_text: str) -> bool:

@@ -92,6 +92,7 @@ from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel,
 from companion_daemon.world_affect import public_mood
 from companion_daemon.world_behavior import WorldBehaviorPolicy
 from companion_daemon.world_conversation import (
+    affect_reply_violation,
     asks_for_source_detail,
     best_matching_grounded_source,
     build_safe_failure_candidate,
@@ -1286,6 +1287,12 @@ class CompanionEngine:
             )
             if human_violation:
                 raise WorldError(f"human reply contract rejected: {human_violation}")
+            affect_violation = affect_reply_violation(
+                modulation,
+                str(candidate.get("reply_text") or ""),
+            )
+            if affect_violation:
+                raise WorldError(f"world affect contract rejected: {affect_violation}")
             if (
                 asks_for_source_detail(message.text)
                 and related_npc_experiences
@@ -1439,7 +1446,9 @@ class CompanionEngine:
                     )
                 except Exception as repair_error:
                     self._fail_world_model_call(repair_action_id, str(repair_error))
-                    candidate = build_safe_failure_candidate(message.text, grounded_fallback)
+                    candidate = build_safe_failure_candidate(
+                        message.text, grounded_fallback, modulation
+                    )
                     fallback_needs_audit = True
                 else:
                     self._record_world_model_output(
@@ -1488,6 +1497,14 @@ class CompanionEngine:
                             raise WorldError(
                                 f"human reply contract rejected: {human_violation}"
                             )
+                        affect_violation = affect_reply_violation(
+                            modulation,
+                            str(candidate.get("reply_text") or ""),
+                        )
+                        if affect_violation:
+                            raise WorldError(
+                                f"world affect contract rejected: {affect_violation}"
+                            )
                         related_npc_experiences = [
                             item
                             for item in experience_sources
@@ -1510,7 +1527,9 @@ class CompanionEngine:
                             grounding_context=audit_context,
                         )
                     except WorldError:
-                        candidate = build_safe_failure_candidate(message.text, grounded_fallback)
+                        candidate = build_safe_failure_candidate(
+                            message.text, grounded_fallback, modulation
+                        )
                         fallback_needs_audit = True
         if fallback_needs_audit:
             candidate = self.world_kernel.validate_reply_candidate(
@@ -1909,6 +1928,7 @@ class CompanionEngine:
                 '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}。\n'
                 f"当前关系阶段: {str(snapshot.get('relationships', {}).get(self._world_user_id(canonical_user_id), {}).get('stage') or 'stranger')}；"
                 f"阶段表达规则: {self.world_behavior_policy.expression_guidance(snapshot, user_id=self._world_user_id(canonical_user_id)).prompt_line}\n"
+                f"当前情感投影(JSON): {json.dumps(snapshot.get('emotion_modulation', {}), ensure_ascii=False, separators=(',', ':'))}\n"
                 f"已结算事实: {[item['value'] for item in snapshot['facts'].values()]}\n"
                 f"已结算经历: {[item['content'] for item in snapshot['experiences'].values()][-3:]}\n"
                 f"模式: {mode}"
@@ -1937,7 +1957,28 @@ class CompanionEngine:
                 "", candidate, relationship
             ):
                 return None
+            if affect_reply_violation(
+                snapshot.get("emotion_modulation", {})
+                if isinstance(snapshot.get("emotion_modulation", {}), dict)
+                else {},
+                str(candidate.get("reply_text") or ""),
+            ):
+                return None
             text = sanitize_chat_text(str(candidate["reply_text"]))
+            try:
+                await self._audit_world_reply(
+                    purpose="afterthought_audit",
+                    causation=causation,
+                    user_text="上一条回复之后的一句可取消聊天余波。",
+                    reply_text=text,
+                    grounding_context={
+                        "facts": list(snapshot.get("facts", {}).values()),
+                        "experiences": list(snapshot.get("experiences", {}).values())[-3:],
+                        "emotion_modulation": snapshot.get("emotion_modulation", {}),
+                    },
+                )
+            except WorldError:
+                return None
             return text if text and len(text) <= 60 else None
         state = self.store.get_mood_state(canonical_user_id)
         if state.mood in {"guarded", "hurt"}:
@@ -2519,9 +2560,10 @@ class CompanionEngine:
                 }
             )
         if decision.should_send and decision.message:
+            candidate_message = decision.message
             violation = human_reply_contract_violation(
                 "",
-                {"reply_text": decision.message, "claims": []},
+                {"reply_text": candidate_message, "claims": []},
                 relationship,
             )
             if violation:
@@ -2531,6 +2573,42 @@ class CompanionEngine:
                         "message": None,
                         "message_type": "none",
                         "private_thought": f"关系阶段门禁要求先收住：{violation}。",
+                    }
+                )
+            if decision.should_send and decision.message:
+                affect_violation = affect_reply_violation(
+                    modulation if isinstance(modulation, dict) else {},
+                    candidate_message,
+                )
+                if affect_violation:
+                    decision = decision.model_copy(
+                        update={
+                            "should_send": False,
+                            "message": None,
+                            "message_type": "none",
+                            "private_thought": f"情感投影不支持该主动表达：{affect_violation}。",
+                        }
+                    )
+        if decision.should_send and decision.message:
+            try:
+                await self._audit_world_reply(
+                    purpose="proactive_audit",
+                    causation=causation,
+                    user_text="主动联系，不索取用户回应。",
+                    reply_text=decision.message,
+                    grounding_context={
+                        "facts": list(snapshot.get("facts", {}).values()),
+                        "experiences": list(snapshot.get("experiences", {}).values())[-4:],
+                        "emotion_modulation": modulation,
+                    },
+                )
+            except WorldError:
+                decision = decision.model_copy(
+                    update={
+                        "should_send": False,
+                        "message": None,
+                        "message_type": "none",
+                        "private_thought": "主动消息未通过独立世界审计，先不发。",
                     }
                 )
         if not decision.should_send or not decision.message or not decision.platform:
