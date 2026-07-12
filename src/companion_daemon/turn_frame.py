@@ -34,6 +34,7 @@ class TurnFrame:
     scene: dict[str, object]
     relationship: dict[str, object]
     affect: dict[str, object]
+    user_affect: dict[str, object]
     facts: tuple[dict[str, object], ...]
     experiences: tuple[dict[str, object], ...]
     open_threads: tuple[dict[str, object], ...]
@@ -51,6 +52,7 @@ class TurnFrame:
             "scene": self.scene,
             "relationship": self.relationship,
             "affect": self.affect,
+            "user_affect": self.user_affect,
             "recent_messages": list(self.recent_messages),
             "facts": list(self.facts),
             "experiences": list(self.experiences),
@@ -110,6 +112,9 @@ class TurnFrameCompiler:
         scene = self._scene(snapshot)
         relationship = dict(self._mapping(snapshot.get("relationships")).get(user_id, {}))
         affect = dict(self._mapping(snapshot.get("emotion_modulation")))
+        user_affect = dict(
+            self._mapping(self._mapping(snapshot.get("user_affect")).get(user_id))
+        )
         capability = self._capability(snapshot)
         dependencies = tuple(
             token
@@ -132,6 +137,7 @@ class TurnFrameCompiler:
             scene=scene,
             relationship=relationship,
             affect=affect,
+            user_affect=user_affect,
             facts=facts,
             experiences=experiences,
             open_threads=threads,
@@ -165,6 +171,27 @@ class TurnFrameCompiler:
                 source_event_ids=(f"world_revision:{frame.revision}",),
             )
         )
+        if (
+            bool(frame.user_affect.get("unresolved"))
+            and str(frame.user_affect.get("kind") or "")
+            in {"disappointment", "confusion"}
+        ):
+            advisories.append(
+                InnerAdvisory(
+                    kind="repair",
+                    tendency="用户可能仍有失望或困惑；先接住当下，不要用追问抢走修复。",
+                    intensity=min(100, int(frame.user_affect.get("intensity") or 0) * 25),
+                    confidence=float(frame.user_affect.get("confidence") or 0.6),
+                    source_event_ids=tuple(
+                        item
+                        for item in (
+                            str(frame.user_affect.get("source_message_id") or ""),
+                        )
+                        if item
+                    )
+                    or (f"world_revision:{frame.revision}",),
+                )
+            )
         if frame.open_threads:
             advisories.append(
                 InnerAdvisory(

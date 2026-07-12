@@ -1664,6 +1664,10 @@ class CompanionEngine:
         if (
             self.interaction_appraisal_model
             and appraisal_risk.request_model_proposal
+            # A slow semantic appraisal must never sit in front of an active
+            # back-and-forth.  The deterministic observation is still
+            # committed, and the reply model receives it as Advisory context.
+            and frozen_turn.cadence.heat != "hot"
         ):
             circuit_state = self.provider_circuit_state()
             appraisal_call_decision = call_budget.decide(

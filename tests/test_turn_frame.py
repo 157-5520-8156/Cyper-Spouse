@@ -19,6 +19,15 @@ def test_turn_frame_is_bounded_and_carries_provenance() -> None:
         ],
         "relationships": {"user:geoff": {"stage": "friend"}},
         "emotion_modulation": {"hurt": 37, "warmth": 15},
+        "user_affect": {
+            "user:geoff": {
+                "kind": "disappointment",
+                "intensity": 3,
+                "unresolved": True,
+                "confidence": 0.83,
+                "source_message_id": "message:disappointed",
+            }
+        },
         "facts": {
             f"fact:{index}": {
                 "subject": "user:geoff",
@@ -71,6 +80,7 @@ def test_turn_frame_is_bounded_and_carries_provenance() -> None:
     assert len(frame.open_actions) == 4
     assert frame.dependency_tokens[0] == f"world:world:1:revision:42:state:{'a' * 64}"
     assert all(item["provenance"].startswith("event:") for item in frame.facts)
+    assert frame.user_affect["kind"] == "disappointment"
     delta = frame.prompt_delta()
     assert set(delta) == {
         "world_revision",
@@ -156,3 +166,45 @@ def test_turn_frame_does_not_repeat_the_current_input_in_recent_history() -> Non
     )
 
     assert [item["text"] for item in frame.recent_messages] == ["上一次的话。"]
+
+
+def test_unresolved_user_disappointment_becomes_repair_advisory_despite_surface_minimizing() -> None:
+    compiler = TurnFrameCompiler()
+    frame = compiler.compile(
+        world_id="world:1",
+        revision=9,
+        state_hash="d" * 64,
+        snapshot={
+            "clock": {},
+            "recent_messages": [],
+            "relationships": {"user:geoff": {"stage": "friend"}},
+            "emotion_modulation": {},
+            "user_affect": {
+                "user:geoff": {
+                    "kind": "disappointment",
+                    "intensity": 4,
+                    "unresolved": True,
+                    "confidence": 0.85,
+                    "source_message_id": "qq:geoff:earlier",
+                }
+            },
+            "facts": {},
+            "experiences": {},
+            "conversation_threads": {},
+            "actions": {},
+            "agenda": {},
+        },
+        user_id="user:geoff",
+        message=IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="qq:geoff:now",
+            text="没事，你忙你的。",
+        ),
+    )
+
+    repair = next(item for item in compiler.advisories(frame) if item.kind == "repair")
+
+    assert repair.intensity == 100
+    assert repair.confidence == 0.85
+    assert repair.source_event_ids == ("qq:geoff:earlier",)

@@ -257,7 +257,7 @@ async def test_open_real_provider_circuit_skips_appraisal_and_reply_models(
 
 
 @pytest.mark.asyncio
-async def test_hot_turn_bounds_contextual_appraisal_before_reply_generation(
+async def test_hot_turn_omits_slow_contextual_appraisal_before_reply_generation(
     tmp_path: Path,
 ) -> None:
     class SlowAppraisalModel:
@@ -304,6 +304,6 @@ async def test_hot_turn_bounds_contextual_appraisal_before_reply_generation(
         turn_context=frozen,
     )
 
-    assert monotonic() - started < 8
-    assert slow.cancelled is True
+    assert monotonic() - started < 2
+    assert slow.cancelled is False
     assert reply is not None
