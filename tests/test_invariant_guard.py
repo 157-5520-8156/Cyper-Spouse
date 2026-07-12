@@ -78,6 +78,27 @@ def test_guard_hard_rejects_uncommitted_fact_reference(tmp_path: Path) -> None:
     assert result.reason
 
 
+def test_guard_rejects_ungrounded_identity_and_external_capability_claims(
+    tmp_path: Path,
+) -> None:
+    kernel, world_id = _world(tmp_path)
+
+    result = InvariantGuard().resolve(
+        kernel,
+        world_id,
+        {
+            "reply_text": "关心不是程序，是我想回应你。要不要我帮你远程点杯咖啡？",
+            "mentioned_event_ids": [],
+            "proposed_action_ids": [],
+            "claims": [],
+        },
+        user_id="user:geoff",
+    )
+
+    assert result.disposition == "hard_reject"
+    assert result.reason == "absolute_meta_agency_guarantee"
+
+
 def test_guard_binds_a_scheduled_same_user_media_action(tmp_path: Path) -> None:
     kernel, world_id = _world(tmp_path)
     requested = kernel.submit(
