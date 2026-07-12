@@ -40,8 +40,12 @@ class WorldMediaPolicy:
         relationship_stage = str(relation.get("stage") or "stranger")
         boundary = int(needs.get("boundary", 0))
         security = int(needs.get("security", 50))
+        affect = _mapping(state.get("emotion_modulation"))
+        affect_vector = _mapping(affect.get("vector"))
         selfie = self._is_selfie_request(request, user_text)
         topic = str(request.directive or user_text).strip()[:120]
+        if selfie and bool(affect.get("unresolved")) and int(affect_vector.get("hurt", 0)) >= 20:
+            return WorldMediaDecision(False, "selfie", "unresolved_negative_affect")
         if selfie and boundary >= 65 and self._is_pressure(user_text):
             return WorldMediaDecision(False, "selfie", "boundary_high_under_pressure")
         if selfie and relationship_stage in {"stranger", "acquaintance", "friend"}:
@@ -60,10 +64,13 @@ class WorldMediaPolicy:
         """Return a display intent only; sticker delivery is still an Action."""
         modulation = _mapping(state.get("emotion_modulation"))
         mode = str(modulation.get("mode") or "calm")
-        if mode == "guarded" or int(_mapping(state.get("needs")).get("boundary", 0)) >= 55:
-            return "boundary"
+        behavior_tendency = str(modulation.get("behavior_tendency") or "neutral")
         if appraisal == "user_vulnerable":
             return "comfort"
+        if behavior_tendency == "withdraw":
+            return "boundary"
+        if mode == "guarded" or int(_mapping(state.get("needs")).get("boundary", 0)) >= 55:
+            return "boundary"
         if mode in {"warm", "open", "softening"}:
             return "greeting"
         return None

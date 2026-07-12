@@ -11,6 +11,8 @@ from datetime import datetime
 from math import ceil
 from typing import Any, Literal
 
+from companion_daemon.repair_curve import is_repair_message
+from companion_daemon.world_affect import affect_guidance
 from companion_daemon.world_relationship import STAGES, relationship_stage_instruction
 
 CommunicationAttention = Literal["seen", "deferred", "do_not_disturb"]
@@ -40,6 +42,7 @@ class WorldBehaviorPolicy:
 
     RULE_VERSION = "world-behavior-v1"
     _URGENT_MARKERS = ("急", "紧急", "救命", "出事", "医院", "危险", "现在就", "立刻")
+    _VULNERABLE_MARKERS = ("崩溃", "难受", "撑不住", "想哭", "好难过", "很痛苦", "不想活", "我害怕", "害怕")
     _PRESSURE_MARKERS = ("必须", "立刻", "马上", "现在就", "快点", "不发", "证明", "听话")
 
     def communication_decision(
@@ -57,6 +60,16 @@ class WorldBehaviorPolicy:
             return CommunicationDecision("do_not_disturb", "boundary_high_under_pressure")
         if resumed_action or self._is_urgent(text):
             return CommunicationDecision("seen", "resumed_or_urgent_turn")
+        if self._is_vulnerable(text):
+            return CommunicationDecision("seen", "user_vulnerable_turn")
+        modulation = _mapping(state.get("emotion_modulation"))
+        affect_vector = _mapping(modulation.get("vector"))
+        if (
+            str(modulation.get("behavior_tendency") or "") == "withdraw"
+            and int(affect_vector.get("hurt", 0)) >= 30
+            and not is_repair_message(text)
+        ):
+            return CommunicationDecision("deferred", "unresolved_hurt", defer_minutes=15)
         active = next(
             (
                 _mapping(item)
@@ -95,6 +108,14 @@ class WorldBehaviorPolicy:
         relationship_stage = str(relationship.get("stage") or "stranger")
         if not relationship or relationship_stage == "stranger":
             return OutreachConstraint(False, "relationship_stage_stranger")
+        modulation = _mapping(state.get("emotion_modulation"))
+        vector = _mapping(modulation.get("vector"))
+        behavior_tendency = str(modulation.get("behavior_tendency") or "neutral")
+        if bool(modulation.get("unresolved")) and (
+            int(vector.get("hurt", 0)) >= 20
+            or behavior_tendency in {"withdraw", "guarded", "patient"}
+        ):
+            return OutreachConstraint(False, "unresolved_negative_affect")
         needs = _mapping(state.get("needs"))
         if int(needs.get("boundary", 0)) >= 55:
             return OutreachConstraint(False, "boundary_high")
@@ -113,6 +134,12 @@ class WorldBehaviorPolicy:
         if relationship_stage not in STAGES:
             relationship_stage = "stranger"
         mode = str(modulation.get("mode") or "calm")
+        behavior_tendency = str(modulation.get("behavior_tendency") or "neutral")
+        if behavior_tendency in {"withdraw", "repair_open", "patient", "caring"}:
+            return ExpressionGuidance(
+                f"affect_{behavior_tendency}",
+                affect_guidance(modulation),
+            )
         if int(needs.get("boundary", 0)) >= 55 or mode == "guarded":
             return ExpressionGuidance("guarded", "表达简短、清楚，不讨好；只说愿意说的部分。")
         if relationship_stage in {"stranger", "acquaintance"}:
@@ -140,6 +167,10 @@ class WorldBehaviorPolicy:
     @classmethod
     def _is_pressure(cls, text: str) -> bool:
         return any(marker in text for marker in cls._PRESSURE_MARKERS)
+
+    @classmethod
+    def _is_vulnerable(cls, text: str) -> bool:
+        return any(marker in text for marker in cls._VULNERABLE_MARKERS)
 
 
 def _mapping(value: object) -> dict[str, Any]:

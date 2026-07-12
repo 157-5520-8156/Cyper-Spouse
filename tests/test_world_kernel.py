@@ -139,12 +139,15 @@ def test_world_user_relationship_and_emotion_are_reduced_from_turn_appraisal(tmp
         "stage_rule_version": "world-relationship-v1",
         "stage_changed_at": NOW.isoformat(),
     }
-    assert snapshot["emotion_modulation"] == {
-        "mode": "guarded", "charge": 16, "reason": "boundary_violation",
-        "expression": "guarded", "last_decay_at": NOW.isoformat(),
-    }
+    affect = snapshot["emotion_modulation"]
+    assert affect["mode"] == "guarded"
+    assert affect["expression"] == "guarded"
+    assert affect["charge"] == 16
+    assert affect["vector"]["hurt"] == 18
+    assert affect["vector"]["anger"] == 12
+    assert affect["behavior_tendency"] == "guarded"
     assert {event.event_type for event in appraised.events} >= {
-        "RelationshipAppraised", "RelationshipChanged", "EmotionModulated",
+        "RelationshipAppraised", "RelationshipChanged", "AffectChanged",
     }
 
 

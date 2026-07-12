@@ -89,6 +89,7 @@ from companion_daemon.unanswered_question import (
 from companion_daemon.withheld_impulse import apply_withheld_impulse, build_withheld_impulse
 from companion_daemon.turns import TurnCommit, build_turn_plan
 from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel, parse_reply_candidate
+from companion_daemon.world_affect import public_mood
 from companion_daemon.world_behavior import WorldBehaviorPolicy
 from companion_daemon.world_conversation import (
     asks_for_source_detail,
@@ -1152,7 +1153,7 @@ class CompanionEngine:
             f"- 可引用事实来源(JSON): {json.dumps(fact_sources, ensure_ascii=False, separators=(',', ':')) if fact_sources else '[]'}\n"
             f"- 已结算经历来源(JSON): {json.dumps(experience_sources, ensure_ascii=False, separators=(',', ':')) if experience_sources else '[]'}\n"
             f"- 当前可见行为调制: 安全感={needs['security']}，主动性={needs['initiative']}，边界={needs['boundary']}。\n"
-            f"- 关系投影: {relationship or '尚无累计变化'}；情绪调制={modulation.get('mode', 'calm')}，表达={modulation.get('expression', 'neutral')}。\n"
+            f"- 关系投影: {relationship or '尚无累计变化'}；情感投影(JSON): {json.dumps(modulation, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 当前表达指导({expression_guidance.label}): {expression_guidance.prompt_line}\n"
             f"- 世界行为策略: {world_policy['mode']}；回复长度={world_policy['reply_length']}；主动性={world_policy['initiative']}。\n"
             f"- 多媒体处理: {media_reason or '本轮未请求'}；不得声称媒体已经发送，除非投递 Action 已结算。\n"
@@ -1558,7 +1559,7 @@ class CompanionEngine:
         )
         reply = CompanionReply(
             canonical_user_id=canonical_user_id,
-            mood="calm",
+            mood=public_mood(modulation),
             text=text,
             text_parts=[text],
             delivery_id=delivery_id,
@@ -2478,6 +2479,8 @@ class CompanionEngine:
             "若不适合，返回 JSON 的 should_send=false；若适合，不能新增未记录事实。\n"
             f"当前关系阶段: {str(snapshot.get('relationships', {}).get(user_id, {}).get('stage') or 'stranger')}; "
             f"阶段表达规则: {self.world_behavior_policy.expression_guidance(snapshot, user_id=user_id).prompt_line}\n"
+            f"当前情感投影(JSON): {json.dumps(snapshot.get('emotion_modulation', {}), ensure_ascii=False, separators=(',', ':'))}\n"
+            "若 unresolved=true，不能假装已经没事、不能用亲密主动消息索取回应；除非是在回应明确的修复或紧急关怀，否则应收住。\n"
             f"事实: {[item['value'] for item in snapshot['facts'].values()]}\n"
             f"经历: {[item['content'] for item in snapshot['experiences'].values()][-4:]}"
         )
@@ -2492,10 +2495,29 @@ class CompanionEngine:
             purpose="proactive",
             causation=causation, content=raw, action_id=model_action_id,
         )
-        decision = self._parse_decision(canonical_user_id, raw, MoodState())
+        modulation = snapshot.get("emotion_modulation", {})
+        decision = self._parse_decision(
+            canonical_user_id,
+            raw,
+            MoodState(mood=public_mood(modulation if isinstance(modulation, dict) else {})),
+        )
         relationship = snapshot.get("relationships", {}).get(user_id, {})
         if not isinstance(relationship, dict):
             relationship = {}
+        behavior_tendency = str(modulation.get("behavior_tendency") or "neutral") if isinstance(modulation, dict) else "neutral"
+        if (
+            decision.should_send
+            and bool(modulation.get("unresolved"))
+            and behavior_tendency in {"withdraw", "guarded", "patient"}
+        ):
+            decision = decision.model_copy(
+                update={
+                    "should_send": False,
+                    "message": None,
+                    "message_type": "none",
+                    "private_thought": "负面情绪尚未消化，主动消息先收住。",
+                }
+            )
         if decision.should_send and decision.message:
             violation = human_reply_contract_violation(
                 "",

@@ -19,6 +19,12 @@ from companion_daemon.life_simulation import LifeSimulation
 from companion_daemon.time import utc_now
 from companion_daemon.world_interaction_rules import WorldInteractionRules
 from companion_daemon.world_relationship import evaluate_relationship_stage, stage_event_payload
+from companion_daemon.world_affect import (
+    apply_appraisal,
+    decay_affect,
+    initial_affect,
+    outcome_payload as affect_outcome_payload,
+)
 
 
 class WorldError(ValueError):
@@ -1531,7 +1537,7 @@ class WorldKernel:
             events: list[tuple[str, dict[str, object]]] = []
             working = json.loads(_stable_json(state))
 
-            def emit(event_type: str, payload: dict[str, object]) -> None:
+            def emit(event_type: str, payload: dict[str, object], *, logical_at: str | None = None) -> None:
                 nonlocal working
                 events.append((event_type, payload))
                 working = reduce_event(
@@ -1542,8 +1548,8 @@ class WorldKernel:
                         revision=0,
                         event_type=event_type,
                         schema_version=1,
-                        logical_at=target,
-                        observed_at=target,
+                        logical_at=logical_at or target,
+                        observed_at=logical_at or target,
                         actor={"kind": "simulation"},
                         source="life_simulation",
                         correlation_id="simulation",
@@ -1558,6 +1564,38 @@ class WorldKernel:
             if command.get("observed_at"):
                 clock_payload["observed_at"] = str(command["observed_at"])
             emit("ClockAdvanced", clock_payload)
+            affect_cursor = current_at
+
+            def decay_affect_until(at: datetime) -> None:
+                nonlocal affect_cursor
+                if at <= affect_cursor:
+                    return
+                previous_affect = _as_dict(working["emotion_modulation"], "emotion modulation")
+                decayed_affect = decay_affect(
+                    previous_affect,
+                    int((at - affect_cursor).total_seconds()),
+                    at.isoformat(),
+                )
+                emit(
+                    "AffectDecayed",
+                    affect_outcome_payload(
+                        decayed_affect,
+                        logical_at=at.isoformat(),
+                        event_type="AffectDecayed",
+                    ),
+                    logical_at=at.isoformat(),
+                )
+                if bool(previous_affect.get("unresolved")) and not decayed_affect.unresolved:
+                    emit(
+                        "AffectResolved",
+                        affect_outcome_payload(
+                            decayed_affect,
+                            logical_at=at.isoformat(),
+                            event_type="AffectResolved",
+                        ),
+                        logical_at=at.isoformat(),
+                    )
+                affect_cursor = at
 
             timeline: list[tuple[datetime, datetime, dict[str, object], bool]] = []
             for raw in _as_dict(state["agenda"], "agenda").values():
@@ -1724,19 +1762,45 @@ class WorldKernel:
                     and _parse_at(str(item["expires_at"])) <= target_at
                 ):
                     emit("ActionExpired", {"action_id": action_id, "reason": "logical_timeout"})
-            for thread_id, thread in _as_dict(working.get("conversation_threads", {}), "conversation threads").items():
+            threads = sorted(
+                _as_dict(working.get("conversation_threads", {}), "conversation threads").items(),
+                key=lambda item: str(_as_dict(item[1], "conversation thread").get("expires_at") or ""),
+            )
+            for thread_id, thread in threads:
                 item = _as_dict(thread, "conversation thread")
                 if (
                     item.get("status") == "open"
                     and item.get("expires_at")
                     and _parse_at(str(item["expires_at"])) <= target_at
                 ):
-                    emit("ConversationThreadExpired", {"thread_id": thread_id, "reason": "logical_timeout"})
+                    expires_at = _parse_at(str(item["expires_at"]))
+                    decay_affect_until(expires_at)
+                    emit(
+                        "ConversationThreadExpired",
+                        {"thread_id": thread_id, "reason": "logical_timeout"},
+                        logical_at=expires_at.isoformat(),
+                    )
+                    affect = apply_appraisal(
+                        _as_dict(working["emotion_modulation"], "emotion modulation"),
+                        "conversation_thread_expired",
+                        expires_at.isoformat(),
+                        source_reference=f"conversation_thread:{thread_id}",
+                    )
+                    emit(
+                        "AffectChanged",
+                        affect_outcome_payload(
+                            affect,
+                            logical_at=expires_at.isoformat(),
+                            event_type="AffectChanged",
+                        ),
+                        logical_at=expires_at.isoformat(),
+                    )
             for goal_id, goal in list(_as_dict(working.get("goals", {}), "goals").items()):
                 if goal.get("status") == "active" and goal.get("deadline") and _parse_at(str(goal["deadline"])) <= target_at:
                     emit("GoalDeferred", {"goal_id": goal_id, "reason": "deadline_reached", "next_review_at": (target_at + timedelta(days=1)).isoformat()})
                 elif goal.get("status") == "deferred" and goal.get("next_review_at") and _parse_at(str(goal["next_review_at"])) <= target_at:
                     emit("GoalReviewDue", {"goal_id": goal_id})
+            decay_affect_until(target_at)
             return events
         if command_type == "register_npc":
             npc = _as_dict(command.get("npc"), "npc")
@@ -2331,10 +2395,29 @@ class WorldKernel:
                         ),
                     )
                 )
-            events.append((
-                "EmotionModulated",
-                {"mode": consequence.emotion_mode, "expression": consequence.emotion_expression, "charge_delta": consequence.emotion_charge_delta, "reason": appraisal, "rule_version": self.interaction_rules.RULE_VERSION},
-            ))
+            logical_at = str(_as_dict(state["clock"], "clock").get("logical_at") or "")
+            affect = apply_appraisal(
+                _as_dict(state["emotion_modulation"], "emotion modulation"),
+                appraisal,
+                logical_at,
+                source_reference=f"message:{command.get('message_id') or command.get('intent_id') or 'unknown'}",
+            )
+            events.append(
+                (
+                    "AffectChanged",
+                    affect_outcome_payload(affect, logical_at=logical_at, event_type="AffectChanged"),
+                )
+            )
+            if (
+                bool(_as_dict(state["emotion_modulation"], "emotion modulation").get("unresolved"))
+                and not affect.unresolved
+            ):
+                events.append(
+                    (
+                        "AffectResolved",
+                        affect_outcome_payload(affect, logical_at=logical_at, event_type="AffectResolved"),
+                    )
+                )
             return events
         raise WorldError(f"unsupported command: {command_type}")
 
@@ -2545,6 +2628,7 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         next_state = _empty_state(event.world_id)
         next_state["clock"] = {"logical_at": payload["logical_at"], "mode": "paused", "rate": 0}
         next_state["clock_observed_at"] = event.observed_at
+        next_state["emotion_modulation"] = initial_affect(str(payload["logical_at"]))
         next_state["entities"] = {str(protagonist["id"]): {**protagonist, "status": "active"}}
         next_state["daily_schedule"] = payload.get("daily_schedule", [])
         next_state["life_outcome_templates"] = payload.get("life_outcome_templates", {})
@@ -2576,19 +2660,18 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         next_state["clock"] = {**_as_dict(next_state["clock"], "clock"), **payload}
         next_state["clock_observed_at"] = event.observed_at
     elif event.event_type == "ClockAdvanced":
-        modulation = _as_dict(next_state["emotion_modulation"], "emotion modulation")
-        decay_anchor = _parse_at(
-            str(modulation.get("last_decay_at") or _as_dict(next_state["clock"], "clock")["logical_at"])
-        )
-        target_at = _parse_at(str(payload["target_logical_at"]))
-        elapsed_hours = max(0, int((target_at - decay_anchor).total_seconds() // 3600))
-        if elapsed_hours:
-            modulation["charge"] = max(0, int(modulation.get("charge", 0)) - elapsed_hours * 2)
-            modulation["last_decay_at"] = (decay_anchor + timedelta(hours=elapsed_hours)).isoformat()
-            if modulation["charge"] == 0:
-                modulation.update({"mode": "calm", "expression": "neutral", "reason": "logical_time_decay"})
         _as_dict(next_state["clock"], "clock")["logical_at"] = payload["target_logical_at"]
         next_state["clock_observed_at"] = str(payload.get("observed_at") or event.observed_at)
+    elif event.event_type in {"AffectChanged", "AffectDecayed", "AffectResolved"}:
+        affect_payload = dict(payload)
+        # Segment duration is audit metadata on the event, not a mutable
+        # world fact.  Keeping it out of the projection preserves identical
+        # state hashes for long-jump and incremental replay.
+        affect_payload.pop("elapsed_seconds", None)
+        next_state["emotion_modulation"] = {
+            **_as_dict(next_state["emotion_modulation"], "emotion modulation"),
+            **affect_payload,
+        }
     elif event.event_type == "ActivityPlanned":
         item = {**payload, "status": "planned"}
         _as_dict(next_state["agenda"], "agenda")[str(item["activity_id"])] = item
@@ -2662,6 +2745,7 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "EmotionModulated":
         current = _as_dict(next_state["emotion_modulation"], "emotion modulation")
         next_state["emotion_modulation"] = {
+            **current,
             "mode": payload["mode"], "expression": payload["expression"], "reason": payload["reason"],
             "charge": max(0, min(100, int(current.get("charge", 0)) + int(payload["charge_delta"]))),
             "last_decay_at": event.logical_at,
@@ -2837,7 +2921,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
             "message_id": None, "attention": "idle", "typing": "idle", "reason": None,
             "due_at": None, "deferred_action_id": None,
         },
-        "emotion_modulation": {"mode": "calm", "expression": "neutral", "reason": "world_started", "charge": 0, "last_decay_at": None},
+        "emotion_modulation": initial_affect(""),
         "last_relationship_appraisal": None,
         "decisions": {},
         "conversation_threads": {},
