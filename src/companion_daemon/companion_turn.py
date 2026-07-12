@@ -59,6 +59,14 @@ class ResponseBudget:
 
 
 @dataclass(frozen=True)
+class TurnOptions:
+    """Turn-scoped generation context owned by the caller's observation seam."""
+
+    context_hint: str | None = None
+    turn_context: object | None = None
+
+
+@dataclass(frozen=True)
 class TurnBeat:
     action_id: str
     delivery_id: int
@@ -149,11 +157,14 @@ class CompanionTurn:
         turn: TurnEnvelope,
         *,
         budget: ResponseBudget,
+        options: TurnOptions | None = None,
     ) -> TurnOutcome:
         """Respond within the first-visible deadline and converge timed-out work."""
         self._recover_receipt_watchdogs()
         try:
-            return await self._respond_with_timeout(turn, budget=budget)
+            return await self._respond_with_timeout(
+                turn, budget=budget, options=options or TurnOptions()
+            )
         except TimeoutError:
             return self._converge_timeout(turn)
 
@@ -162,6 +173,7 @@ class CompanionTurn:
         turn: TurnEnvelope,
         *,
         budget: ResponseBudget,
+        options: TurnOptions,
     ) -> TurnOutcome:
         existing = self._existing_outcome(turn)
         if existing is not None:
@@ -174,6 +186,8 @@ class CompanionTurn:
                 turn.message,
                 defer_delivery=True,
                 complete_by_observed_at=complete_by_at,
+                context_hint=options.context_hint,
+                turn_context=options.turn_context,
             )
             if reply is None:
                 return self._outcome(
@@ -273,6 +287,16 @@ class CompanionTurn:
         self._recover_receipt_watchdogs()
         async with self._action_locks.setdefault(observation.action_id, asyncio.Lock()):
             return await self._settle(observation, advance=True)
+
+    async def interrupt(
+        self, turn: TurnEnvelope, *, kind: Literal["backchannel", "substantive"]
+    ) -> tuple[str, ...]:
+        """Apply a live user interruption before the next coalesced turn flushes."""
+        if kind == "backchannel":
+            return ()
+        before = self._cancelled_segment_ids()
+        await self._cancel_interrupted_actions(turn, force=True)
+        return tuple(sorted(self._cancelled_segment_ids() - before))
 
     async def _settle(
         self, observation: ExternalObservation, *, advance: bool
@@ -603,9 +627,9 @@ class CompanionTurn:
             advance=advance,
         )
 
-    async def _cancel_interrupted_actions(self, turn: TurnEnvelope) -> None:
+    async def _cancel_interrupted_actions(self, turn: TurnEnvelope, *, force: bool = False) -> None:
         """A substantive new user turn takes over any partially delivered reply."""
-        if not self._is_substantive_interjection(turn.message.text):
+        if not force and not self._is_substantive_interjection(turn.message.text):
             return
         world = self.engine.world_kernel
         world_id = self.engine.world_id
@@ -629,7 +653,26 @@ class CompanionTurn:
         for action_id in candidates:
             async with self._action_locks.setdefault(action_id, asyncio.Lock()):
                 raw = self._action(action_id)
-                await self._cancel_interrupted_action(turn, raw)
+            await self._cancel_interrupted_action(turn, raw)
+
+    def _cancelled_segment_ids(self) -> set[str]:
+        world = self.engine.world_kernel
+        world_id = self.engine.world_id
+        assert world is not None and world_id is not None
+        actions = world.snapshot(world_id).get("actions", {})
+        if not isinstance(actions, dict):
+            return set()
+        return {
+            str(segment.get("segment_id") or "")
+            for raw in actions.values()
+            if isinstance(raw, dict)
+            for segment in (
+                raw.get("segment_state", {}).get("segments", [])
+                if isinstance(raw.get("segment_state"), dict)
+                else []
+            )
+            if isinstance(segment, dict) and segment.get("status") == "cancelled"
+        }
 
     async def _cancel_interrupted_action(self, turn: TurnEnvelope, raw: dict[str, object]) -> None:
         world = self.engine.world_kernel

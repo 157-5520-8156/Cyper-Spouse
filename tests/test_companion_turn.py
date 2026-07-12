@@ -12,6 +12,7 @@ from companion_daemon.companion_turn import (
     ResponseBudget,
     TurnBeat,
     TurnEnvelope,
+    TurnOptions,
     TurnTransport,
 )
 from companion_daemon.db import CompanionStore
@@ -404,6 +405,55 @@ async def test_takeover_waits_for_initial_dispatch_then_cancels_old_remainder(
         "cancelled",
     ]
     assert [beat.action_id for beat in transport.beats].count(first.action_ids[0]) == 1
+
+
+@pytest.mark.asyncio
+async def test_public_interrupt_cancels_remainder_before_next_turn_flush(
+    tmp_path: Path,
+) -> None:
+    transport = RecordingTransport(
+        DispatchAcceptance(status="delivered", external_receipt="receipt:interrupt")
+    )
+    runtime, world, world_id = _turn_runtime(tmp_path, transport, model=MultiBeatReplyModel())
+    outcome = await runtime.respond(
+        _envelope("turn-public-interrupt"),
+        budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
+    )
+
+    cancelled = await runtime.interrupt(
+        _envelope("turn-public-interrupt-takeover"), kind="substantive"
+    )
+
+    assert cancelled == (f"{outcome.action_ids[0]}:segment:1",)
+    action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
+    assert action["segment_state"]["segments"][1]["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_turn_options_reach_generation_without_entering_transport_interface(
+    tmp_path: Path,
+) -> None:
+    transport = RecordingTransport(
+        DispatchAcceptance(status="delivered", external_receipt="receipt:options")
+    )
+    runtime, _, _ = _turn_runtime(tmp_path, transport)
+    original = runtime.engine.handle_message
+    observed: dict[str, object] = {}
+
+    async def recording_handle(message: IncomingMessage, **kwargs: object):
+        observed.update(kwargs)
+        return await original(message, **kwargs)
+
+    runtime.engine.handle_message = recording_handle  # type: ignore[method-assign]
+    frozen = runtime.engine.freeze_turn_context(_envelope("turn-options").message)
+    await runtime.respond(
+        _envelope("turn-options"),
+        budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
+        options=TurnOptions(context_hint="刚刚忙完。", turn_context=frozen),
+    )
+
+    assert observed["context_hint"] == "刚刚忙完。"
+    assert observed["turn_context"] is frozen
 
 
 @pytest.mark.asyncio
