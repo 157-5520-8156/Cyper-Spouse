@@ -184,6 +184,14 @@
 - `wall-art-window-upper / lower / bedside` 三幅画各自成为单层 `wall-decoration`，分别贴回窄墙上/下位置和床侧右墙；hidden 只删除目标，solo 不夹带墙面或家具。
 - 整屋装配为 52 个草稿对象、63 个构建资产（含 Compiler 复现的 art shell）。窗景位于 frame 下层，窗帘包住 frame，窗台植物覆盖窗台，三幅画不侵入灯具、床或窗口。所有新增对象均为 `wall` occupancy；没有生成任何屋顶/天花安装物。
 
+## 全资产原子化 · 工作区桌面与左墙 decor 草稿（2026-07-12）
+
+- 生成并接入 laptop、stationery、desk book cluster、左墙 floating shelf、shelf book cluster、shelf-mounted plant 和 pinned-photo cluster 七张独立资产。每张保留洋红 chroma 原稿，并在 inventory 记录提示、色键、裁切与 resize 参数。
+- laptop、stationery 和 book cluster 直接 `attachedTo: desk`，使用 `front` 角色与 desk 的 front 深度分离；desk hidden 会级联关闭三件，子对象 solo 保留 desk 祖先。它们均为 `occupancy.kind=none`，不影响 study approach 或路径。
+- shelf 是独立 `wall-decoration`；books 与 plants 只附着 shelf，photo cluster 独立贴墙。浏览器确认 shelf hidden 时 books/plants 一并消失而照片保留，plants solo 时 shelf 祖先保留；四件墙面资产均为 `wall` occupancy。
+- 首次整屋、seven-object solo、七件逐一 hidden、desk hidden、shelf hidden、两个子 solo 与连续 tour 均已实际检查；laptop、书和文具没有进入书柜/椅子空间，墙架与照片墙没有侵入角色路线，浏览器控制台无 warning/error。Runtime 测试锁定逐件隐藏不改变路径，desk/shelf 只级联自己的后代，photo cluster 始终独立。草稿累计为 59 个对象、70 个构建资产，继续保持 `planned / needs-art`。
+- 无新屋顶/天花素材：壁架植物的承载语义明确为 shelf-mounted。
+
 ## 后续扩展规则
 
 - 后续若新增家具或新动作，必须同时添加 `behind/front` 或动作巡检入口，不能只改 daemon 映射。

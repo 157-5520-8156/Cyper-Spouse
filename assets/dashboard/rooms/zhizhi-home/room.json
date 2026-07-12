@@ -328,6 +328,140 @@
         "audit": {"behind": [0, 6, 0], "front": [1, 7, 0]}
       },
       {
+        "id": "desk-laptop",
+        "attachedTo": "desk",
+        "category": "appliance",
+        "assetMode": "layered",
+        "depthTile": [1, 5, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/desk-laptop-chroma-v1.png",
+          "sourceTransform": {"crop": [340, 100, 1200, 940], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [120, 95]},
+          "output": "desk-laptop-draft.png",
+          "origin": [150, 445],
+          "depthBias": 550
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "desk-stationery-cluster",
+        "attachedTo": "desk",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "depthTile": [1, 5, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/desk-stationery-cluster-chroma-v1.png",
+          "sourceTransform": {"crop": [430, 390, 830, 855], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [55, 65]},
+          "output": "desk-stationery-cluster-draft.png",
+          "origin": [295, 455],
+          "depthBias": 560
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "desk-book-cluster",
+        "attachedTo": "desk",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "depthTile": [1, 5, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "layers": [{
+          "role": "front",
+          "source": "sources/desk-book-cluster-chroma-v1.png",
+          "sourceTransform": {"crop": [230, 235, 1020, 1030], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [90, 70]},
+          "output": "desk-book-cluster-draft.png",
+          "origin": [70, 465],
+          "depthBias": 560
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "desk-wall-shelf",
+        "category": "wall-decoration",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "sources/desk-wall-shelf-chroma-v1.png",
+          "sourceTransform": {"crop": [140, 185, 1365, 820], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [300, 95]},
+          "output": "desk-wall-shelf-draft.png",
+          "origin": [50, 285]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "desk-wall-books",
+        "attachedTo": "desk-wall-shelf",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "sources/desk-wall-books-chroma-v1.png",
+          "sourceTransform": {"crop": [320, 185, 1200, 790], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [120, 85]},
+          "output": "desk-wall-books-draft.png",
+          "origin": [70, 285]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "desk-wall-plants",
+        "attachedTo": "desk-wall-shelf",
+        "category": "plant",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "sources/desk-wall-plants-chroma-v1.png",
+          "sourceTransform": {"crop": [340, 250, 900, 1050], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [105, 150]},
+          "output": "desk-wall-plants-draft.png",
+          "origin": [225, 270]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "desk-wall-photo-cluster",
+        "category": "wall-decoration",
+        "assetMode": "layered",
+        "depthTile": [0, 0, 0],
+        "occupancy": {"kind": "wall", "tiles": []},
+        "layers": [{
+          "role": "body",
+          "source": "sources/desk-wall-photo-cluster-chroma-v1.png",
+          "sourceTransform": {"crop": [300, 145, 1240, 845], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [170, 125]},
+          "output": "desk-wall-photo-cluster-draft.png",
+          "origin": [75, 370]
+        }],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
         "id": "office-chair",
         "category": "furniture",
         "assetMode": "layered",

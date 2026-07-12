@@ -198,7 +198,8 @@
         "zone": "work",
         "category": "appliance",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft laptop attaches directly to desk."
       },
       {
         "id": "desk-lamp",
@@ -212,42 +213,48 @@
         "zone": "work",
         "category": "decor-cluster",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft stationery attaches directly to desk."
       },
       {
         "id": "desk-book-cluster",
         "zone": "work",
         "category": "decor-cluster",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft book cluster attaches directly to desk."
       },
       {
         "id": "desk-wall-shelf",
         "zone": "work",
         "category": "wall-decoration",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft wall shelf carries books and plants."
       },
       {
         "id": "desk-wall-books",
         "zone": "work",
         "category": "decor-cluster",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft books attach to desk-wall-shelf."
       },
       {
         "id": "desk-wall-plants",
         "zone": "work",
         "category": "plant",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Art-draft shelf-mounted plant attaches to desk-wall-shelf; not ceiling-mounted."
       },
       {
         "id": "desk-wall-photo-cluster",
         "zone": "work",
         "category": "wall-decoration",
         "status": "planned",
-        "interactive": false
+        "interactive": false,
+        "note": "Independent art-draft pinned-photo wall cluster."
       },
       {
         "id": "tall-bookcase",
@@ -1582,6 +1589,13 @@
       "bedBeddingFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bed-bedding-draft.png",
       "tableFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/coffee-table-draft.png",
       "deskFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-frame-draft.png",
+      "deskLaptopFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-laptop-draft.png",
+      "deskStationeryClusterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-stationery-cluster-draft.png",
+      "deskBookClusterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-book-cluster-draft.png",
+      "deskWallShelfBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-wall-shelf-draft.png",
+      "deskWallBooksBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-wall-books-draft.png",
+      "deskWallPlantsBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-wall-plants-draft.png",
+      "deskWallPhotoClusterBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-wall-photo-cluster-draft.png",
       "officeChairFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/office-chair-draft.png",
       "sofaCushionGreenFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/sofa-cushion-green-draft.png",
       "sofaCushionPinkFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/sofa-cushion-pink-draft.png",
@@ -1913,6 +1927,277 @@
             0
           ]
         },
+        "auditPose": {}
+      },
+      {
+        "id": "desk-laptop",
+        "category": "appliance",
+        "assetMode": "layered",
+        "tile": [
+          1,
+          5,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "deskLaptopFront0Draft",
+            "origin": [
+              150,
+              445
+            ],
+            "depthBias": 550
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "desk"
+      },
+      {
+        "id": "desk-stationery-cluster",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "tile": [
+          1,
+          5,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "deskStationeryClusterFront0Draft",
+            "origin": [
+              295,
+              455
+            ],
+            "depthBias": 560
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "desk"
+      },
+      {
+        "id": "desk-book-cluster",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "tile": [
+          1,
+          5,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "deskBookClusterFront0Draft",
+            "origin": [
+              70,
+              465
+            ],
+            "depthBias": 560
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "desk"
+      },
+      {
+        "id": "desk-wall-shelf",
+        "category": "wall-decoration",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "deskWallShelfBody0Draft",
+            "origin": [
+              50,
+              285
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "desk-wall-books",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "deskWallBooksBody0Draft",
+            "origin": [
+              70,
+              285
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "desk-wall-shelf"
+      },
+      {
+        "id": "desk-wall-plants",
+        "category": "plant",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "deskWallPlantsBody0Draft",
+            "origin": [
+              225,
+              270
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "desk-wall-shelf"
+      },
+      {
+        "id": "desk-wall-photo-cluster",
+        "category": "wall-decoration",
+        "assetMode": "layered",
+        "tile": [
+          0,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "wall",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "body",
+            "image": "deskWallPhotoClusterBody0Draft",
+            "origin": [
+              75,
+              370
+            ],
+            "depthBias": 0
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
         "auditPose": {}
       },
       {

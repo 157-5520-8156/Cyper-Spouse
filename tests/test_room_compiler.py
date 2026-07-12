@@ -84,7 +84,9 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     )
     assert set(bundle["artDraft"]["images"]).isdisjoint(bundle["images"])
     assert [item["id"] for item in bundle["artDraft"]["objects"]] == [
-        "sofa", "bed", "bed-bedding", "table", "desk", "office-chair",
+        "sofa", "bed", "bed-bedding", "table", "desk", "desk-laptop",
+        "desk-stationery-cluster", "desk-book-cluster", "desk-wall-shelf",
+        "desk-wall-books", "desk-wall-plants", "desk-wall-photo-cluster", "office-chair",
         "sofa-cushion-green", "sofa-cushion-pink", "sofa-throw",
         "coffee-table-setting", "dining", "dining-chair-left",
         "dining-chair-right", "dining-table-setting", "divider",
@@ -128,6 +130,40 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     assert desk_plant["audit"] == {"front": [1.15, 4.15, 0]}
     assert all(living_plant["audits"].values())
     assert draft_by_id["bookcase-content-cluster"]["attachedTo"] == "tall-bookcase"
+    desk_surface = [draft_by_id[item_id] for item_id in (
+        "desk-laptop", "desk-stationery-cluster", "desk-book-cluster",
+    )]
+    assert all(item["attachedTo"] == "desk" for item in desk_surface)
+    assert all(item["occupancy"] == {"kind": "none", "tiles": []} for item in desk_surface)
+    assert all([layer["role"] for layer in item["layers"]] == ["front"] for item in desk_surface)
+    expected_desk_sources = {
+        "desk-laptop": ("sources/desk-laptop-chroma-v1.png", [340, 100, 1200, 940], [120, 95]),
+        "desk-stationery-cluster": ("sources/desk-stationery-cluster-chroma-v1.png", [430, 390, 830, 855], [55, 65]),
+        "desk-book-cluster": ("sources/desk-book-cluster-chroma-v1.png", [230, 235, 1020, 1030], [90, 70]),
+        "desk-wall-shelf": ("sources/desk-wall-shelf-chroma-v1.png", [140, 185, 1365, 820], [300, 95]),
+        "desk-wall-books": ("sources/desk-wall-books-chroma-v1.png", [320, 185, 1200, 790], [120, 85]),
+        "desk-wall-plants": ("sources/desk-wall-plants-chroma-v1.png", [340, 250, 900, 1050], [105, 150]),
+        "desk-wall-photo-cluster": ("sources/desk-wall-photo-cluster-chroma-v1.png", [300, 145, 1240, 845], [170, 125]),
+    }
+    manifest_draft_by_id = {
+        item["id"]: item for item in json.loads(ROOM_MANIFEST.read_text())["artDraft"]["objects"]
+    }
+    for object_id, (source, crop, resize) in expected_desk_sources.items():
+        layer = manifest_draft_by_id[object_id]["layers"][0]
+        assert layer["source"] == source
+        assert layer["sourceTransform"] == {
+            "crop": crop, "chromaKey": "#ff00ff", "transparentThreshold": 50,
+            "opaqueThreshold": 160, "despill": True, "resize": resize,
+        }
+    desk_wall = [draft_by_id[item_id] for item_id in (
+        "desk-wall-shelf", "desk-wall-books", "desk-wall-plants",
+        "desk-wall-photo-cluster",
+    )]
+    assert all(item["occupancy"] == {"kind": "wall", "tiles": []} for item in desk_wall)
+    assert all([layer["role"] for layer in item["layers"]] == ["body"] for item in desk_wall)
+    assert draft_by_id["desk-wall-books"]["attachedTo"] == "desk-wall-shelf"
+    assert draft_by_id["desk-wall-plants"]["attachedTo"] == "desk-wall-shelf"
+    assert "attachedTo" not in draft_by_id["desk-wall-photo-cluster"]
     assert [7, 4] not in bundle["walkable"]
     assert bundle["anchors"]["rug"] == [7, 5, 0]
     assert [6, 5, 0] in bundle["routes"]["tour"]
@@ -210,7 +246,11 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         for name in (
             "sofa-frame-draft.png", "bed-frame-draft.png",
             "bed-bedding-draft.png", "coffee-table-draft.png",
-            "desk-frame-draft.png", "office-chair-draft.png",
+            "desk-frame-draft.png", "desk-laptop-draft.png",
+            "desk-stationery-cluster-draft.png", "desk-book-cluster-draft.png",
+            "desk-wall-shelf-draft.png", "desk-wall-books-draft.png",
+            "desk-wall-plants-draft.png", "desk-wall-photo-cluster-draft.png",
+            "office-chair-draft.png",
             "sofa-cushion-green-draft.png", "sofa-cushion-pink-draft.png",
             "sofa-throw-draft.png", "coffee-table-setting-draft.png",
             "dining-table-draft.png", "dining-chair-left-draft.png",

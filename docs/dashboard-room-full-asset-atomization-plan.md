@@ -13,7 +13,7 @@
 - [ ] 波次 1：主要遮挡家具（进行中：clean shell 与 16 个家具/附属对象已进入可编译 `artDraft`，仍需逐件校准和删除测试）。
 - [x] 波次 2：厨房与大型收纳草稿功能闭环（29 个对象、36 个构建资产；全部厨房对象可删除，父子联动、适用遮挡与餐厨动作/路径通过；素材仍保持 `needs-art`，终稿基线在波次 6 统一批准）。
 - [ ] 波次 3：地毯、灯具、植物与窗区（进行中：四块地毯、两株落地植物、三盏台灯、两件承载柜、两组直属 decor、窗结构 sibling/attachment 模型、五件窗区软装/植物/墙灯及三幅墙画已进入草稿，现为 52 对象、63 个构建资产；所有屋顶对象继续排除，其余植物待处理）。
-- [ ] 波次 4–6：decor、路径动作与最终验收。
+- [ ] 波次 4–6：decor、路径动作与最终验收（进行中：工作区桌面与左墙七件 decor 已进入草稿，现为 59 个对象、70 个构建资产）。
 
 ### 波次 0 验收记录
 
@@ -60,6 +60,12 @@
 - `window-view` 与 `window-frame` 是可各自删除的 sibling；`window-frame → window-curtains / window-planter-left / window-planter-right` 构成显式 attachment 子树。隐藏 view 只删除景色，隐藏 frame 会关闭框及其真正承载的窗帘/窗台物，solo 窗帘或 planter 则保留 frame 祖先。
 - 首个品红键窗景因粉紫天空与 key 冲突被拒绝；绿色键 v2 作为独立 view，木框/中梃/窗台作为独立 frame。三幅墙画也各自成为 `wall-decoration`，不夹带墙面或家具像素。
 - 浏览器完成五件结构/墙画 hidden/solo、窗口父子级联、整屋组合与位置检查；全部为 `wall` occupancy，不影响路径。候选仍为 `planned / needs-art`，等待终稿基线批准。
+
+### 波次 4 工作区桌面与左墙 decor 草稿记录
+
+- `desk-laptop`、`desk-stationery-cluster`、`desk-book-cluster` 各自为 desk 的直接子对象，使用 `front` 层在 desk 主体之后绘制；它们不认领地面占用，也没有虚构互动。
+- `desk-wall-shelf` 是左墙 shelf 的物理父体；`desk-wall-books` 和 `desk-wall-plants` 只包含其承载物并附着 shelf。`desk-wall-photo-cluster` 独立贴在左墙，不因 shelf 隐藏而消失。
+- 浏览器完成 seven-object solo、七件各自 hidden、desk/shelf 父 hidden、子 solo、整屋装配和 tour；Runtime 专项测试同时锁定每次 hidden 不改变路径，desk/shelf 级联只影响各自后代，照片墙保持独立。桌面物未越出桌体，墙面资产不阻塞路径；壁架植物明确是 shelf-mounted，不属于屋顶/天花物件。
 
 ## 用户目标
 

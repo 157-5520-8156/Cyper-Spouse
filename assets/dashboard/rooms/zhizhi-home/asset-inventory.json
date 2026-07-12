@@ -328,6 +328,63 @@
         }
       },
       "note": "Three wall pictures remain independent wall objects and contain no wall, furniture, lighting, ceiling or roof pixels."
+    },
+    {
+      "id": "wave4-desk-surface-and-wall-decor-chroma-v1",
+      "targets": [
+        "desk-laptop",
+        "desk-stationery-cluster",
+        "desk-book-cluster",
+        "desk-wall-shelf",
+        "desk-wall-books",
+        "desk-wall-plants",
+        "desk-wall-photo-cluster"
+      ],
+      "status": "needs-art",
+      "method": "imagegen-background-extraction",
+      "sources": [
+        "sources/desk-laptop-chroma-v1.png",
+        "sources/desk-stationery-cluster-chroma-v1.png",
+        "sources/desk-book-cluster-chroma-v1.png",
+        "sources/desk-wall-shelf-chroma-v1.png",
+        "sources/desk-wall-books-chroma-v1.png",
+        "sources/desk-wall-plants-chroma-v1.png",
+        "sources/desk-wall-photo-cluster-chroma-v1.png",
+        "generated/desk-laptop-alpha-v1.png",
+        "generated/desk-stationery-cluster-alpha-v1.png",
+        "generated/desk-book-cluster-alpha-v1.png",
+        "generated/desk-wall-shelf-alpha-v1.png",
+        "generated/desk-wall-books-alpha-v1.png",
+        "generated/desk-wall-plants-alpha-v1.png",
+        "generated/desk-wall-photo-cluster-alpha-v1.png"
+      ],
+      "generation": {
+        "reference": "zhizhi-room-isometric-v2.png",
+        "background": "flat #ff00ff chroma",
+        "prompts": {
+          "desk-laptop-chroma-v1.png": "Open slim charcoal-blue laptop with a subtle cool interface glow; laptop only.",
+          "desk-stationery-cluster-chroma-v1.png": "Muted teal pencil cup, pens, warm note and one compact desk accessory; stationery only.",
+          "desk-book-cluster-chroma-v1.png": "Compact stack of warm muted books and one closed notebook; desk books only.",
+          "desk-wall-shelf-chroma-v1.png": "Long slim warm-dark-wood floating left-wall shelf with empty surface and subtle brackets; shelf only.",
+          "desk-wall-books-chroma-v1.png": "Upright and leaning muted books for the left-wall shelf; books only.",
+          "desk-wall-plants-chroma-v1.png": "Terracotta shelf plant with a small trailing vine; shelf-mounted, never ceiling-mounted.",
+          "desk-wall-photo-cluster-chroma-v1.png": "Small pinned photo/postcard cluster for the left wall; paper/photos only."
+        },
+        "alphaPostprocess": {
+          "helper": "imagegen/scripts/remove_chroma_key.py",
+          "keying": {"autoKey": "border", "transparentThreshold": 50, "opaqueThreshold": 160, "softMatte": true, "despill": true},
+          "sprites": {
+            "desk-laptop-alpha-v1.png": {"crop": [340, 100, 1200, 940], "resize": [120, 95]},
+            "desk-stationery-cluster-alpha-v1.png": {"crop": [430, 390, 830, 855], "resize": [55, 65]},
+            "desk-book-cluster-alpha-v1.png": {"crop": [230, 235, 1020, 1030], "resize": [90, 70]},
+            "desk-wall-shelf-alpha-v1.png": {"crop": [140, 185, 1365, 820], "resize": [300, 95]},
+            "desk-wall-books-alpha-v1.png": {"crop": [320, 185, 1200, 790], "resize": [120, 85]},
+            "desk-wall-plants-alpha-v1.png": {"crop": [340, 250, 900, 1050], "resize": [105, 150]},
+            "desk-wall-photo-cluster-alpha-v1.png": {"crop": [300, 145, 1240, 845], "resize": [170, 125]}
+          }
+        }
+      },
+      "note": "Desk surface objects attach directly to desk. Shelf books and plants attach to their wall shelf; the photo cluster remains independent on the wall. No asset contains a carrier, wall, ceiling or roof pixel."
     }
   ],
   "items": [
@@ -344,14 +401,14 @@
 
     {"id":"desk","zone":"work","category":"furniture","status":"partial","interactive":true,"note":"Logical object and front matte exist; full RGB remains in master."},
     {"id":"office-chair","zone":"work","category":"furniture","status":"planned","interactive":false},
-    {"id":"desk-laptop","zone":"work","category":"appliance","status":"planned","interactive":false},
+    {"id":"desk-laptop","zone":"work","category":"appliance","status":"planned","interactive":false,"note":"Art-draft laptop attaches directly to desk."},
     {"id":"desk-lamp","zone":"work","category":"lighting","status":"planned","interactive":false},
-    {"id":"desk-stationery-cluster","zone":"work","category":"decor-cluster","status":"planned","interactive":false},
-    {"id":"desk-book-cluster","zone":"work","category":"decor-cluster","status":"planned","interactive":false},
-    {"id":"desk-wall-shelf","zone":"work","category":"wall-decoration","status":"planned","interactive":false},
-    {"id":"desk-wall-books","zone":"work","category":"decor-cluster","status":"planned","interactive":false},
-    {"id":"desk-wall-plants","zone":"work","category":"plant","status":"planned","interactive":false},
-    {"id":"desk-wall-photo-cluster","zone":"work","category":"wall-decoration","status":"planned","interactive":false},
+    {"id":"desk-stationery-cluster","zone":"work","category":"decor-cluster","status":"planned","interactive":false,"note":"Art-draft stationery attaches directly to desk."},
+    {"id":"desk-book-cluster","zone":"work","category":"decor-cluster","status":"planned","interactive":false,"note":"Art-draft book cluster attaches directly to desk."},
+    {"id":"desk-wall-shelf","zone":"work","category":"wall-decoration","status":"planned","interactive":false,"note":"Art-draft wall shelf carries books and plants."},
+    {"id":"desk-wall-books","zone":"work","category":"decor-cluster","status":"planned","interactive":false,"note":"Art-draft books attach to desk-wall-shelf."},
+    {"id":"desk-wall-plants","zone":"work","category":"plant","status":"planned","interactive":false,"note":"Art-draft shelf-mounted plant attaches to desk-wall-shelf; not ceiling-mounted."},
+    {"id":"desk-wall-photo-cluster","zone":"work","category":"wall-decoration","status":"planned","interactive":false,"note":"Independent art-draft pinned-photo wall cluster."},
     {"id":"tall-bookcase","zone":"work","category":"furniture","status":"planned","interactive":false},
     {"id":"bookcase-content-cluster","zone":"work","category":"decor-cluster","status":"planned","interactive":false},
     {"id":"desk-floor-plant","zone":"work","category":"plant","status":"planned","interactive":false},

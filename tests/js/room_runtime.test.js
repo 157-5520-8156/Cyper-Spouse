@@ -206,6 +206,51 @@ test('attached objects follow parent hiding while solo keeps required ancestors'
   assert.deepEqual(runtime.visibleObjects().map(item => item.id), ['sofa', 'table']);
 });
 
+test('desk decor deletion audits keep siblings and paths stable', () => {
+  const objectIds = [
+    'desk-laptop', 'desk-stationery-cluster', 'desk-book-cluster',
+    'desk-wall-shelf', 'desk-wall-books', 'desk-wall-plants',
+    'desk-wall-photo-cluster',
+  ];
+  const routeStart = [7, 4, 0], routeEnd = [5, 7, 0];
+  const hiddenWithDescendants = {
+    'desk-wall-shelf': new Set(['desk-wall-shelf', 'desk-wall-books', 'desk-wall-plants']),
+  };
+
+  for (const objectId of objectIds) {
+    const runtime = new DashboardRoomRuntime(fakeCanvas(), bundle, {});
+    const beforePath = runtime.pathfind(routeStart, routeEnd);
+    runtime.activatePreview(new URLSearchParams('demo=art-draft'));
+    const baselineVisible = runtime.visibleObjects().map(item => item.id);
+    runtime.activatePreview(new URLSearchParams(`demo=atomization&art=draft&object=${objectId}&mode=hidden`));
+    const visible = runtime.visibleObjects().map(item => item.id);
+    const hidden = hiddenWithDescendants[objectId] || new Set([objectId]);
+
+    assert.deepEqual(
+      visible,
+      baselineVisible.filter(id => !hidden.has(id)),
+      `${objectId} should preserve all unrelated object order`,
+    );
+    assert.deepEqual(runtime.pathfind(routeStart, routeEnd), beforePath, `${objectId} should not alter paths`);
+  }
+
+  const deskRuntime = new DashboardRoomRuntime(fakeCanvas(), bundle, {});
+  deskRuntime.activatePreview(new URLSearchParams('demo=atomization&art=draft&object=desk&mode=hidden'));
+  const deskVisible = new Set(deskRuntime.visibleObjects().map(item => item.id));
+  for (const objectId of ['desk', 'desk-laptop', 'desk-stationery-cluster', 'desk-book-cluster']) {
+    assert.equal(deskVisible.has(objectId), false, `${objectId} should follow desk hiding`);
+  }
+  assert.equal(deskVisible.has('desk-wall-photo-cluster'), true);
+
+  const shelfRuntime = new DashboardRoomRuntime(fakeCanvas(), bundle, {});
+  shelfRuntime.activatePreview(new URLSearchParams('demo=atomization&art=draft&object=desk-wall-shelf&mode=hidden'));
+  const shelfVisible = new Set(shelfRuntime.visibleObjects().map(item => item.id));
+  for (const objectId of ['desk-wall-shelf', 'desk-wall-books', 'desk-wall-plants']) {
+    assert.equal(shelfVisible.has(objectId), false, `${objectId} should follow shelf hiding`);
+  }
+  assert.equal(shelfVisible.has('desk-wall-photo-cluster'), true);
+});
+
 test('pathfinding only enters occupied interaction tiles declared by object id', () => {
   const configuredBundle = structuredClone(bundle);
   configuredBundle.objects.find(item => item.id === 'desk').occupancy = {kind:'footprint', tiles:[[5, 7]]};
