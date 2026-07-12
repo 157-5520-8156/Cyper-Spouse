@@ -199,7 +199,7 @@ async def test_world_turn_selectively_commits_inner_impression_and_question_comm
             if "WorldReplyJSON" in joined:
                 return json.dumps(
                     {
-                        "reply_text": "刚才那句我没接住。你愿意把后面也说完吗？",
+                        "reply_text": "我在听。你愿意把后面也说完吗？",
                         "mentioned_event_ids": [],
                         "proposed_action_ids": [],
                         "claims": [],
@@ -242,10 +242,63 @@ async def test_world_turn_selectively_commits_inner_impression_and_question_comm
         item["kind"] == "possible_disappointment"
         for item in state["private_impressions"].values()
     )
-    assert any(
-        item["status"] == "active"
-        and item["intention"] == "等他愿意时，把刚才没说完的话听完。"
+    thread_id = "thread:private-commitment"
+    delivery_id, _, _ = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="我在。",
+        kind="reply",
+        expires_at=NOW + timedelta(hours=12),
+        trace={
+            "world_id": world_id,
+            "user_id": "user:geoff",
+            "input_message_id": "m:disappointed",
+            "appraisal": "ordinary_message",
+            "expression_policy": "test",
+            "allowed_facts": [],
+            "observable_reason": "test",
+            "conversation_thread": {
+                "thread_id": thread_id,
+                "user_id": "user:geoff",
+                "question": "你愿意把后面也说完吗？",
+                "expires_at": (NOW + timedelta(hours=24)).isoformat(),
+            },
+            "private_commitment": {
+                "commitment_id": "commitment:linked-thread",
+                "user_id": "user:geoff",
+                "intention": "等他愿意时，把刚才没说完的话听完。",
+                "source_event_ids": ["message:m:disappointed"],
+                "expires_at": (NOW + timedelta(hours=24)).isoformat(),
+                "priority": 55,
+                "related_thread_id": thread_id,
+            },
+        },
+    )
+    kernel.settle_outgoing_action(delivery_id, delivered=True)
+    state = kernel.snapshot(world_id)
+    commitment = next(
+        item
         for item in state["private_commitments"].values()
+        if item["status"] == "active"
+        and item["intention"] == "等他愿意时，把刚才没说完的话听完。"
+    )
+    assert commitment["related_thread_id"]
+    kernel.submit(
+        {
+            "type": "resolve_conversation_thread",
+            "world_id": world_id,
+            "thread_id": commitment["related_thread_id"],
+            "outcome": "answered",
+            "reason": "用户已回应问题",
+            "idempotency_key": "test:resolve-private-commitment",
+        },
+        expected_revision=kernel.revision(world_id),
+    )
+    assert (
+        kernel.snapshot(world_id)["private_commitments"][commitment["commitment_id"]][
+            "status"
+        ]
+        == "fulfilled"
     )
     assert not any(
         item["kind"] == "outgoing_message"

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import re
 
 from companion_daemon.models import IncomingMessage
 
@@ -123,10 +124,14 @@ class TurnFrameCompiler:
             self._mapping(self._mapping(snapshot.get("user_affect")).get(user_id))
         )
         private_impressions = tuple(
-            self._private_impressions(snapshot, user_id=user_id)[: self.MAX_THREADS]
+            self._private_impressions(
+                snapshot, user_id=user_id, query=message.text
+            )[: self.MAX_THREADS]
         )
         private_commitments = tuple(
-            self._private_commitments(snapshot, user_id=user_id)[: self.MAX_THREADS]
+            self._private_commitments(
+                snapshot, user_id=user_id, query=message.text
+            )[: self.MAX_THREADS]
         )
         capability = self._capability(snapshot)
         dependencies = tuple(
@@ -390,7 +395,7 @@ class TurnFrameCompiler:
         ]
 
     def _private_impressions(
-        self, snapshot: dict[str, object], *, user_id: str
+        self, snapshot: dict[str, object], *, user_id: str, query: str
     ) -> list[dict[str, object]]:
         logical_at = str(self._mapping(snapshot.get("clock")).get("logical_at") or "")
         impressions = [
@@ -408,13 +413,24 @@ class TurnFrameCompiler:
             and item.get("user_id") == user_id
             and (not logical_at or str(item.get("expires_at") or "") > logical_at)
         ]
-        return sorted(
-            impressions,
-            key=lambda item: (-float(item["confidence"]), str(item["expires_at"])),
-        )
+        return [
+            item
+            for score, item in sorted(
+                (
+                    (self._inner_relevance(query, str(item["summary"])), item)
+                    for item in impressions
+                ),
+                key=lambda entry: (
+                    -entry[0],
+                    -float(entry[1]["confidence"]),
+                    str(entry[1]["expires_at"]),
+                ),
+            )
+            if score > 0
+        ]
 
     def _private_commitments(
-        self, snapshot: dict[str, object], *, user_id: str
+        self, snapshot: dict[str, object], *, user_id: str, query: str
     ) -> list[dict[str, object]]:
         logical_at = str(self._mapping(snapshot.get("clock")).get("logical_at") or "")
         commitments = [
@@ -431,10 +447,38 @@ class TurnFrameCompiler:
             and item.get("user_id") == user_id
             and (not logical_at or str(item.get("expires_at") or "") > logical_at)
         ]
-        return sorted(
-            commitments,
-            key=lambda item: (-int(item["priority"]), str(item["expires_at"])),
-        )
+        return [
+            item
+            for score, item in sorted(
+                (
+                    (self._inner_relevance(query, str(item["intention"])), item)
+                    for item in commitments
+                ),
+                key=lambda entry: (
+                    -entry[0],
+                    -int(entry[1]["priority"]),
+                    str(entry[1]["expires_at"]),
+                ),
+            )
+            if score > 0
+        ]
+
+    @staticmethod
+    def _inner_relevance(query: str, text: str) -> int:
+        """Use compact lexical overlap; no private record is globally sticky."""
+        normalized_query = re.sub(r"\s+", "", query)
+        normalized_text = re.sub(r"\s+", "", text)
+        if len(normalized_query) < 2 or len(normalized_text) < 2:
+            return 0
+        query_bigrams = {
+            normalized_query[index : index + 2]
+            for index in range(len(normalized_query) - 1)
+        }
+        text_bigrams = {
+            normalized_text[index : index + 2]
+            for index in range(len(normalized_text) - 1)
+        }
+        return len(query_bigrams & text_bigrams)
 
     def _scene(self, snapshot: dict[str, object]) -> dict[str, object]:
         clock = self._mapping(snapshot.get("clock"))

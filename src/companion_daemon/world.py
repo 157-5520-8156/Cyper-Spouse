@@ -132,6 +132,7 @@ class AcceptedTurn:
     appraisal: CommittedAppraisal
     expected_revision: int
     causation_id: str | None = None
+    private_impression: dict[str, object] | None = None
 
 
 @dataclass(frozen=True)
@@ -206,6 +207,11 @@ class WorldKernel:
                 "actor": {"kind": "companion", "id": "zhizhi"},
                 "causation_id": turn.causation_id or turn.message_id,
                 "idempotency_key": f"appraise:{turn.intent_id}",
+                **(
+                    {"private_impression": dict(turn.private_impression)}
+                    if turn.private_impression
+                    else {}
+                ),
             },
             expected_revision=turn.expected_revision,
         )
@@ -670,6 +676,28 @@ class WorldKernel:
                 )
                 trace_row_id = int(trace_row.lastrowid)
                 action_id = f"outgoing:{delivery_id}"
+                private_commitment_events: list[tuple[str, dict[str, object]]] = []
+                raw_private_commitment = trace.get("private_commitment")
+                if raw_private_commitment is not None:
+                    private_commitment_events.append(
+                        (
+                            "PrivateCommitmentCommitted",
+                            self._private_commitment_payload(
+                                state,
+                                _as_dict(
+                                    raw_private_commitment,
+                                    "outgoing private commitment",
+                                ),
+                                pending_thread_id=str(
+                                    _as_dict(
+                                        trace.get("conversation_thread", {}),
+                                        "outgoing conversation thread",
+                                    ).get("thread_id")
+                                    or ""
+                                ),
+                            ),
+                        )
+                    )
                 segmented = self.action_coordinator.plan_action(
                     action_id=action_id, texts=parts
                 )
@@ -706,6 +734,7 @@ class WorldKernel:
                             },
                         ),
                         planned_event,
+                        *private_commitment_events,
                     ],
                     idempotency_key=f"outgoing:{delivery_id}",
                     correlation_id=str(uuid4()),
@@ -1691,6 +1720,20 @@ class WorldKernel:
                         ),
                     ),
                 ))
+            private_commitment = trace.get("private_commitment")
+            if not delivered and isinstance(private_commitment, dict):
+                commitment_id = str(private_commitment.get("commitment_id") or "")
+                if commitment_id:
+                    specifications.append(
+                        (
+                            "PrivateCommitmentResolved",
+                            {
+                                "commitment_id": commitment_id,
+                                "outcome": "released",
+                                "reason": "question_action_not_delivered",
+                            },
+                        )
+                    )
             self._append_and_project(
                 conn,
                 world_id,
@@ -3333,6 +3376,13 @@ class WorldKernel:
                         {"thread_id": thread_id, "reason": "logical_timeout"},
                         logical_at=expires_at.isoformat(),
                     )
+                    for event_type, event_payload in self._thread_commitment_resolution_events(
+                        working,
+                        thread_id=thread_id,
+                        outcome="released",
+                        reason="conversation_thread_expired",
+                    ):
+                        emit(event_type, event_payload, logical_at=expires_at.isoformat())
                     affect = apply_appraisal(
                         _as_dict(
                             working["emotion_modulation"], "emotion modulation"
@@ -4344,7 +4394,15 @@ class WorldKernel:
             thread = _as_dict(_as_dict(state.get("conversation_threads", {}), "conversation threads").get(thread_id), "conversation thread")
             if thread.get("status") != "open" or outcome not in {"answered", "skipped", "meta"} or not reason:
                 raise WorldError("only an open conversation thread can be resolved with a classified user response")
-            return [("ConversationThreadResolved", {"thread_id": thread_id, "outcome": outcome, "reason": reason[:160]})]
+            return [
+                ("ConversationThreadResolved", {"thread_id": thread_id, "outcome": outcome, "reason": reason[:160]}),
+                *self._thread_commitment_resolution_events(
+                    state,
+                    thread_id=thread_id,
+                    outcome="fulfilled" if outcome == "answered" else "released",
+                    reason=f"conversation_thread_{outcome}",
+                ),
+            ]
         if command_type == "cancel_conversation_thread":
             thread_id = str(command.get("thread_id") or "")
             condition = str(command.get("condition") or "")
@@ -4373,7 +4431,13 @@ class WorldKernel:
                         "condition": condition,
                         "reason": reason[:160],
                     },
-                )
+                ),
+                *self._thread_commitment_resolution_events(
+                    state,
+                    thread_id=thread_id,
+                    outcome="released",
+                    reason="conversation_thread_cancelled",
+                ),
             ]
         if command_type == "cancel_action":
             action_id = str(command.get("action_id") or "")
@@ -4960,49 +5024,10 @@ class WorldKernel:
                 },
             )]
         if command_type == "commit_private_impression":
-            impression_id = str(command.get("impression_id") or "")
-            user_id = str(command.get("user_id") or "")
-            kind = str(command.get("kind") or "")
-            summary = str(command.get("summary") or "").strip()
-            confidence = float(command.get("confidence") or 0.0)
-            sources = self._validated_inner_life_sources(
-                state,
-                user_id=user_id,
-                source_event_ids=command.get("source_event_ids", []),
-            )
-            expires_at = str(command.get("expires_at") or "")
-            if (
-                not impression_id
-                or impression_id in _as_dict(state.get("private_impressions", {}), "private impressions")
-                or kind not in {
-                    "possible_disappointment",
-                    "possible_confusion",
-                    "boundary_concern",
-                    "relational_hypothesis",
-                    "continuity_note",
-                }
-                or len(kind) > 80
-                or not summary
-                or len(summary) > 240
-                or not 0.0 < confidence <= 1.0
-                or not expires_at
-                or _parse_at(expires_at) <= _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
-            ):
-                raise WorldError("private impression is outside the bounded schema")
             return [
                 (
                     "PrivateImpressionCommitted",
-                    {
-                        "impression_id": impression_id,
-                        "user_id": user_id,
-                        "kind": kind,
-                        "summary": summary,
-                        "confidence": confidence,
-                        "source_event_ids": sources,
-                        "expires_at": expires_at,
-                        "contradictory_evidence": [],
-                        "rule_version": "private-inner-life-v1",
-                    },
+                    self._private_impression_payload(state, command),
                 )
             ]
         if command_type == "contradict_private_impression":
@@ -5036,63 +5061,10 @@ class WorldKernel:
                 )
             ]
         if command_type == "commit_private_commitment":
-            commitment_id = str(command.get("commitment_id") or "")
-            user_id = str(command.get("user_id") or "")
-            intention = str(command.get("intention") or "").strip()
-            sources = self._validated_inner_life_sources(
-                state,
-                user_id=user_id,
-                source_event_ids=command.get("source_event_ids", []),
-            )
-            expires_at = str(command.get("expires_at") or "")
-            priority = int(command.get("priority") or 0)
-            related_thread_id = str(command.get("related_thread_id") or "")
-            if (
-                not commitment_id
-                or commitment_id in _as_dict(state.get("private_commitments", {}), "private commitments")
-                or not intention
-                or len(intention) > 240
-                or not 1 <= priority <= 100
-                or not expires_at
-                or _parse_at(expires_at) <= _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
-                or len(related_thread_id) > 160
-                or (
-                    related_thread_id
-                    and (
-                        _as_dict(
-                            _as_dict(state.get("conversation_threads", {}), "threads").get(
-                                related_thread_id
-                            ),
-                            "related thread",
-                        ).get("status")
-                        != "open"
-                        or str(
-                            _as_dict(
-                                _as_dict(state.get("conversation_threads", {}), "threads").get(
-                                    related_thread_id
-                                ),
-                                "related thread",
-                            ).get("user_id")
-                            or ""
-                        )
-                        != user_id
-                    )
-                )
-            ):
-                raise WorldError("private commitment is outside the bounded schema")
             return [
                 (
                     "PrivateCommitmentCommitted",
-                    {
-                        "commitment_id": commitment_id,
-                        "user_id": user_id,
-                        "intention": intention,
-                        "source_event_ids": sources,
-                        "expires_at": expires_at,
-                        "priority": priority,
-                        "related_thread_id": related_thread_id,
-                        "rule_version": "private-inner-life-v1",
-                    },
+                    self._private_commitment_payload(state, command),
                 )
             ]
         if command_type == "resolve_private_commitment":
@@ -5430,6 +5402,27 @@ class WorldKernel:
                             },
                         )
                     )
+            raw_private_impression = command.get("private_impression")
+            if raw_private_impression is not None:
+                impression = self._private_impression_payload(
+                    state,
+                    _as_dict(raw_private_impression, "turn private impression"),
+                )
+                expected_kind = (
+                    "possible_disappointment"
+                    if str(raw_user_affect.get("kind") or "") == "disappointment"
+                    else "possible_confusion"
+                    if str(raw_user_affect.get("kind") or "") == "confusion"
+                    else ""
+                )
+                if (
+                    not bool(raw_user_affect.get("unresolved"))
+                    or int(raw_user_affect.get("intensity") or 0) < 3
+                    or impression["kind"] != expected_kind
+                    or impression["user_id"] != str(command.get("user_id") or "")
+                ):
+                    raise WorldError("turn private impression fails the materiality policy")
+                events.append(("PrivateImpressionCommitted", impression))
             message_reference = (
                 f"message:{command.get('message_id') or command.get('intent_id') or 'unknown'}"
             )
@@ -6095,6 +6088,133 @@ class WorldKernel:
         if any(source_id not in known for source_id in source_ids):
             raise WorldError("private inner life requires committed source ids")
         return source_ids
+
+    @classmethod
+    def _private_commitment_payload(
+        cls,
+        state: dict[str, object],
+        raw: dict[str, object],
+        *,
+        pending_thread_id: str = "",
+    ) -> dict[str, object]:
+        """Validate the one shared commitment shape used by turns and API calls."""
+        commitment_id = str(raw.get("commitment_id") or "")
+        user_id = str(raw.get("user_id") or "")
+        intention = str(raw.get("intention") or "").strip()
+        sources = cls._validated_inner_life_sources(
+            state,
+            user_id=user_id,
+            source_event_ids=raw.get("source_event_ids", []),
+        )
+        expires_at = str(raw.get("expires_at") or "")
+        priority = int(raw.get("priority") or 0)
+        related_thread_id = str(raw.get("related_thread_id") or "")
+        threads = _as_dict(state.get("conversation_threads", {}), "threads")
+        related_thread = _as_dict(threads.get(related_thread_id, {}), "related thread")
+        if (
+            not commitment_id
+            or commitment_id
+            in _as_dict(state.get("private_commitments", {}), "private commitments")
+            or not intention
+            or len(intention) > 240
+            or not 1 <= priority <= 100
+            or not expires_at
+            or _parse_at(expires_at)
+            <= _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+            or len(related_thread_id) > 160
+            or (
+                related_thread_id
+                and (
+                    related_thread.get("status") != "open"
+                    or str(related_thread.get("user_id") or "") != user_id
+                )
+                and related_thread_id != pending_thread_id
+            )
+        ):
+            raise WorldError("private commitment is outside the bounded schema")
+        return {
+            "commitment_id": commitment_id,
+            "user_id": user_id,
+            "intention": intention,
+            "source_event_ids": sources,
+            "expires_at": expires_at,
+            "priority": priority,
+            "related_thread_id": related_thread_id,
+            "rule_version": "private-inner-life-v1",
+        }
+
+    @classmethod
+    def _private_impression_payload(
+        cls, state: dict[str, object], raw: dict[str, object]
+    ) -> dict[str, object]:
+        impression_id = str(raw.get("impression_id") or "")
+        user_id = str(raw.get("user_id") or "")
+        kind = str(raw.get("kind") or "")
+        summary = str(raw.get("summary") or "").strip()
+        confidence = float(raw.get("confidence") or 0.0)
+        sources = cls._validated_inner_life_sources(
+            state,
+            user_id=user_id,
+            source_event_ids=raw.get("source_event_ids", []),
+        )
+        expires_at = str(raw.get("expires_at") or "")
+        if (
+            not impression_id
+            or impression_id
+            in _as_dict(state.get("private_impressions", {}), "private impressions")
+            or kind
+            not in {
+                "possible_disappointment",
+                "possible_confusion",
+                "boundary_concern",
+                "relational_hypothesis",
+                "continuity_note",
+            }
+            or not summary
+            or len(summary) > 240
+            or "\n" in summary
+            or not 0.0 < confidence <= 1.0
+            or not expires_at
+            or _parse_at(expires_at)
+            <= _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+        ):
+            raise WorldError("private impression is outside the bounded schema")
+        return {
+            "impression_id": impression_id,
+            "user_id": user_id,
+            "kind": kind,
+            "summary": summary,
+            "confidence": confidence,
+            "source_event_ids": sources,
+            "expires_at": expires_at,
+            "contradictory_evidence": [],
+            "rule_version": "private-inner-life-v1",
+        }
+
+    @staticmethod
+    def _thread_commitment_resolution_events(
+        state: dict[str, object],
+        *,
+        thread_id: str,
+        outcome: str,
+        reason: str,
+    ) -> list[tuple[str, dict[str, object]]]:
+        return [
+            (
+                "PrivateCommitmentResolved",
+                {
+                    "commitment_id": commitment_id,
+                    "outcome": outcome,
+                    "reason": reason,
+                },
+            )
+            for commitment_id, raw in _as_dict(
+                state.get("private_commitments", {}), "private commitments"
+            ).items()
+            if (commitment := _as_dict(raw, "private commitment")).get("status")
+            == "active"
+            and str(commitment.get("related_thread_id") or "") == thread_id
+        ]
 
     def _receipt(self, conn, world_id: str, key: str):
         return conn.execute(

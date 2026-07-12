@@ -1847,7 +1847,12 @@ class CompanionEngine:
                         "idempotency_key": f"thread-response:{thread_id}:{message.message_id}",
                     }
                 )
-        accepted_turn = self.world_kernel.accept_turn(
+        private_impression = self._material_private_impression_proposal(
+            message=message,
+            user_id=user_id,
+            user_affect=user_affect,
+        )
+        self.world_kernel.accept_turn(
             AcceptedTurn(
                 world_id=self.world_id,
                 user_id=user_id,
@@ -1866,13 +1871,8 @@ class CompanionEngine:
                 ),
                 expected_revision=self.world_kernel.revision(self.world_id),
                 causation_id=str(message.message_id or ""),
+                private_impression=private_impression,
             )
-        )
-        self._commit_material_private_impression(
-            message=message,
-            user_id=user_id,
-            user_affect=user_affect,
-            expected_revision=accepted_turn.revision,
         )
         if skip_reply:
             return None
@@ -2699,7 +2699,7 @@ class CompanionEngine:
             "short_lived_constraint": None,
             "observable_reason": "由已结算世界账本和本轮判断决定。",
         }
-        if question:
+        if question and user_affect is not None and user_affect.unresolved:
             thread_id = "thread:" + sha256(
                 f"{user_id}|{message.message_id}|{question}".encode("utf-8")
             ).hexdigest()[:20]
@@ -2708,6 +2708,17 @@ class CompanionEngine:
                 "user_id": user_id,
                 "question": question,
                 "expires_at": (self._world_logical_now() + timedelta(hours=24)).isoformat(),
+            }
+            trace["private_commitment"] = {
+                "commitment_id": "commitment:" + sha256(
+                    f"{user_id}|{message.message_id}|{question}".encode("utf-8")
+                ).hexdigest()[:20],
+                "user_id": user_id,
+                "intention": "等他愿意时，把刚才没说完的话听完。",
+                "source_event_ids": [f"message:{message.message_id}"],
+                "expires_at": (self._world_logical_now() + timedelta(hours=24)).isoformat(),
+                "priority": 55,
+                "related_thread_id": thread_id,
             }
         delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(
             canonical_user_id=canonical_user_id,
@@ -2719,13 +2730,6 @@ class CompanionEngine:
             trace=trace,
             complete_by_observed_at=complete_by_observed_at,
         )
-        if question:
-            self._commit_question_followup_commitment(
-                message=message,
-                user_id=user_id,
-                question=question,
-                expected_revision=self.world_kernel.revision(self.world_id),
-            )
         reply = CompanionReply(
             canonical_user_id=canonical_user_id,
             mood=public_mood_value,
@@ -2743,15 +2747,14 @@ class CompanionEngine:
             self.confirm_reply_delivery(reply)
         return reply
 
-    def _commit_material_private_impression(
+    def _material_private_impression_proposal(
         self,
         *,
         message: IncomingMessage,
         user_id: str,
         user_affect: UserAffectAppraisal | None,
-        expected_revision: int,
-    ) -> None:
-        """Selectively retain high-salience fallible user-meaning hypotheses."""
+    ) -> dict[str, object] | None:
+        """Return an eligible inner proposal for the same atomic turn commit."""
         if (
             user_affect is None
             or not user_affect.unresolved
@@ -2759,7 +2762,7 @@ class CompanionEngine:
             or user_affect.kind not in {"disappointment", "confusion"}
             or not message.message_id
         ):
-            return
+            return None
         kind = (
             "possible_disappointment"
             if user_affect.kind == "disappointment"
@@ -2770,55 +2773,15 @@ class CompanionEngine:
             if user_affect.kind == "disappointment"
             else "我感觉他可能还在困惑刚才的互动。"
         )
-        try:
-            self.world_kernel.commit_private_impression(
-                self.world_id,
-                impression_id=f"impression:{message.message_id}",
-                user_id=user_id,
-                kind=kind,
-                summary=summary,
-                confidence=user_affect.confidence,
-                source_event_ids=(f"message:{message.message_id}",),
-                expires_at=self._world_logical_now() + timedelta(days=7),
-                expected_revision=expected_revision,
-            )
-        except (WorldError, ConcurrencyConflict) as exc:
-            # This is advisory continuity. It must not turn a natural reply
-            # into silence when another writer wins the revision race.
-            logger.warning("private impression was not committed: %s", exc)
-
-    def _commit_question_followup_commitment(
-        self,
-        *,
-        message: IncomingMessage,
-        user_id: str,
-        question: str,
-        expected_revision: int,
-    ) -> None:
-        """A real question can create a bounded internal wish to hear more.
-
-        It never schedules an outbound Action and therefore cannot claim that
-        the user agreed to continue. The eventual delivered reply still owns
-        the public ConversationThread lifecycle.
-        """
-        if not message.message_id:
-            return
-        commitment_id = "commitment:" + sha256(
-            f"{user_id}|{message.message_id}|{question}".encode("utf-8")
-        ).hexdigest()[:20]
-        try:
-            self.world_kernel.commit_private_commitment(
-                self.world_id,
-                commitment_id=commitment_id,
-                user_id=user_id,
-                intention="等他愿意时，把刚才没说完的话听完。",
-                source_event_ids=(f"message:{message.message_id}",),
-                expires_at=self._world_logical_now() + timedelta(hours=24),
-                priority=55,
-                expected_revision=expected_revision,
-            )
-        except (WorldError, ConcurrencyConflict) as exc:
-            logger.warning("private follow-up commitment was not committed: %s", exc)
+        return {
+            "impression_id": f"impression:{message.message_id}",
+            "user_id": user_id,
+            "kind": kind,
+            "summary": summary,
+            "confidence": user_affect.confidence,
+            "source_event_ids": [f"message:{message.message_id}"],
+            "expires_at": (self._world_logical_now() + timedelta(days=7)).isoformat(),
+        }
 
     def conversation_cadence(
         self,

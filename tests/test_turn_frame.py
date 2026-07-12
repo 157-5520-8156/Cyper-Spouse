@@ -261,7 +261,7 @@ def test_turn_frame_injects_only_active_user_scoped_inner_records_as_fallible_de
                 "commitment:high": {
                     "status": "active",
                     "user_id": "user:geoff",
-                    "intention": "等合适时把话听完。",
+                        "intention": "等他愿意时，再把刚才的话听完。",
                     "priority": 80,
                     "source_event_ids": ["message:m:earlier"],
                     "expires_at": "2026-07-13T12:00:00+00:00",
@@ -269,7 +269,9 @@ def test_turn_frame_injects_only_active_user_scoped_inner_records_as_fallible_de
             },
         },
         user_id="user:geoff",
-        message=IncomingMessage(platform="qq", platform_user_id="geoff", text="没事。"),
+        message=IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="刚才我还是有点失望。"
+        ),
     )
 
     delta = frame.prompt_delta()
@@ -281,3 +283,38 @@ def test_turn_frame_injects_only_active_user_scoped_inner_records_as_fallible_de
     assert "message:m:earlier" in frame.dependency_tokens
     assert any(item.kind == "continuity" for item in compiler.advisories(frame))
     assert any(item.kind == "agency" for item in compiler.advisories(frame))
+
+    unrelated = compiler.compile(
+        world_id="world:1",
+        revision=10,
+        state_hash="e" * 64,
+        snapshot={
+            **frame.prompt_payload(),
+            "clock": {"logical_at": "2026-07-12T12:00:00+00:00"},
+            "private_impressions": {
+                "impression:active": {
+                    "status": "active",
+                    "user_id": "user:geoff",
+                    "kind": "possible_disappointment",
+                    "summary": "我感觉他可能有点失望。",
+                    "confidence": 0.8,
+                    "source_event_ids": ["message:m:earlier"],
+                    "expires_at": "2026-07-13T12:00:00+00:00",
+                }
+            },
+            "private_commitments": {
+                "commitment:high": {
+                    "status": "active",
+                    "user_id": "user:geoff",
+                    "intention": "等他愿意时，再把刚才的话听完。",
+                    "priority": 80,
+                    "source_event_ids": ["message:m:earlier"],
+                    "expires_at": "2026-07-13T12:00:00+00:00",
+                }
+            },
+        },
+        user_id="user:geoff",
+        message=IncomingMessage(platform="qq", platform_user_id="geoff", text="晚饭吃什么？"),
+    )
+    assert unrelated.private_impressions == ()
+    assert unrelated.private_commitments == ()
