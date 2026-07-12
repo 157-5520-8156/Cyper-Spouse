@@ -31,6 +31,14 @@ class PrivateImpressionProposal:
 
 
 @dataclass(frozen=True)
+class PrivateCommitmentProposal:
+    """A future-facing intention that still requires a delivery-linked thread."""
+
+    intention: str
+    priority: int
+
+
+@dataclass(frozen=True)
 class MindProposal:
     """A bounded model proposal; factual authority remains outside this type."""
 
@@ -38,6 +46,7 @@ class MindProposal:
     expression_beats: tuple[ExpressionBeat, ...] = ()
     display_strategy: str | None = None
     private_impression: PrivateImpressionProposal | None = None
+    private_commitment: PrivateCommitmentProposal | None = None
 
 
 def parse_mind_proposal(raw: str) -> MindProposal:
@@ -66,6 +75,7 @@ def parse_mind_proposal(raw: str) -> MindProposal:
         ),
         display_strategy=_parse_display_strategy(payload.get("display_strategy")),
         private_impression=_parse_private_impression(payload.get("private_impression")),
+        private_commitment=_parse_private_commitment(payload.get("private_commitment")),
     )
 
 
@@ -112,3 +122,19 @@ def _parse_private_impression(raw: object) -> PrivateImpressionProposal | None:
     ):
         return None
     return PrivateImpressionProposal(kind, summary, float(confidence))
+
+
+def _parse_private_commitment(raw: object) -> PrivateCommitmentProposal | None:
+    if not isinstance(raw, dict):
+        return None
+    intention = str(raw.get("intention") or "").strip()
+    priority = raw.get("priority")
+    if (
+        not intention
+        or len(intention) > 240
+        or "\n" in intention
+        or type(priority) is not int
+        or not 50 <= priority <= 100
+    ):
+        return None
+    return PrivateCommitmentProposal(intention, priority)

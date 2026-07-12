@@ -46,3 +46,15 @@ def test_mind_proposal_keeps_only_a_bounded_fallible_private_impression() -> Non
     assert proposal.private_impression is not None
     assert proposal.private_impression.kind == "possible_disappointment"
     assert proposal.private_impression.confidence == 0.7
+
+
+def test_mind_proposal_keeps_a_high_priority_thread_linked_commitment() -> None:
+    proposal = parse_mind_proposal(
+        '{"reply_text":"你愿意继续说吗？",'
+        '"private_commitment":{"intention":"等他愿意时把这段委屈听完。","priority":68},'
+        '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+    )
+
+    assert proposal.private_commitment is not None
+    assert proposal.private_commitment.intention == "等他愿意时把这段委屈听完。"
+    assert proposal.private_commitment.priority == 68

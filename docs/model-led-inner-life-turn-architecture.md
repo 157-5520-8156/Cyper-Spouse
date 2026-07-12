@@ -269,8 +269,9 @@ class MindProposal:
 0–20 秒并写入同一 Action 的 segment projection。平台回执和用户插话仍逐段结算/取消。该
 外壳不保存自由推理文本；当前仅支持一个受限的 `private_impression`：它只能对应已被本轮
 Appraisal 判为显著、未解决的失望/困惑，且 World 重新附加当前用户消息来源、过期时间与
-materiality policy 后，才与回复 Action 原子提交。`private_commitments` 的模型提案仍将在下一
-迁移切片接入既有 Commit Policy，不能因为出现在 JSON 中就直接持久化。
+materiality policy 后，才与回复 Action 原子提交。若回复留下开放问题，受限
+`private_commitment` 可以选择 intention 与 priority；World 把它绑定到该 Question Thread，
+由投递回执、插话、线程结算和逻辑过期共同释放，不能因为出现在 JSON 中就直接持久化。
 
 每个 Beat 仍受该 turn 的 `complete_by` deadline 约束：若请求的自然间隔已无法在剩余预算内
 完成，系统取消未发 remainder，而不是拖住下一轮或伪造已送达。等待期间不会持有 Action

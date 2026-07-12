@@ -85,6 +85,7 @@ from companion_daemon.model_call_policy import (
 from companion_daemon.memory import extract_memories, is_durable_user_fact
 from companion_daemon.mind_proposal import (
     MindProposal,
+    PrivateCommitmentProposal,
     PrivateImpressionProposal,
     parse_mind_proposal,
 )
@@ -2157,7 +2158,9 @@ class CompanionEngine:
                                 "每段可有 delay_ms(0–20000，首段为0)；不要为了结构而拆句："
                                 "若本轮存在显著且未解决的用户失望/困惑，可额外给 private_impression（仅 kind、summary、confidence），"
                                 "它只是可拒绝的内心猜测，绝不是用户事实："
-                                '{"reply_text":"...","expression_beats":[{"text":"...","delay_ms":0}],"display_strategy":"...","private_impression":{"kind":"possible_disappointment","summary":"...","confidence":0.6},"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
+                                "若回复自然留下一个开放问题，也可给 private_commitment（仅 intention、priority=50–100），"
+                                "它不是已完成承诺："
+                                '{"reply_text":"...","expression_beats":[{"text":"...","delay_ms":0}],"display_strategy":"...","private_impression":{"kind":"possible_disappointment","summary":"...","confidence":0.6},"private_commitment":{"intention":"...","priority":60},"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
                             ),
                         },
                     ], temperature=0.75),
@@ -2793,15 +2796,18 @@ class CompanionEngine:
                 "expires_at": (self._world_logical_now() + timedelta(hours=24)).isoformat(),
             }
             if user_affect is not None and user_affect.unresolved:
+                commitment = self._model_private_commitment_proposal(
+                    message=message,
+                    user_id=user_id,
+                    question=question,
+                    model_proposal=(
+                        mind_proposal.private_commitment
+                        if mind_proposal is not None
+                        else None
+                    ),
+                )
                 trace["private_commitment"] = {
-                    "commitment_id": "commitment:" + sha256(
-                        f"{user_id}|{message.message_id}|{question}".encode("utf-8")
-                    ).hexdigest()[:20],
-                    "user_id": user_id,
-                    "intention": "等他愿意时，把刚才没说完的话听完。",
-                    "source_event_ids": [f"message:{message.message_id}"],
-                    "expires_at": (self._world_logical_now() + timedelta(hours=24)).isoformat(),
-                    "priority": 55,
+                    **commitment,
                     "related_thread_id": thread_id,
                 }
         delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(
@@ -2872,6 +2878,31 @@ class CompanionEngine:
             "confidence": confidence,
             "source_event_ids": [f"message:{message.message_id}"],
             "expires_at": (self._world_logical_now() + timedelta(days=7)).isoformat(),
+        }
+
+    def _model_private_commitment_proposal(
+        self,
+        *,
+        message: IncomingMessage,
+        user_id: str,
+        question: str,
+        model_proposal: PrivateCommitmentProposal | None,
+    ) -> dict[str, object]:
+        """Bind a model intention to this delivered question, never to free prose."""
+        intention = "等他愿意时，把刚才没说完的话听完。"
+        priority = 55
+        if model_proposal is not None:
+            intention = model_proposal.intention
+            priority = model_proposal.priority
+        return {
+            "commitment_id": "commitment:" + sha256(
+                f"{user_id}|{message.message_id}|{question}".encode("utf-8")
+            ).hexdigest()[:20],
+            "user_id": user_id,
+            "intention": intention,
+            "source_event_ids": [f"message:{message.message_id}"],
+            "expires_at": (self._world_logical_now() + timedelta(hours=24)).isoformat(),
+            "priority": priority,
         }
 
     def conversation_cadence(

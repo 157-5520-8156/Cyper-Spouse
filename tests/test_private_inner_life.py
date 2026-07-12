@@ -467,11 +467,15 @@ async def test_model_private_impression_is_committed_atomically_with_reply_actio
         async def complete(self, messages, *, temperature: float) -> str:
             return json.dumps(
                 {
-                    "reply_text": "我听出来你有点失望了，是我刚才没接住。",
+                    "reply_text": "我听出来你有点失望了，是我刚才没接住。你愿意把后面也说完吗？",
                     "private_impression": {
                         "kind": "possible_disappointment",
                         "summary": "我感觉他被刚才没接住的回应伤到了。",
                         "confidence": 0.72,
+                    },
+                    "private_commitment": {
+                        "intention": "等他愿意时，把这段失望认真听完。",
+                        "priority": 68,
                     },
                     "mentioned_event_ids": [],
                     "proposed_action_ids": [],
@@ -515,6 +519,13 @@ async def test_model_private_impression_is_committed_atomically_with_reply_actio
     assert impression["summary"] == "我感觉他被刚才没接住的回应伤到了。"
     assert action["trace"]["private_impression"]["impression_id"] == impression["impression_id"]
     assert impression["status"] == "active"
+    commitment = next(
+        item
+        for item in state["private_commitments"].values()
+        if item["intention"] == "等他愿意时，把这段失望认真听完。"
+    )
+    assert commitment["priority"] == 68
+    assert commitment["related_thread_id"]
 
 
 def test_outgoing_private_inner_life_cannot_cross_user_boundaries(tmp_path: Path) -> None:
