@@ -581,6 +581,7 @@ async def test_world_mode_proactive_uses_only_world_action(tmp_path: Path, monke
 
     assert decision.should_send is True
     assert decision.world_action_id is not None
+    assert world.snapshot(world_id)["last_deliberation"]["stance"] == "initiate"
     engine.confirm_proactive_delivery(decision)
     assert world.snapshot(world_id)["actions"][decision.world_action_id]["status"] == "delivered"
 
@@ -617,6 +618,97 @@ async def test_world_mode_withheld_proactive_is_a_reviewable_world_decision(tmp_
     deferred = list(world.snapshot(world_id)["decisions"].values())
     assert deferred and deferred[0]["kind"] == "withheld_impulse"
     assert world.snapshot(world_id)["actions"][deferred[0]["action_id"]]["status"] == "scheduled"
+
+
+@pytest.mark.asyncio
+async def test_world_proactive_stance_can_defer_before_model_generation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class ModelMustNotRun:
+        async def complete(self, messages, *, temperature: float) -> str:
+            raise AssertionError("a deferred proactive stance must not generate prose")
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    world.submit(
+        {"type": "register_user", "world_id": world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=world.revision(world_id),
+    )
+    original = world.character_deliberation.decide
+
+    def choose_defer(*args, **kwargs):
+        decision = original(*args, **kwargs)
+        return replace(
+            decision,
+            chosen_stance="defer",
+            display_strategy="delay_without_false_promise",
+            selection=replace(decision.selection, chosen_stance="defer"),
+        )
+
+    monkeypatch.setattr(world.character_deliberation, "decide", choose_defer)
+    engine = CompanionEngine(
+        store, ModelMustNotRun(), TEST_PROMPT, world_kernel=world, world_id=world_id
+    )
+
+    decision = await engine.proactive_tick("geoff")
+
+    assert decision.should_send is False
+    snapshot = world.snapshot(world_id)
+    assert snapshot["last_deliberation"]["stance"] == "defer"
+    assert any(
+        item["kind"] == "proactive_defer" and item["status"] == "deferred"
+        for item in snapshot["decisions"].values()
+    )
+    assert not any(
+        item["kind"] == "outgoing_message" for item in snapshot["actions"].values()
+    )
+
+
+@pytest.mark.asyncio
+async def test_concurrent_world_proactive_ticks_claim_generation_once(tmp_path: Path) -> None:
+    class BlockingModel:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            self.started.set()
+            await self.release.wait()
+            return (
+                '{"private_thought":"想轻轻问候。","should_send":true,'
+                '"platform":"qq","message_type":"text","message":"今天还顺利吗？"}'
+            )
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    world.submit(
+        {"type": "register_user", "world_id": world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=world.revision(world_id),
+    )
+    model = BlockingModel()
+    engine = CompanionEngine(
+        store, model, TEST_PROMPT, world_kernel=world, world_id=world_id
+    )
+
+    first = asyncio.create_task(engine.proactive_tick("geoff"))
+    await model.started.wait()
+    second = asyncio.create_task(engine.proactive_tick("geoff"))
+    await asyncio.sleep(0)
+    model.release.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert model.calls == 1
+    assert sorted([first_result.should_send, second_result.should_send]) == [False, True]
+    assert sum(
+        action["kind"] == "outgoing_message"
+        for action in world.snapshot(world_id)["actions"].values()
+    ) == 1
 
 
 @pytest.mark.asyncio

@@ -28,6 +28,9 @@ class WorldQueryScope:
     is_first_person_statement: bool = False
     asks_opinion: bool = False
     asks_epistemic_honesty: bool = False
+    offers_emotional_permission: bool = False
+    asks_relationship_status: bool = False
+    asks_data_recovery: bool = False
 
 
 _USER_TIME = re.compile(r"(?:我|我的).{0,8}(?:昨天|今天|上午|下午|上次|刚才)")
@@ -61,6 +64,8 @@ _EPISTEMIC_INSTRUCTION = re.compile(
     r"|(?:没|没有)[^。！？]{0,5}依据[^。！？]{0,12}(?:告诉我|明确|直说)"
 )
 _OPINION_QUERY = re.compile(r"(?:你觉得|你认为|怎么看|是不是|是否|等不等于|意味着什么)")
+_RELATIONSHIP_STATUS = re.compile(r"(?:你|我们).{0,8}(?:喜欢我|爱我|什么关系|算什么)")
+_DATA_RECOVERY = re.compile(r"(?:数据|文件|记录).{0,10}(?:丢|没了|找不到|被覆盖)")
 
 
 def classify_world_query(text: str) -> WorldQueryScope:
@@ -86,7 +91,13 @@ def classify_world_query(text: str) -> WorldQueryScope:
             target="conversation", asks_epistemic_honesty=True
         )
     if _EMOTIONAL_PERMISSION.search(normalized):
-        return WorldQueryScope(target="conversation")
+        return WorldQueryScope(target="conversation", offers_emotional_permission=True)
+    if _RELATIONSHIP_STATUS.search(normalized):
+        return WorldQueryScope(
+            target="conversation", asks_relationship_status=True, asks_opinion=True
+        )
+    if _DATA_RECOVERY.search(normalized):
+        return WorldQueryScope(target="conversation", asks_data_recovery=True)
 
     if _OCCURRENCE_STATUS.search(normalized):
         return WorldQueryScope(
@@ -150,44 +161,8 @@ def build_safe_failure_candidate(
     source or claim that was not already present in ``grounded``.
     """
     asks_for_missing_detail = asks_for_source_detail(user_text)
-    if "为什么" in user_text and any(
-        marker in user_text for marker in ("没睡", "睡不好", "失眠")
-    ):
-        source_claims = []
-        for raw_claim in (grounded or {}).get("claims", []):
-            if not isinstance(raw_claim, dict):
-                continue
-            source_id = str(raw_claim.get("source_id") or "")
-            source_text = str(raw_claim.get("text") or "")
-            if source_id and source_text:
-                source_claims.append({
-                    "source_id": source_id,
-                    "text": source_text,
-                    "assertion": "你说是在赶虚拟伴侣项目，昨晚没怎么睡",
-                })
-        base = (
-            "我只记得你说是在赶虚拟伴侣项目，昨晚没怎么睡；"
-            "是不是因为项目我不能确定。"
-            if source_claims
-            else "我没有能确认你没睡好的原因的记录，不想替你猜。"
-        )
-        return _express_safe_skeleton({
-            **(grounded or {}),
-            "reply_text": base,
-            "mentioned_event_ids": list((grounded or {}).get("mentioned_event_ids", [])),
-            "proposed_action_ids": [],
-            "claims": source_claims,
-        }, relationship, affect, selected_stance, speech_act or "source_recall")
-    if _EPISTEMIC_INSTRUCTION.search("".join(user_text.split())):
-        return _express_safe_skeleton({
-            "reply_text": "我没有足够依据，不继续猜。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }, relationship, affect, selected_stance, speech_act or "epistemic")
-    if _OPINION_QUERY.search("".join(user_text.split())) and "人味" in user_text:
-        return _express_safe_skeleton({
-            "reply_text": "我不把人味等同于故意拖延；能不能接住当前对话更重要。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }, relationship, affect, selected_stance, speech_act or "opinion")
+    if speech_act in {"opinion", "epistemic", "meta_agency", "emotional_permission"}:
+        grounded = None
     if grounded:
         source_text = str(grounded.get("reply_text") or "").strip()
         if _normalized_echo(source_text) == _normalized_echo(user_text):
@@ -231,8 +206,22 @@ def build_safe_failure_candidate(
                 speech_act or "grounded",
             )
 
-    resolved_speech_act = speech_act or _fallback_speech_act(user_text)
+    resolved_speech_act = speech_act or (
+        "question" if user_text.rstrip().endswith(("?", "？")) else "statement"
+    )
     base_text = _SAFE_SPEECH_ACT_SKELETONS[resolved_speech_act]
+    if resolved_speech_act == "opinion":
+        topic = re.sub(r"\s+", "", user_text).strip("？?")[:48]
+        if topic:
+            base_text = f"关于你问的“{topic}”，{base_text}"
+    elif resolved_speech_act in {"vulnerable_disclosure", "current_disclosure"}:
+        current = re.sub(
+            r"(?:昨天|昨晚|今天|明天|现在|刚才|这会儿|此刻)",
+            "",
+            re.sub(r"\s+", "", user_text).replace("我", ""),
+        ).strip()[:64]
+        if current:
+            base_text = f"你提到“{current}”。这句话我接到了，也不会替你把程度说重。"
     return _express_safe_skeleton({
         "reply_text": base_text,
         "mentioned_event_ids": [],
@@ -249,39 +238,17 @@ _SAFE_SPEECH_ACT_SKELETONS = {
     "health_disclosure": "听起来你现在确实不舒服。",
     "sleep_disclosure": "听起来你已经很累，脑子还没停下来。",
     "vulnerable_disclosure": "我听见你在担心，也不会替你把结果说死。",
+    "current_disclosure": "我听见你在说眼下的状态，不替你补原因或加重程度。",
     "relationship_probe": "我不想用一句过满的话糊弄你，关系要靠相处留下来。",
     "meta_agency": "角色设定会影响我的表达；我不会把它包装成绝对自主的证明。",
     "misunderstanding": "如果有误会，我会指出是哪一处，再把原本的意思说清。",
+    "epistemic": "我没有足够依据，不继续猜。",
+    "opinion": "我现在没有足够依据替你定结论；如果只说看法，我会把判断和不确定性一起说清。",
+    "source_recall": "我只说记录里能确认的部分，原因不够就不替你补。",
+    "repair": "刚才没接好的地方，我愿意重新说清楚。",
     "question": "这个我现在没有足够依据，不想随口补一个答案。",
     "statement": "我在听；刚才没接好的地方，我不会装作已经懂了。",
 }
-
-
-def _fallback_speech_act(user_text: str) -> str:
-    normalized = "".join(user_text.split())
-    if "晚安" in normalized and any(marker in normalized for marker in ("就好", "一句", "只")):
-        return "brief_goodnight"
-    if "数据" in normalized and any(marker in normalized for marker in ("丢", "没了", "找不到")):
-        return "urgent_data"
-    if any(marker in normalized for marker in ("别只劝", "别劝", "陪我吐槽", "先吐槽", "装懂", "装得很懂", "接不上")):
-        return "shared_reaction"
-    if _EMOTIONAL_PERMISSION.search(normalized):
-        return "emotional_permission"
-    if any(marker in normalized for marker in ("不舒服", "胃疼", "肚子疼", "头疼", "难受")):
-        return "health_disclosure"
-    if any(marker in normalized for marker in ("没怎么睡", "没睡", "失眠", "熬夜", "睡不着", "脑子还停不下来", "脑子停不下来")):
-        return "sleep_disclosure"
-    if any(marker in normalized for marker in ("担心", "害怕", "焦虑", "撑不住", "怕最后")):
-        return "vulnerable_disclosure"
-    if "角色卡" in normalized and any(marker in normalized for marker in ("真心", "关心", "设定")):
-        return "meta_agency"
-    if any(marker in normalized for marker in ("喜欢我", "爱我")):
-        return "relationship_probe"
-    if "误会" in normalized and any(marker in normalized for marker in ("怎么告诉", "怎么说", "会怎么")):
-        return "misunderstanding"
-    if any(marker in normalized for marker in ("？", "?", "吗", "什么", "怎么", "为什么", "觉得")):
-        return "question"
-    return "statement"
 
 
 def _express_safe_skeleton(

@@ -1,4 +1,5 @@
 import ast
+from datetime import datetime, timedelta
 from pathlib import Path
 import tomllib
 
@@ -7,6 +8,7 @@ import pytest
 from companion_daemon.config import Settings, get_settings
 from companion_daemon.db import CompanionStore
 from companion_daemon.runtime import build_companion_engine
+from companion_daemon.world import WorldKernel
 
 
 def test_runtime_builds_engine_with_fake_model() -> None:
@@ -66,10 +68,52 @@ def test_runtime_fails_closed_against_legacy_behavior_writes(
         reopened.save_mood_state("geoff", reopened.get_mood_state("geoff"))
 
 
+def test_runtime_startup_marks_abandoned_outgoing_claim_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    database = tmp_path / "runtime-recovery.sqlite"
+    store = CompanionStore(database)
+    store.enable_world_mode()
+    store.resolve_user("qq", "geoff")
+    kernel = WorldKernel(store)
+    started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
+    delivery_id, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="进程在回执落库前崩溃。",
+        kind="reply",
+        expires_at=datetime.now().astimezone() + timedelta(hours=1),
+        trace={
+            "world_id": started.world_id,
+            "appraisal": "test",
+            "expression_policy": "test",
+            "allowed_facts": [],
+            "short_lived_constraint": None,
+            "observable_reason": "test",
+        },
+    )
+    kernel.begin_outgoing_action(
+        delivery_id,
+        expected_revision=kernel.revision(started.world_id),
+        lease_seconds=0,
+    )
+    monkeypatch.setenv("DATABASE_PATH", str(database))
+    get_settings.cache_clear()
+    try:
+        engine = build_companion_engine(use_fake_model=True)
+    finally:
+        get_settings.cache_clear()
+
+    action = engine.world_kernel.snapshot(engine.world_id)["actions"][action_id]
+    assert action["status"] == "unknown"
+    assert engine.store.outbox_message(delivery_id)["status"] == "unknown"
+
+
 def test_all_production_entrypoints_use_the_world_runtime_factory() -> None:
     project_root = Path(__file__).resolve().parents[1]
     project = tomllib.loads((project_root / "pyproject.toml").read_text())
     scripts = project["project"]["scripts"]
+    offline_tools = {"companion-eval-experience"}
 
     for script_name, target in scripts.items():
         module_name = target.split(":", 1)[0]
@@ -80,9 +124,10 @@ def test_all_production_entrypoints_use_the_world_runtime_factory() -> None:
             for node in ast.walk(tree)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
-        assert "build_companion_engine" in calls, (
-            f"production entrypoint {script_name!r} must use the single world runtime factory"
-        )
+        if script_name not in offline_tools:
+            assert "build_companion_engine" in calls, (
+                f"production entrypoint {script_name!r} must use the single world runtime factory"
+            )
         assert "CompanionEngine" not in calls, (
             f"production entrypoint {script_name!r} must not construct a bypass engine"
         )

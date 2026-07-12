@@ -2,12 +2,14 @@ from pathlib import Path
 from datetime import datetime, timedelta
 
 from fastapi.testclient import TestClient
+import pytest
 
 import companion_daemon.app as app_module
 from companion_daemon.db import CompanionStore
+from companion_daemon.config import Settings
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
-from companion_daemon.world import WorldKernel
+from companion_daemon.world import ConcurrencyConflict, WorldKernel
 from companion_daemon.models import IncomingMessage
 from companion_daemon.stickers import Sticker, StickerCatalog
 
@@ -49,6 +51,307 @@ def test_world_enablement_and_trusted_delivery_settlement(tmp_path: Path, monkey
     )
     assert blocked.status_code == 403
     assert "settle external results" in blocked.json()["detail"]
+
+
+def test_operator_can_reconcile_unknown_delivery_once_with_audited_external_evidence(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = CompanionStore(tmp_path / "world-reconciliation.sqlite")
+    seed_user(store)
+    kernel = WorldKernel(store)
+    started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
+    runtime = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        "你是知栀。",
+        world_kernel=kernel,
+        world_id=started.world_id,
+    )
+    monkeypatch.setattr(app_module, "engine", runtime)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings",
+        lambda: Settings(DELIVERY_RECONCILIATION_TOKEN="operator-secret"),
+    )
+    delivery_id, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="发送后进程崩溃的消息。",
+        kind="reply",
+        expires_at=datetime.fromisoformat("2026-07-12T09:00:00+08:00"),
+        trace={
+            "world_id": started.world_id,
+            "appraisal": "test",
+            "expression_policy": "test",
+            "allowed_facts": [],
+            "short_lived_constraint": None,
+            "observable_reason": "test",
+        },
+    )
+    kernel.begin_outgoing_action(
+        delivery_id, expected_revision=kernel.revision(started.world_id)
+    )
+    kernel.mark_outgoing_unknown(
+        delivery_id,
+        reason="process crashed after dispatch",
+        expected_revision=kernel.revision(started.world_id),
+    )
+    client = TestClient(app_module.app)
+    request = {
+        "expected_revision": kernel.revision(started.world_id),
+        "status": "delivered",
+        "evidence_kind": "operator_verification",
+        "external_receipt": "qq-message:late-42",
+        "reviewer_id": "ops-geoff",
+        "review_note": "运维人员已在 QQ 端核对到该消息。",
+    }
+
+    response = client.post(
+        f"/world/{started.world_id}/deliveries/{delivery_id}/reconcile",
+        headers={"X-Delivery-Reconciliation-Token": "operator-secret"},
+        json=request,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["reconciled"] is True
+    action = kernel.snapshot(started.world_id)["actions"][action_id]
+    assert action["status"] == "delivered"
+    assert action["result"]["external_receipt"] == "qq-message:late-42"
+    assert action["result"]["reconciliation_evidence"] == {
+        "kind": "operator_verification",
+        "reference": "qq-message:late-42",
+        "reviewer_id": "ops-geoff",
+        "review_note": "运维人员已在 QQ 端核对到该消息。",
+    }
+    event_count = len(kernel.export_ledger(started.world_id))
+
+    duplicate = client.post(
+        f"/world/{started.world_id}/deliveries/{delivery_id}/reconcile",
+        headers={"X-Delivery-Reconciliation-Token": "operator-secret"},
+        json=request,
+    )
+
+    assert duplicate.status_code == 200
+    assert duplicate.json()["reconciled"] is False
+    assert len(kernel.export_ledger(started.world_id)) == event_count
+
+    with pytest.raises(ConcurrencyConflict, match="already reconciled as delivered"):
+        kernel.settle_outgoing_action(
+            delivery_id,
+            delivered=False,
+            reason="conflicting late callback",
+            external_receipt="qq-message:conflict-42",
+            reconciliation_evidence={
+                "kind": "platform_receipt",
+                "reference": "qq-message:conflict-42",
+                "reviewer_id": "ops-geoff",
+                "review_note": "迟到的冲突回调。",
+            },
+        )
+
+    partial_delivery, _, partial_action = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="第一段。第二段。第三段。",
+        text_parts=["第一段。", "第二段。", "第三段。"],
+        kind="reply",
+        expires_at=datetime.fromisoformat("2026-07-12T10:00:00+08:00"),
+        trace={
+            "world_id": started.world_id,
+            "appraisal": "test",
+            "expression_policy": "test",
+            "allowed_facts": [],
+            "observable_reason": "test",
+        },
+    )
+    first = kernel.claim_outgoing_segment(
+        partial_delivery, expected_revision=kernel.revision(started.world_id)
+    )
+    assert first
+    kernel.settle_outgoing_segment(
+        partial_delivery,
+        first.segment_id,
+        delivered=True,
+        expected_revision=kernel.revision(started.world_id),
+    )
+    uncertain = kernel.claim_outgoing_segment(
+        partial_delivery, expected_revision=kernel.revision(started.world_id)
+    )
+    assert uncertain
+    kernel.mark_outgoing_segment_unknown(
+        partial_delivery,
+        uncertain.segment_id,
+        reason="connection lost after segment dispatch",
+        expected_revision=kernel.revision(started.world_id),
+    )
+    segment_request = {
+        **request,
+        "expected_revision": kernel.revision(started.world_id),
+        "external_receipt": "qq-segment:late-43",
+        "segment_id": uncertain.segment_id,
+        "cancel_remaining": True,
+    }
+
+    segment_response = client.post(
+        f"/world/{started.world_id}/deliveries/{partial_delivery}/reconcile",
+        headers={"X-Delivery-Reconciliation-Token": "operator-secret"},
+        json=segment_request,
+    )
+
+    assert segment_response.status_code == 200
+    assert segment_response.json()["action_status"] == "cancelled"
+    partial = kernel.snapshot(started.world_id)["actions"][partial_action]
+    assert [item["status"] for item in partial["segment_state"]["segments"]] == [
+        "delivered",
+        "delivered",
+        "cancelled",
+    ]
+    assert [
+        row["text"] for row in store.recent_messages("geoff") if row["direction"] == "out"
+    ][-2:] == ["第一段。", "第二段。"]
+    reconciled_event = next(
+        event
+        for event in reversed(kernel.events(started.world_id))
+        if event.event_type == "ActionSegmentSettled"
+    )
+    assert reconciled_event.payload["result"]["reconciliation_evidence"][
+        "reviewer_id"
+    ] == "ops-geoff"
+
+    failed_delivery, _, failed_action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="未确认段。未发送段。",
+        text_parts=["未确认段。", "未发送段。"],
+        kind="reply",
+        expires_at=datetime.fromisoformat("2026-07-12T10:00:00+08:00"),
+        trace={
+            "world_id": started.world_id,
+            "appraisal": "test",
+            "expression_policy": "test",
+            "allowed_facts": [],
+            "observable_reason": "test",
+        },
+    )
+    failed_segment = kernel.claim_outgoing_segment(
+        failed_delivery, expected_revision=kernel.revision(started.world_id)
+    )
+    assert failed_segment
+    kernel.mark_outgoing_segment_unknown(
+        failed_delivery,
+        failed_segment.segment_id,
+        reason="connection lost",
+        expected_revision=kernel.revision(started.world_id),
+    )
+    failed_request = {
+        **request,
+        "expected_revision": kernel.revision(started.world_id),
+        "status": "failed",
+        "failure_reason": "platform confirmed rejection",
+        "external_receipt": "qq-segment-rejected:44",
+        "segment_id": failed_segment.segment_id,
+    }
+
+    failed_response = client.post(
+        f"/world/{started.world_id}/deliveries/{failed_delivery}/reconcile",
+        headers={"X-Delivery-Reconciliation-Token": "operator-secret"},
+        json=failed_request,
+    )
+
+    assert failed_response.status_code == 200
+    failed_action = kernel.snapshot(started.world_id)["actions"][failed_action_id]
+    assert failed_action["status"] == "failed"
+    assert [item["status"] for item in failed_action["segment_state"]["segments"]] == [
+        "cancelled",
+        "cancelled",
+    ]
+    assert not any(
+        row["text"] in {"未确认段。", "未发送段。"}
+        for row in store.recent_messages("geoff")
+    )
+
+
+def test_reconciliation_without_authority_or_evidence_leaves_delivery_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = CompanionStore(tmp_path / "world-reconciliation-guard.sqlite")
+    seed_user(store)
+    kernel = WorldKernel(store)
+    started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
+    monkeypatch.setattr(
+        app_module,
+        "engine",
+        CompanionEngine(
+            store,
+            FakeCompanionModel(),
+            "你是知栀。",
+            world_kernel=kernel,
+            world_id=started.world_id,
+        ),
+    )
+    monkeypatch.setattr(
+        app_module,
+        "get_settings",
+        lambda: Settings(DELIVERY_RECONCILIATION_TOKEN="operator-secret"),
+    )
+    delivery_id, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="这条没有回执。",
+        kind="reply",
+        expires_at=datetime.fromisoformat("2026-07-12T09:00:00+08:00"),
+        trace={
+            "world_id": started.world_id,
+            "appraisal": "test",
+            "expression_policy": "test",
+            "allowed_facts": [],
+            "short_lived_constraint": None,
+            "observable_reason": "test",
+        },
+    )
+    kernel.begin_outgoing_action(
+        delivery_id, expected_revision=kernel.revision(started.world_id)
+    )
+    kernel.mark_outgoing_unknown(
+        delivery_id,
+        reason="receipt unavailable",
+        expected_revision=kernel.revision(started.world_id),
+    )
+    client = TestClient(app_module.app)
+    endpoint = f"/world/{started.world_id}/deliveries/{delivery_id}/reconcile"
+    body = {
+        "expected_revision": kernel.revision(started.world_id),
+        "status": "failed",
+        "evidence_kind": "platform_receipt",
+        "external_receipt": "qq-rejection:42",
+        "reviewer_id": "ops-geoff",
+        "review_note": "QQ 返回了明确的拒绝回执。",
+        "failure_reason": "platform rejected the message",
+    }
+
+    unauthorized = client.post(
+        endpoint,
+        headers={"X-Delivery-Reconciliation-Token": "wrong-secret"},
+        json=body,
+    )
+    missing_evidence = client.post(
+        endpoint,
+        headers={"X-Delivery-Reconciliation-Token": "operator-secret"},
+        json={key: value for key, value in body.items() if key != "external_receipt"},
+    )
+
+    assert unauthorized.status_code == 403
+    assert missing_evidence.status_code == 422
+    assert kernel.snapshot(started.world_id)["actions"][action_id]["status"] == "unknown"
+
+    reconciled = client.post(
+        endpoint,
+        headers={"X-Delivery-Reconciliation-Token": "operator-secret"},
+        json=body,
+    )
+
+    assert reconciled.status_code == 200
+    assert kernel.snapshot(started.world_id)["actions"][action_id]["status"] == "failed"
 
 
 def test_world_console_reads_active_world_and_submits_clock_commands(tmp_path: Path, monkeypatch) -> None:

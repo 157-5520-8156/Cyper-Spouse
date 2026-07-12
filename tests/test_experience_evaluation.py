@@ -4,7 +4,9 @@ from companion_daemon.experience_evaluation import (
     ExperienceEvaluationError,
     ExperienceTurn,
     VariantRun,
+    append_variant_run_jsonl,
     compare_five_turn_variants,
+    load_variant_runs_jsonl,
 )
 
 
@@ -81,3 +83,46 @@ def test_ab_report_keeps_surface_diversity_diagnostic_separate_from_human_judgme
     assert report.variants["varied"].human_like is None
     assert report.warning == "diagnostics_do_not_replace_human_experience_review"
 
+
+def test_jsonl_ledger_round_trips_a_valid_five_turn_human_review(tmp_path) -> None:
+    ledger = tmp_path / "experience-runs.jsonl"
+    run = VariantRun(
+        "candidate-a",
+        tuple(turn(i, reply=f"回复-{i}", note=f"人工备注-{i}") for i in range(5)),
+    )
+
+    append_variant_run_jsonl(ledger, run)
+
+    assert load_variant_runs_jsonl(ledger) == (run,)
+    line = ledger.read_text(encoding="utf-8").splitlines()[0]
+    assert '"schema_version": 1' in line
+    assert '"manual_review_note": "人工备注-0"' in line
+
+
+def test_jsonl_ledger_reports_the_line_of_a_corrupt_review_record(tmp_path) -> None:
+    ledger = tmp_path / "experience-runs.jsonl"
+    valid = VariantRun(
+        "candidate-a",
+        tuple(turn(i, reply=f"回复-{i}", note=f"人工备注-{i}") for i in range(5)),
+    )
+    append_variant_run_jsonl(ledger, valid)
+    with ledger.open("a", encoding="utf-8") as handle:
+        handle.write('{"schema_version": 1, "variant_id": "broken"}\n')
+
+    with pytest.raises(ExperienceEvaluationError, match="line 2"):
+        load_variant_runs_jsonl(ledger)
+
+
+def test_jsonl_ledger_rejects_duplicate_variant_without_polluting_file(tmp_path) -> None:
+    ledger = tmp_path / "experience-runs.jsonl"
+    run = VariantRun(
+        "candidate-a",
+        tuple(turn(i, reply=f"回复-{i}", note=f"人工备注-{i}") for i in range(5)),
+    )
+    append_variant_run_jsonl(ledger, run)
+    original = ledger.read_text(encoding="utf-8")
+
+    with pytest.raises(ExperienceEvaluationError, match="already exists"):
+        append_variant_run_jsonl(ledger, run)
+
+    assert ledger.read_text(encoding="utf-8") == original

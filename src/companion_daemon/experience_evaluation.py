@@ -8,10 +8,12 @@ diagnostics and deliberately have no pass/fail threshold.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import fcntl
 from hashlib import sha256
 import json
+from pathlib import Path
 import re
-from typing import Literal
+from typing import Literal, Mapping
 
 
 ActionConsequence = Literal[
@@ -81,6 +83,13 @@ class VariantRun:
     variant_id: str
     turns: tuple[ExperienceTurn, ...]
 
+    def to_record(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "variant_id": self.variant_id,
+            "turns": [turn.to_record() for turn in self.turns],
+        }
+
 
 @dataclass(frozen=True)
 class VariantDiagnostics:
@@ -128,6 +137,94 @@ def compare_five_turn_variants(runs: tuple[VariantRun, ...]) -> VariantCompariso
     return VariantComparison(fact_fingerprint=next(iter(fingerprints)), variants=result)
 
 
+def append_variant_run_jsonl(path: str | Path, run: VariantRun) -> None:
+    """Validate and append one five-turn annotated variant to an audit ledger."""
+    compare_five_turn_variants((run,))
+    destination = Path(path)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with destination.open("a+", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            handle.seek(0)
+            existing = _load_variant_lines(handle)
+            if any(item.variant_id == run.variant_id for item in existing):
+                raise ExperienceEvaluationError(
+                    f"variant id {run.variant_id!r} already exists in the ledger"
+                )
+            if existing:
+                compare_five_turn_variants((*existing, run))
+            handle.seek(0, 2)
+            handle.write(
+                json.dumps(run.to_record(), ensure_ascii=False, sort_keys=True) + "\n"
+            )
+            handle.flush()
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def load_variant_runs_jsonl(path: str | Path) -> tuple[VariantRun, ...]:
+    """Load annotated variants from a JSONL ledger and validate every record."""
+    source = Path(path)
+    with source.open("r", encoding="utf-8") as handle:
+        return _load_variant_lines(handle)
+
+
+def _load_variant_lines(handle) -> tuple[VariantRun, ...]:
+    runs: list[VariantRun] = []
+    for line_number, raw_line in enumerate(handle, start=1):
+        if not raw_line.strip():
+            continue
+        try:
+            record = json.loads(raw_line)
+            run = variant_run_from_record(record)
+            compare_five_turn_variants((run,))
+        except (json.JSONDecodeError, TypeError, KeyError, ExperienceEvaluationError) as exc:
+            raise ExperienceEvaluationError(
+                f"invalid evaluation ledger record at line {line_number}: {exc}"
+            ) from exc
+        runs.append(run)
+    compare_five_turn_variants(tuple(runs)) if runs else None
+    return tuple(runs)
+
+
+def variant_run_from_record(record: object) -> VariantRun:
+    if not isinstance(record, Mapping):
+        raise ExperienceEvaluationError("variant record must be an object")
+    if record.get("schema_version") != 1:
+        raise ExperienceEvaluationError("unsupported evaluation schema version")
+    variant_id = record.get("variant_id")
+    if not isinstance(variant_id, str) or not variant_id.strip():
+        raise ExperienceEvaluationError("variant id must be a non-empty string")
+    raw_turns = record.get("turns")
+    if not isinstance(raw_turns, list):
+        raise ExperienceEvaluationError("turns must be a list")
+    turns: list[ExperienceTurn] = []
+    for raw_turn in raw_turns:
+        if not isinstance(raw_turn, Mapping):
+            raise ExperienceEvaluationError("each turn must be an object")
+        values = dict(raw_turn)
+        for field in ("turn_id", "reply", "speech_act", "stance"):
+            if not isinstance(values.get(field), str):
+                raise ExperienceEvaluationError(f"{field} must be a string")
+        for field in ("empathy", "persona_continuity", "grounding", "agency"):
+            if not isinstance(values.get(field), int) or isinstance(values.get(field), bool):
+                raise ExperienceEvaluationError(f"{field} must be an integer")
+        note = values.get("manual_review_note")
+        if note is not None and not isinstance(note, str):
+            raise ExperienceEvaluationError("manual_review_note must be a string or null")
+        invariants = values.get("factual_invariants")
+        if not isinstance(invariants, list) or any(
+            not isinstance(item, str) for item in invariants
+        ):
+            raise ExperienceEvaluationError("factual_invariants must be a list of strings")
+        values["factual_invariants"] = tuple(invariants)
+        try:
+            turns.append(ExperienceTurn(**values))
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise ExperienceEvaluationError(f"invalid experience turn: {exc}") from exc
+    return VariantRun(variant_id=variant_id, turns=tuple(turns))
+
+
 def _mean(values) -> float:
     items = [int(value) for value in values]
     return round(sum(items) / len(items), 3)
@@ -136,4 +233,3 @@ def _mean(values) -> float:
 def _surface_diversity(replies: tuple[str, ...]) -> float:
     normalized = [re.sub(r"\s+", "", reply).strip().lower() for reply in replies]
     return round(len(set(normalized)) / len(normalized), 3)
-

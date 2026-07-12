@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from collections.abc import Awaitable, Callable
 from urllib.parse import urlparse
+from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -68,6 +69,7 @@ from companion_daemon.personality_drift import apply_personality_drift
 from companion_daemon.prompts import proactive_prompt, reply_prompt
 from companion_daemon.proactive_feedback import apply_proactive_feedback, classify_proactive_feedback
 from companion_daemon.proactive_triggers import ProactiveTrigger, evaluate_proactive_trigger
+from companion_daemon.reply_decision import classify_message
 from companion_daemon.proactive_waiting import apply_waiting_after_proactive
 from companion_daemon.relationship import advance_relationship, key_event_bonus
 from companion_daemon.relationship_events import apply_key_relationship_event, detect_key_relationship_event
@@ -775,6 +777,7 @@ class CompanionEngine:
     ) -> CompanionReply | None:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         if self.world_kernel and self.world_id:
+            self.world_kernel.recover_interrupted_outgoing_deliveries(self.world_id)
             message = message.model_copy(update={"message_id": self._world_message_id(message)})
             if not resume_action_id and self._world_turn_already_observed(str(message.message_id)):
                 return None
@@ -1556,6 +1559,17 @@ class CompanionEngine:
         }
         fallback_needs_audit = False
         query_scope = classify_world_query(message.text)
+        last_request = snapshot.get("last_user_request", {})
+        fallback_speech_act = _safe_failure_speech_act(
+            query_scope,
+            appraisal=appraisal,
+            request_kind=(
+                str(last_request.get("kind") or "")
+                if isinstance(last_request, dict)
+                else ""
+            ),
+            message_text=message.text,
+        )
         related_npc_experiences: list[dict[str, object]] = []
         urgent_turn = bool(
             communication_decision
@@ -1829,6 +1843,7 @@ class CompanionEngine:
                         modulation,
                         relationship=relationship,
                         selected_stance=chosen_stance,
+                        speech_act=fallback_speech_act,
                     )
                     fallback_needs_audit = True
                 else:
@@ -1915,6 +1930,7 @@ class CompanionEngine:
                             modulation,
                             relationship=relationship,
                             selected_stance=chosen_stance,
+                            speech_act=fallback_speech_act,
                         )
                         fallback_needs_audit = True
         if fallback_needs_audit:
@@ -2793,6 +2809,7 @@ class CompanionEngine:
 
     async def proactive_tick(self, canonical_user_id: str) -> ProactiveDecision:
         if self.world_kernel and self.world_id:
+            self.world_kernel.recover_interrupted_outgoing_deliveries(self.world_id)
             return await self._world_proactive_tick(canonical_user_id)
         now = utc_now()
         state = self.refresh_waiting_state(canonical_user_id)
@@ -2973,12 +2990,49 @@ class CompanionEngine:
             )
         return decision
 
+    def _settle_proactive_generation(
+        self, action_id: str, *, status: str, reason: str
+    ) -> None:
+        assert self.world_kernel and self.world_id
+        action = self.world_kernel.snapshot(self.world_id).get("actions", {}).get(
+            action_id, {}
+        )
+        if not isinstance(action, dict) or action.get("status") not in {
+            "scheduled",
+            "sending",
+        }:
+            return
+        self._submit_world_with_retry(
+            {
+                "type": "record_external_result",
+                "world_id": self.world_id,
+                "action_id": action_id,
+                "result": {
+                    "kind": "proactive_generation",
+                    "status": status,
+                    "reason": reason[:300],
+                },
+                "idempotency_key": f"generation:{action_id}:{status}",
+            }
+        )
+
     async def _world_proactive_tick(self, canonical_user_id: str) -> ProactiveDecision:
         """World-only proactive decision; it never reads or writes legacy mood/tasks."""
         assert self.world_kernel and self.world_id
         snapshot = self.world_kernel.snapshot(self.world_id)
         logical_now = self._world_logical_now()
         for action in self.world_kernel.due_actions(self.world_id, now=logical_now):
+            if action.get("kind") == "proactive_generation":
+                self._submit_world_with_retry(
+                    {
+                        "type": "cancel_action",
+                        "world_id": self.world_id,
+                        "action_id": str(action["action_id"]),
+                        "reason": "proactive_generation_lease_expired",
+                        "idempotency_key": f"expire:{action['action_id']}",
+                    }
+                )
+                continue
             if action.get("kind") != "decision_review":
                 continue
             payload = action.get("payload", {})
@@ -3022,6 +3076,53 @@ class CompanionEngine:
                 private_thought=f"世界行为规则要求先收住：{outreach.reason}。",
                 should_send=False,
             )
+        impulse_id = f"proactive:{self.world_kernel.revision(self.world_id)}"
+        generation_action_id = f"proactive-generation:{impulse_id}"
+        try:
+            self._submit_world_with_retry(
+                {
+                    "type": "deliberate_proactive",
+                    "world_id": self.world_id,
+                    "impulse_id": impulse_id,
+                    "user_id": user_id,
+                    "generation_action_id": generation_action_id,
+                    "idempotency_key": f"deliberate:{impulse_id}:{uuid4().hex}",
+                }
+            )
+        except WorldError as exc:
+            if "proactive generation is already in progress" not in str(exc):
+                raise
+            return ProactiveDecision(
+                canonical_user_id=canonical_user_id,
+                private_thought="另一轮主动判断正在生成，先不重复消耗模型和外发预算。",
+                should_send=False,
+            )
+        snapshot = self.world_kernel.snapshot(self.world_id)
+        selected_stance = str(snapshot.get("last_deliberation", {}).get("stance") or "")
+        if selected_stance != "initiate":
+            reason = (
+                "角色选择保持沉默，暂不把这个念头变成对用户的打扰。"
+                if selected_stance == "remain_silent"
+                else "角色选择暂缓主动联系，等待精力或关系语境变化。"
+            )
+            self._submit_world_with_retry(
+                {
+                    "type": "defer_decision",
+                    "world_id": self.world_id,
+                    "decision_id": impulse_id,
+                    "kind": f"proactive_{selected_stance or 'defer'}",
+                    "reason": reason,
+                    "review_at": (
+                        self._world_logical_now() + timedelta(minutes=45)
+                    ).isoformat(),
+                    "idempotency_key": f"defer:{impulse_id}",
+                }
+            )
+            return ProactiveDecision(
+                canonical_user_id=canonical_user_id,
+                private_thought=reason,
+                should_send=False,
+            )
         prompt = (
             "基于以下已结算世界账本，决定是否轻轻主动发一句消息。"
             "若不适合，返回 JSON 的 should_send=false；若适合，不能新增未记录事实。\n"
@@ -3041,6 +3142,9 @@ class CompanionEngine:
             raw = await self.model.complete([{"role": "user", "content": prompt}], temperature=0.7)
         except Exception as exc:
             self._fail_world_model_call(model_action_id, str(exc))
+            self._settle_proactive_generation(
+                generation_action_id, status="failed", reason=type(exc).__name__
+            )
             raise
         self._record_world_model_output(
             purpose="proactive",
@@ -3108,6 +3212,9 @@ class CompanionEngine:
                     }
                 )
         if not decision.should_send or not decision.message or not decision.platform:
+            self._settle_proactive_generation(
+                generation_action_id, status="delivered", reason="decision_completed"
+            )
             self._submit_world_with_retry(
                 {
                     "type": "defer_decision", "world_id": self.world_id,
@@ -3150,6 +3257,9 @@ class CompanionEngine:
             reason = str(exc)
             if "transgression_" not in reason and "outbound policy rejected" not in reason:
                 raise
+            self._settle_proactive_generation(
+                generation_action_id, status="delivered", reason="decision_completed"
+            )
             self._submit_world_with_retry(
                 {
                     "type": "defer_decision",
@@ -3169,6 +3279,9 @@ class CompanionEngine:
                     "private_thought": f"这次越过预算还没恢复：{reason}。",
                 }
             )
+        self._settle_proactive_generation(
+            generation_action_id, status="delivered", reason="decision_completed"
+        )
         return decision.model_copy(
             update={"message": text, "delivery_id": delivery_id, "turn_trace_id": trace_id, "world_action_id": action_id}
         )
@@ -3906,6 +4019,42 @@ def _scene_projection(state: MoodState, runtime, *, has_open_task: bool) -> dict
         "activity_kind": runtime.activity_kind,
         "phone_attention": runtime.phone_attention,
     }
+
+
+def _safe_failure_speech_act(
+    query_scope,
+    *,
+    appraisal: str,
+    request_kind: str,
+    message_text: str,
+) -> str:
+    """Translate already-structured turn signals into a conservative speech act."""
+    if query_scope.asks_epistemic_honesty:
+        return "epistemic"
+    if query_scope.asks_meta_agency:
+        return "meta_agency"
+    if query_scope.asks_relationship_status:
+        return "relationship_probe"
+    if query_scope.asks_opinion:
+        return "opinion"
+    if query_scope.offers_emotional_permission:
+        return "emotional_permission"
+    if request_kind in {"no_advice", "listen_only"}:
+        return "shared_reaction"
+    if query_scope.is_first_person_statement:
+        return "current_disclosure"
+    message_kind = classify_message(message_text)
+    if message_kind == "farewell":
+        return "brief_goodnight"
+    if message_kind == "urgent" and query_scope.asks_data_recovery:
+        return "urgent_data"
+    if appraisal.startswith("repair_") or appraisal == "repair_attempt":
+        return "repair"
+    if appraisal == "user_vulnerable" or message_kind == "emotional":
+        return "vulnerable_disclosure"
+    if message_kind == "question":
+        return "question"
+    return "statement"
 
 
 def _social_task_trigger(task) -> ProactiveTrigger | None:

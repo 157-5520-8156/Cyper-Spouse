@@ -72,6 +72,9 @@ class Settings(BaseSettings):
     qq_bot_secret: str | None = Field(default=None, alias="QQ_BOT_SECRET")
     qq_verify_signatures: bool = Field(default=True, alias="QQ_VERIFY_SIGNATURES")
     qq_message_batch_seconds: float = Field(default=2.5, alias="QQ_MESSAGE_BATCH_SECONDS")
+    delivery_reconciliation_token: str | None = Field(
+        default=None, alias="DELIVERY_RECONCILIATION_TOKEN"
+    )
     proactive_interval_seconds: float = Field(default=900, alias="PROACTIVE_INTERVAL_SECONDS")
     proactive_min_cooldown_minutes: int = Field(default=45, alias="PROACTIVE_MIN_COOLDOWN_MINUTES")
     openai_api_key: str | None = Field(default=None, alias="OPENAI_API_KEY")

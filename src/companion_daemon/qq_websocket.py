@@ -845,6 +845,7 @@ class CompanionQQClient(botpy.Client):
             on_reply=self._log_reply,
             on_sticker=self._send_reply_sticker,
             on_image=self._send_reply_image,
+            on_reaction=self._reject_unsupported_reply_reaction,
             human_timing=True,
             enable_reply_decision=settings.enable_reply_decision,
         )
@@ -928,6 +929,23 @@ class CompanionQQClient(botpy.Client):
     async def _send_reply_image(self, incoming: IncomingMessage, reply: CompanionReply) -> None:
         if reply.image_path:
             await self._send_local_image(incoming, Path(reply.image_path))
+
+    async def _reject_unsupported_reply_reaction(
+        self, incoming: IncomingMessage, reply: CompanionReply
+    ) -> None:
+        """Close the world action truthfully when official QQ cannot attach reactions."""
+        action_id = self.engine.begin_reaction_delivery(incoming, reply)
+        if not action_id:
+            return
+        self.engine.settle_reaction_delivery(
+            action_id,
+            status="failed",
+            reason="official_qq_reaction_unsupported",
+        )
+        logger.info(
+            "official QQ adapter does not support message reactions; recorded failed action: %s",
+            action_id,
+        )
 
     async def _send_local_image(self, incoming: IncomingMessage, path: Path) -> None:
         if not self.qq_api:

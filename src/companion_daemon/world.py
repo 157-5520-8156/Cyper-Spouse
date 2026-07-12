@@ -531,7 +531,11 @@ class WorldKernel:
         return delivery_id, trace_row_id, action_id
 
     def claim_outgoing_segment(
-        self, delivery_id: int, *, expected_revision: int
+        self,
+        delivery_id: int,
+        *,
+        expected_revision: int,
+        lease_seconds: int = 300,
     ) -> OutgoingSegment | None:
         """Claim exactly one planned segment without claiming later text."""
         with self.store.connect() as conn:
@@ -559,7 +563,15 @@ class WorldKernel:
                 updated, claimed = self.action_coordinator.claim_next(segmented)
             except ValueError as exc:
                 raise WorldError(str(exc)) from exc
+            if lease_seconds < 0:
+                raise WorldError("delivery lease cannot be negative")
             now = utc_now().isoformat()
+            claimed_event_type, claimed_payload = (
+                self.action_coordinator.claimed_world_event(updated, claimed)
+            )
+            claimed_payload["lease_expires_observed_at"] = (
+                utc_now() + timedelta(seconds=lease_seconds)
+            ).isoformat()
             conn.execute(
                 "update outbox_messages set status = 'sending' where id = ? and status in ('planned', 'sending')",
                 (delivery_id,),
@@ -575,7 +587,7 @@ class WorldKernel:
                 state,
                 [
                     ("ActionAttempted", {"action_id": action_id}),
-                    self.action_coordinator.claimed_world_event(updated, claimed),
+                    (claimed_event_type, claimed_payload),
                 ],
                 idempotency_key=f"segment-claim:{claimed.segment_id}",
                 correlation_id=str(uuid4()),
@@ -594,6 +606,8 @@ class WorldKernel:
         expected_revision: int,
         reason: str | None = None,
         external_receipt: str | None = None,
+        reconciliation_evidence: dict[str, object] | None = None,
+        cancel_remaining: bool = False,
     ) -> dict[str, object] | None:
         """Settle one claimed segment; only delivered text enters history."""
         if not delivered:
@@ -635,6 +649,13 @@ class WorldKernel:
             except ValueError as exc:
                 raise WorldError(str(exc)) from exc
             segment = next(item for item in updated.segments if item.segment_id == segment_id)
+            cancelled_ids: tuple[str, ...] = ()
+            if cancel_remaining and updated.status is not DeliveryStatus.DELIVERED:
+                updated, cancelled_ids = self.action_coordinator.observe_user_interjection(
+                    updated,
+                    kind=UserInterjectionKind.SUBSTANTIVE,
+                    user_message_id="operator-reconciliation",
+                )
             complete = updated.status is DeliveryStatus.DELIVERED
             now = utc_now().isoformat()
             conn.execute(
@@ -648,15 +669,39 @@ class WorldKernel:
             )
             conn.execute(
                 "update outbox_messages set status = ?, delivered_at = ? where id = ?",
-                ("delivered" if complete else "planned", now if complete else None, delivery_id),
+                (
+                    "delivered" if complete else "cancelled" if cancelled_ids else "planned",
+                    now if complete else None,
+                    delivery_id,
+                ),
             )
             conn.execute(
-                "update turn_traces set status = ?, updated_at = ? where delivery_id = ?",
-                ("delivered" if complete else "planned", now, delivery_id),
+                "update turn_traces set status = ?, failure_reason = ?, updated_at = ? where delivery_id = ?",
+                (
+                    "delivered" if complete else "cancelled" if cancelled_ids else "planned",
+                    "operator reconciliation cancelled unsent remainder" if cancelled_ids else None,
+                    now,
+                    delivery_id,
+                ),
             )
+            settled_event_type, settled_payload = self.action_coordinator.settled_world_event(
+                updated, segment_id=segment_id
+            )
+            if reconciliation_evidence:
+                _as_dict(settled_payload["result"], "segment result")[
+                    "reconciliation_evidence"
+                ] = reconciliation_evidence
             specifications: list[tuple[str, dict[str, object]]] = [
-                self.action_coordinator.settled_world_event(updated, segment_id=segment_id)
+                (settled_event_type, settled_payload)
             ]
+            if cancelled_ids:
+                specifications.append(
+                    self.action_coordinator.cancelled_world_event(
+                        updated,
+                        segment_ids=cancelled_ids,
+                        user_message_id="operator-reconciliation",
+                    )
+                )
             if complete:
                 specifications.append(
                     (
@@ -691,8 +736,13 @@ class WorldKernel:
                 specifications,
                 idempotency_key=f"segment-settle:{segment_id}:delivered",
                 correlation_id=str(uuid4()),
-                source="segment_delivery",
-                actor={"kind": "transport"},
+                source="delivery_reconciliation" if reconciliation_evidence else "segment_delivery",
+                actor={
+                    "kind": "operator",
+                    "id": str(reconciliation_evidence.get("reviewer_id") or ""),
+                }
+                if reconciliation_evidence
+                else {"kind": "transport"},
                 causation_id=action_id,
             )
             return {
@@ -700,6 +750,7 @@ class WorldKernel:
                 "segment_id": segment_id,
                 "status": "delivered",
                 "complete": complete,
+                "cancelled_segment_ids": cancelled_ids,
             }
 
     def mark_outgoing_segment_unknown(
@@ -975,7 +1026,13 @@ class WorldKernel:
         score, experience_id, experience = max(candidates, key=lambda item: (item[0], item[1]))
         return experience_id, experience, score
 
-    def begin_outgoing_action(self, delivery_id: int, *, expected_revision: int) -> bool:
+    def begin_outgoing_action(
+        self,
+        delivery_id: int,
+        *,
+        expected_revision: int,
+        lease_seconds: int = 300,
+    ) -> bool:
         """Durably claim an outbox delivery before calling an unreliable adapter."""
         with self.store.connect() as conn:
             row = conn.execute("select status from outbox_messages where id = ?", (delivery_id,)).fetchone()
@@ -993,7 +1050,10 @@ class WorldKernel:
             now = utc_now().isoformat()
             conn.execute("update outbox_messages set status = 'sending' where id = ? and status = 'planned'", (delivery_id,))
             conn.execute("update turn_traces set status = 'sending', updated_at = ? where delivery_id = ? and status = 'planned'", (now, delivery_id))
-            self._append_and_project(conn, world_id, revision, state, [("ActionAttempted", {"action_id": action_id}), ("ActionDispatchClaimed", {"action_id": action_id})], idempotency_key=f"begin:{delivery_id}", correlation_id=str(uuid4()), source="delivery", actor={"kind": "transport"}, causation_id=None)
+            if lease_seconds < 0:
+                raise WorldError("delivery lease cannot be negative")
+            lease_expires = (utc_now() + timedelta(seconds=lease_seconds)).isoformat()
+            self._append_and_project(conn, world_id, revision, state, [("ActionAttempted", {"action_id": action_id}), ("ActionDispatchClaimed", {"action_id": action_id, "lease_expires_observed_at": lease_expires})], idempotency_key=f"begin:{delivery_id}", correlation_id=str(uuid4()), source="delivery", actor={"kind": "transport"}, causation_id=None)
             return True
 
     def mark_outgoing_unknown(self, delivery_id: int, *, reason: str, expected_revision: int) -> bool:
@@ -1026,6 +1086,59 @@ class WorldKernel:
         ]
         return sum(self.mark_outgoing_unknown(item, reason="process restarted during adapter delivery", expected_revision=self.revision(world_id)) for item in delivery_ids)
 
+    def recover_interrupted_outgoing_deliveries(
+        self, world_id: str, *, observed_now: datetime | None = None
+    ) -> int:
+        """Close expired transport claims as unknown without racing a live sender."""
+        snapshot = self.snapshot(world_id)
+        observed_now = observed_now or utc_now()
+        expired: list[tuple[int, str | None]] = []
+        for raw_action in _as_dict(snapshot["actions"], "actions").values():
+            action = _as_dict(raw_action, "action")
+            lease = str(action.get("lease_expires_observed_at") or "")
+            if (
+                action.get("kind") != "outgoing_message"
+                or action.get("status") != "sending"
+                or action.get("delivery_id") is None
+                or not lease
+                or _parse_at(lease) > observed_now
+            ):
+                continue
+            sending_segment = next(
+                (
+                    str(_as_dict(item, "segment")["segment_id"])
+                    for item in _as_list(
+                        _as_dict(action.get("segment_state", {}), "segment state").get(
+                            "segments", []
+                        ),
+                        "segments",
+                    )
+                    if _as_dict(item, "segment").get("status") == "sending"
+                ),
+                None,
+            )
+            expired.append((int(action["delivery_id"]), sending_segment))
+        recovered = 0
+        for delivery_id, segment_id in expired:
+            if segment_id:
+                recovered += int(
+                    self.mark_outgoing_segment_unknown(
+                        delivery_id,
+                        segment_id,
+                        reason="delivery lease expired after process interruption",
+                        expected_revision=self.revision(world_id),
+                    )
+                )
+            else:
+                recovered += int(
+                    self.mark_outgoing_unknown(
+                        delivery_id,
+                        reason="delivery lease expired after process interruption",
+                        expected_revision=self.revision(world_id),
+                    )
+                )
+        return recovered
+
     def cancel_life_share_delivery(self, world_id: str, action_id: str, *, reason: str, expected_revision: int) -> bool:
         """Cancel a still-planned share and its outbox record in one transaction."""
         with self.store.connect() as conn:
@@ -1045,6 +1158,8 @@ class WorldKernel:
     def settle_outgoing_action(
         self, delivery_id: int, *, delivered: bool, reason: str | None = None,
         external_receipt: str | None = None,
+        expected_revision: int | None = None,
+        reconciliation_evidence: dict[str, object] | None = None,
     ) -> dict[str, object] | None:
         """Atomically settle transport history, turn trace, and its world action."""
         with self.store.connect() as conn:
@@ -1056,6 +1171,11 @@ class WorldKernel:
                 return None
             result = dict(row)
             if row["status"] not in {"planned", "sending", "unknown"}:
+                requested_status = "delivered" if delivered else "failed"
+                if reconciliation_evidence and row["status"] != requested_status:
+                    raise ConcurrencyConflict(
+                        f"delivery {delivery_id} was already reconciled as {row['status']}"
+                    )
                 return result
             if row["status"] == "unknown" and not external_receipt:
                 raise WorldError("unknown delivery needs an external receipt before reconciliation")
@@ -1067,6 +1187,8 @@ class WorldKernel:
                 raise WorldError(f"outbox delivery {delivery_id} has no world action")
             world_id = str(action_row["world_id"])
             revision, state = self._load_state(conn, world_id)
+            if expected_revision is not None:
+                self._check_revision(revision, expected_revision)
             action_id = next(
                 (
                     candidate_id
@@ -1084,16 +1206,33 @@ class WorldKernel:
                 if isinstance(segment_state, dict)
                 else []
             )
+            segments_to_deliver: list[dict[str, object]] = []
+            if delivered and segments:
+                statuses = {
+                    str(_as_dict(item, "segment").get("status") or "")
+                    for item in segments
+                }
+                if reconciliation_evidence and "planned" in statuses and statuses != {"planned"}:
+                    raise WorldError(
+                        "partially dispatched segmented delivery needs segment-level reconciliation"
+                    )
+                segments_to_deliver = [
+                    _as_dict(item, "segment")
+                    for item in segments
+                    if str(_as_dict(item, "segment").get("status") or "")
+                    != "delivered"
+                ]
             now = utc_now().isoformat()
             if delivered:
                 conn.execute(
                     "update outbox_messages set status = 'delivered', delivered_at = ? where id = ?",
                     (now, delivery_id),
                 )
-                delivered_texts = [
-                    str(_as_dict(item, "segment").get("text") or "")
-                    for item in segments
-                ] or [str(row["text"])]
+                delivered_texts = (
+                    [str(item.get("text") or "") for item in segments_to_deliver]
+                    if segments
+                    else [str(row["text"])]
+                )
                 for delivered_text in delivered_texts:
                     conn.execute(
                         """
@@ -1112,19 +1251,16 @@ class WorldKernel:
             conn.execute(
                 """
                 update turn_traces set status = ?, failure_reason = ?, updated_at = ?
-                where delivery_id = ? and status in ('planned', 'sending')
+                where delivery_id = ? and status in ('planned', 'sending', 'unknown')
                 """,
                 ("delivered" if delivered else "failed", None if delivered else (reason or "delivery failed")[:500], now, delivery_id),
             )
             trace = _as_dict(action.get("trace", {}), "action trace")
             specifications: list[tuple[str, dict[str, object]]] = []
             if delivered and segments:
-                for raw_segment in segments:
-                    segment = _as_dict(raw_segment, "segment")
-                    if segment.get("status") == "delivered":
-                        continue
-                    specifications.extend(
-                        [
+                for segment in segments_to_deliver:
+                    if segment.get("status") == "planned":
+                        specifications.append(
                             (
                                 "ActionSegmentDispatchClaimed",
                                 {
@@ -1132,21 +1268,40 @@ class WorldKernel:
                                     "segment_id": str(segment["segment_id"]),
                                     "position": int(segment["position"]),
                                 },
-                            ),
-                            (
-                                "ActionSegmentSettled",
-                                {
-                                    "action_id": action_id,
-                                    "segment_id": str(segment["segment_id"]),
-                                    "position": int(segment["position"]),
-                                    "result": {
-                                        "kind": "delivery",
-                                        "status": "delivered",
-                                        "external_receipt": external_receipt,
-                                    },
+                            )
+                        )
+                    specifications.append(
+                        (
+                            "ActionSegmentSettled",
+                            {
+                                "action_id": action_id,
+                                "segment_id": str(segment["segment_id"]),
+                                "position": int(segment["position"]),
+                                "result": {
+                                    "kind": "delivery",
+                                    "status": "delivered",
+                                    "external_receipt": external_receipt,
                                 },
-                            ),
-                        ]
+                            },
+                        )
+                    )
+            elif not delivered and segments:
+                unresolved_segment_ids = [
+                    str(_as_dict(item, "segment")["segment_id"])
+                    for item in segments
+                    if _as_dict(item, "segment").get("status") != "delivered"
+                ]
+                if unresolved_segment_ids:
+                    specifications.append(
+                        (
+                            "ActionSegmentsCancelled",
+                            {
+                                "action_id": action_id,
+                                "segment_ids": unresolved_segment_ids,
+                                "user_message_id": "delivery-failed",
+                                "reason": reason or "delivery failed",
+                            },
+                        )
                     )
             specifications.extend([
                 ("ActionAttempted", {"action_id": action_id}),
@@ -1160,6 +1315,11 @@ class WorldKernel:
                             "reason": reason,
                             "external_receipt": external_receipt,
                             "segmented": bool(segments),
+                            **(
+                                {"reconciliation_evidence": reconciliation_evidence}
+                                if reconciliation_evidence
+                                else {}
+                            ),
                         },
                     },
                 ),
@@ -1192,8 +1352,13 @@ class WorldKernel:
                 specifications,
                 idempotency_key=f"settle:{delivery_id}:{'delivered' if delivered else 'failed'}",
                 correlation_id=str(uuid4()),
-                source="delivery",
-                actor={"kind": "transport"},
+                source="delivery_reconciliation" if reconciliation_evidence else "delivery",
+                actor={
+                    "kind": "operator",
+                    "id": str(reconciliation_evidence.get("reviewer_id") or ""),
+                }
+                if reconciliation_evidence
+                else {"kind": "transport"},
                 causation_id=None,
             )
             return result
@@ -3378,6 +3543,100 @@ class WorldKernel:
                 ("DecisionDeferred", {"decision_id": decision_id, "kind": kind, "reason": reason, "review_at": review_at, "action_id": action_id}),
                 ("ActionScheduled", {"action_id": action_id, "kind": "decision_review", "expires_at": (_parse_at(review_at) + timedelta(hours=12)).isoformat(), "payload": {"due_at": review_at, "decision_id": decision_id}}),
             ]
+        if command_type == "deliberate_proactive":
+            impulse_id = str(command.get("impulse_id") or "").strip()
+            user_id = str(command.get("user_id") or "").strip()
+            generation_action_id = str(command.get("generation_action_id") or "").strip()
+            user = _as_dict(
+                _as_dict(state["entities"], "entities").get(user_id), "proactive user"
+            )
+            if not impulse_id or not generation_action_id or user.get("kind") != "user":
+                raise WorldError("proactive deliberation requires an impulse and registered user")
+            if any(
+                _as_dict(raw, "action").get("kind") == "proactive_generation"
+                and _as_dict(raw, "action").get("status") in {"scheduled", "sending"}
+                for raw in _as_dict(state["actions"], "actions").values()
+            ):
+                raise WorldError("a proactive generation is already in progress")
+            protagonist = next(
+                (
+                    _as_dict(raw, "protagonist")
+                    for raw in _as_dict(state["entities"], "entities").values()
+                    if _as_dict(raw, "entity").get("kind") == "companion"
+                ),
+                {},
+            )
+            affect = _as_dict(state["emotion_modulation"], "emotion modulation")
+            vector = _as_dict(affect.get("vector", {}), "affect vector")
+            deliberation = self.character_deliberation.decide(
+                situation={
+                    "kind": "proactive",
+                    "text": "",
+                    "risk": "low",
+                    "causation_ids": (impulse_id,),
+                },
+                self_core=protagonist,
+                relationship=_as_dict(
+                    _as_dict(state["relationships"], "relationships").get(user_id, {}),
+                    "relationship",
+                ),
+                affect={"irritation": int(vector.get("anger", 0)), **vector},
+                needs=_as_dict(state["needs"], "needs"),
+                user_request=UserRequest(kind="unspecified", strength="implicit"),
+                open_commitments=tuple(
+                    thread_id
+                    for thread_id, raw in _as_dict(
+                        state.get("conversation_threads", {}), "threads"
+                    ).items()
+                    if _as_dict(raw, "thread").get("status") == "open"
+                    and _as_dict(raw, "thread").get("user_id") == user_id
+                ),
+                available_actions=("initiate", "defer", "remain_silent"),
+            )
+            events: list[tuple[str, dict[str, object]]] = [
+                (
+                    "MotiveConflictEvaluated",
+                    {
+                        "message_id": impulse_id,
+                        "appraisal": deliberation.appraisal,
+                        "drives": dict(deliberation.drives),
+                        "conflicts": list(deliberation.conflicts),
+                        "stances_considered": list(deliberation.stances_considered),
+                        "rule_version": deliberation.rule_version,
+                    },
+                ),
+                (
+                    "StanceSelected",
+                    {
+                        "message_id": impulse_id,
+                        "stance": deliberation.chosen_stance,
+                        "display_strategy": deliberation.display_strategy,
+                        "action_candidates": list(deliberation.action_candidates),
+                        "selection_mode": deliberation.selection.mode,
+                        "rule_version": deliberation.rule_version,
+                    },
+                ),
+            ]
+            if deliberation.chosen_stance == "initiate":
+                due_at = _parse_at(
+                    str(_as_dict(state["clock"], "clock")["logical_at"])
+                ) + timedelta(minutes=10)
+                events.append(
+                    (
+                        "ActionScheduled",
+                        {
+                            "action_id": generation_action_id,
+                            "kind": "proactive_generation",
+                            "expires_at": (due_at + timedelta(minutes=5)).isoformat(),
+                            "payload": {
+                                "due_at": due_at.isoformat(),
+                                "user_id": user_id,
+                                "impulse_id": impulse_id,
+                            },
+                        },
+                    )
+                )
+            return events
         if command_type == "resolve_deferred_decision":
             decision_id = str(command.get("decision_id") or "")
             outcome = str(command.get("outcome") or "")
@@ -3816,12 +4075,20 @@ class WorldKernel:
         if command_type == "record_external_result":
             action_id = str(command.get("action_id") or "")
             action = _as_dict(_as_dict(state["actions"], "actions").get(action_id), "action")
-            if action["status"] not in {"scheduled", "sending"}:
-                raise WorldError("only a scheduled or claimed external action can settle")
             result = _as_dict(command.get("result"), "result")
             status = str(result.get("status") or "")
             if status not in {"delivered", "failed", "cancelled"}:
                 raise WorldError("external result requires a terminal status")
+            late_reaction_receipt = (
+                action.get("status") == "unknown"
+                and action.get("kind") == "reaction_delivery"
+                and status in {"delivered", "failed"}
+                and bool(str(result.get("external_receipt") or "").strip())
+            )
+            if action["status"] not in {"scheduled", "sending"} and not late_reaction_receipt:
+                raise WorldError(
+                    "only an unresolved action, or an unknown reaction with a receipt, can settle"
+                )
             if action.get("kind") == "attachment_analysis" and status == "delivered":
                 payload = _as_dict(action.get("payload", {}), "attachment analysis payload")
                 summary = str(result.get("summary") or "")
@@ -4807,6 +5074,9 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
                 segment["status"] = "sending"
         segment_state["status"] = "sending"
         action["status"] = "sending"
+        action["lease_expires_observed_at"] = str(
+            payload.get("lease_expires_observed_at") or ""
+        )
     elif event.event_type == "ActionSegmentSettled":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         segment_state = _as_dict(action["segment_state"], "segment state")
@@ -5622,7 +5892,12 @@ def _hash(value: str) -> str:
 
 
 def _state_hash(state: dict[str, object]) -> str:
-    return _hash(_stable_json(state))
+    semantic_state = json.loads(_stable_json(state))
+    for raw_action in _as_dict(
+        semantic_state.get("actions", {}), "actions"
+    ).values():
+        _as_dict(raw_action, "action").pop("lease_expires_observed_at", None)
+    return _hash(_stable_json(semantic_state))
 
 
 def _parse_at(value: str) -> datetime:

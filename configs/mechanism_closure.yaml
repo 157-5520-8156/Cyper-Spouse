@@ -244,12 +244,12 @@ mechanisms:
 
   - id: observability-and-human-evaluation
     status: structure
-    sources: [WorldLedger, DialogueScenario, HumanAnnotation]
+    sources: [WorldLedger, DialogueScenario, HumanAnnotation, VersionedJSONLLedger]
     events: []
     reducers: []
-    projections: [five_turn_variant_comparison, dialogue_evaluation, world_overview]
+    projections: [five_turn_variant_comparison, persisted_evaluation_report, dialogue_evaluation, world_overview]
     decision_consumers: [human-reviewer, regression-gate]
     actions: []
     terminal_states: []
     adapters: [world-console, evaluation-cli]
-    tests: [tests/test_experience_evaluation.py::test_ab_report_keeps_surface_diversity_diagnostic_separate_from_human_judgment, tests/test_world_replays.py::test_world_replay_preserves_appraisal_and_settled_action]
+    tests: [tests/test_experience_evaluation_cli.py::test_cli_records_two_five_turn_variants_then_writes_comparison_report, tests/test_experience_evaluation.py::test_ab_report_keeps_surface_diversity_diagnostic_separate_from_human_judgment, tests/test_world_replays.py::test_world_replay_preserves_appraisal_and_settled_action]

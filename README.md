@@ -75,6 +75,24 @@ QQ_MESSAGE_BATCH_SECONDS=2.5 uv run companion-qq-ws --sandbox
 
 The batcher is stateful. If a burst looks unfinished, such as messages beginning with "还有/然后/因为" or ending with "，/：/...", it waits longer. If the message is a complete question or you say "你先说", it replies sooner.
 
+If an outbound action remains `unknown` after a process crash and the QQ adapter
+cannot query a receipt, an operator can reconcile it only after checking external
+evidence. Configure `DELIVERY_RECONCILIATION_TOKEN`, then send the current world
+revision, the `delivery_id`, a platform receipt (or another stable evidence
+reference), reviewer identity, and a review note to:
+
+```text
+POST /world/{world_id}/deliveries/{delivery_id}/reconcile
+X-Delivery-Reconciliation-Token: <operator token>
+```
+
+The endpoint accepts only `unknown` deliveries and only the `delivered` or
+`failed` terminal state. Without evidence it leaves the action unchanged; it
+never retries the message.
+For a partially sent multi-part reply, also provide the unknown `segment_id`.
+The verified segment is committed once; by default any never-sent remainder is
+cancelled (`cancel_remaining=true`) so it cannot be replayed as a duplicate.
+
 Run one proactive decision without sending:
 
 ```bash

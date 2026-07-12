@@ -1,4 +1,6 @@
 from pathlib import Path
+import secrets
+from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, JSONResponse
@@ -50,6 +52,18 @@ class WorldCommandRequest(BaseModel):
 class WorldClockRequest(BaseModel):
     expected_revision: int
     target_logical_at: str
+
+
+class DeliveryReconciliationRequest(BaseModel):
+    expected_revision: int = Field(ge=0)
+    status: Literal["delivered", "failed"]
+    evidence_kind: Literal["platform_receipt", "operator_verification"]
+    external_receipt: str = Field(min_length=1, max_length=500)
+    reviewer_id: str = Field(min_length=1, max_length=100)
+    review_note: str = Field(min_length=1, max_length=1000)
+    failure_reason: str | None = Field(default=None, max_length=500)
+    segment_id: str | None = Field(default=None, max_length=200)
+    cancel_remaining: bool = True
 
 
 # The browser is an operator surface, not a transport adapter.  In particular
@@ -250,6 +264,149 @@ def active_world_overview() -> dict[str, object]:
     if not engine.world_kernel or not engine.world_id:
         return {"enabled": False}
     return {"enabled": True, **engine.world_kernel.dashboard_overview(engine.world_id)}
+
+
+@app.post("/world/{world_id}/deliveries/{delivery_id}/reconcile")
+def reconcile_unknown_delivery(
+    world_id: str,
+    delivery_id: int,
+    request: DeliveryReconciliationRequest,
+    x_delivery_reconciliation_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Settle one unknown delivery from operator-reviewed external evidence."""
+    configured_token = (get_settings().delivery_reconciliation_token or "").strip()
+    if not configured_token:
+        raise HTTPException(
+            status_code=503,
+            detail="delivery reconciliation is disabled until its operator token is configured",
+        )
+    if not x_delivery_reconciliation_token or not secrets.compare_digest(
+        x_delivery_reconciliation_token, configured_token
+    ):
+        raise HTTPException(status_code=403, detail="invalid delivery reconciliation token")
+    if (
+        not request.external_receipt.strip()
+        or not request.reviewer_id.strip()
+        or not request.review_note.strip()
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="receipt, reviewer, and review note must contain non-whitespace evidence",
+        )
+    if request.status == "failed" and not (request.failure_reason or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="failed reconciliation requires a failure reason",
+        )
+
+    kernel = WorldKernel(engine.store)
+    try:
+        snapshot = kernel.snapshot(world_id)
+    except WorldError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    action_id = kernel.action_id_for_delivery(world_id, delivery_id)
+    if not action_id:
+        raise HTTPException(
+            status_code=404,
+            detail=f"delivery {delivery_id} is not an outgoing action in world {world_id}",
+        )
+    action = snapshot["actions"][action_id]
+    if request.segment_id:
+        segments = action.get("segment_state", {}).get("segments", [])
+        segment = next(
+            (
+                item
+                for item in segments
+                if isinstance(item, dict) and item.get("segment_id") == request.segment_id
+            ),
+            None,
+        )
+        if not isinstance(segment, dict):
+            raise HTTPException(status_code=404, detail="segment is not part of this delivery")
+        if segment.get("status") == "delivered":
+            return {
+                "world_id": world_id,
+                "delivery_id": delivery_id,
+                "action_id": action_id,
+                "segment_id": request.segment_id,
+                "status": "delivered",
+                "reconciled": False,
+                "revision": kernel.revision(world_id),
+            }
+        if request.status not in {"delivered", "failed"} or segment.get("status") != "unknown":
+            raise HTTPException(
+                status_code=409,
+                detail="segment reconciliation requires an unknown segment and evidence",
+            )
+    current_status = str(action.get("status") or "")
+    if current_status != "unknown":
+        if current_status == request.status:
+            return {
+                "world_id": world_id,
+                "delivery_id": delivery_id,
+                "action_id": action_id,
+                "status": current_status,
+                "reconciled": False,
+                "revision": kernel.revision(world_id),
+            }
+        raise HTTPException(
+            status_code=409,
+            detail=f"delivery is already terminal with status {current_status}",
+        )
+
+    evidence = {
+        "kind": request.evidence_kind,
+        "reference": request.external_receipt.strip(),
+        "reviewer_id": request.reviewer_id.strip(),
+        "review_note": request.review_note.strip(),
+    }
+    try:
+        if request.segment_id and request.status == "delivered":
+            settlement = kernel.settle_outgoing_segment(
+                delivery_id,
+                request.segment_id,
+                delivered=True,
+                expected_revision=request.expected_revision,
+                external_receipt=request.external_receipt.strip(),
+                reconciliation_evidence=evidence,
+                cancel_remaining=request.cancel_remaining,
+            )
+            if settlement is None:
+                raise HTTPException(status_code=404, detail=f"delivery {delivery_id} not found")
+            settled_action = kernel.snapshot(world_id)["actions"][action_id]
+            return {
+                "world_id": world_id,
+                "delivery_id": delivery_id,
+                "action_id": action_id,
+                "segment_id": request.segment_id,
+                "status": "delivered",
+                "action_status": settled_action["status"],
+                "cancelled_segment_ids": list(settlement["cancelled_segment_ids"]),
+                "reconciled": True,
+                "revision": kernel.revision(world_id),
+            }
+        settlement = kernel.settle_outgoing_action(
+            delivery_id,
+            delivered=request.status == "delivered",
+            reason=(request.failure_reason or "").strip() or None,
+            external_receipt=request.external_receipt.strip(),
+            expected_revision=request.expected_revision,
+            reconciliation_evidence=evidence,
+        )
+    except ConcurrencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except WorldError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if settlement is None:
+        raise HTTPException(status_code=404, detail=f"delivery {delivery_id} not found")
+    return {
+        "world_id": world_id,
+        "delivery_id": delivery_id,
+        "action_id": action_id,
+        "status": request.status,
+        "reconciled": str(settlement.get("status") or "") == "unknown",
+        "revision": kernel.revision(world_id),
+    }
 
 
 @app.post("/qq/webhook")

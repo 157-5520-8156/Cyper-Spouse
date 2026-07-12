@@ -597,22 +597,22 @@ def test_grounded_but_irrelevant_fact_dump_is_rejected() -> None:
 
 
 @pytest.mark.parametrize(
-    ("user_text", "expected_marker"),
+    ("user_text", "speech_act", "expected_marker"),
     [
-        ("我胃有点不舒服，但还是喝了冰美式。", "不舒服"),
-        ("我今天要赶一个项目，昨晚没怎么睡。", "很累"),
-        ("我最烦那种前言不搭后语，还装得很懂我的回复。", "不满"),
-        ("其实我有点担心，做这么久最后还是没有人味。", "担心"),
-        ("我准备睡了，但脑子还停不下来。", "没停下来"),
-        ("早，我昨天为什么没睡好，你还记得吗？", "没有能确认"),
-        ("急，我项目数据好像丢了，你先回我。", "别继续覆盖数据"),
-        ("你不用讲大道理，跟我说一句晚安就好。", "晚安。"),
+        ("我胃有点不舒服，但还是喝了冰美式。", "health_disclosure", "不舒服"),
+        ("我今天要赶一个项目，昨晚没怎么睡。", "sleep_disclosure", "很累"),
+        ("我最烦那种前言不搭后语，还装得很懂我的回复。", "shared_reaction", "不满"),
+        ("其实我有点担心，做这么久最后还是没有人味。", "vulnerable_disclosure", "担心"),
+        ("我准备睡了，但脑子还停不下来。", "sleep_disclosure", "没停下来"),
+        ("早，我昨天为什么没睡好，你还记得吗？", "source_recall", "记录"),
+        ("急，我项目数据好像丢了，你先回我。", "urgent_data", "别继续覆盖数据"),
+        ("你不用讲大道理，跟我说一句晚安就好。", "brief_goodnight", "晚安。"),
     ],
 )
 def test_safe_failure_keeps_the_current_user_speech_act(
-    user_text: str, expected_marker: str
+    user_text: str, speech_act: str, expected_marker: str
 ) -> None:
-    candidate = build_safe_failure_candidate(user_text, None)
+    candidate = build_safe_failure_candidate(user_text, None, speech_act=speech_act)
 
     assert expected_marker in str(candidate["reply_text"])
     assert candidate["mentioned_event_ids"] == []
@@ -1883,7 +1883,7 @@ async def test_external_execution_offer_requires_a_scheduled_action(tmp_path: Pa
     )
 
     assert reply is not None
-    assert "很累" in reply.text
+    assert "没睡好" in reply.text
     assert "帮你远程点" not in reply.text
     assert model.calls == 2
 
@@ -2021,9 +2021,39 @@ async def test_opinion_question_cannot_degrade_to_an_old_source_quote(
     )
 
     assert reply is not None
-    assert "不把人味等同于故意拖延" in reply.text
-    assert "接住当前对话" in reply.text
+    assert "人味" in reply.text
+    assert "拖着不回" in reply.text
     assert "前言不搭后语" not in reply.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("message_id", "text", "forbidden"),
+    [
+        ("shop-overnight", "这家店通宵营业吗？", "很累"),
+        ("database-migration", "急，数据库迁移怎么做", "覆盖数据"),
+    ],
+)
+async def test_safe_failure_speech_act_has_hard_negatives_for_ambiguous_words(
+    tmp_path: Path, message_id: str, text: str, forbidden: str
+) -> None:
+    class NonJsonModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return "not-json"
+
+    _, _, engine = _world_engine(tmp_path, NonJsonModel())
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id=message_id,
+            text=text,
+        )
+    )
+
+    assert reply is not None
+    assert forbidden not in reply.text
 
 
 @pytest.mark.asyncio
@@ -2116,6 +2146,8 @@ async def test_reply_cannot_deny_a_registered_npc_interaction_that_is_in_the_led
 
 
 def test_misunderstanding_question_has_a_typed_safe_fallback() -> None:
-    candidate = build_safe_failure_candidate("如果我误会你了，你会怎么告诉我？", None)
+    candidate = build_safe_failure_candidate(
+        "如果我误会你了，你会怎么告诉我？", None, speech_act="misunderstanding"
+    )
     assert "误会" in str(candidate["reply_text"])
     assert "说清" in str(candidate["reply_text"])

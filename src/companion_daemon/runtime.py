@@ -26,6 +26,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
     store.enable_world_mode()
     world_kernel = WorldKernel(store)
     world_id = world_kernel.ensure_seed_file(settings.world_seed_path).world_id
+    world_kernel.recover_interrupted_outgoing_deliveries(world_id)
     world_kernel.import_verified_facts(world_id, store.active_fact_lines(settings.primary_user_id))
     character = load_character(str(settings.character_path))
     store.map_account("simulator", "geoff", settings.primary_user_id)

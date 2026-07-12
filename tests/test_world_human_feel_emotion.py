@@ -89,6 +89,7 @@ def test_injected_hurt_has_a_state_backed_failure_fallback() -> None:
             "unresolved": True,
             "vector": {"hurt": 36},
         },
+        speech_act="question",
     )
 
     assert "还没完全缓过来" in str(candidate["reply_text"])
@@ -105,6 +106,7 @@ def test_repair_state_fallback_does_not_claim_the_user_just_apologized() -> None
             "vector": {"hurt": 12, "warmth": 4},
         },
         selected_stance="seek_repair",
+        speech_act="repair",
     )
 
     assert "说开" in str(candidate["reply_text"])
@@ -121,6 +123,7 @@ def test_caring_state_has_a_presence_fallback_without_inventing_history() -> Non
             "vector": {"hurt": 10, "warmth": 4},
         },
         selected_stance="care_despite_hurt",
+        speech_act="vulnerable_disclosure",
     )
 
     assert "我会顾着你" in str(candidate["reply_text"])
@@ -194,7 +197,9 @@ async def test_world_afterthought_cannot_bypass_calm_affect_projection(tmp_path:
 
 def test_mechanism_discussion_has_a_shared_reaction_fallback() -> None:
     candidate = build_safe_failure_candidate(
-        "对，我也觉得机制再多，接不上对话就还是不像人。", None
+        "对，我也觉得机制再多，接不上对话就还是不像人。",
+        None,
+        speech_act="shared_reaction",
     )
 
     assert "不满" in str(candidate["reply_text"])

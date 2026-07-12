@@ -1,9 +1,12 @@
 from pathlib import Path
 
+import pytest
+
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import CompanionReply, IncomingMessage
+from companion_daemon.qq_websocket import CompanionQQClient
 from companion_daemon.world import WorldKernel
 
 
@@ -82,4 +85,53 @@ def test_uncertain_reaction_delivery_never_becomes_shared_history(tmp_path: Path
     assert snapshot["actions"][action_id]["status"] == "unknown"
     assert snapshot["reactions"][action_id]["status"] == "unknown"
     assert not any(event.event_type == "ReactionShared" for event in world.events(world_id))
+    assert world.rebuild_projection(world_id, "world_current_state").matches_live is True
+
+
+def test_late_reaction_receipt_reconciles_unknown_without_inventing_earlier_success(
+    tmp_path: Path,
+) -> None:
+    engine, world, world_id, incoming, reply = engine_with_observed_message(
+        tmp_path, message_id="reaction-late-receipt"
+    )
+    action_id = engine.begin_reaction_delivery(incoming, reply)
+    engine.settle_reaction_delivery(
+        action_id, status="unknown", reason="connection_lost_after_dispatch"
+    )
+
+    engine.settle_reaction_delivery(
+        action_id,
+        status="delivered",
+        external_receipt="onebot-late:reaction-late-receipt:128514",
+    )
+
+    snapshot = world.snapshot(world_id)
+    assert snapshot["actions"][action_id]["status"] == "delivered"
+    assert snapshot["reactions"][action_id]["status"] == "shared"
+    assert snapshot["reactions"][action_id]["external_receipt"].startswith("onebot-late")
+    assert world.rebuild_projection(world_id, "world_current_state").matches_live is True
+
+
+@pytest.mark.asyncio
+async def test_official_qq_records_unsupported_reaction_as_failed_world_action(
+    tmp_path: Path,
+) -> None:
+    engine, world, world_id, incoming, reply = engine_with_observed_message(
+        tmp_path, message_id="reaction-official-unsupported"
+    )
+    client = object.__new__(CompanionQQClient)
+    client.engine = engine
+
+    await client._reject_unsupported_reply_reaction(incoming, reply)
+
+    action_id = "reaction:qq:reaction-official-unsupported:haha"
+    snapshot = world.snapshot(world_id)
+    assert snapshot["actions"][action_id]["status"] == "failed"
+    assert snapshot["reactions"][action_id]["status"] == "delivery_failed"
+    assert not any(event.event_type == "ReactionShared" for event in world.events(world_id))
+    assert [
+        event.event_type
+        for event in world.events(world_id)
+        if event.event_type in {"ReactionSelected", "ActionScheduled", "ActionSettled"}
+    ][-3:] == ["ReactionSelected", "ActionScheduled", "ActionSettled"]
     assert world.rebuild_projection(world_id, "world_current_state").matches_live is True

@@ -1562,6 +1562,164 @@ def test_life_share_delivery_is_atomic_and_uncertain_sends_are_not_retried(tmp_p
     assert kernel.schedule_life_share_delivery(world_id=started.world_id, canonical_user_id="geoff", platform="qq", expires_at=NOW + timedelta(hours=2), expected_revision=kernel.revision(started.world_id)) is None
 
 
+def test_restart_marks_every_interrupted_outgoing_delivery_unknown(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.resolve_user("qq", "geoff")
+    kernel = WorldKernel(store)
+    started = kernel.submit(
+        {"type": "start_world", "seed": world_seed()}, expected_revision=0
+    )
+    delivery_id, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="普通回复也可能在发送时崩溃。",
+        kind="reply",
+        expires_at=NOW + timedelta(hours=1),
+        trace={
+            "world_id": started.world_id,
+            "appraisal": "test",
+            "expression_policy": "test",
+            "allowed_facts": [],
+            "short_lived_constraint": None,
+            "observable_reason": "test",
+        },
+    )
+    assert kernel.begin_outgoing_action(
+        delivery_id,
+        expected_revision=kernel.revision(started.world_id),
+        lease_seconds=0,
+    )
+
+    assert kernel.recover_interrupted_outgoing_deliveries(started.world_id) == 1
+    assert store.outbox_message(delivery_id)["status"] == "unknown"
+    assert kernel.snapshot(started.world_id)["actions"][action_id]["status"] == "unknown"
+    assert (
+        kernel.recover_interrupted_outgoing_deliveries(started.world_id) == 0
+    )
+
+
+def test_restart_expires_only_the_claimed_segment_and_preserves_unsent_remainder(
+    tmp_path: Path,
+) -> None:
+    store = CompanionStore(tmp_path / "segmented-recovery.sqlite")
+    store.resolve_user("qq", "geoff")
+    kernel = WorldKernel(store)
+    started = kernel.submit(
+        {"type": "start_world", "seed": world_seed()}, expected_revision=0
+    )
+    delivery_id, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="可能发出。还没发。",
+        text_parts=["可能发出。", "还没发。"],
+        kind="reply",
+        expires_at=NOW + timedelta(hours=1),
+        trace={
+            "world_id": started.world_id,
+            "appraisal": "test",
+            "expression_policy": "test",
+            "allowed_facts": [],
+            "observable_reason": "test",
+        },
+    )
+    kernel.claim_outgoing_segment(
+        delivery_id,
+        expected_revision=kernel.revision(started.world_id),
+    )
+
+    assert kernel.recover_interrupted_outgoing_deliveries(started.world_id) == 0
+    assert (
+        kernel.recover_interrupted_outgoing_deliveries(
+            started.world_id,
+            observed_now=datetime.now(UTC) + timedelta(minutes=6),
+        )
+        == 1
+    )
+    segments = kernel.snapshot(started.world_id)["actions"][action_id]["segment_state"][
+        "segments"
+    ]
+    assert [item["status"] for item in segments] == ["unknown", "planned"]
+
+
+def test_whole_delivery_reconciliation_refuses_to_invent_a_planned_segment(
+    tmp_path: Path,
+) -> None:
+    store = CompanionStore(tmp_path / "partial-reconciliation.sqlite")
+    store.resolve_user("qq", "geoff")
+    kernel = WorldKernel(store)
+    started = kernel.submit(
+        {"type": "start_world", "seed": world_seed()}, expected_revision=0
+    )
+    delivery_id, _, action_id = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="第一。第二。第三。",
+        text_parts=["第一。", "第二。", "第三。"],
+        kind="reply",
+        expires_at=NOW + timedelta(hours=1),
+        trace={
+            "world_id": started.world_id,
+            "appraisal": "test",
+            "expression_policy": "test",
+            "allowed_facts": [],
+            "observable_reason": "test",
+        },
+    )
+    first = kernel.claim_outgoing_segment(
+        delivery_id, expected_revision=kernel.revision(started.world_id)
+    )
+    assert first
+    kernel.settle_outgoing_segment(
+        delivery_id,
+        first.segment_id,
+        delivered=True,
+        expected_revision=kernel.revision(started.world_id),
+    )
+    second = kernel.claim_outgoing_segment(
+        delivery_id, expected_revision=kernel.revision(started.world_id)
+    )
+    assert second
+    kernel.mark_outgoing_segment_unknown(
+        delivery_id,
+        second.segment_id,
+        reason="crash after send",
+        expected_revision=kernel.revision(started.world_id),
+    )
+
+    with pytest.raises(WorldError, match="segment-level reconciliation"):
+        kernel.settle_outgoing_action(
+            delivery_id,
+            delivered=True,
+            external_receipt="whole-receipt",
+            expected_revision=kernel.revision(started.world_id),
+            reconciliation_evidence={"reviewer_id": "ops"},
+        )
+
+    action = kernel.snapshot(started.world_id)["actions"][action_id]
+    assert [item["status"] for item in action["segment_state"]["segments"]] == [
+        "delivered",
+        "unknown",
+        "planned",
+    ]
+    assert [
+        row["text"] for row in store.recent_messages("geoff") if row["direction"] == "out"
+    ] == ["第一。"]
+
+    kernel.settle_outgoing_action(
+        delivery_id,
+        delivered=False,
+        reason="platform confirmed the uncertain segment failed",
+        external_receipt="segment-failure-receipt",
+        expected_revision=kernel.revision(started.world_id),
+        reconciliation_evidence={"reviewer_id": "ops"},
+    )
+    failed_action = kernel.snapshot(started.world_id)["actions"][action_id]
+    assert failed_action["status"] == "failed"
+    assert [
+        item["status"] for item in failed_action["segment_state"]["segments"]
+    ] == ["delivered", "cancelled", "cancelled"]
+
+
 def test_week_long_life_simulation_rebuilds_deterministically(tmp_path: Path) -> None:
     kernel = WorldKernel(CompanionStore(tmp_path / "world.sqlite"))
     started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))

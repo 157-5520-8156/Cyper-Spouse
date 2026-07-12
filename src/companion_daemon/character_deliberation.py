@@ -43,7 +43,10 @@ class UserRequest:
         for address in ("宝宝", "宝贝", "老婆", "亲爱的"):
             if any(marker in text for marker in (f"别叫我{address}", f"不要叫我{address}")):
                 return cls(kind="avoid_address", subject=address)
-        if any(marker in text for marker in ("别劝", "不要劝", "不用讲道理")):
+        if any(
+            marker in text
+            for marker in ("别劝", "别只劝", "不要劝", "不要只劝", "不用讲道理")
+        ):
             return cls.no_advice_now()
         if any(marker in text for marker in ("别问", "不要问")):
             return cls(kind="no_questions")
