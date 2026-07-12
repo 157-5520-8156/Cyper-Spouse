@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from companion_daemon.world_affinity import personality_affect_baseline
+from companion_daemon.world_interaction_rules import HARMFUL_INTERACTION_APPRAISALS
 
 
 AFFECT_KEYS = (
@@ -37,6 +38,9 @@ class AffectOutcome:
 _EFFECTS: dict[str, dict[str, int]] = {
     "reply_discomfort": {"hurt": 4, "anger": 2},
     "boundary_violation": {"hurt": 18, "anger": 12, "sadness": 4, "anxiety": 4, "resentment": 8, "joy": -4},
+    "sexual_boundary_violation": {"hurt": 23, "anger": 25, "sadness": 8, "anxiety": 14, "resentment": 16, "warmth": -8, "joy": -8},
+    "dehumanization": {"hurt": 16, "anger": 15, "sadness": 7, "anxiety": 5, "resentment": 11, "warmth": -6, "joy": -5},
+    "coercion": {"hurt": 14, "anger": 20, "sadness": 4, "anxiety": 9, "resentment": 13, "warmth": -5, "joy": -5},
     "control_pressure": {"hurt": 10, "anger": 16, "anxiety": 3, "resentment": 8, "joy": -3},
     "repair_attempt": {"hurt": -6, "anger": -8, "sadness": -3, "anxiety": -2, "resentment": -5, "warmth": 4},
     "repair_perfunctory": {"hurt": -1, "anger": -1},
@@ -48,11 +52,22 @@ _EFFECTS: dict[str, dict[str, int]] = {
     "availability_drop": {"warmth": -1},
     "return_after_gap": {"sadness": -2, "loneliness": -2, "anxiety": -2, "warmth": 2},
     "conversation_thread_expired": {"sadness": 4, "loneliness": 3, "anxiety": 5, "resentment": 2},
+    "npc_conflict": {"hurt": 10, "anger": 14, "sadness": 3, "anxiety": 6, "resentment": 6, "warmth": -4, "joy": -2},
+    "social_warmth": {"warmth": 7, "joy": 4, "loneliness": -3, "anxiety": -1},
+    "family_connection": {"warmth": 9, "joy": 4, "loneliness": -5, "anxiety": -2},
+    "goal_progress": {"warmth": 2, "joy": 5, "anxiety": -3},
+    "goal_completed": {"warmth": 5, "joy": 12, "anxiety": -7, "sadness": -2},
+    "creative_satisfaction": {"warmth": 3, "joy": 7, "anxiety": -3},
+    "restorative_solitude": {"anger": -3, "sadness": -2, "anxiety": -5, "resentment": -1},
+    "goal_strain": {"anger": 3, "sadness": 2, "anxiety": 7, "joy": -2},
 }
 
 _BEHAVIOR: dict[str, tuple[str, str, str]] = {
     "reply_discomfort": ("guarded", "guarded", "the current message caused discomfort"),
     "boundary_violation": ("guarded", "guarded", "boundary was crossed"),
+    "sexual_boundary_violation": ("guarded", "guarded", "a sexual or privacy boundary was crossed"),
+    "dehumanization": ("guarded", "guarded", "the character was dehumanized or objectified"),
+    "coercion": ("guarded", "guarded", "the interaction attempted to coerce obedience"),
     "control_pressure": ("guarded", "guarded", "control pressure was felt"),
     "repair_attempt": ("softening", "soft", "repair was heard but not yet complete"),
     "repair_perfunctory": ("guarded", "neutral", "a bare apology was heard but needs evidence"),
@@ -64,6 +79,14 @@ _BEHAVIOR: dict[str, tuple[str, str, str]] = {
     "availability_drop": ("patient", "neutral", "the user is temporarily busy"),
     "return_after_gap": ("open", "soft", "the user returned"),
     "conversation_thread_expired": ("patient", "neutral", "an open question went unanswered"),
+    "npc_conflict": ("guarded", "guarded", "an NPC interaction caused friction"),
+    "social_warmth": ("warm", "smile", "a settled social interaction felt warm"),
+    "family_connection": ("warm", "soft", "settled family contact felt grounding"),
+    "goal_progress": ("steady", "soft", "a meaningful goal moved forward"),
+    "goal_completed": ("proud", "smile", "a meaningful goal was completed"),
+    "creative_satisfaction": ("absorbed", "smile", "creative work felt satisfying"),
+    "restorative_solitude": ("calm", "neutral", "quiet time helped the character settle"),
+    "goal_strain": ("tense", "guarded", "goal pressure remained after the activity"),
 }
 
 _DECAY_PER_HOUR = {
@@ -96,6 +119,7 @@ def apply_appraisal(
     logical_at: str,
     *,
     source_reference: str = "",
+    intensity: int | None = None,
 ) -> AffectOutcome:
     repair_observation_seconds = int(current.get("repair_observation_seconds") or 0)
     violation_count = int(current.get("violation_count") or 0)
@@ -107,8 +131,17 @@ def apply_appraisal(
         appraisal = "repeated_violation"
     vector = _vector(current)
     baseline = _baseline(current)
+    has_affect_effect = appraisal in _EFFECTS
     for key, delta in _EFFECTS.get(appraisal, {}).items():
-        vector[key] = _clamp(vector[key] + delta)
+        scaled = delta
+        if intensity is not None:
+            raw_intensity = int(intensity)
+            if 1 <= raw_intensity <= 4:
+                scaled = int(round(delta * {1: 0.5, 2: 0.75, 3: 1.0, 4: 1.25}[raw_intensity]))
+            else:
+                bounded_intensity = max(1, min(100, raw_intensity))
+                scaled = int(round(delta * (50 + bounded_intensity) / 100))
+        vector[key] = _clamp(vector[key] + scaled)
     mode, expression, reason = _BEHAVIOR.get(
         appraisal,
         (
@@ -136,7 +169,7 @@ def apply_appraisal(
     unresolved = (
         _negative_total(vector, baseline) >= 8
     )
-    if appraisal in {"boundary_violation", "control_pressure", "repeated_violation"}:
+    if appraisal in HARMFUL_INTERACTION_APPRAISALS:
         violation_count += 1
         repair_streak = 0
         repair_quality = ""
@@ -170,11 +203,19 @@ def apply_appraisal(
         charge=charge,
         behavior_tendency=behavior_tendency,
         unresolved=unresolved,
-        source_appraisal=appraisal,
+        source_appraisal=(
+            appraisal
+            if has_affect_effect
+            else str(current.get("source_appraisal") or appraisal)
+        ),
         reason=reason,
         decay_remainder_seconds=int(current.get("decay_remainder_seconds") or 0),
         decay_anchor_at=logical_at,
-        source_reference=source_reference,
+        source_reference=(
+            source_reference
+            if has_affect_effect
+            else str(current.get("source_reference") or source_reference)
+        ),
         repair_quality=repair_quality,
         repair_observation_seconds=repair_observation_seconds,
         repair_streak=repair_streak,
@@ -278,7 +319,7 @@ def affect_guidance(state: dict[str, Any]) -> str:
     if behavior == "guarded":
         return "保持边界：明确指出不舒服的地方，不辱骂、不威胁，也不假装没事。"
     if behavior == "patient" and unresolved:
-        return "正在消化情绪：不主动追问，不把普通忙碌解释成背叛。"
+        return "情绪还没过去，正在消化：不主动追问，不把普通忙碌解释成背叛。"
     if behavior == "repair_open":
         return "听见了修复：可以缓和，但不要把残留情绪瞬间清零。"
     if behavior == "repair_observing":
@@ -333,6 +374,9 @@ def _baseline(current: dict[str, object]) -> dict[str, int]:
 def _charge_delta(appraisal: str) -> int:
     return {
         "boundary_violation": 16,
+        "sexual_boundary_violation": 28,
+        "dehumanization": 20,
+        "coercion": 22,
         "control_pressure": 11,
         "repair_attempt": -5,
         "repair_perfunctory": -1,
@@ -344,6 +388,14 @@ def _charge_delta(appraisal: str) -> int:
         "availability_drop": -2,
         "return_after_gap": 3,
         "conversation_thread_expired": 3,
+        "npc_conflict": 14,
+        "social_warmth": 6,
+        "family_connection": 7,
+        "goal_progress": 5,
+        "goal_completed": 10,
+        "creative_satisfaction": 7,
+        "restorative_solitude": -5,
+        "goal_strain": 8,
     }.get(appraisal, -1)
 
 

@@ -775,7 +775,7 @@ async def test_coalescer_can_defer_long_story_then_reply() -> None:
     assert engine.seen_texts == [opener]
     assert engine.context_hints == [None]
     assert target.replies == ["刚看到。"]
-    assert any(seconds >= 300 for seconds in sleeps)
+    assert any(10 <= seconds <= 20 for seconds in sleeps)
 
 
 def test_qq_emoji_id_maps_known_reactions() -> None:

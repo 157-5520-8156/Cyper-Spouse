@@ -19,6 +19,10 @@ from companion_daemon.character import CharacterProfile
 from companion_daemon.context_assembler import ContextAssembler
 from companion_daemon.conversation import ConversationCore, PromptedConversationCore
 from companion_daemon.context_orchestrator import build_context_package
+from companion_daemon.conversation_cadence import (
+    ConversationCadence,
+    derive_conversation_cadence,
+)
 from companion_daemon.calendar_ledger import calendar_context_for_message, calendar_ledger
 from companion_daemon.db import CompanionStore
 from companion_daemon.emotion_state import interpret_interaction
@@ -99,7 +103,10 @@ from companion_daemon.turns import TurnCommit, build_turn_plan
 from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel, parse_reply_candidate
 from companion_daemon.world_affect import public_mood
 from companion_daemon.world_behavior import WorldBehaviorPolicy
-from companion_daemon.world_interaction_rules import classify_repair_appraisal
+from companion_daemon.world_interaction_rules import (
+    HARMFUL_INTERACTION_APPRAISALS,
+    classify_repair_appraisal,
+)
 from companion_daemon.world_conversation import (
     affect_reply_violation,
     asks_for_source_detail,
@@ -777,6 +784,7 @@ class CompanionEngine:
     ) -> CompanionReply | None:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         if self.world_kernel and self.world_id:
+            cadence = self.conversation_cadence(message)
             self.world_kernel.recover_interrupted_outgoing_deliveries(self.world_id)
             message = message.model_copy(update={"message_id": self._world_message_id(message)})
             if not resume_action_id and self._world_turn_already_observed(str(message.message_id)):
@@ -795,6 +803,7 @@ class CompanionEngine:
                     skip_reply=skip_reply,
                     defer_delivery=defer_delivery,
                     resume_action_id=resume_action_id,
+                    cadence=cadence,
                 )
             except Exception as exc:
                 try:
@@ -1135,6 +1144,7 @@ class CompanionEngine:
             self_core_block=self_core_block,
             context_block=turn_plan.prompt_block(),
         ))
+        text = _ensure_observable_legacy_boundary(text, event.kind)
         text_parts = split_reply_text(text, next_state)
         suggested_reaction = select_character_reaction(message.text, next_state)
         sticker = choose_reply_sticker(
@@ -1202,6 +1212,7 @@ class CompanionEngine:
         skip_reply: bool,
         defer_delivery: bool,
         resume_action_id: str | None,
+        cadence: ConversationCadence | None = None,
     ) -> CompanionReply | None:
         """World-mode turn path; legacy state tables are not behavioural inputs here."""
         assert self.world_kernel and self.world_id
@@ -1253,6 +1264,7 @@ class CompanionEngine:
                 text=message.text,
                 resumed_action=bool(resume_action_id),
                 user_id=self._world_user_id(canonical_user_id),
+                cadence=cadence,
             )
             attention_candidates = [
                 {
@@ -1342,6 +1354,12 @@ class CompanionEngine:
                 "type": "appraise_turn",
                 "world_id": self.world_id,
                 "appraisal": appraisal,
+                "interaction": {
+                    "acts": list(event.acts),
+                    "target": event.target,
+                    "severity": event.intensity,
+                    "evidence_spans": list(event.evidence_spans),
+                },
                 "intent_id": intent_id,
                 "message_id": str(message.message_id or ""),
                 "user_id": user_id,
@@ -1999,6 +2017,37 @@ class CompanionEngine:
         if not defer_delivery:
             self.confirm_reply_delivery(reply)
         return reply
+
+    def conversation_cadence(
+        self,
+        message: IncomingMessage,
+        *,
+        observed_at: datetime | None = None,
+    ) -> ConversationCadence:
+        """Return observed chat heat without consulting the virtual-life clock."""
+        observed_at = observed_at or utc_now()
+        canonical_user_id = self.store.resolve_user(
+            message.platform, message.platform_user_id
+        )
+        if not self.world_kernel or not self.world_id:
+            recent_messages = [
+                {
+                    "direction": str(row["direction"]),
+                    "user_id": canonical_user_id,
+                    "observed_at": str(row["sent_at"]),
+                }
+                for row in self.store.recent_messages(canonical_user_id, limit=8)
+            ]
+            return derive_conversation_cadence(
+                {"recent_messages": recent_messages},
+                user_id=canonical_user_id,
+                observed_at=observed_at,
+            )
+        return derive_conversation_cadence(
+            self.world_kernel.snapshot(self.world_id),
+            user_id=self._world_user_id(canonical_user_id),
+            observed_at=observed_at,
+        )
 
     def phone_attention_decision(self, message: IncomingMessage) -> PhoneDecision:
         if self.world_kernel and self.world_id:
@@ -4029,6 +4078,8 @@ def _safe_failure_speech_act(
     message_text: str,
 ) -> str:
     """Translate already-structured turn signals into a conservative speech act."""
+    if appraisal in HARMFUL_INTERACTION_APPRAISALS:
+        return "boundary_response"
     if query_scope.asks_epistemic_honesty:
         return "epistemic"
     if query_scope.asks_meta_agency:
@@ -4055,6 +4106,17 @@ def _safe_failure_speech_act(
     if message_kind == "question":
         return "question"
     return "statement"
+
+
+def _ensure_observable_legacy_boundary(text: str, appraisal: str) -> str:
+    if appraisal not in HARMFUL_INTERACTION_APPRAISALS:
+        return text
+    if re.search(
+        r"不喜欢|不接受|不愿意|不想|别这样|不要这样|不舒服|越界|边界|先停|不能这样",
+        text,
+    ):
+        return text
+    return "这句话越过我的边界了，我不接受这种互动方式。"
 
 
 def _social_task_trigger(task) -> ProactiveTrigger | None:

@@ -24,7 +24,10 @@ from companion_daemon.action_coordinator import (
 from companion_daemon.life_simulation import LifeSimulation
 from companion_daemon.life_evolution import LifeEvolution
 from companion_daemon.time import utc_now
-from companion_daemon.world_interaction_rules import WorldInteractionRules
+from companion_daemon.world_interaction_rules import (
+    HARMFUL_INTERACTION_APPRAISALS,
+    WorldInteractionRules,
+)
 from companion_daemon.world_relationship import (
     evaluate_relationship_stage,
     relationship_event_significance,
@@ -2715,12 +2718,18 @@ class WorldKernel:
 
             def decay_affect_until(at: datetime) -> None:
                 nonlocal affect_cursor
-                if at <= affect_cursor:
+                previous_affect = _as_dict(
+                    working["emotion_modulation"], "emotion modulation"
+                )
+                recorded_anchor = str(previous_affect.get("decay_anchor_at") or "")
+                effective_cursor = affect_cursor
+                if recorded_anchor:
+                    effective_cursor = max(effective_cursor, _parse_at(recorded_anchor))
+                if at <= effective_cursor:
                     return
-                previous_affect = _as_dict(working["emotion_modulation"], "emotion modulation")
                 decayed_affect = decay_affect(
                     previous_affect,
-                    int((at - affect_cursor).total_seconds()),
+                    int((at - effective_cursor).total_seconds()),
                     at.isoformat(),
                 )
                 emit(
@@ -2743,6 +2752,102 @@ class WorldKernel:
                         logical_at=at.isoformat(),
                     )
                 affect_cursor = at
+
+            def expire_threads_until(at: datetime) -> None:
+                threads = sorted(
+                    _as_dict(
+                        working.get("conversation_threads", {}),
+                        "conversation threads",
+                    ).items(),
+                    key=lambda item: str(
+                        _as_dict(item[1], "conversation thread").get(
+                            "expires_at"
+                        )
+                        or ""
+                    ),
+                )
+                for thread_id, raw_thread in threads:
+                    thread = _as_dict(raw_thread, "conversation thread")
+                    if (
+                        thread.get("status") != "open"
+                        or not thread.get("expires_at")
+                        or thread.get("rule_version")
+                        != "conversation-commitments-v1"
+                    ):
+                        continue
+                    expires_at = _parse_at(str(thread["expires_at"]))
+                    if expires_at > at:
+                        continue
+                    user_id = str(thread.get("user_id") or "")
+                    relationship = _as_dict(
+                        _as_dict(
+                            working.get("relationships", {}), "relationships"
+                        ).get(user_id, {}),
+                        "thread relationship",
+                    )
+                    waiting = evaluate_waiting_response(
+                        thread,
+                        relationship=relationship,
+                        logical_at=expires_at,
+                    )
+                    if waiting.phase != str(
+                        thread.get("waiting_phase") or "not_due"
+                    ):
+                        emit(
+                            "ConversationThreadWaitingChanged",
+                            {
+                                "thread_id": thread_id,
+                                "phase": waiting.phase,
+                                "reason": waiting.reason,
+                                "expression_policy": waiting.expression_policy,
+                                "relationship_deltas": dict(
+                                    waiting.relationship_deltas
+                                ),
+                                "next_review_at": (
+                                    waiting.next_review_at.isoformat()
+                                    if waiting.next_review_at
+                                    else None
+                                ),
+                                "rule_version": waiting.rule_version,
+                            },
+                            logical_at=expires_at.isoformat(),
+                        )
+                        for dimension, delta in waiting.relationship_deltas.items():
+                            emit(
+                                "RelationshipChanged",
+                                {
+                                    "entity_id": user_id,
+                                    "dimension": dimension,
+                                    "delta": delta,
+                                    "reason": waiting.reason,
+                                    "thread_id": thread_id,
+                                    "rule_version": waiting.rule_version,
+                                },
+                                logical_at=expires_at.isoformat(),
+                            )
+                    decay_affect_until(expires_at)
+                    emit(
+                        "ConversationThreadExpired",
+                        {"thread_id": thread_id, "reason": "logical_timeout"},
+                        logical_at=expires_at.isoformat(),
+                    )
+                    affect = apply_appraisal(
+                        _as_dict(
+                            working["emotion_modulation"], "emotion modulation"
+                        ),
+                        "conversation_thread_expired",
+                        expires_at.isoformat(),
+                        source_reference=f"conversation_thread:{thread_id}",
+                    )
+                    emit(
+                        "AffectChanged",
+                        affect_outcome_payload(
+                            affect,
+                            logical_at=expires_at.isoformat(),
+                            event_type="AffectChanged",
+                        ),
+                        logical_at=expires_at.isoformat(),
+                    )
 
             timeline: list[tuple[datetime, datetime, dict[str, object], bool]] = []
             for raw in _as_dict(working["agenda"], "agenda").values():
@@ -3077,8 +3182,37 @@ class WorldKernel:
                 if ends <= target_at:
                     emit("ActivityCompleted", {"activity_id": activity_id})
                     completed = dict(_as_dict(_as_dict(working["agenda"], "agenda")[activity_id], "activity"))
-                    for outcome_type, outcome_payload in self.life_simulation.advance(working, [completed]):
+                    outcome_events = self.life_simulation.advance(working, [completed])
+                    if any(
+                        outcome_type == "ExperienceAppraised"
+                        for outcome_type, _ in outcome_events
+                    ):
+                        expire_threads_until(ends)
+                        decay_affect_until(ends)
+                    for outcome_type, outcome_payload in outcome_events:
                         emit(outcome_type, outcome_payload)
+                        if outcome_type == "ExperienceAppraised":
+                            affect = apply_appraisal(
+                                _as_dict(
+                                    working["emotion_modulation"],
+                                    "emotion modulation",
+                                ),
+                                str(outcome_payload["appraisal"]),
+                                ends.isoformat(),
+                                source_reference=str(
+                                    outcome_payload["source_reference"]
+                                ),
+                                intensity=int(outcome_payload["intensity"]),
+                            )
+                            emit(
+                                "AffectChanged",
+                                affect_outcome_payload(
+                                    affect,
+                                    logical_at=ends.isoformat(),
+                                    event_type="AffectChanged",
+                                ),
+                                logical_at=ends.isoformat(),
+                            )
                     previous = dict(_as_dict(_as_dict(working["agenda"], "agenda")[activity_id], "activity"))
 
             for action_id, action in _as_dict(working["actions"], "actions").items():
@@ -3089,6 +3223,7 @@ class WorldKernel:
                     and _parse_at(str(item["expires_at"])) <= target_at
                 ):
                     emit("ActionExpired", {"action_id": action_id, "reason": "logical_timeout"})
+            expire_threads_until(target_at)
             threads = sorted(
                 _as_dict(working.get("conversation_threads", {}), "conversation threads").items(),
                 key=lambda item: str(_as_dict(item[1], "conversation thread").get("expires_at") or ""),
@@ -3145,33 +3280,6 @@ class WorldKernel:
                                 },
                                 logical_at=waiting_at.isoformat(),
                             )
-                if (
-                    item.get("status") == "open"
-                    and item.get("expires_at")
-                    and _parse_at(str(item["expires_at"])) <= target_at
-                ):
-                    expires_at = _parse_at(str(item["expires_at"]))
-                    decay_affect_until(expires_at)
-                    emit(
-                        "ConversationThreadExpired",
-                        {"thread_id": thread_id, "reason": "logical_timeout"},
-                        logical_at=expires_at.isoformat(),
-                    )
-                    affect = apply_appraisal(
-                        _as_dict(working["emotion_modulation"], "emotion modulation"),
-                        "conversation_thread_expired",
-                        expires_at.isoformat(),
-                        source_reference=f"conversation_thread:{thread_id}",
-                    )
-                    emit(
-                        "AffectChanged",
-                        affect_outcome_payload(
-                            affect,
-                            logical_at=expires_at.isoformat(),
-                            event_type="AffectChanged",
-                        ),
-                        logical_at=expires_at.isoformat(),
-                    )
             for goal_id, goal in list(_as_dict(working.get("goals", {}), "goals").items()):
                 if goal.get("status") == "active" and goal.get("deadline") and _parse_at(str(goal["deadline"])) <= target_at:
                     emit("GoalDeferred", {"goal_id": goal_id, "reason": "deadline_reached", "next_review_at": (target_at + timedelta(days=1)).isoformat()})
@@ -3611,6 +3719,8 @@ class WorldKernel:
                         "message_id": impulse_id,
                         "stance": deliberation.chosen_stance,
                         "display_strategy": deliberation.display_strategy,
+                        "drives": dict(deliberation.drives),
+                        "conflicts": list(deliberation.conflicts),
                         "action_candidates": list(deliberation.action_candidates),
                         "selection_mode": deliberation.selection.mode,
                         "rule_version": deliberation.rule_version,
@@ -4320,25 +4430,48 @@ class WorldKernel:
                     settlement_id=f"turn:{message_id}",
                     logical_at=str(_as_dict(state["clock"], "clock").get("logical_at") or ""),
                 )
-                events.append(
-                    (
-                        "AffinityInteractionSettled",
-                        {
-                            "user_id": user_id,
-                            "message_id": message_id,
-                            "settlement_id": f"turn:{message_id}",
-                            "appraisal": appraisal,
-                            "state": outcome.state,
-                            "delta": outcome.delta,
-                            "rule_version": outcome.rule_version,
-                        },
+                if not outcome.duplicate:
+                    events.append(
+                        (
+                            "AffinityInteractionSettled",
+                            {
+                                "user_id": user_id,
+                                "message_id": message_id,
+                                "settlement_id": f"turn:{message_id}",
+                                "appraisal": appraisal,
+                                "state": outcome.state,
+                                "delta": outcome.delta,
+                                "rule_version": outcome.rule_version,
+                            },
+                        )
                     )
-                )
             return events
         if command_type == "appraise_turn":
             appraisal = str(command.get("appraisal") or "ordinary_message")
+            interaction = _as_dict(command.get("interaction", {}), "interaction appraisal")
+            has_interaction_severity = "severity" in interaction
+            severity = int(interaction.get("severity") or 3)
+            target = str(interaction.get("target") or "general")
+            acts = [
+                str(item)
+                for item in _as_list(interaction.get("acts", []), "interaction acts")
+            ]
+            evidence_spans = [
+                str(item)[:80]
+                for item in _as_list(
+                    interaction.get("evidence_spans", []), "interaction evidence"
+                )
+            ]
+            if not 1 <= severity <= 4 or target not in {
+                "general",
+                "companion",
+                "self",
+                "third_party",
+            } or len(acts) > 6:
+                raise WorldError("interaction appraisal is outside the bounded schema")
             if (
-                appraisal in {"boundary_violation", "control_pressure"}
+                appraisal in HARMFUL_INTERACTION_APPRAISALS
+                and appraisal != "repeated_violation"
                 and int(
                     _as_dict(state["emotion_modulation"], "emotion modulation").get(
                         "repair_observation_seconds", 0
@@ -4355,6 +4488,10 @@ class WorldKernel:
                         "message_id": str(command.get("message_id") or ""),
                         "user_id": str(command.get("user_id") or ""),
                         "appraisal": appraisal,
+                        "severity": severity,
+                        "acts": acts,
+                        "target": target,
+                        "evidence_spans": evidence_spans,
                         "policy": consequence.policy,
                         "rule_version": self.interaction_rules.RULE_VERSION,
                     },
@@ -4428,12 +4565,45 @@ class WorldKernel:
                         ),
                     )
                 )
+                if appraisal in HARMFUL_INTERACTION_APPRAISALS:
+                    current_affinity = _as_dict(
+                        _as_dict(
+                            state.get("long_term_affinity", {}),
+                            "long-term affinity",
+                        ).get(user_id, {}),
+                        "user affinity",
+                    )
+                    affinity = settle_affinity_interaction(
+                        current_affinity,
+                        user_id=user_id,
+                        appraisal=appraisal,
+                        settlement_id=f"turn:{command.get('message_id') or command['intent_id']}",
+                        logical_at=str(
+                            _as_dict(state["clock"], "clock").get("logical_at") or ""
+                        ),
+                    )
+                    if not affinity.duplicate:
+                        events.append(
+                            (
+                                "AffinityInteractionSettled",
+                                {
+                                    "user_id": user_id,
+                                    "message_id": str(command.get("message_id") or ""),
+                                    "settlement_id": f"turn:{command.get('message_id') or command['intent_id']}",
+                                    "appraisal": appraisal,
+                                    "state": affinity.state,
+                                    "delta": affinity.delta,
+                                    "rule_version": affinity.rule_version,
+                                },
+                            )
+                        )
             logical_at = str(_as_dict(state["clock"], "clock").get("logical_at") or "")
             affect = apply_appraisal(
                 _as_dict(state["emotion_modulation"], "emotion modulation"),
                 appraisal,
                 logical_at,
                 source_reference=f"message:{command.get('message_id') or command.get('intent_id') or 'unknown'}",
+                intensity=severity if has_interaction_severity else None,
             )
             events.append(
                 (
@@ -4459,6 +4629,9 @@ class WorldKernel:
                 situation={
                     "text": user_text,
                     "risk": str(command.get("risk") or "low"),
+                    "appraisal": appraisal,
+                    "severity": severity,
+                    "acts": tuple(acts),
                     "causation_ids": (message_id,) if message_id else (),
                 },
                 self_core=next(
@@ -4512,6 +4685,8 @@ class WorldKernel:
                             "message_id": message_id,
                             "stance": decision.chosen_stance,
                             "display_strategy": decision.display_strategy,
+                            "drives": dict(decision.drives),
+                            "conflicts": list(decision.conflicts),
                             "action_candidates": list(decision.action_candidates),
                             "selection_mode": decision.selection.mode,
                             "rule_version": decision.rule_version,
@@ -5105,6 +5280,7 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
                     "text": str(delivered_segment["text"]),
                     "sent_at": event.logical_at,
                     "logical_at": event.logical_at,
+                    "observed_at": event.observed_at,
                     "user_id": str(trace.get("user_id") or ""),
                     "source_action_id": str(payload["action_id"]),
                     "outgoing_direction": str(trace.get("direction") or ""),
@@ -5160,6 +5336,7 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
                 "direction": "out", "message_id": str(payload["action_id"]),
                 "text": str(action.get("text") or ""), "sent_at": event.logical_at,
                 "logical_at": event.logical_at,
+                "observed_at": event.observed_at,
                 "user_id": str(trace.get("user_id") or ""),
                 "source_action_id": str(payload["action_id"]), "outgoing_direction": str(trace.get("direction") or ""),
             })
@@ -5372,6 +5549,13 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "ExperienceCommitted":
         item = dict(payload)
         _as_dict(next_state["experiences"], "experiences")[str(item["experience_id"])] = item
+    elif event.event_type == "ExperienceAppraised":
+        experience = _as_dict(next_state["experiences"], "experiences").get(
+            str(payload["outcome_id"])
+        )
+        if isinstance(experience, dict):
+            experience["affect_appraisal"] = str(payload["appraisal"])
+            experience["affect_intensity"] = int(payload["intensity"])
     elif event.event_type == "LifeOutcomeProposed":
         _as_dict(next_state["proposals"], "proposals")[str(payload["outcome_id"])] = {**payload, "status": "proposed"}
     elif event.event_type == "LifeOutcomeCommitted":
@@ -5441,7 +5625,14 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         facts[str(item["fact_id"])] = item
     elif event.event_type == "UserMessageObserved":
         history = _as_list(next_state["recent_messages"], "recent_messages")
-        history.append({"direction": "in", "logical_at": event.logical_at, **payload})
+        history.append(
+            {
+                "direction": "in",
+                "logical_at": event.logical_at,
+                "observed_at": event.observed_at,
+                **payload,
+            }
+        )
         next_state["recent_messages"] = history[-64:]
         next_state["communication"] = {
             "message_id": payload.get("message_id"), "attention": "unread", "typing": "idle",
@@ -5897,6 +6088,13 @@ def _state_hash(state: dict[str, object]) -> str:
         semantic_state.get("actions", {}), "actions"
     ).values():
         _as_dict(raw_action, "action").pop("lease_expires_observed_at", None)
+    # Transport observation timestamps drive adapter cadence, but are not
+    # virtual-world facts.  The attention decision they influence is recorded
+    # as a world event; excluding raw wall time keeps semantic replay stable.
+    for raw_message in _as_list(
+        semantic_state.get("recent_messages", []), "recent messages"
+    ):
+        _as_dict(raw_message, "recent message").pop("observed_at", None)
     return _hash(_stable_json(semantic_state))
 
 

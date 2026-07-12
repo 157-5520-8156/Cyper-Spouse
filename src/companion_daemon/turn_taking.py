@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from enum import StrEnum
 
+from companion_daemon.conversation_cadence import ConversationCadence
+
 
 class TurnState(StrEnum):
     IDLE = "idle"
@@ -47,9 +49,29 @@ class TurnTakingPolicy:
         self.long_burst_seconds = long_burst_seconds
         self.longform_start_seconds = longform_start_seconds
 
-    def decide(self, turn: TurnInput) -> TurnDecision:
+    def decide(
+        self,
+        turn: TurnInput,
+        *,
+        cadence: ConversationCadence | None = None,
+    ) -> TurnDecision:
         latest = turn.latest_text.strip()
         merged = turn.merged_text.strip()
+        heat = str(getattr(cadence, "heat", "cold"))
+        short_wait = (
+            min(self.short_wait_seconds, 0.6)
+            if heat == "hot"
+            else min(self.short_wait_seconds, 1.4)
+            if heat == "warm"
+            else self.short_wait_seconds
+        )
+        conversational_wait = (
+            min(self.long_wait_seconds, 2.0)
+            if heat == "hot"
+            else min(self.long_wait_seconds, 3.5)
+            if heat == "warm"
+            else self.long_wait_seconds
+        )
 
         if not latest:
             return TurnDecision(TurnState.COLLECTING, ReplyTiming.SHORT_WAIT, 1.0, "empty")
@@ -90,7 +112,10 @@ class TurnTakingPolicy:
             return TurnDecision(
                 TurnState.COLLECTING,
                 ReplyTiming.LONG_WAIT,
-                self.longform_start_seconds,
+                min(
+                    self.longform_start_seconds,
+                    2.0 if heat == "hot" else 8.0 if heat == "warm" else 20.0,
+                ),
                 "longform_opener_waiting_for_user",
             )
 
@@ -98,12 +123,12 @@ class TurnTakingPolicy:
             return TurnDecision(
                 TurnState.READY,
                 ReplyTiming.SHORT_WAIT,
-                self.short_wait_seconds,
+                short_wait,
                 "single_complete_turn",
             )
 
         if _looks_like_continuation(latest):
-            wait = self.long_burst_seconds if turn.pending_count >= 3 else self.long_wait_seconds
+            wait = self.long_burst_seconds if turn.pending_count >= 3 else conversational_wait
             return TurnDecision(
                 TurnState.COLLECTING,
                 ReplyTiming.LONG_WAIT,
@@ -123,7 +148,7 @@ class TurnTakingPolicy:
             return TurnDecision(
                 TurnState.READY,
                 ReplyTiming.SHORT_WAIT,
-                self.short_wait_seconds,
+                short_wait,
                 "several_messages_probably_complete",
             )
 
@@ -131,14 +156,14 @@ class TurnTakingPolicy:
             return TurnDecision(
                 TurnState.READY,
                 ReplyTiming.SHORT_WAIT,
-                self.short_wait_seconds,
+                short_wait,
                 "complete_enough",
             )
 
         return TurnDecision(
             TurnState.COLLECTING,
             ReplyTiming.LONG_WAIT,
-            self.long_wait_seconds,
+            conversational_wait,
             "probably_still_typing",
         )
 

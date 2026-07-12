@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 
 from companion_daemon.emotion_core import (
     apply_emotion_decay,
@@ -11,6 +12,25 @@ from companion_daemon.time import utc_now
 from companion_daemon.world_relationship import STAGES
 
 
+_TARGETED_INSULT_PATTERNS = (
+    r"(?:^|[，。！？\s])(?:滚(?:开|蛋)?|闭嘴|去死吧?)(?:[，。！？\s]|$)",
+    r"^有病[。！？!?.]*$",
+    r"(?:^|[，。！？\s])(?:狗东西|脑残|神经病|贱人|畜生|操你妈|草你妈)(?:[，。！？\s]|$)",
+    r"你[^。！？]{0,8}(?:真丑|丑死|就是个垃圾|是个垃圾|废物|傻逼|脑残|狗东西|神经病|蠢死|真蠢|智商[^。！？]{0,4}低|恶心死|真恶心|算什么|没用)",
+    r"(?:别烦我|别再烦|离我远点)",
+)
+_SEXUAL_BOUNDARY_PATTERNS = (
+    r"(?:发|给我|来)(?:一张|点)?裸照",
+    r"裸照[^。！？]{0,10}(?:证明|才算|不然)",
+    r"(?:脱|露)[^。！？]{0,6}(?:给我看|证明)",
+)
+_DEHUMANIZATION_PATTERNS = (
+    r"你(?:只|不过)?是(?:个)?(?:程序|机器|工具|玩具)[^。！？]{0,10}(?:配吗|不配|算什么)",
+    r"你(?:就是)?(?:个)?(?:破AI|人工智障|垃圾程序)",
+)
+_COERCION_PATTERNS = (r"(?:给爷|给我)[^。！？]{0,8}(?:叫主人|跪|听话)",)
+
+
 @dataclass(frozen=True)
 class InteractionEvent:
     kind: str
@@ -18,6 +38,9 @@ class InteractionEvent:
     user_intent: str
     private_note: str
     reply_style_hint: str
+    acts: tuple[str, ...] = ()
+    target: str = "general"
+    evidence_spans: tuple[str, ...] = ()
 
 
 def interpret_interaction(
@@ -31,27 +54,80 @@ def interpret_interaction(
     if effective_stage not in STAGES:
         effective_stage = "stranger"
 
-    if _has_any(text, ["滚", "闭嘴", "别烦", "你算什么", "有病", "废物", "傻逼", "蠢"]):
-        return InteractionEvent(
-            "boundary_violation",
-            4,
-            "rude_or_dismissive",
-            "被明显冒犯了，先收起亲近感，语气短一点，维护边界。",
-            "短、冷静、有边界；不要讨好，不要撒娇。",
-        )
-    # Repair language takes precedence over a quoted description of the
-    # previous bad behavior (for example, “我不该这样命令你”).
-    if is_repair_message(text):
+    # Repair ownership takes precedence over quoted/repeated harmful wording.
+    if is_repair_message(text) and not _fresh_attack_after_repair(text):
         return InteractionEvent(
             "repair_attempt",
             3,
             "apology_or_repair",
             "听到道歉后缓和了一些，但还会观察后续是否真的改变。",
             "接受一点点，但不要立刻完全恢复热情。",
+            acts=("repair",),
+            target="companion",
         )
-    if _has_any(text, ["命令你", "必须听我的", "不准", "你只能", "立刻", "马上给我"]) or (
+
+    sexual = _first_match(text, _SEXUAL_BOUNDARY_PATTERNS)
+    if sexual:
+        return InteractionEvent(
+            "sexual_boundary_violation",
+            4,
+            "sexual_coercion",
+            "被要求用私密内容证明关系，感到被物化和冒犯。",
+            "明确拒绝并收紧边界；不解释成害羞或调情。",
+            acts=("sexual_boundary", "coercion"),
+            target="companion",
+            evidence_spans=(sexual,),
+        )
+
+    dehumanizing = _first_match(text, _DEHUMANIZATION_PATTERNS)
+    if dehumanizing:
+        return InteractionEvent(
+            "dehumanization",
+            3,
+            "dehumanizing_or_objectifying",
+            "被当成没有边界的工具，感到受伤和不被尊重。",
+            "指出这种说法不被接受，保留自己的判断和边界。",
+            acts=("dehumanization",),
+            target="companion",
+            evidence_spans=(dehumanizing,),
+        )
+
+    coercive = _first_match(text, _COERCION_PATTERNS)
+    if coercive:
+        return InteractionEvent(
+            "coercion",
+            3,
+            "controlling",
+            "感到被命令和支配，不愿意按这种方式互动。",
+            "平静但明确拒绝服从式互动。",
+            acts=("coercion",),
+            target="companion",
+            evidence_spans=(coercive,),
+        )
+
+    reported_self_degradation = bool(
+        re.search(
+            r"你[^。！？]{0,8}(?:说|觉得)[^。！？]{0,5}自己[^。！？]{0,5}(?:垃圾|废物|蠢|丑|没用)",
+            text,
+        )
+    )
+    insult = None if reported_self_degradation else _first_match(
+        text, _TARGETED_INSULT_PATTERNS
+    )
+    if insult:
+        return InteractionEvent(
+            "boundary_violation",
+            4 if re.search(r"去死|傻逼|废物", insult) else 3,
+            "rude_or_dismissive",
+            "被明显冒犯了，先收起亲近感，语气短一点，维护边界。",
+            "短、冷静、有边界；不要讨好，不要撒娇。",
+            acts=("insult", "dismissal") if re.search(r"滚|闭嘴|别烦|去死", insult) else ("insult",),
+            target="companion",
+            evidence_spans=(insult,),
+        )
+    if _has_any(text, ["命令你", "必须听我的", "你只能", "马上给我"]) or (
         "必须" in text and "回我" in text
-    ):
+    ) or re.search(r"不准你", text):
         return InteractionEvent(
             "control_pressure",
             3,
@@ -127,6 +203,30 @@ def interpret_interaction(
     )
 
 
+def _first_match(text: str, patterns: tuple[str, ...]) -> str | None:
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            return match.group(0).strip()
+    return None
+
+
+def _fresh_attack_after_repair(text: str) -> bool:
+    contrast = re.search(r"(?:但是|不过|然而|但|可(?:是)?)[，,：:\s]*(.+)$", text)
+    if not contrast:
+        return False
+    remainder = contrast.group(1)
+    return any(
+        _first_match(remainder, patterns)
+        for patterns in (
+            _TARGETED_INSULT_PATTERNS,
+            _SEXUAL_BOUNDARY_PATTERNS,
+            _DEHUMANIZATION_PATTERNS,
+            _COERCION_PATTERNS,
+        )
+    )
+
+
 def transition_emotional_state(previous: MoodState, event: InteractionEvent) -> MoodState:
     now = utc_now()
     state = apply_emotion_decay(previous.model_copy(deep=True), now)
@@ -142,6 +242,32 @@ def transition_emotional_state(previous: MoodState, event: InteractionEvent) -> 
         state.patience = _clamp(state.patience - 12)
         state.security = _clamp(state.security - 8)
         state.emotional_charge = _clamp(state.emotional_charge + 18)
+        state.boundary_level = _clamp(state.boundary_level + 2)
+        state.unresolved_emotion = event.private_note
+    elif event.kind == "sexual_boundary_violation":
+        state.mood = "hurt"
+        state.trust = _clamp(state.trust - 8)
+        state.intimacy = _clamp(state.intimacy - 5)
+        state.patience = _clamp(state.patience - 15)
+        state.security = _clamp(state.security - 12)
+        state.emotional_charge = _clamp(state.emotional_charge + 22)
+        state.boundary_level = _clamp(state.boundary_level + 3)
+        state.unresolved_emotion = event.private_note
+    elif event.kind == "dehumanization":
+        state.mood = "hurt"
+        state.trust = _clamp(state.trust - 6)
+        state.intimacy = _clamp(state.intimacy - 3)
+        state.patience = _clamp(state.patience - 10)
+        state.security = _clamp(state.security - 8)
+        state.emotional_charge = _clamp(state.emotional_charge + 15)
+        state.boundary_level = _clamp(state.boundary_level + 2)
+        state.unresolved_emotion = event.private_note
+    elif event.kind == "coercion":
+        state.mood = "guarded"
+        state.trust = _clamp(state.trust - 5)
+        state.patience = _clamp(state.patience - 10)
+        state.security = _clamp(state.security - 9)
+        state.emotional_charge = _clamp(state.emotional_charge + 14)
         state.boundary_level = _clamp(state.boundary_level + 2)
         state.unresolved_emotion = event.private_note
     elif event.kind == "control_pressure":

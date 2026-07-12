@@ -56,6 +56,8 @@ life_outcome_templates:
     load: medium
     social: true
     phone_accessible: false
+    affect_appraisal: social_warmth
+    affect_intensity: 55
     content: 在图书馆和范予安核对了读书会的书单。
     max_per_day: 1
   course_notes:
@@ -65,6 +67,8 @@ life_outcome_templates:
     load: high
     social: false
     phone_accessible: false
+    affect_appraisal: goal_progress
+    affect_intensity: 60
     content: 整理完了今天的课程笔记。
     max_per_day: 1
   photo_portfolio:
@@ -75,6 +79,8 @@ life_outcome_templates:
     load: high
     social: true
     phone_accessible: false
+    affect_appraisal: creative_satisfaction
+    affect_intensity: 65
     content: 整理了摄影社活动要用的照片。
     max_per_day: 1
   campus_walk:
@@ -84,6 +90,8 @@ life_outcome_templates:
     load: low
     social: true
     phone_accessible: true
+    affect_appraisal: social_warmth
+    affect_intensity: 60
     content: 和林晚在校园里走了一小段，聊了晚饭。
     max_per_day: 1
   independent_sort:
@@ -92,6 +100,8 @@ life_outcome_templates:
     load: low
     social: false
     phone_accessible: true
+    affect_appraisal: restorative_solitude
+    affect_intensity: 50
     content: 在宿舍把照片和笔记分门别类整理了一下。
     max_per_day: 1
   family_bookstore_call:
@@ -101,7 +111,21 @@ life_outcome_templates:
     load: low
     social: true
     phone_accessible: true
+    affect_appraisal: family_connection
+    affect_intensity: 65
     content: 和妈妈通了电话，问了问书店今天的情况。
+    max_per_day: 1
+  photo_review_disagreement:
+    location: 上海
+    npc_id: photography-zhou
+    goal_id: photo-portfolio
+    energy_cost: 7
+    load: medium
+    social: true
+    phone_accessible: false
+    affect_appraisal: npc_conflict
+    affect_intensity: 55
+    content: 和周栩讨论选片时意见不合，最后先各自冷静了一会儿。
     max_per_day: 1
 location_travel_minutes:
   华东师范大学宿舍->华东师范大学: 20
@@ -157,6 +181,16 @@ daily_schedule:
     attention_demand: 42
     interruptible: true
 weekly_themes:
+  - id: photo-review-friction
+    title: 摄影社选片讨论
+    template_id: photo_review_disagreement
+    location: 上海
+    weekdays: [1]
+    starts_hour: 16
+    duration_hours: 1
+    priority: 7
+    attention_demand: 72
+    interruptible: true
   - id: portfolio-sprint
     title: 摄影作品集阶段整理
     template_id: photo_portfolio

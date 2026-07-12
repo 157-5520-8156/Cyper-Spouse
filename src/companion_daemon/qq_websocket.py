@@ -243,8 +243,12 @@ class QQMessageCoalescer:
         queued = self._pending[key]
         latest = queued[-1].incoming.text if queued else ""
         merged = "\n".join(item.incoming.text for item in queued if item.incoming.text.strip())
+        cadence = None
+        if queued and hasattr(self.engine, "conversation_cadence"):
+            cadence = self.engine.conversation_cadence(queued[-1].incoming)
         return self.turn_policy.decide(
-            TurnInput(pending_count=len(queued), latest_text=latest, merged_text=merged)
+            TurnInput(pending_count=len(queued), latest_text=latest, merged_text=merged),
+            cadence=cadence,
         )
 
     async def _flush_later(self, key: str, wait_seconds: float) -> None:

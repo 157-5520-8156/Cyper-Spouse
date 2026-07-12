@@ -11,6 +11,7 @@ from datetime import datetime
 from math import ceil
 from typing import Any, Literal
 
+from companion_daemon.conversation_cadence import ConversationCadence
 from companion_daemon.outbound_policy import (
     OutboundAllowance,
     OutboundKind,
@@ -73,6 +74,7 @@ class WorldBehaviorPolicy:
         text: str,
         resumed_action: bool = False,
         user_id: str | None = None,
+        cadence: ConversationCadence | None = None,
     ) -> CommunicationDecision:
         """Rank attention options from explicit, replayable world facts."""
         needs = _mapping(state.get("needs"))
@@ -141,6 +143,15 @@ class WorldBehaviorPolicy:
             defer_minutes = max(defer_minutes, min(25, 15 + (20 - security) // 3))
         relationship = _mapping(_mapping(state.get("relationships")).get(user_id))
         scores["seen"] += max(-10, min(10, int(relationship.get("trust", 0)) // 5))
+        heat = str(getattr(cadence, "heat", "cold"))
+        if heat == "hot":
+            scores["seen"] += 35
+            if reasons["seen"] == "world_available":
+                reasons["seen"] = "hot_conversation_continuation"
+        elif heat == "warm":
+            scores["seen"] += 15
+            if reasons["seen"] == "world_available":
+                reasons["seen"] = "warm_conversation_continuation"
         ordered = tuple(
             sorted(
                 (

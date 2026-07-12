@@ -6,6 +6,18 @@ from datetime import datetime
 from typing import Any
 
 
+LIFE_AFFECT_APPRAISALS = {
+    "npc_conflict",
+    "social_warmth",
+    "family_connection",
+    "goal_progress",
+    "goal_completed",
+    "creative_satisfaction",
+    "restorative_solitude",
+    "goal_strain",
+}
+
+
 class LifeSimulation:
     """The one rule seam for automatic and model-proposed life outcomes."""
 
@@ -125,6 +137,23 @@ class LifeSimulation:
         if not validated:
             events.append(("LifeOutcomeValidated", {**payload, "validation": validation}))
         events.extend([("LifeOutcomeCommitted", payload), ("NeedChanged", {"need": "energy", "delta": -int(spec["energy_cost"])}), ("ExperienceCommitted", {"experience_id": outcome_id, "action_id": None, "content": content, "source_outcome_id": outcome_id})])
+        affect_appraisal = str(spec.get("affect_appraisal") or "")
+        if affect_appraisal:
+            events.append(
+                (
+                    "ExperienceAppraised",
+                    {
+                        "outcome_id": outcome_id,
+                        "activity_id": activity["activity_id"],
+                        "npc_id": spec.get("npc_id"),
+                        "goal_id": spec.get("goal_id"),
+                        "appraisal": affect_appraisal,
+                        "intensity": int(spec.get("affect_intensity", 50)),
+                        "source_reference": outcome_id,
+                        "rule_version": "life-affect-v1",
+                    },
+                )
+            )
         if spec.get("npc_id"):
             events.append(("NpcInteractionCommitted", {
                 "interaction_id": f"npc-interaction:{outcome_id}", "outcome_id": outcome_id,
@@ -150,6 +179,15 @@ class LifeSimulation:
         spec = specs.get(template)
         if not isinstance(spec, dict):
             return False, "unregistered_outcome_template", None
+        affect_appraisal = str(spec.get("affect_appraisal") or "")
+        if affect_appraisal and affect_appraisal not in LIFE_AFFECT_APPRAISALS:
+            return False, "unsupported_affect_appraisal", None
+        try:
+            affect_intensity = int(spec.get("affect_intensity", 50))
+        except (TypeError, ValueError):
+            return False, "invalid_affect_intensity", None
+        if affect_appraisal and not 1 <= affect_intensity <= 100:
+            return False, "invalid_affect_intensity", None
         if str(activity.get("location") or "") != str(spec.get("location") or ""):
             return False, "template_location_mismatch", None
         if state.get("needs", {}).get("energy", 0) < int(spec.get("energy_cost", 0)):

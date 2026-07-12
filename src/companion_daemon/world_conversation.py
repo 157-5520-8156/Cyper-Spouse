@@ -240,6 +240,7 @@ _SAFE_SPEECH_ACT_SKELETONS = {
     "vulnerable_disclosure": "我听见你在担心，也不会替你把结果说死。",
     "current_disclosure": "我听见你在说眼下的状态，不替你补原因或加重程度。",
     "relationship_probe": "我不想用一句过满的话糊弄你，关系要靠相处留下来。",
+    "boundary_response": "这句话越过我的边界了，我不接受这种互动方式。",
     "meta_agency": "角色设定会影响我的表达；我不会把它包装成绝对自主的证明。",
     "misunderstanding": "如果有误会，我会指出是哪一处，再把原本的意思说清。",
     "epistemic": "我没有足够依据，不继续猜。",
@@ -457,6 +458,11 @@ def human_reply_contract_violation(
     reply = str(candidate.get("reply_text") or "").strip()
     if not reply:
         return "empty_reply"
+    if chosen_stance in {"set_boundary", "refuse_to_affirm"} and not re.search(
+        r"不喜欢|不接受|不愿意|不想|别这样|不要这样|不舒服|越界|边界|先停|不能这样",
+        reply,
+    ):
+        return "selected_boundary_stance_is_not_observable"
 
     asks_for_presence_not_advice = any(
         marker in user_text

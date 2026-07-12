@@ -5,6 +5,18 @@ from dataclasses import dataclass
 import re
 
 
+HARMFUL_INTERACTION_APPRAISALS = frozenset(
+    {
+        "boundary_violation",
+        "sexual_boundary_violation",
+        "dehumanization",
+        "coercion",
+        "control_pressure",
+        "repeated_violation",
+    }
+)
+
+
 @dataclass(frozen=True)
 class InteractionConsequence:
     policy: str
@@ -23,6 +35,9 @@ class WorldInteractionRules:
     _POLICIES = {
         "user_vulnerable": "先接住情绪，不急着追问。",
         "boundary_violation": "短而清楚地守住边界。",
+        "sexual_boundary_violation": "明确拒绝私密或性化要求，不把冒犯包装成调情。",
+        "dehumanization": "指出物化和贬低不可接受，不证明自己的价值。",
+        "coercion": "拒绝服从式互动，明确保留自主和边界。",
         "control_pressure": "不讨好，平静地说明边界。",
         "repair_attempt": "可以缓和，但不立刻翻篇。",
         "repair_perfunctory": "听见了道歉，但先保留判断。",
@@ -34,6 +49,9 @@ class WorldInteractionRules:
     }
     _NEEDS = {
         "boundary_violation": {"security": -12, "boundary": 12, "initiative": -8},
+        "sexual_boundary_violation": {"security": -20, "boundary": 22, "initiative": -15},
+        "dehumanization": {"security": -13, "boundary": 14, "initiative": -9},
+        "coercion": {"security": -15, "boundary": 18, "initiative": -12},
         "control_pressure": {"security": -8, "boundary": 8, "initiative": -5},
         "repair_attempt": {"security": 5, "boundary": -3},
         "repair_perfunctory": {"security": 1},
@@ -47,6 +65,9 @@ class WorldInteractionRules:
     }
     _RELATIONSHIP = {
         "boundary_violation": {"respect": -12, "reliability": -4, "trust": -8},
+        "sexual_boundary_violation": {"respect": -22, "reliability": -9, "trust": -18},
+        "dehumanization": {"respect": -15, "reliability": -5, "trust": -11},
+        "coercion": {"respect": -18, "reliability": -7, "trust": -13},
         "control_pressure": {"respect": -8, "trust": -5},
         "repair_attempt": {"respect": 3, "reliability": 2, "trust": 4},
         "repair_perfunctory": {"respect": 1, "reliability": 0, "trust": 0},
@@ -60,6 +81,9 @@ class WorldInteractionRules:
     }
     _EMOTION = {
         "boundary_violation": ("guarded", "guarded", 16),
+        "sexual_boundary_violation": ("guarded", "guarded", 28),
+        "dehumanization": ("guarded", "guarded", 20),
+        "coercion": ("guarded", "guarded", 22),
         "control_pressure": ("guarded", "guarded", 11),
         "repair_attempt": ("softening", "soft", -5),
         "repair_perfunctory": ("guarded", "neutral", -1),

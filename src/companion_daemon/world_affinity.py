@@ -10,6 +10,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Mapping
 
+from companion_daemon.world_interaction_rules import HARMFUL_INTERACTION_APPRAISALS
+
 
 AFFECT_KEYS = (
     "hurt",
@@ -126,7 +128,7 @@ def _pattern(appraisal: str) -> tuple[str, dict[str, int]]:
         return "warmth", {"warmth": 1}
     if appraisal in {"repair_specific", "repair_restitution"}:
         return "reliable_repair", {"warmth": 1, "resentment": -1}
-    if appraisal in {"boundary_violation", "control_pressure", "repeated_violation"}:
+    if appraisal in HARMFUL_INTERACTION_APPRAISALS:
         return "boundary_harm", {"warmth": -1, "resentment": 1}
     return "", {}
 

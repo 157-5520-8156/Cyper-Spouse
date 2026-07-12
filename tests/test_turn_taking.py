@@ -25,7 +25,7 @@ def test_short_wait_for_complete_question() -> None:
     assert decision.wait_seconds == 2.0
 
 
-def test_waits_much_longer_for_longform_opener() -> None:
+def test_cold_longform_opener_wait_is_bounded_instead_of_five_minutes() -> None:
     policy = TurnTakingPolicy(short_wait_seconds=2.0, long_wait_seconds=5.0, longform_start_seconds=300.0)
 
     decision = policy.decide(
@@ -38,7 +38,7 @@ def test_waits_much_longer_for_longform_opener() -> None:
 
     assert decision.state == TurnState.COLLECTING
     assert decision.timing == ReplyTiming.LONG_WAIT
-    assert decision.wait_seconds == 300.0
+    assert decision.wait_seconds == 20.0
     assert decision.reason == "longform_opener_waiting_for_user"
 
 

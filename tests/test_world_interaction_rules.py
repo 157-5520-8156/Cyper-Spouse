@@ -1,7 +1,7 @@
 from companion_daemon.world_interaction_rules import WorldInteractionRules
 
 
-def test_world_emotion_charge_decays_on_logical_time_without_erasing_relationship(tmp_path) -> None:
+def test_world_negative_emotion_decays_without_erasing_relationship_or_later_life_affect(tmp_path) -> None:
     from datetime import timedelta
     from pathlib import Path
 
@@ -30,8 +30,11 @@ def test_world_emotion_charge_decays_on_logical_time_without_erasing_relationshi
     kernel.advance(started.world_id, logical_at + timedelta(hours=9), expected_revision=appraised.revision)
 
     snapshot = kernel.snapshot(started.world_id)
-    assert snapshot["emotion_modulation"]["charge"] == 0
-    assert snapshot["emotion_modulation"]["mode"] == "calm"
+    assert any(
+        event.event_type == "AffectResolved"
+        for event in kernel.events(started.world_id)
+    )
+    assert snapshot["emotion_modulation"]["source_appraisal"] != "boundary_violation"
     assert snapshot["relationships"]["user:geoff"]["respect"] == respect_before
 
 

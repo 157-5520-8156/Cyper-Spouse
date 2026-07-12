@@ -157,9 +157,12 @@ def test_logical_decay_that_clears_affect_has_an_explicit_resolution_event(tmp_p
         expected_revision=kernel.revision(world_id),
     )
 
+    events = kernel.events(world_id)
+    assert any(event.event_type == "AffectResolved" for event in events)
+    # A later, independently settled NPC conflict may create new unresolved
+    # emotion without undoing the explicit resolution of the user's offense.
     affect = kernel.snapshot(world_id)["emotion_modulation"]
-    assert affect["unresolved"] is False
-    assert any(event.event_type == "AffectResolved" for event in kernel.events(world_id))
+    assert affect["source_appraisal"] != "boundary_violation"
 
 
 def test_repeated_reliable_repair_can_resolve_negative_affect_explicitly(tmp_path: Path) -> None:
@@ -291,11 +294,28 @@ def test_thread_expiry_in_a_long_jump_is_decayed_only_after_it_occurs(tmp_path: 
         expected_revision=kernel.revision(world_id),
     )
 
-    affect = kernel.snapshot(world_id)["emotion_modulation"]
-    assert affect["vector"]["sadness"] == 2
-    assert affect["vector"]["loneliness"] == 1
-    assert affect["vector"]["anxiety"] == 1
-    assert affect["source_appraisal"] == "conversation_thread_expired"
+    affect_events = [
+        event
+        for event in kernel.events(world_id)
+        if event.event_type in {"AffectChanged", "AffectDecayed"}
+    ]
+    expiry_index = next(
+        index
+        for index, event in enumerate(affect_events)
+        if event.payload.get("source_appraisal") == "conversation_thread_expired"
+        and event.event_type == "AffectChanged"
+    )
+    decayed_expiry = affect_events[expiry_index + 1]
+    assert decayed_expiry.event_type == "AffectDecayed"
+    assert decayed_expiry.payload["vector"]["sadness"] == 2
+    assert decayed_expiry.payload["vector"]["loneliness"] == 1
+    assert decayed_expiry.payload["vector"]["anxiety"] == 1
+    assert decayed_expiry.payload["source_appraisal"] == "conversation_thread_expired"
+
+    # A life outcome at the same logical instant may legitimately continue to
+    # reshape the final affect; it must not retroactively change expiry decay.
+    final_affect = kernel.snapshot(world_id)["emotion_modulation"]
+    assert final_affect["source_appraisal"] == "social_warmth"
 
 
 def test_unresolved_hurt_defers_ordinary_reply_but_allows_explicit_repair() -> None:

@@ -8,6 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Literal, Mapping, Sequence
 
+from companion_daemon.world_interaction_rules import HARMFUL_INTERACTION_APPRAISALS
+
 Stance = Literal[
     "comply",
     "comply_then_revisit",
@@ -197,6 +199,23 @@ class CharacterDeliberation:
                         "remain_silent",
                         20 + max(0, 35 - energy) * 2 + boundary // 3,
                     ),
+                ),
+            )
+        appraisal = str(situation.get("appraisal") or "")
+        if appraisal in HARMFUL_INTERACTION_APPRAISALS:
+            severity = max(1, min(4, int(situation.get("severity") or 3)))
+            return (
+                "offense_or_coercion",
+                ("preserve_dignity_vs_continue_connection",),
+                (
+                    ("set_boundary", 90 + severity * 12 + boundary // 3),
+                    ("refuse_to_affirm", 65 + severity * 8 + hurt // 4),
+                    ("defer", 35 + severity * 7 + max(0, 45 - energy)),
+                    (
+                        "remain_silent",
+                        25 + severity * 8 + max(0, 35 - energy) + hurt // 5,
+                    ),
+                    ("seek_repair", 25 + trust // 10),
                 ),
             )
         if request.kind == "avoid_address":
