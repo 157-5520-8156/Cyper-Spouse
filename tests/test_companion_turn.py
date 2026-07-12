@@ -13,6 +13,8 @@ from companion_daemon.companion_turn import (
     TurnBeat,
     TurnEnvelope,
     TurnOptions,
+    TurnPresentation,
+    TurnPresenter,
     TurnTransport,
 )
 from companion_daemon.db import CompanionStore
@@ -99,8 +101,26 @@ class BlockingFirstTransport:
         )
 
 
+class RecordingPresenter:
+    def __init__(self, events: list[str]) -> None:
+        self.events = events
+        self.presentations: list[TurnPresentation] = []
+
+    async def before_text(self, presentation: TurnPresentation) -> None:
+        self.events.append("reaction")
+        self.presentations.append(presentation)
+
+    async def after_text(self, presentation: TurnPresentation, terminal_state: str) -> None:
+        self.events.append(f"after:{terminal_state}")
+
+
 def _turn_runtime(
-    tmp_path: Path, transport: TurnTransport, *, model: object | None = None
+    tmp_path: Path,
+    transport: TurnTransport,
+    *,
+    model: object | None = None,
+    presenter: TurnPresenter | None = None,
+    cadence_delay_seconds: float = 0.3,
 ) -> tuple[CompanionTurn, WorldKernel, str]:
     store = CompanionStore(tmp_path / "companion-turn.sqlite")
     seed_user(store)
@@ -113,7 +133,16 @@ def _turn_runtime(
         world_kernel=world,
         world_id=world_id,
     )
-    return CompanionTurn(engine, transport), world, world_id
+    return (
+        CompanionTurn(
+            engine,
+            transport,
+            presenter=presenter,
+            cadence_delay_seconds=cadence_delay_seconds,
+        ),
+        world,
+        world_id,
+    )
 
 
 def _envelope(message_id: str) -> TurnEnvelope:
@@ -393,7 +422,7 @@ async def test_takeover_waits_for_initial_dispatch_then_cancels_old_remainder(
             budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
         )
     )
-    await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
     assert not takeover_task.done()
 
     transport.release.set()
@@ -454,6 +483,45 @@ async def test_turn_options_reach_generation_without_entering_transport_interfac
 
     assert observed["context_hint"] == "刚刚忙完。"
     assert observed["turn_context"] is frozen
+
+
+@pytest.mark.asyncio
+async def test_presentation_wraps_all_text_beats_and_only_finishes_at_terminal(
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+
+    class EventTransport(SequencedTransport):
+        async def dispatch(self, beat: TurnBeat) -> DispatchAcceptance:
+            events.append(f"text:{beat.position}")
+            return await super().dispatch(beat)
+
+    transport = EventTransport(
+        [
+            DispatchAcceptance(status="delivered", external_receipt="receipt:presentation:1"),
+            DispatchAcceptance(status="delivered", external_receipt="receipt:presentation:2"),
+        ]
+    )
+    presenter = RecordingPresenter(events)
+    runtime, _, _ = _turn_runtime(
+        tmp_path,
+        transport,
+        model=MultiBeatReplyModel(),
+        presenter=presenter,
+        cadence_delay_seconds=0,
+    )
+
+    outcome = await runtime.respond(
+        _envelope("turn-presentation"),
+        budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
+    )
+    await asyncio.sleep(0.01)
+
+    assert outcome.visible_status == "delivered"
+    assert events == ["reaction", "text:0", "text:1", "after:delivered"]
+    presentation = presenter.presentations[0]
+    assert presentation.action_id == outcome.action_ids[0]
+    assert presentation.incoming.message_id == "qq:geoff:turn-presentation"
 
 
 @pytest.mark.asyncio

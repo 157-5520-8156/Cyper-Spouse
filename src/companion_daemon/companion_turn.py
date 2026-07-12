@@ -96,6 +96,28 @@ class TurnTransport(Protocol):
 
 
 @dataclass(frozen=True)
+class TurnPresentation:
+    """Non-text expression effects associated with one authoritative text Action."""
+
+    action_id: str
+    incoming: IncomingMessage
+    canonical_user_id: str
+    suggested_reaction: str | None
+    sticker_path: str | None
+    image_path: str | None
+    media_action_id: str | None
+    sticker_action_id: str | None
+
+
+class TurnPresenter(Protocol):
+    async def before_text(self, presentation: TurnPresentation) -> None: ...
+
+    async def after_text(
+        self, presentation: TurnPresentation, terminal_state: TerminalState
+    ) -> None: ...
+
+
+@dataclass(frozen=True)
 class TurnOutcome:
     turn_id: str
     committed_revision: int
@@ -135,6 +157,7 @@ class CompanionTurn:
         *,
         cadence_delay_seconds: float = 0.3,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        presenter: TurnPresenter | None = None,
     ) -> None:
         if engine.world_kernel is None or engine.world_id is None:
             raise ValueError("CompanionTurn v2 requires the authoritative World runtime")
@@ -142,9 +165,11 @@ class CompanionTurn:
         self.transport = transport
         self.cadence_delay_seconds = max(0.0, cadence_delay_seconds)
         self.sleep = sleep
+        self.presenter = presenter
         self._continuations: set[asyncio.Task[None]] = set()
         self._action_locks: dict[str, asyncio.Lock] = {}
         self._watchdog_keys: set[tuple[str, str]] = set()
+        self._presentations: dict[str, TurnPresentation] = {}
         self._recover_receipt_watchdogs()
 
     async def start(self) -> None:
@@ -199,6 +224,18 @@ class CompanionTurn:
                 )
             if reply.delivery_id is None or not reply.world_action_id:
                 raise WorldError("world reply did not stage an outgoing Action")
+            presentation = TurnPresentation(
+                action_id=reply.world_action_id,
+                incoming=turn.message,
+                canonical_user_id=reply.canonical_user_id,
+                suggested_reaction=reply.suggested_reaction,
+                sticker_path=reply.sticker_path,
+                image_path=reply.image_path,
+                media_action_id=reply.media_action_id,
+                sticker_action_id=reply.sticker_action_id,
+            )
+            self._presentations[reply.world_action_id] = presentation
+            await self._present_before_text(presentation)
 
             async with self._action_locks.setdefault(reply.world_action_id, asyncio.Lock()):
                 settled = await self._dispatch_next(
@@ -221,6 +258,8 @@ class CompanionTurn:
                     observed_at=turn.observed_at,
                     idempotency_prefix=turn.idempotency_key,
                 )
+            elif status in {"delivered", "failed", "unknown"}:
+                await self._present_after_text(reply.world_action_id, status)
             return self._outcome(
                 turn,
                 action_ids=(reply.world_action_id,),
@@ -357,11 +396,35 @@ class CompanionTurn:
         else:
             raise ValueError(f"settlement status {observation.status!r} is not yet supported")
 
+        if terminal is not None:
+            await self._present_after_text(observation.action_id, terminal)
         return SettlementOutcome(
             action_id=observation.action_id,
             terminal_state=terminal,
             committed_revision=world.revision(world_id),
         )
+
+    async def _present_before_text(self, presentation: TurnPresentation) -> None:
+        if self.presenter is None:
+            return
+        try:
+            await self.presenter.before_text(presentation)
+        except Exception:
+            # A reaction/presence failure must not prevent the text Action from
+            # being attempted.  Presenters are responsible for their own World
+            # external-result settlement.
+            return
+
+    async def _present_after_text(self, action_id: str, terminal_state: TerminalState) -> None:
+        presentation = self._presentations.pop(action_id, None)
+        if presentation is None or self.presenter is None:
+            return
+        try:
+            await self.presenter.after_text(presentation, terminal_state)
+        except Exception:
+            # The text receipt is already authoritative; a presenter failure
+            # must be settled by that presenter without rewriting text truth.
+            return
 
     async def _dispatch_next(
         self,
@@ -388,6 +451,7 @@ class CompanionTurn:
                     reason="outgoing completion deadline elapsed",
                     expected_revision=world.revision(world_id),
                 )
+                await self._present_after_text(action_id, "cancelled")
                 return SettlementOutcome(
                     action_id=action_id,
                     terminal_state="cancelled",
@@ -586,6 +650,7 @@ class CompanionTurn:
                     reason="platform receipt missing at completion deadline",
                     expected_revision=world.revision(world_id),
                 )
+                await self._present_after_text(action_id, "unknown")
 
         task = asyncio.create_task(run())
         self._continuations.add(task)
@@ -612,6 +677,8 @@ class CompanionTurn:
             terminal: TerminalState | None = None
             if state in {"delivered", "failed", "cancelled", "unknown"}:
                 terminal = state  # type: ignore[assignment]
+            if terminal is not None:
+                await self._present_after_text(action_id, terminal)
             world = self.engine.world_kernel
             assert world is not None
             return SettlementOutcome(
@@ -653,7 +720,7 @@ class CompanionTurn:
         for action_id in candidates:
             async with self._action_locks.setdefault(action_id, asyncio.Lock()):
                 raw = self._action(action_id)
-            await self._cancel_interrupted_action(turn, raw)
+                await self._cancel_interrupted_action(turn, action_id, raw)
 
     def _cancelled_segment_ids(self) -> set[str]:
         world = self.engine.world_kernel
@@ -674,7 +741,9 @@ class CompanionTurn:
             if isinstance(segment, dict) and segment.get("status") == "cancelled"
         }
 
-    async def _cancel_interrupted_action(self, turn: TurnEnvelope, raw: dict[str, object]) -> None:
+    async def _cancel_interrupted_action(
+        self, turn: TurnEnvelope, action_id: str, raw: dict[str, object]
+    ) -> None:
         world = self.engine.world_kernel
         world_id = self.engine.world_id
         assert world is not None and world_id is not None
@@ -699,6 +768,7 @@ class CompanionTurn:
                 user_message_id=turn.idempotency_key,
                 expected_revision=world.revision(world_id),
             )
+            await self._present_after_text(action_id, "cancelled")
         elif has_accepted and has_planned:
             delivery_id = int(raw.get("delivery_id") or 0)
             world.expire_outgoing_remainder(
@@ -720,6 +790,7 @@ class CompanionTurn:
                 reason="accepted delivery superseded before receipt",
                 expected_revision=world.revision(world_id),
             )
+            await self._present_after_text(action_id, "unknown")
 
     @staticmethod
     def _is_substantive_interjection(text: str) -> bool:
