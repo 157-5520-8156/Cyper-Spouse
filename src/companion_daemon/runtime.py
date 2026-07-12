@@ -29,12 +29,18 @@ from companion_daemon.world import WorldKernel
 logger = logging.getLogger(__name__)
 
 
-def require_flash_model(model: str, *, setting: str) -> str:
-    if model != "deepseek-v4-flash":
-        raise ValueError(
-            f"{setting} must be deepseek-v4-flash; configured model {model!r} is disabled"
-        )
-    return model
+def require_configured_model(model: str | None, *, setting: str) -> str:
+    """Reject empty configuration without preventing explicitly routed models."""
+    normalized = (model or "").strip()
+    if not normalized:
+        raise ValueError(f"{setting} must name a model")
+    return normalized
+
+
+# Kept as a compatibility import for local integrations.  Model selection is
+# now a routing policy; Flash is the default rather than an artificial ban on
+# strong/thinking models for high-value non-hot turns.
+require_flash_model = require_configured_model
 
 
 def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
@@ -75,6 +81,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
     interaction_appraisal_model = None
     interaction_deep_appraisal_model = None
     reply_repair_model = None
+    expressive_model = None
     shared_model_client = None
     if settings.deepseek_api_key and not use_fake_model:
         provider_circuit = ProviderCircuitBreaker(
@@ -85,7 +92,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         model = DeepSeekChatModel(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
-            model=require_flash_model(settings.deepseek_model, setting="DEEPSEEK_MODEL"),
+            model=require_configured_model(settings.deepseek_model, setting="DEEPSEEK_MODEL"),
             thinking_enabled=settings.deepseek_thinking_enabled,
             reasoning_effort=settings.deepseek_reasoning_effort,
             usage_observer=record_model_usage,
@@ -122,6 +129,27 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             circuit_breaker=provider_circuit,
             client=shared_model_client,
         )
+        expressive_model_name = require_configured_model(
+            settings.deepseek_expressive_model or settings.deepseek_model,
+            setting="DEEPSEEK_EXPRESSIVE_MODEL",
+        )
+        if (
+            expressive_model_name != settings.deepseek_model
+            or settings.deepseek_expressive_thinking_enabled
+            != settings.deepseek_thinking_enabled
+            or settings.deepseek_expressive_reasoning_effort
+            != settings.deepseek_reasoning_effort
+        ):
+            expressive_model = DeepSeekChatModel(
+                api_key=settings.deepseek_api_key,
+                base_url=settings.deepseek_base_url,
+                model=expressive_model_name,
+                thinking_enabled=settings.deepseek_expressive_thinking_enabled,
+                reasoning_effort=settings.deepseek_expressive_reasoning_effort,
+                usage_observer=record_model_usage,
+                circuit_breaker=provider_circuit,
+                client=shared_model_client,
+            )
     else:
         model = FakeCompanionModel()
     conversation_core = None
@@ -202,7 +230,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         rewrite_model = DeepSeekChatModel(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
-            model=require_flash_model(
+            model=require_configured_model(
                 settings.deepseek_reply_model or settings.deepseek_model,
                 setting="DEEPSEEK_REPLY_MODEL",
             ),
@@ -231,6 +259,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         interaction_appraisal_model=interaction_appraisal_model,
         interaction_deep_appraisal_model=interaction_deep_appraisal_model,
         reply_repair_model=reply_repair_model,
+        expressive_model=expressive_model,
         attachment_cache=AttachmentCache(settings.attachment_cache_path),
         managed_async_resources=(shared_model_client,) if shared_model_client else (),
     )

@@ -66,6 +66,25 @@ def test_warm_complex_relation_repair_may_use_strong_thinking_within_one_call() 
     assert decision.soft_timeout_seconds <= 10.0
 
 
+def test_warm_complex_expression_may_route_to_strong_thinking() -> None:
+    risk = GroundingAuditRisk().assess(CandidateGroundingSignals(reply_text=""))
+
+    decision = TurnModelCallBudget().decide(
+        turn=_turn("warm"),
+        request=ModelCallRequest(
+            purpose="reply",
+            calls_used=0,
+            complexity="cross_turn_relation_repair",
+        ),
+        grounding=risk,
+        circuit=ProviderCircuitState.closed(),
+    )
+
+    assert decision.allowed is True
+    assert decision.model_tier == "strong"
+    assert decision.thinking is True
+
+
 def test_hot_complex_turn_stays_on_flash_instead_of_serially_escalating() -> None:
     risk = GroundingAuditRisk().assess(CandidateGroundingSignals(reply_text=""))
 

@@ -251,7 +251,8 @@ class TurnModelCallBudget:
         use_strong_reasoning = (
             request.complexity != "routine"
             and turn.cadence.heat != "hot"
-            and request.purpose in {"interaction_appraisal", "reply_repair", "reply_audit"}
+            and request.purpose
+            in {"reply", "interaction_appraisal", "reply_repair", "reply_audit"}
         )
         return ModelCallDecision(
             allowed=allowed,

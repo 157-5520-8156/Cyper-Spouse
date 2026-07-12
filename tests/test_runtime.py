@@ -32,9 +32,10 @@ def test_daemon_prompt_core_is_default_without_env() -> None:
     assert not hasattr(settings, "world_runtime_enabled")
 
 
-def test_runtime_rejects_v4_pro_override() -> None:
-    with pytest.raises(ValueError, match="disabled"):
-        require_flash_model("deepseek-v4-pro", setting="DEEPSEEK_MODEL")
+def test_runtime_allows_explicitly_routed_strong_models_but_rejects_empty_name() -> None:
+    assert require_flash_model("deepseek-v4-pro", setting="DEEPSEEK_MODEL") == "deepseek-v4-pro"
+    with pytest.raises(ValueError, match="must name a model"):
+        require_flash_model("", setting="DEEPSEEK_MODEL")
 
 
 @pytest.mark.asyncio
@@ -77,6 +78,8 @@ async def test_runtime_routes_daily_reply_to_flash_and_exposes_task_level_deep_m
     monkeypatch.setenv("DEEPSEEK_DEEP_APPRAISAL_THINKING_ENABLED", "true")
     monkeypatch.setenv("DEEPSEEK_REPAIR_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("DEEPSEEK_REPAIR_THINKING_ENABLED", "false")
+    monkeypatch.setenv("DEEPSEEK_EXPRESSIVE_MODEL", "deepseek-v4-pro")
+    monkeypatch.setenv("DEEPSEEK_EXPRESSIVE_THINKING_ENABLED", "true")
     get_settings.cache_clear()
     try:
         engine = build_companion_engine()
@@ -93,6 +96,10 @@ async def test_runtime_routes_daily_reply_to_flash_and_exposes_task_level_deep_m
     assert engine.reply_repair_model.thinking_enabled is False
     assert engine.reply_repair_model.client is engine.model.client
     assert engine.reply_repair_model.circuit_breaker is engine.model.circuit_breaker
+    assert engine.expressive_model is not None
+    assert engine.expressive_model.model == "deepseek-v4-pro"
+    assert engine.expressive_model.thinking_enabled is True
+    assert engine.expressive_model.client is engine.model.client
     await engine.aclose()
 
 

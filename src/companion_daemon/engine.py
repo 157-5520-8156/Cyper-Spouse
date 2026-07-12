@@ -228,6 +228,7 @@ class CompanionEngine:
         interaction_appraisal_model: ChatModel | None = None,
         interaction_deep_appraisal_model: ChatModel | None = None,
         reply_repair_model: ChatModel | None = None,
+        expressive_model: ChatModel | None = None,
         attachment_cache: AttachmentCache | None = None,
         attachment_fetcher: Callable[[str], Awaitable[bytes]] | None = None,
         managed_async_resources: tuple[object, ...] = (),
@@ -252,6 +253,7 @@ class CompanionEngine:
         self.interaction_appraisal_model = interaction_appraisal_model
         self.interaction_deep_appraisal_model = interaction_deep_appraisal_model
         self.reply_repair_model = reply_repair_model
+        self.expressive_model = expressive_model
         self.attachment_cache = attachment_cache
         self.attachment_fetcher = attachment_fetcher or self._fetch_attachment
         self.managed_async_resources = managed_async_resources
@@ -2080,6 +2082,14 @@ class CompanionEngine:
                 purpose="reply",
                 calls_used=calls_used,
                 ambiguous=appraisal_risk.request_model_proposal,
+                complexity=(
+                    "cross_turn_relation_repair"
+                    if user_affect is not None
+                    and user_affect.kind in {"disappointment", "confusion"}
+                    else "high_pragmatic_ambiguity"
+                    if appraisal_risk.request_deeper_reasoning
+                    else "routine"
+                ),
                 recovery_probe=circuit_state.status == "half_open",
                 remaining_budget_cny=remaining_after_calls(calls_used),
                 estimated_call_cost_cny=0.02,
@@ -2092,8 +2102,14 @@ class CompanionEngine:
             if not reply_call_decision.allowed:
                 raise ConnectionError(reply_call_decision.reason)
             with model_call_scope("reply", action_id=model_action_id):
+                reply_model = (
+                    self.expressive_model
+                    if reply_call_decision.model_tier == "strong"
+                    and self.expressive_model is not None
+                    else self.model
+                )
                 raw = await complete_with_timeout(
-                    self.model.complete([
+                    reply_model.complete([
                         {"role": "system", "content": self.companion_system_prompt},
                         {
                             "role": "user",

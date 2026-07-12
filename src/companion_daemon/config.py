@@ -13,6 +13,15 @@ class Settings(BaseSettings):
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-v4-flash"
     deepseek_reply_model: str | None = Field(default=None, alias="DEEPSEEK_REPLY_MODEL")
+    deepseek_expressive_model: str | None = Field(
+        default=None, alias="DEEPSEEK_EXPRESSIVE_MODEL"
+    )
+    deepseek_expressive_thinking_enabled: bool = Field(
+        default=False, alias="DEEPSEEK_EXPRESSIVE_THINKING_ENABLED"
+    )
+    deepseek_expressive_reasoning_effort: str = Field(
+        default="high", alias="DEEPSEEK_EXPRESSIVE_REASONING_EFFORT"
+    )
     deepseek_thinking_enabled: bool = Field(default=False, alias="DEEPSEEK_THINKING_ENABLED")
     deepseek_reasoning_effort: str = Field(default="high", alias="DEEPSEEK_REASONING_EFFORT")
     deepseek_deep_appraisal_model: str = Field(
