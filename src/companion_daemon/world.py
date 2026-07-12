@@ -967,6 +967,27 @@ class WorldKernel:
                         ),
                     )
                 )
+                trace = _as_dict(action.get("trace", {}), "action trace")
+                thread = trace.get("conversation_thread")
+                if isinstance(thread, dict):
+                    specifications.append(
+                        (
+                            "ConversationThreadOpened",
+                            _conversation_thread_event_payload(
+                                thread,
+                                source_action_id=action_id,
+                                logical_at=_parse_at(
+                                    str(_as_dict(state["clock"], "clock")["logical_at"])
+                                ),
+                            ),
+                        )
+                    )
+            elif cancelled_ids:
+                specifications.extend(
+                    self._release_trace_private_commitment(
+                        action, reason="outgoing_remainder_cancelled"
+                    )
+                )
             self._append_and_project(
                 conn,
                 world_id,
@@ -1173,6 +1194,10 @@ class WorldKernel:
                         segment_ids=cancelled_ids,
                         user_message_id=user_message_id,
                     )
+                    ,
+                    *self._release_trace_private_commitment(
+                        action, reason="substantive_user_interjection"
+                    ),
                 ],
                 idempotency_key=f"segment-interjection:{action_id}:{user_message_id}",
                 correlation_id=str(uuid4()),
@@ -1240,7 +1265,10 @@ class WorldKernel:
                             "reason": reason,
                             "terminal_reason": terminal_reason,
                         },
-                    )
+                    ),
+                    *self._release_trace_private_commitment(
+                        action, reason=terminal_reason
+                    ),
                 ],
                 idempotency_key=f"segment-remainder-cancel:{action_id}:{terminal_reason}",
                 correlation_id=str(uuid4()),
@@ -6215,6 +6243,32 @@ class WorldKernel:
             == "active"
             and str(commitment.get("related_thread_id") or "") == thread_id
         ]
+
+    @staticmethod
+    def _release_trace_private_commitment(
+        action: dict[str, object], *, reason: str
+    ) -> list[tuple[str, dict[str, object]]]:
+        trace = _as_dict(action.get("trace", {}), "action trace")
+        commitment = trace.get("private_commitment")
+        commitment_id = (
+            str(_as_dict(commitment, "trace private commitment").get("commitment_id") or "")
+            if isinstance(commitment, dict)
+            else ""
+        )
+        return (
+            [
+                (
+                    "PrivateCommitmentResolved",
+                    {
+                        "commitment_id": commitment_id,
+                        "outcome": "released",
+                        "reason": reason[:240],
+                    },
+                )
+            ]
+            if commitment_id
+            else []
+        )
 
     def _receipt(self, conn, world_id: str, key: str):
         return conn.execute(

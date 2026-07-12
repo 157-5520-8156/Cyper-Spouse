@@ -189,6 +189,137 @@ def test_private_inner_life_expires_from_logical_clock_without_action_side_effec
     )
 
 
+def _threaded_commitment_trace(world_id: str, *, thread_id: str, commitment_id: str) -> dict[str, object]:
+    return {
+        "world_id": world_id,
+        "user_id": "user:geoff",
+        "input_message_id": "m:disappointed",
+        "appraisal": "ordinary_message",
+        "expression_policy": "test",
+        "allowed_facts": [],
+        "observable_reason": "test",
+        "conversation_thread": {
+            "thread_id": thread_id,
+            "user_id": "user:geoff",
+            "question": "你愿意接着说吗？",
+            "expires_at": (NOW + timedelta(hours=24)).isoformat(),
+        },
+        "private_commitment": {
+            "commitment_id": commitment_id,
+            "user_id": "user:geoff",
+            "intention": "等他愿意时，把刚才没说完的话听完。",
+            "source_event_ids": ["message:m:disappointed"],
+            "expires_at": (NOW + timedelta(hours=24)).isoformat(),
+            "priority": 55,
+            "related_thread_id": thread_id,
+        },
+    }
+
+
+def test_segmented_delivery_opens_linked_thread_only_after_final_receipt(tmp_path: Path) -> None:
+    kernel, world_id = _started_kernel(tmp_path)
+    delivery_id, _, _ = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="我在。你愿意接着说吗？",
+        text_parts=["我在。", "你愿意接着说吗？"],
+        kind="reply",
+        expires_at=NOW + timedelta(hours=12),
+        trace=_threaded_commitment_trace(
+            world_id, thread_id="thread:segmented", commitment_id="commitment:segmented"
+        ),
+    )
+    first = kernel.claim_outgoing_segment(
+        delivery_id, expected_revision=kernel.revision(world_id)
+    )
+    assert first is not None
+    kernel.settle_outgoing_segment(
+        delivery_id,
+        first.segment_id,
+        delivered=True,
+        external_receipt="receipt:one",
+        expected_revision=kernel.revision(world_id),
+    )
+    assert not kernel.snapshot(world_id)["conversation_threads"]
+
+    second = kernel.claim_outgoing_segment(
+        delivery_id, expected_revision=kernel.revision(world_id)
+    )
+    assert second is not None
+    kernel.settle_outgoing_segment(
+        delivery_id,
+        second.segment_id,
+        delivered=True,
+        external_receipt="receipt:two",
+        expected_revision=kernel.revision(world_id),
+    )
+
+    state = kernel.snapshot(world_id)
+    assert state["conversation_threads"]["thread:segmented"]["status"] == "open"
+    assert state["private_commitments"]["commitment:segmented"]["status"] == "active"
+
+
+def test_interruption_and_deadline_cancel_release_linked_private_commitment(
+    tmp_path: Path,
+) -> None:
+    kernel, world_id = _started_kernel(tmp_path)
+    interrupted_id, _, _ = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="我在。你愿意接着说吗？",
+        text_parts=["我在。", "你愿意接着说吗？"],
+        kind="reply",
+        expires_at=NOW + timedelta(hours=12),
+        trace=_threaded_commitment_trace(
+            world_id, thread_id="thread:interrupted", commitment_id="commitment:interrupted"
+        ),
+    )
+    first = kernel.claim_outgoing_segment(
+        interrupted_id, expected_revision=kernel.revision(world_id)
+    )
+    assert first is not None
+    kernel.settle_outgoing_segment(
+        interrupted_id,
+        first.segment_id,
+        delivered=True,
+        external_receipt="receipt:interrupted-first",
+        expected_revision=kernel.revision(world_id),
+    )
+    assert kernel.observe_outgoing_interjection(
+        interrupted_id,
+        kind="substantive",
+        user_message_id="m:takeover",
+        expected_revision=kernel.revision(world_id),
+    )
+    assert (
+        kernel.snapshot(world_id)["private_commitments"]["commitment:interrupted"][
+            "status"
+        ]
+        == "released"
+    )
+
+    deadline_id, _, _ = kernel.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="我在。你愿意接着说吗？",
+        text_parts=["我在。", "你愿意接着说吗？"],
+        kind="reply",
+        expires_at=NOW + timedelta(hours=12),
+        trace=_threaded_commitment_trace(
+            world_id, thread_id="thread:deadline", commitment_id="commitment:deadline"
+        ),
+    )
+    assert kernel.expire_outgoing_remainder(
+        deadline_id,
+        reason="deadline",
+        expected_revision=kernel.revision(world_id),
+    )
+    assert (
+        kernel.snapshot(world_id)["private_commitments"]["commitment:deadline"]["status"]
+        == "released"
+    )
+
+
 @pytest.mark.asyncio
 async def test_world_turn_selectively_commits_inner_impression_and_question_commitment(
     tmp_path: Path,

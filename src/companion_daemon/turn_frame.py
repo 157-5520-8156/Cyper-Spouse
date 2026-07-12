@@ -95,6 +95,7 @@ class TurnFrameCompiler:
     MAX_EXPERIENCES = 4
     MAX_THREADS = 3
     MAX_ACTIONS = 4
+    _GENERIC_PRIVATE_BIGRAMS = frozenset({"有点", "可能", "刚才", "等他", "愿意", "听完"})
 
     def compile(
         self,
@@ -478,7 +479,7 @@ class TurnFrameCompiler:
             normalized_text[index : index + 2]
             for index in range(len(normalized_text) - 1)
         }
-        return len(query_bigrams & text_bigrams)
+        return len((query_bigrams & text_bigrams) - TurnFrameCompiler._GENERIC_PRIVATE_BIGRAMS)
 
     def _scene(self, snapshot: dict[str, object]) -> dict[str, object]:
         clock = self._mapping(snapshot.get("clock"))

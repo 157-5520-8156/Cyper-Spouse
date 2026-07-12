@@ -2699,7 +2699,7 @@ class CompanionEngine:
             "short_lived_constraint": None,
             "observable_reason": "由已结算世界账本和本轮判断决定。",
         }
-        if question and user_affect is not None and user_affect.unresolved:
+        if question:
             thread_id = "thread:" + sha256(
                 f"{user_id}|{message.message_id}|{question}".encode("utf-8")
             ).hexdigest()[:20]
@@ -2709,17 +2709,18 @@ class CompanionEngine:
                 "question": question,
                 "expires_at": (self._world_logical_now() + timedelta(hours=24)).isoformat(),
             }
-            trace["private_commitment"] = {
-                "commitment_id": "commitment:" + sha256(
-                    f"{user_id}|{message.message_id}|{question}".encode("utf-8")
-                ).hexdigest()[:20],
-                "user_id": user_id,
-                "intention": "等他愿意时，把刚才没说完的话听完。",
-                "source_event_ids": [f"message:{message.message_id}"],
-                "expires_at": (self._world_logical_now() + timedelta(hours=24)).isoformat(),
-                "priority": 55,
-                "related_thread_id": thread_id,
-            }
+            if user_affect is not None and user_affect.unresolved:
+                trace["private_commitment"] = {
+                    "commitment_id": "commitment:" + sha256(
+                        f"{user_id}|{message.message_id}|{question}".encode("utf-8")
+                    ).hexdigest()[:20],
+                    "user_id": user_id,
+                    "intention": "等他愿意时，把刚才没说完的话听完。",
+                    "source_event_ids": [f"message:{message.message_id}"],
+                    "expires_at": (self._world_logical_now() + timedelta(hours=24)).isoformat(),
+                    "priority": 55,
+                    "related_thread_id": thread_id,
+                }
         delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(
             canonical_user_id=canonical_user_id,
             platform=message.platform,

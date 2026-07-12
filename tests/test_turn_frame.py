@@ -261,7 +261,7 @@ def test_turn_frame_injects_only_active_user_scoped_inner_records_as_fallible_de
                 "commitment:high": {
                     "status": "active",
                     "user_id": "user:geoff",
-                        "intention": "等他愿意时，再把刚才的话听完。",
+                    "intention": "等他愿意时，把失望的地方说完。",
                     "priority": 80,
                     "source_event_ids": ["message:m:earlier"],
                     "expires_at": "2026-07-13T12:00:00+00:00",
@@ -306,7 +306,7 @@ def test_turn_frame_injects_only_active_user_scoped_inner_records_as_fallible_de
                 "commitment:high": {
                     "status": "active",
                     "user_id": "user:geoff",
-                    "intention": "等他愿意时，再把刚才的话听完。",
+                    "intention": "等他愿意时，把失望的地方说完。",
                     "priority": 80,
                     "source_event_ids": ["message:m:earlier"],
                     "expires_at": "2026-07-13T12:00:00+00:00",
@@ -314,7 +314,7 @@ def test_turn_frame_injects_only_active_user_scoped_inner_records_as_fallible_de
             },
         },
         user_id="user:geoff",
-        message=IncomingMessage(platform="qq", platform_user_id="geoff", text="晚饭吃什么？"),
+        message=IncomingMessage(platform="qq", platform_user_id="geoff", text="我今天有点累。"),
     )
     assert unrelated.private_impressions == ()
     assert unrelated.private_commitments == ()
