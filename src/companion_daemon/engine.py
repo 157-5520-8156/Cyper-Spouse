@@ -161,7 +161,6 @@ from companion_daemon.world_conversation import (
     build_safe_failure_candidate,
     classify_world_query,
     conversation_fact_candidate,
-    denies_known_npc_interaction,
     human_reply_contract_violation,
     only_echoes_user_message,
     only_recites_irrelevant_sources,
@@ -2206,16 +2205,6 @@ class CompanionEngine:
             and communication_decision.reason == "resumed_or_urgent_turn"
             and not resume_action_id
         )
-        hard_evidence = HardEvidenceContext(
-            user_text=message.text,
-            recent_user_texts=tuple(
-                str(item.get("text") or "")
-                for item in snapshot.get("recent_messages", [])
-                if item.get("direction") == "in" and str(item.get("text") or "").strip()
-            ),
-            meta_agency_query=query_scope.asks_meta_agency,
-            epistemic_honesty_requested=query_scope.asks_epistemic_honesty,
-        )
         occurrence_source = (
             best_matching_grounded_source(message.text, experience_sources)
             if query_scope.asks_occurrence_status
@@ -2250,6 +2239,19 @@ class CompanionEngine:
                 for name in mentioned_npc_names
             )
         ]
+        hard_evidence = HardEvidenceContext(
+            user_text=message.text,
+            recent_user_texts=tuple(
+                str(item.get("text") or "")
+                for item in snapshot.get("recent_messages", [])
+                if item.get("direction") == "in" and str(item.get("text") or "").strip()
+            ),
+            meta_agency_query=query_scope.asks_meta_agency,
+            epistemic_honesty_requested=query_scope.asks_epistemic_honesty,
+            known_npc_interaction_required=bool(
+                asks_for_source_detail(message.text) and related_npc_experiences
+            ),
+        )
         try:
             mind_proposal = parse_mind_proposal(raw)
             parsed_candidate = mind_proposal.candidate
@@ -2314,12 +2316,6 @@ class CompanionEngine:
             )
             if affect_violation:
                 quality_signals.append(f"expression_plan:{affect_violation}")
-            if (
-                asks_for_source_detail(message.text)
-                and related_npc_experiences
-                and denies_known_npc_interaction(str(candidate.get("reply_text") or ""))
-            ):
-                raise WorldError("reply denies a known NPC interaction")
             if (
                 asks_for_source_detail(message.text)
                 and mentioned_npc_names
@@ -2612,20 +2608,6 @@ class CompanionEngine:
                             quality_signals.append(
                                 f"expression_plan:{affect_violation}"
                             )
-                        related_npc_experiences = [
-                            item
-                            for item in experience_sources
-                            if any(
-                                name and name in str(item.get("content") or "")
-                                for name in mentioned_npc_names
-                            )
-                        ]
-                        if (
-                            asks_for_source_detail(message.text)
-                            and related_npc_experiences
-                            and denies_known_npc_interaction(str(candidate.get("reply_text") or ""))
-                        ):
-                            raise WorldError("reply denies a known NPC interaction")
                         repaired_claims = candidate.get("claims", [])
                         repaired_mentions = candidate.get("mentioned_event_ids", [])
                         repaired_actions = candidate.get("proposed_action_ids", [])

@@ -35,6 +35,7 @@ class HardEvidenceContext:
     recent_user_texts: tuple[str, ...] = ()
     meta_agency_query: bool = False
     epistemic_honesty_requested: bool = False
+    known_npc_interaction_required: bool = False
 
 
 class InvariantGuard:
@@ -64,6 +65,11 @@ class InvariantGuard:
         semantic_error = _hard_semantic_claim_error(accepted, evidence=evidence)
         if semantic_error:
             return GuardResolution("hard_reject", reason=semantic_error)
+        if evidence and evidence.known_npc_interaction_required and re.search(
+            r"(?:没听过|没聊过|没有聊过|不认识|没见过|没有互动)",
+            str(accepted.get("reply_text") or ""),
+        ):
+            return GuardResolution("hard_reject", reason="reply denies a known NPC interaction")
         if _uncommitted_companion_affect_claim(accepted):
             return GuardResolution("hard_reject", reason="uncommitted_companion_affect")
         proposed_actions = accepted.get("proposed_action_ids", [])
