@@ -91,7 +91,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "kitchen-stove-counter-decor", "fridge", "oven", "kitchen-shelf",
         "kitchen-utensil-rail", "kitchen-bin", "desk-rug", "dining-rug",
         "bed-rug", "living-rug", "desk-floor-plant", "living-large-plant",
-        "desk-lamp",
+        "desk-lamp", "bedside-table", "bedside-lamp",
+        "foreground-console", "foreground-table-lamp",
     ]
     assert bundle["artDraft"]["objects"][0]["layers"][0]["image"] == "sofaFront0Draft"
     bookcase = next(item for item in bundle["artDraft"]["objects"] if item["id"] == "tall-bookcase")
@@ -123,18 +124,32 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     assert bundle["anchors"]["rug"] == [7, 5, 0]
     assert [6, 5, 0] in bundle["routes"]["tour"]
     assert [7, 4, 0] not in bundle["routes"]["tour"]
-    lamps = [
-        draft_by_id[item_id] for item_id in ("desk-lamp",)
-    ]
+    lamps = [draft_by_id[item_id] for item_id in (
+        "desk-lamp", "bedside-lamp", "foreground-table-lamp",
+    )]
     assert all(item["category"] == "lighting" for item in lamps)
     assert all(item["occupancy"] == {"kind": "none", "tiles": []} for item in lamps)
-    assert all([layer["role"] for layer in item["layers"]] == ["body", "light"] for item in lamps)
+    assert all([layer["role"] for layer in item["layers"]] == ["front", "light"] for item in lamps)
     assert all(item["layers"][1]["blendMode"] == "screen" for item in lamps)
     assert all(0 < item["layers"][1]["opacity"] < 1 for item in lamps)
     assert all(item["audits"] == {
         "hidden": True, "solo": True, "behind": False, "front": False,
     } for item in lamps)
     assert draft_by_id["desk-lamp"]["attachedTo"] == "desk"
+    assert draft_by_id["bedside-lamp"]["attachedTo"] == "bedside-table"
+    assert draft_by_id["foreground-table-lamp"]["attachedTo"] == "foreground-console"
+    assert draft_by_id["bedside-table"]["occupancy"] == {
+        "kind": "footprint", "tiles": [[7, 0]],
+    }
+    assert draft_by_id["bedside-table"]["audits"] == {
+        "hidden": True, "solo": True, "behind": False, "front": False,
+    }
+    assert draft_by_id["foreground-console"]["occupancy"] == {
+        "kind": "footprint", "tiles": [[3, 7], [4, 7]],
+    }
+    assert draft_by_id["foreground-console"]["audit"] == {
+        "behind": [4.5, 7, 0],
+    }
 
     master = Image.open(ROOT / "assets/dashboard/zhizhi-room-isometric-v2.png").convert("RGBA")
     matte = Image.open(ROOT / "assets/dashboard/layers/desk-front-v1.png").convert("RGBA")
@@ -172,7 +187,11 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
             "desk-rug-draft.png", "dining-rug-draft.png",
             "bed-rug-draft.png", "living-rug-draft.png",
             "desk-floor-plant-draft.png", "living-large-plant-draft.png",
-            "desk-lamp-body-draft.png", "desk-lamp-light-draft.png",
+            "desk-lamp-front-draft.png", "desk-lamp-light-draft.png",
+            "bedside-table-draft.png", "bedside-lamp-front-draft.png",
+            "bedside-lamp-light-draft.png", "foreground-console-draft.png",
+            "foreground-table-lamp-front-draft.png",
+            "foreground-table-lamp-light-draft.png",
         )
     )
 

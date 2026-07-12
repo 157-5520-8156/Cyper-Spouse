@@ -152,6 +152,14 @@
 - 浏览器已验证书桌灯 solo 会保留承载书桌，hidden 会同时移除灯具本体与局部光效；整屋落点位于书桌后沿。撤除屋顶对象后的连续 tour 可正常经过工作区、厨房和客厅。
 - 自动验证：Room Compiler 26 项、Room Runtime 20 项、Ruff、`git diff --check` 与两次确定性构建均通过；runtime 为 36 个草稿对象、44 个构建资产。
 
+## 全资产原子化 · 床头柜与前景长柜载体草稿（2026-07-12）
+
+- 复核确认现有 `bed-frame / bed-bedding` 不含床头柜，前景长柜也未进入任何草稿对象；因此分别生成无灯具、无植物、无台面 decor 的独立洋红 chroma source。
+- `bedside-table` 占据 `[7,0]`，位于床右侧房间边界；真实可达站位不与柜体形成有效遮挡，故只启用 hidden/solo，不伪造 behind/front。
+- `foreground-console` 占据本来就不可走的 `[3,7] / [4,7]`，视觉深度单独校准到房间前沿；behind 审计在 `[4.5,7]` 让柜体沿上沿遮住角色下半身，front 因位于房间外而明确为 false。
+- 床头灯与前景台灯使用 `front + light`，分别 attached 到直接承载柜；父柜 hidden 会连同灯具和光效消失，子灯 solo 会保留唯一父柜。书桌灯也统一为同一前景灯具层角色。
+- 浏览器实测两组父 hidden、子 solo、前景柜 behind 及整屋组合；两件载体没有侵入床、沙发、茶几或路径。草稿增至 40 个对象、50 个构建资产，素材保持 `planned / needs-art`。
+
 ## 后续扩展规则
 
 - 后续若新增家具或新动作，必须同时添加 `behind/front` 或动作巡检入口，不能只改 daemon 映射。

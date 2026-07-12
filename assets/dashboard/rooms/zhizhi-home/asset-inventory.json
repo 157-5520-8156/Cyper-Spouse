@@ -171,7 +171,26 @@
           "warm-lamp-halo-blue-v3.png": "Soft warm amber circular light halo with dithered radial falloff and no fixture or surface, isolated on flat #0000ff for alpha extraction."
         }
       },
-      "note": "Desk lamp currently owns body plus extracted-alpha light layers. Bedside and foreground lamp sources stay pending until their carrier furniture is atomized, preventing floating or duplicate ownership."
+      "note": "Desk, bedside and foreground lamps own body plus extracted-alpha light layers; the latter two attach to independently generated carrier furniture."
+    },
+    {
+      "id": "wave3-lamp-carriers-chroma-v1",
+      "targets": ["bedside-table", "foreground-console"],
+      "status": "needs-art",
+      "method": "imagegen-background-extraction",
+      "sources": [
+        "sources/bedside-table-chroma-v1.png",
+        "sources/foreground-console-chroma-v1.png"
+      ],
+      "generation": {
+        "reference": "zhizhi-room-isometric-v2.png",
+        "background": "flat #ff00ff chroma",
+        "prompts": {
+          "bedside-table-chroma-v1.png": "Narrow tall warm-wood bedside cabinet with top, drawer and two open shelves; furniture body only, no lamp or decor.",
+          "foreground-console-chroma-v1.png": "Long low warm-wood foreground console with cabinet doors and drawers; furniture body only, no plants, lamp or decor."
+        }
+      },
+      "note": "Carrier furniture is isolated before attaching its lamp and later decor children, preventing floating props and duplicate ownership."
     }
   ],
   "items": [

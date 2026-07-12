@@ -1602,8 +1602,14 @@
       "livingRugBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/living-rug-draft.png",
       "deskFloorPlantFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-floor-plant-draft.png",
       "livingLargePlantFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/living-large-plant-draft.png",
-      "deskLampBody0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-lamp-body-draft.png",
-      "deskLampLight1Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-lamp-light-draft.png"
+      "deskLampFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-lamp-front-draft.png",
+      "deskLampLight1Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/desk-lamp-light-draft.png",
+      "bedsideTableFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bedside-table-draft.png",
+      "bedsideLampFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bedside-lamp-front-draft.png",
+      "bedsideLampLight1Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bedside-lamp-light-draft.png",
+      "foregroundConsoleFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-console-draft.png",
+      "foregroundTableLampFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-table-lamp-front-draft.png",
+      "foregroundTableLampLight1Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-table-lamp-light-draft.png"
     },
     "objects": [
       {
@@ -3237,13 +3243,13 @@
         },
         "layers": [
           {
-            "role": "body",
-            "image": "deskLampBody0Draft",
+            "role": "front",
+            "image": "deskLampFront0Draft",
             "origin": [
               390,
               488
             ],
-            "depthBias": 0
+            "depthBias": 550
           },
           {
             "role": "light",
@@ -3271,6 +3277,202 @@
         "audit": {},
         "auditPose": {},
         "attachedTo": "desk"
+      },
+      {
+        "id": "bedside-table",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          7,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              7,
+              0
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "bedsideTableFront0Draft",
+            "origin": [
+              1290,
+              480
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {}
+      },
+      {
+        "id": "bedside-lamp",
+        "category": "lighting",
+        "assetMode": "layered",
+        "tile": [
+          7,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "bedsideLampFront0Draft",
+            "origin": [
+              1300,
+              400
+            ],
+            "depthBias": 550
+          },
+          {
+            "role": "light",
+            "image": "bedsideLampLight1Draft",
+            "origin": [
+              1290,
+              380
+            ],
+            "depthBias": 1000,
+            "opacity": 0.15,
+            "blendMode": "screen"
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "bedside-table"
+      },
+      {
+        "id": "foreground-console",
+        "category": "furniture",
+        "assetMode": "layered",
+        "tile": [
+          5,
+          7,
+          0
+        ],
+        "occupancy": {
+          "kind": "footprint",
+          "tiles": [
+            [
+              3,
+              7
+            ],
+            [
+              4,
+              7
+            ]
+          ]
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "foregroundConsoleFront0Draft",
+            "origin": [
+              300,
+              790
+            ],
+            "depthBias": 500
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": true,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {
+          "behind": [
+            4.5,
+            7,
+            0
+          ]
+        },
+        "auditPose": {}
+      },
+      {
+        "id": "foreground-table-lamp",
+        "category": "lighting",
+        "assetMode": "layered",
+        "tile": [
+          5,
+          7,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "foregroundTableLampFront0Draft",
+            "origin": [
+              550,
+              820
+            ],
+            "depthBias": 550
+          },
+          {
+            "role": "light",
+            "image": "foregroundTableLampLight1Draft",
+            "origin": [
+              540,
+              800
+            ],
+            "depthBias": 1000,
+            "opacity": 0.15,
+            "blendMode": "screen"
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "foreground-console"
       }
     ]
   }
