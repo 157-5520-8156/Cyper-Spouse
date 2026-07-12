@@ -1170,21 +1170,41 @@
           {
             "role": "front",
             "source": "sources/bedside-lamp-chroma-v1.png",
-            "sourceTransform": {"crop": [400, 250, 860, 1000], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [60, 95]},
+            "sourceTransform": {"crop": [400, 250, 860, 1000], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [50, 80]},
             "output": "bedside-lamp-front-draft.png",
-            "origin": [1300, 400],
+            "origin": [1315, 415],
             "depthBias": 550
           },
           {
             "role": "light",
             "source": "sources/warm-lamp-halo-alpha-v3.png",
-            "sourceTransform": {"crop": [300, 250, 950, 950], "resize": [75, 65]},
+            "sourceTransform": {"crop": [300, 250, 950, 950], "resize": [65, 55]},
             "output": "bedside-lamp-light-draft.png",
-            "origin": [1290, 380],
+            "origin": [1305, 395],
             "opacity": 0.15,
             "blendMode": "screen"
           }
         ],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "bedside-decor-cluster",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "depthTile": [7, 0, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "attachedTo": "bedside-table",
+        "layers": [{
+          "role": "front",
+          "source": "sources/bedside-decor-cluster-chroma-v1.png",
+          "sourceTransform": {"crop": [450, 480, 800, 780], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [30, 25]},
+          "output": "bedside-decor-cluster-draft.png",
+          "origin": [1307, 458],
+          "depthBias": 560
+        }],
         "interactions": [],
         "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
         "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
@@ -1234,6 +1254,26 @@
             "blendMode": "screen"
           }
         ],
+        "interactions": [],
+        "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
+        "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},
+        "audit": {}
+      },
+      {
+        "id": "foreground-console-plants",
+        "category": "plant",
+        "assetMode": "layered",
+        "depthTile": [5, 7, 0],
+        "occupancy": {"kind": "none", "tiles": []},
+        "attachedTo": "foreground-console",
+        "layers": [{
+          "role": "front",
+          "source": "sources/foreground-console-plants-chroma-v1.png",
+          "sourceTransform": {"crop": [250, 320, 1190, 740], "chromaKey": "#ff00ff", "transparentThreshold": 50, "opaqueThreshold": 160, "despill": true, "resize": [180, 80]},
+          "output": "foreground-console-plants-draft.png",
+          "origin": [330, 770],
+          "depthBias": 560
+        }],
         "interactions": [],
         "audits": {"hidden": true, "solo": true, "behind": false, "front": false},
         "provenance": {"method": "imagegen-background-extraction", "reference": "zhizhi-room-isometric-v2.png"},

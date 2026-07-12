@@ -1607,9 +1607,11 @@
       "bedsideTableFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bedside-table-draft.png",
       "bedsideLampFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bedside-lamp-front-draft.png",
       "bedsideLampLight1Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bedside-lamp-light-draft.png",
+      "bedsideDecorClusterFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/bedside-decor-cluster-draft.png",
       "foregroundConsoleFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-console-draft.png",
       "foregroundTableLampFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-table-lamp-front-draft.png",
-      "foregroundTableLampLight1Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-table-lamp-light-draft.png"
+      "foregroundTableLampLight1Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-table-lamp-light-draft.png",
+      "foregroundConsolePlantsFront0Draft": "/assets/dashboard/rooms/zhizhi-home/runtime/draft-layers/foreground-console-plants-draft.png"
     },
     "objects": [
       {
@@ -3339,8 +3341,8 @@
             "role": "front",
             "image": "bedsideLampFront0Draft",
             "origin": [
-              1300,
-              400
+              1315,
+              415
             ],
             "depthBias": 550
           },
@@ -3348,12 +3350,51 @@
             "role": "light",
             "image": "bedsideLampLight1Draft",
             "origin": [
-              1290,
-              380
+              1305,
+              395
             ],
             "depthBias": 1000,
             "opacity": 0.15,
             "blendMode": "screen"
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "bedside-table"
+      },
+      {
+        "id": "bedside-decor-cluster",
+        "category": "decor-cluster",
+        "assetMode": "layered",
+        "tile": [
+          7,
+          0,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "bedsideDecorClusterFront0Draft",
+            "origin": [
+              1307,
+              458
+            ],
+            "depthBias": 560
           }
         ],
         "interactions": [],
@@ -3457,6 +3498,45 @@
             "depthBias": 1000,
             "opacity": 0.15,
             "blendMode": "screen"
+          }
+        ],
+        "interactions": [],
+        "audits": {
+          "hidden": true,
+          "solo": true,
+          "behind": false,
+          "front": false
+        },
+        "provenance": {
+          "method": "imagegen-background-extraction",
+          "reference": "zhizhi-room-isometric-v2.png"
+        },
+        "audit": {},
+        "auditPose": {},
+        "attachedTo": "foreground-console"
+      },
+      {
+        "id": "foreground-console-plants",
+        "category": "plant",
+        "assetMode": "layered",
+        "tile": [
+          5,
+          7,
+          0
+        ],
+        "occupancy": {
+          "kind": "none",
+          "tiles": []
+        },
+        "layers": [
+          {
+            "role": "front",
+            "image": "foregroundConsolePlantsFront0Draft",
+            "origin": [
+              330,
+              770
+            ],
+            "depthBias": 560
           }
         ],
         "interactions": [],

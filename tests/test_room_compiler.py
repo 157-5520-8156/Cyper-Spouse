@@ -91,8 +91,8 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
         "kitchen-stove-counter-decor", "fridge", "oven", "kitchen-shelf",
         "kitchen-utensil-rail", "kitchen-bin", "desk-rug", "dining-rug",
         "bed-rug", "living-rug", "desk-floor-plant", "living-large-plant",
-        "desk-lamp", "bedside-table", "bedside-lamp",
-        "foreground-console", "foreground-table-lamp",
+        "desk-lamp", "bedside-table", "bedside-lamp", "bedside-decor-cluster",
+        "foreground-console", "foreground-table-lamp", "foreground-console-plants",
     ]
     assert bundle["artDraft"]["objects"][0]["layers"][0]["image"] == "sofaFront0Draft"
     bookcase = next(item for item in bundle["artDraft"]["objects"] if item["id"] == "tall-bookcase")
@@ -137,7 +137,9 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
     } for item in lamps)
     assert draft_by_id["desk-lamp"]["attachedTo"] == "desk"
     assert draft_by_id["bedside-lamp"]["attachedTo"] == "bedside-table"
+    assert draft_by_id["bedside-decor-cluster"]["attachedTo"] == "bedside-table"
     assert draft_by_id["foreground-table-lamp"]["attachedTo"] == "foreground-console"
+    assert draft_by_id["foreground-console-plants"]["attachedTo"] == "foreground-console"
     assert draft_by_id["bedside-table"]["occupancy"] == {
         "kind": "footprint", "tiles": [[7, 0]],
     }
@@ -189,9 +191,11 @@ def test_compile_room_builds_runtime_bundle_and_coordinate_locked_occluders(
             "desk-floor-plant-draft.png", "living-large-plant-draft.png",
             "desk-lamp-front-draft.png", "desk-lamp-light-draft.png",
             "bedside-table-draft.png", "bedside-lamp-front-draft.png",
-            "bedside-lamp-light-draft.png", "foreground-console-draft.png",
+            "bedside-lamp-light-draft.png", "bedside-decor-cluster-draft.png",
+            "foreground-console-draft.png",
             "foreground-table-lamp-front-draft.png",
             "foreground-table-lamp-light-draft.png",
+            "foreground-console-plants-draft.png",
         )
     )
 

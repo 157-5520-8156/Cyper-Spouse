@@ -160,6 +160,13 @@
 - 床头灯与前景台灯使用 `front + light`，分别 attached 到直接承载柜；父柜 hidden 会连同灯具和光效消失，子灯 solo 会保留唯一父柜。书桌灯也统一为同一前景灯具层角色。
 - 浏览器实测两组父 hidden、子 solo、前景柜 behind 及整屋组合；两件载体没有侵入床、沙发、茶几或路径。草稿增至 40 个对象、50 个构建资产，素材保持 `planned / needs-art`。
 
+## 全资产原子化 · 载体直属 decor 草稿进行中（2026-07-12）
+
+- 新生成床头绿色闹钟/小摆件 cluster 与前景长柜三盆植物 cluster；两张 source 都不含灯具或承载家具，并记录母版 reference 与生成提示。
+- `bedside-decor-cluster` attached 到 `bedside-table`；`foreground-console-plants` attached 到 `foreground-console`。两者均为 `occupancy.kind=none`、无互动、只启用 hidden/solo。
+- 床头灯缩小并移到柜面右侧，为左侧闹钟留出独立所有权；前景植物放在长柜左/中段，台灯保留右端。草稿暂增至 42 个对象、52 个构建资产。
+- Compiler 已生成独立 alpha 层，单层检查无洋红残边。浏览器验证床头摆件右移后落在柜面左侧，前景植物落在长柜左/中段；两组父 hidden 会关闭全部子项，子 solo 只保留直接载体与目标，连续 tour 无变化。
+
 ## 后续扩展规则
 
 - 后续若新增家具或新动作，必须同时添加 `behind/front` 或动作巡检入口，不能只改 daemon 映射。

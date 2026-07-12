@@ -191,6 +191,25 @@
         }
       },
       "note": "Carrier furniture is isolated before attaching its lamp and later decor children, preventing floating props and duplicate ownership."
+    },
+    {
+      "id": "wave4-carrier-decor-chroma-v1",
+      "targets": ["bedside-decor-cluster", "foreground-console-plants"],
+      "status": "needs-art",
+      "method": "imagegen-background-extraction",
+      "sources": [
+        "sources/bedside-decor-cluster-chroma-v1.png",
+        "sources/foreground-console-plants-chroma-v1.png"
+      ],
+      "generation": {
+        "reference": "zhizhi-room-isometric-v2.png",
+        "background": "flat #ff00ff chroma",
+        "prompts": {
+          "bedside-decor-cluster-chroma-v1.png": "Tiny green bedside alarm clock plus one neutral trinket; decor only, no lamp or cabinet.",
+          "foreground-console-plants-chroma-v1.png": "Three varied tabletop houseplants in terracotta, cream and muted-green pots; plants only, no lamp or console."
+        }
+      },
+      "note": "Each decor group attaches to its direct carrier and contains no carrier or lamp pixels."
     }
   ],
   "items": [
