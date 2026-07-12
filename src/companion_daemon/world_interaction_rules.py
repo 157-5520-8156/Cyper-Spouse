@@ -43,6 +43,7 @@ class WorldInteractionRules:
         "repair_perfunctory": "听见了道歉，但先保留判断。",
         "repair_specific": "具体的道歉值得回应，仍需要时间观察。",
         "repair_restitution": "看见了补偿行动，允许逐步恢复信任。",
+        "boundary_respected": "看见边界被实际尊重，按连续行为逐步恢复。",
         "repeated_violation": "修复期再次越界，明确收紧边界。",
         "availability_drop": "收住主动性，不追发。",
         "return_after_gap": "自然接上，不抱怨。",
@@ -57,6 +58,7 @@ class WorldInteractionRules:
         "repair_perfunctory": {"security": 1},
         "repair_specific": {"security": 4, "boundary": -2},
         "repair_restitution": {"security": 7, "boundary": -4},
+        "boundary_respected": {"security": 3, "boundary": -2},
         "repeated_violation": {"security": -18, "boundary": 18, "initiative": -12},
         "warmth_received": {"security": 4, "initiative": 3},
         "user_vulnerable": {"initiative": 5, "attention": -4},
@@ -73,6 +75,7 @@ class WorldInteractionRules:
         "repair_perfunctory": {"respect": 1, "reliability": 0, "trust": 0},
         "repair_specific": {"respect": 3, "reliability": 1, "trust": 3},
         "repair_restitution": {"respect": 5, "reliability": 4, "trust": 6},
+        "boundary_respected": {"respect": 2, "reliability": 3, "trust": 2},
         "repeated_violation": {"respect": -18, "reliability": -9, "trust": -14},
         "warmth_received": {"closeness": 4, "reliability": 1, "trust": 5},
         "user_vulnerable": {"closeness": 2, "trust": 3},
@@ -89,6 +92,7 @@ class WorldInteractionRules:
         "repair_perfunctory": ("guarded", "neutral", -1),
         "repair_specific": ("softening", "soft", -4),
         "repair_restitution": ("softening", "soft", -7),
+        "boundary_respected": ("softening", "soft", -2),
         "repeated_violation": ("guarded", "guarded", 22),
         "warmth_received": ("warm", "smile", 5),
         "user_vulnerable": ("caring", "worry", 7),
@@ -96,16 +100,43 @@ class WorldInteractionRules:
         "return_after_gap": ("open", "soft", 3),
     }
 
-    def consequence(self, appraisal: str) -> InteractionConsequence:
+    def consequence(
+        self,
+        appraisal: str,
+        *,
+        severity: int = 3,
+        confidence: float = 1.0,
+    ) -> InteractionConsequence:
         mode, expression, charge_delta = self._EMOTION.get(appraisal, ("calm", "neutral", -1))
+        factor = (
+            {1: 0.5, 2: 0.75, 3: 1.0, 4: 1.25}.get(
+                max(1, min(4, int(severity))), 1.0
+            )
+            * max(0.5, min(1.0, float(confidence)))
+            if appraisal in HARMFUL_INTERACTION_APPRAISALS
+            else 1.0
+        )
         return InteractionConsequence(
             policy=self._POLICIES.get(appraisal, "自然回应当前消息。"),
-            need_deltas=dict(self._NEEDS.get(appraisal, {})),
-            relationship_deltas=dict(self._RELATIONSHIP.get(appraisal, {})),
+            need_deltas=_scaled(self._NEEDS.get(appraisal, {}), factor),
+            relationship_deltas=_scaled(
+                self._RELATIONSHIP.get(appraisal, {}), factor
+            ),
             emotion_mode=mode,
             emotion_expression=expression,
-            emotion_charge_delta=charge_delta,
+            emotion_charge_delta=_scaled_value(charge_delta, factor),
         )
+
+
+def _scaled(values: dict[str, int], factor: float) -> dict[str, int]:
+    return {key: _scaled_value(value, factor) for key, value in values.items()}
+
+
+def _scaled_value(value: int, factor: float) -> int:
+    if value == 0:
+        return 0
+    scaled = int(round(value * factor))
+    return scaled if scaled else (1 if value > 0 else -1)
 
 
 _APOLOGY_RE = re.compile(r"对不起|抱歉|道歉|是我不对|我的错|我错了")

@@ -203,6 +203,24 @@ class CompanionStore:
                   created_at text not null
                 );
 
+                create table if not exists model_usage_events (
+                  id integer primary key autoincrement,
+                  purpose text not null,
+                  model text not null,
+                  status text not null,
+                  latency_ms integer not null,
+                  prompt_tokens integer not null,
+                  completion_tokens integer not null,
+                  reasoning_tokens integer not null,
+                  cache_hit_tokens integer not null,
+                  cache_miss_tokens integer not null,
+                  total_tokens integer not null,
+                  error text not null,
+                  created_at text not null
+                );
+                create index if not exists idx_model_usage_created
+                  on model_usage_events (created_at, purpose);
+
                 create table if not exists interaction_events (
                   id integer primary key autoincrement,
                   canonical_user_id text not null references users(id),
@@ -2274,6 +2292,92 @@ class CompanionStore:
                 args,
             ).fetchone()
         return int(row["count"])
+
+    def record_model_usage(
+        self,
+        *,
+        purpose: str,
+        model: str,
+        status: str,
+        latency_ms: int,
+        prompt_tokens: int = 0,
+        completion_tokens: int = 0,
+        reasoning_tokens: int = 0,
+        cache_hit_tokens: int = 0,
+        cache_miss_tokens: int = 0,
+        total_tokens: int = 0,
+        error: str = "",
+    ) -> None:
+        with self.connect() as conn:
+            conn.execute(
+                """
+                insert into model_usage_events (
+                  purpose, model, status, latency_ms, prompt_tokens,
+                  completion_tokens, reasoning_tokens, cache_hit_tokens,
+                  cache_miss_tokens, total_tokens, error, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    purpose[:80],
+                    model[:120],
+                    status[:40],
+                    max(0, int(latency_ms)),
+                    max(0, int(prompt_tokens)),
+                    max(0, int(completion_tokens)),
+                    max(0, int(reasoning_tokens)),
+                    max(0, int(cache_hit_tokens)),
+                    max(0, int(cache_miss_tokens)),
+                    max(0, int(total_tokens)),
+                    error[:500],
+                    utc_now().isoformat(),
+                ),
+            )
+
+    def model_usage_summary(
+        self, window: str, now: datetime
+    ) -> dict[str, dict[str, int]]:
+        if window == "day":
+            prefix = now.date().isoformat()
+        elif window == "month":
+            prefix = now.strftime("%Y-%m")
+        else:
+            raise ValueError(f"Unsupported usage window: {window}")
+        with self.connect() as conn:
+            rows = conn.execute(
+                """
+                select purpose, count(*) as calls,
+                       sum(prompt_tokens) as prompt_tokens,
+                       sum(completion_tokens) as completion_tokens,
+                       sum(reasoning_tokens) as reasoning_tokens,
+                       sum(cache_hit_tokens) as cache_hit_tokens,
+                       sum(cache_miss_tokens) as cache_miss_tokens,
+                       sum(total_tokens) as total_tokens,
+                       sum(latency_ms) as latency_ms
+                from model_usage_events
+                where substr(created_at, 1, ?) = ?
+                group by purpose
+                order by purpose
+                """,
+                (len(prefix), prefix),
+            ).fetchall()
+        keys = (
+            "calls",
+            "prompt_tokens",
+            "completion_tokens",
+            "reasoning_tokens",
+            "cache_hit_tokens",
+            "cache_miss_tokens",
+            "total_tokens",
+            "latency_ms",
+        )
+        summary = {
+            str(row["purpose"]): {key: int(row[key] or 0) for key in keys}
+            for row in rows
+        }
+        summary["_total"] = {
+            key: sum(item[key] for item in summary.values()) for key in keys
+        }
+        return summary
 
     def save_proactive_event(
         self,

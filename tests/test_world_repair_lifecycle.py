@@ -1,6 +1,8 @@
 from pathlib import Path
 
 from companion_daemon.db import CompanionStore
+from companion_daemon.emotion_state import interpret_interaction
+from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.world import WorldKernel
 from companion_daemon.world_affect import apply_appraisal, decay_affect, initial_affect
 from companion_daemon.world_interaction_rules import (
@@ -15,6 +17,21 @@ def test_repair_classifier_distinguishes_apology_specificity_and_restitution() -
     assert classify_repair_appraisal("刚才逼你马上回复不对，我不该命令你") == "repair_specific"
     assert classify_repair_appraisal("刚才逼你马上回复不对，我已经取消提醒，以后会先问你") == "repair_restitution"
     assert classify_repair_appraisal("今天天气不错") is None
+
+
+def test_boundary_followthrough_is_explicit_repair_evidence() -> None:
+    event = interpret_interaction(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="respect-boundary",
+            text="你不想说就不说，我尊重你的边界。",
+        ),
+        MoodState(),
+    )
+
+    assert event.kind == "boundary_respected"
+    assert event.target == "companion"
 
 
 def test_repair_quality_has_monotonic_but_bounded_consequences() -> None:
@@ -77,7 +94,7 @@ def test_violation_during_observation_is_repeated_and_heavier() -> None:
     assert repeated.violation_count == 2
 
 
-def test_observation_window_is_carried_by_logical_decay_for_replay() -> None:
+def test_observation_window_waits_for_behavior_evidence_after_time_elapsed() -> None:
     state = initial_affect("2026-01-01T00:00:00+00:00")
     hurt = apply_appraisal(state, "boundary_violation", "2026-01-01T00:00:00+00:00")
     apology = apply_appraisal(
@@ -89,8 +106,11 @@ def test_observation_window_is_carried_by_logical_decay_for_replay() -> None:
     assert halfway.repair_observation_seconds == 12 * 3600
     assert halfway.unresolved is True
     assert halfway.behavior_tendency == "repair_observing"
-    assert completed.repair_observation_seconds == 0
-    assert completed.repair_quality == ""
+    assert completed.repair_observation_seconds == 3600
+    assert completed.repair_evidence_count == 0
+    assert completed.repair_quality == "specific"
+    assert completed.unresolved is True
+    assert completed.behavior_tendency == "repair_observing"
 
 
 def test_controlled_transgression_is_a_cost_not_a_relationship_stage_ban() -> None:

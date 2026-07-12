@@ -126,7 +126,7 @@ def settle_affinity_interaction(
 def _pattern(appraisal: str) -> tuple[str, dict[str, int]]:
     if appraisal == "warmth_received":
         return "warmth", {"warmth": 1}
-    if appraisal in {"repair_specific", "repair_restitution"}:
+    if appraisal in {"repair_specific", "repair_restitution", "boundary_respected"}:
         return "reliable_repair", {"warmth": 1, "resentment": -1}
     if appraisal in HARMFUL_INTERACTION_APPRAISALS:
         return "boundary_harm", {"warmth": -1, "resentment": 1}

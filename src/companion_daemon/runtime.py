@@ -9,12 +9,20 @@ from companion_daemon.attachment_cache import AttachmentCache
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine
 from companion_daemon.image_generation import OpenAIImageGenerator
-from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel
+from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel, ModelCallUsage
 from companion_daemon.multimodal_analysis import MultimodalAnalyzer, OpenAIMultimodalAnalyzer
 from companion_daemon.stickers import load_stickers
 from companion_daemon.world import WorldKernel
 
 logger = logging.getLogger(__name__)
+
+
+def require_flash_model(model: str, *, setting: str) -> str:
+    if model != "deepseek-v4-flash":
+        raise ValueError(
+            f"{setting} must be deepseek-v4-flash; configured model {model!r} is disabled"
+        )
+    return model
 
 
 def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
@@ -31,13 +39,39 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
     character = load_character(str(settings.character_path))
     store.map_account("simulator", "geoff", settings.primary_user_id)
     stickers = load_stickers(str(settings.stickers_path))
+
+    def record_model_usage(usage: ModelCallUsage) -> None:
+        store.record_model_usage(
+            purpose=usage.purpose,
+            model=usage.model,
+            status=usage.status,
+            latency_ms=usage.latency_ms,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            cache_hit_tokens=usage.cache_hit_tokens,
+            cache_miss_tokens=usage.cache_miss_tokens,
+            total_tokens=usage.total_tokens,
+            error=usage.error,
+        )
+
+    interaction_appraisal_model = None
     if settings.deepseek_api_key and not use_fake_model:
         model = DeepSeekChatModel(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
-            model=settings.deepseek_model,
+            model=require_flash_model(settings.deepseek_model, setting="DEEPSEEK_MODEL"),
             thinking_enabled=settings.deepseek_thinking_enabled,
             reasoning_effort=settings.deepseek_reasoning_effort,
+            usage_observer=record_model_usage,
+        )
+        interaction_appraisal_model = DeepSeekChatModel(
+            api_key=settings.deepseek_api_key,
+            base_url=settings.deepseek_base_url,
+            model="deepseek-v4-flash",
+            thinking_enabled=True,
+            reasoning_effort="high",
+            usage_observer=record_model_usage,
         )
     else:
         model = FakeCompanionModel()
@@ -87,9 +121,13 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         rewrite_model = DeepSeekChatModel(
             api_key=settings.deepseek_api_key,
             base_url=settings.deepseek_base_url,
-            model=settings.deepseek_reply_model or settings.deepseek_model,
+            model=require_flash_model(
+                settings.deepseek_reply_model or settings.deepseek_model,
+                setting="DEEPSEEK_REPLY_MODEL",
+            ),
             thinking_enabled=settings.deepseek_thinking_enabled,
             reasoning_effort=settings.deepseek_reasoning_effort,
+            usage_observer=record_model_usage,
         )
     return CompanionEngine(
         store,
@@ -106,5 +144,6 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         world_kernel=world_kernel,
         world_id=world_id,
         world_grounding_audit_model=model if world_kernel else None,
+        interaction_appraisal_model=interaction_appraisal_model,
         attachment_cache=AttachmentCache(settings.attachment_cache_path),
     )

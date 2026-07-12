@@ -19,7 +19,6 @@ from companion_daemon.world_conversation import (
     human_reply_contract_violation,
     only_recites_irrelevant_sources,
     repeats_recent_companion_reply,
-    reply_proposes_new_discomfort,
 )
 
 
@@ -1509,12 +1508,14 @@ def test_mixed_affect_and_current_discomfort_are_proposals_not_expression_bans()
     ) is None
 
     calm = {"unresolved": False, "behavior_tendency": "neutral", "vector": {}}
-    text = "你这么说让我有一点不舒服。"
-    assert reply_proposes_new_discomfort(calm, text) is True
+    assert (
+        affect_reply_violation(calm, "你这么说让我有一点不舒服。")
+        == "uncommitted_companion_affect"
+    )
 
 
 @pytest.mark.asyncio
-async def test_current_turn_discomfort_is_committed_before_reply_delivery(tmp_path: Path) -> None:
+async def test_reply_prose_cannot_create_companion_affect_after_appraisal(tmp_path: Path) -> None:
     class Model:
         async def complete(self, messages, *, temperature: float) -> str:
             if "事实审计器" in messages[0]["content"]:
@@ -1533,11 +1534,105 @@ async def test_current_turn_discomfort_is_committed_before_reply_delivery(tmp_pa
     )
 
     assert reply is not None
+    assert "不舒服" not in reply.text
     committed = [
         event for event in world.events(world_id) if event.event_type == "AffectCommitted"
     ]
-    assert committed
-    assert committed[-1].payload["source_reference"] == "message:current-discomfort"
+    assert committed == []
+    assert world.snapshot(world_id)["emotion_modulation"]["source_appraisal"] == "world_started"
+
+
+@pytest.mark.asyncio
+async def test_provider_outage_returns_a_local_fact_safe_reply(tmp_path: Path) -> None:
+    class OfflineModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            raise TimeoutError("provider unavailable")
+
+    world, world_id, engine = _world_engine(tmp_path, OfflineModel())
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="provider-outage",
+            text="你觉得我现在该怎么办？",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text
+    assert reply.delivery_id is not None
+    second = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="provider-outage-2",
+            text="你觉得我现在该怎么办？",
+        )
+    )
+    assert second is not None
+    assert second.text != reply.text
+    assert all(
+        not (
+            event.event_type == "ModelProposalRecorded"
+            and event.payload.get("template_id") == "model_output:reply"
+        )
+        for event in world.events(world_id)
+    )
+
+
+@pytest.mark.asyncio
+async def test_audit_provider_outage_does_not_block_a_locally_validated_reply(
+    tmp_path: Path,
+) -> None:
+    class AuditOfflineModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if "事实审计器" in messages[0]["content"]:
+                raise TimeoutError("audit provider unavailable")
+            return (
+                '{"reply_text":"这个我想先听清楚一点。","mentioned_event_ids":[],'
+                '"proposed_action_ids":[],"claims":[]}'
+            )
+
+    model = AuditOfflineModel()
+    _, _, engine = _world_engine(tmp_path, model)
+    engine.world_grounding_audit_model = model
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="audit-provider-outage",
+            text="你觉得呢？",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_audit_programming_error_fails_closed(tmp_path: Path) -> None:
+    class InvalidAuditModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            raise ValueError("invalid audit parser state")
+
+    _, _, engine = _world_engine(tmp_path, InvalidAuditModel())
+    engine.world_grounding_audit_model = InvalidAuditModel()
+
+    with pytest.raises(WorldError, match="failed internally"):
+        await engine._audit_world_reply(
+            purpose="reply_audit",
+            causation="audit-programming-error",
+            user_text="你好",
+            reply_text="你好。",
+            grounding_context={},
+        )
 
 
 @pytest.mark.asyncio

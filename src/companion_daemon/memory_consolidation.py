@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 
 from companion_daemon.db import CompanionStore
-from companion_daemon.llm import ChatModel
+from companion_daemon.llm import ChatModel, model_call_scope
 from companion_daemon.models import MoodState
 from companion_daemon.self_core import SelfCore, build_self_core_prompt, parse_self_core
 from companion_daemon.time import utc_now
@@ -66,10 +66,11 @@ async def consolidate_memories(
         memory_lines.append(f"[{r['kind']}] {r['content']}")
     prompt = CONSOLIDATION_PROMPT.format(memories="\n".join(memory_lines))
     try:
-        raw = await model.complete(
-            [{"role": "user", "content": prompt}],
-            temperature=0.3,
-        )
+        with model_call_scope("memory_consolidation"):
+            raw = await model.complete(
+                [{"role": "user", "content": prompt}],
+                temperature=0.3,
+            )
     except Exception:
         logger.exception("failed to call LLM for memory consolidation")
         return 0
@@ -125,10 +126,11 @@ async def build_self_core(
         state.mood,
     )
     try:
-        raw = await model.complete(
-            [{"role": "user", "content": prompt}],
-            temperature=0.3,
-        )
+        with model_call_scope("self_core_generation"):
+            raw = await model.complete(
+                [{"role": "user", "content": prompt}],
+                temperature=0.3,
+            )
     except Exception:
         logger.exception("failed to call LLM for self-core generation")
         return None

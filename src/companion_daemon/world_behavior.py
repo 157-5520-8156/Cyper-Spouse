@@ -233,13 +233,26 @@ class WorldBehaviorPolicy:
         """Derive a short-lived expression guide without writing private prose."""
         needs = _mapping(state.get("needs"))
         modulation = _mapping(state.get("emotion_modulation"))
+        display = _mapping(state.get("last_affect_display"))
         relationship = _mapping(_mapping(state.get("relationships")).get(user_id))
         relationship_stage = str(relationship.get("stage") or "stranger")
         if relationship_stage not in STAGES:
             relationship_stage = "stranger"
         mode = str(modulation.get("mode") or "calm")
         behavior_tendency = str(modulation.get("behavior_tendency") or "neutral")
-        if behavior_tendency in {"withdraw", "repair_open", "patient", "caring"}:
+        if behavior_tendency in {"caring", "repair_open", "repair_observing"}:
+            return ExpressionGuidance(
+                f"affect_{behavior_tendency}",
+                affect_guidance(modulation),
+            )
+        if bool(display.get("mixed")) or display.get("regulation_strategy") == "contain_spillover":
+            return ExpressionGuidance(
+                "affect_mixed"
+                if bool(display.get("mixed"))
+                else "affect_spillover",
+                str(display.get("prompt_line") or affect_guidance(modulation)),
+            )
+        if behavior_tendency in {"withdraw", "patient"}:
             return ExpressionGuidance(
                 f"affect_{behavior_tendency}",
                 affect_guidance(modulation),

@@ -21,6 +21,7 @@ from companion_daemon.action_coordinator import (
     SegmentedActionCoordinator,
     UserInterjectionKind,
 )
+from companion_daemon.affect_display import plan_affect_display
 from companion_daemon.life_simulation import LifeSimulation
 from companion_daemon.life_evolution import LifeEvolution
 from companion_daemon.time import utc_now
@@ -2450,6 +2451,9 @@ class WorldKernel:
                         "long_term_goals": _as_list(seed.get("long_term_goals", []), "long-term goals"),
                         "life_outcome_templates": _as_dict(seed.get("life_outcome_templates", {}), "life outcome templates"),
                         "location_travel_minutes": _as_dict(seed.get("location_travel_minutes", {}), "location travel minutes"),
+                        "affect_profile": _as_dict(
+                            seed.get("affect_profile", {}), "affect profile"
+                        ),
                     },
                 )
             ]
@@ -2838,6 +2842,7 @@ class WorldKernel:
                         "conversation_thread_expired",
                         expires_at.isoformat(),
                         source_reference=f"conversation_thread:{thread_id}",
+                        target=user_id or "user",
                     )
                     emit(
                         "AffectChanged",
@@ -3203,6 +3208,13 @@ class WorldKernel:
                                     outcome_payload["source_reference"]
                                 ),
                                 intensity=int(outcome_payload["intensity"]),
+                                target=(
+                                    f"npc:{outcome_payload['npc_id']}"
+                                    if outcome_payload.get("npc_id")
+                                    else f"goal:{outcome_payload['goal_id']}"
+                                    if outcome_payload.get("goal_id")
+                                    else "world"
+                                ),
                             )
                             emit(
                                 "AffectChanged",
@@ -4462,13 +4474,27 @@ class WorldKernel:
                     interaction.get("evidence_spans", []), "interaction evidence"
                 )
             ]
+            confidence = float(interaction.get("confidence", 1.0))
+            certainty = int(interaction.get("certainty", 100))
+            goal_congruence = int(interaction.get("goal_congruence", 0))
+            controllability = int(interaction.get("controllability", 50))
+            norm_compatibility = int(interaction.get("norm_compatibility", 0))
+            power_delta = int(interaction.get("power_delta", 0))
             if not 1 <= severity <= 4 or target not in {
                 "general",
                 "companion",
                 "self",
                 "third_party",
-            } or len(acts) > 6:
+            } or len(acts) > 6 or not 0.0 <= confidence <= 1.0:
                 raise WorldError("interaction appraisal is outside the bounded schema")
+            if (
+                not 0 <= certainty <= 100
+                or not -100 <= goal_congruence <= 100
+                or not 0 <= controllability <= 100
+                or not -100 <= norm_compatibility <= 100
+                or not -100 <= power_delta <= 100
+            ):
+                raise WorldError("interaction appraisal dimensions are outside bounds")
             if (
                 appraisal in HARMFUL_INTERACTION_APPRAISALS
                 and appraisal != "repeated_violation"
@@ -4480,7 +4506,11 @@ class WorldKernel:
                 ) > 0
             ):
                 appraisal = "repeated_violation"
-            consequence = self.interaction_rules.consequence(appraisal)
+            consequence = self.interaction_rules.consequence(
+                appraisal,
+                severity=severity if has_interaction_severity else 3,
+                confidence=confidence,
+            )
             events: list[tuple[str, dict[str, object]]] = [
                 (
                     "TurnAppraised",
@@ -4492,6 +4522,20 @@ class WorldKernel:
                         "acts": acts,
                         "target": target,
                         "evidence_spans": evidence_spans,
+                        "literal_act": str(interaction.get("literal_act") or "")[:160],
+                        "implied_attitude": str(
+                            interaction.get("implied_attitude") or ""
+                        )[:160],
+                        "agency": str(interaction.get("agency") or "unknown")[:40],
+                        "certainty": certainty,
+                        "goal_congruence": goal_congruence,
+                        "controllability": controllability,
+                        "norm_compatibility": norm_compatibility,
+                        "power_delta": power_delta,
+                        "confidence": confidence,
+                        "alternative_appraisal": str(
+                            interaction.get("alternative_appraisal") or ""
+                        )[:240],
                         "policy": consequence.policy,
                         "rule_version": self.interaction_rules.RULE_VERSION,
                     },
@@ -4509,6 +4553,7 @@ class WorldKernel:
                 for need, delta in consequence.need_deltas.items()
             )
             user_id = str(command.get("user_id") or "")
+            affinity_for_affect: dict[str, object] = {}
             if user_id:
                 entities = _as_dict(state["entities"], "entities")
                 user = _as_dict(entities.get(user_id), "appraised user")
@@ -4582,6 +4627,7 @@ class WorldKernel:
                             _as_dict(state["clock"], "clock").get("logical_at") or ""
                         ),
                     )
+                    affinity_for_affect = affinity.state
                     if not affinity.duplicate:
                         events.append(
                             (
@@ -4604,11 +4650,64 @@ class WorldKernel:
                 logical_at,
                 source_reference=f"message:{command.get('message_id') or command.get('intent_id') or 'unknown'}",
                 intensity=severity if has_interaction_severity else None,
+                target=target,
+                appraisal_dimensions={
+                    "certainty": certainty,
+                    "goal_congruence": goal_congruence,
+                    "controllability": controllability,
+                    "norm_compatibility": norm_compatibility,
+                    "power_delta": power_delta,
+                    "confidence": confidence,
+                },
+                relationship_residue=affinity_for_affect,
             )
             events.append(
                 (
                     "AffectChanged",
                     affect_outcome_payload(affect, logical_at=logical_at, event_type="AffectChanged"),
+                )
+            )
+            relation_for_decision = (
+                dict(
+                    _as_dict(
+                        _as_dict(state["relationships"], "relationships").get(
+                            user_id, {}
+                        ),
+                        "relationship",
+                    )
+                )
+                if user_id
+                else {}
+            )
+            for dimension, delta in consequence.relationship_deltas.items():
+                relation_for_decision[dimension] = max(
+                    -100,
+                    min(
+                        100,
+                        int(relation_for_decision.get(dimension, 0)) + int(delta),
+                    ),
+                )
+            needs_for_decision = dict(_as_dict(state["needs"], "needs"))
+            for need, delta in consequence.need_deltas.items():
+                needs_for_decision[need] = max(
+                    0, min(100, int(needs_for_decision.get(need, 0)) + int(delta))
+                )
+            affect_projection = affect_outcome_payload(
+                affect, logical_at=logical_at, event_type="AffectChanged"
+            )
+            display_plan = plan_affect_display(
+                affect_projection,
+                relation_for_decision,
+                needs_for_decision,
+                current_appraisal=appraisal,
+            )
+            events.append(
+                (
+                    "AffectDisplaySelected",
+                    {
+                        "message_id": str(command.get("message_id") or ""),
+                        **display_plan.payload(),
+                    },
                 )
             )
             message_id = str(command.get("message_id") or "")
@@ -4620,11 +4719,6 @@ class WorldKernel:
                 {},
             )
             user_text = str(_as_dict(observed_message, "observed message").get("text") or "")
-            relation_for_decision = (
-                _as_dict(_as_dict(state["relationships"], "relationships").get(user_id, {}), "relationship")
-                if user_id
-                else {}
-            )
             decision = self.character_deliberation.decide(
                 situation={
                     "text": user_text,
@@ -4647,7 +4741,7 @@ class WorldKernel:
                     "irritation": affect.vector.get("anger", 0),
                     **affect.vector,
                 },
-                needs=_as_dict(state["needs"], "needs"),
+                needs=needs_for_decision,
                 user_request=UserRequest.from_text(user_text),
                 open_commitments=tuple(
                     key for key, item in _as_dict(state.get("conversation_threads", {}), "threads").items()
@@ -4719,6 +4813,7 @@ class WorldKernel:
                 "reply_discomfort",
                 logical_at,
                 source_reference=f"message:{message_id}",
+                target="companion",
             )
             return [(
                 "AffectCommitted",
@@ -5031,7 +5126,12 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         next_state["world_started_at"] = payload["logical_at"]
         next_state["clock_observed_at"] = event.observed_at
         next_state["emotion_modulation"] = initial_affect(
-            str(payload["logical_at"]), protagonist=protagonist
+            str(payload["logical_at"]),
+            protagonist=protagonist,
+            profile=payload.get("affect_profile", {}),
+        )
+        next_state["affect_profile"] = dict(
+            _as_dict(payload.get("affect_profile", {}), "affect profile")
         )
         next_state["entities"] = {str(protagonist["id"]): {**protagonist, "status": "active"}}
         next_state["daily_schedule"] = payload.get("daily_schedule", [])
@@ -5690,6 +5790,8 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
             turn = raw_turn
             turn["appraisal"] = str(payload.get("appraisal") or "")
             turn["user_id"] = str(payload.get("user_id") or "")
+    elif event.event_type == "AffectDisplaySelected":
+        next_state["last_affect_display"] = dict(payload)
     elif event.event_type == "AffinityInteractionSettled":
         user_id = str(payload["user_id"])
         _as_dict(next_state["long_term_affinity"], "long-term affinity")[user_id] = dict(

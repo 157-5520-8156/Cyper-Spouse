@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from difflib import SequenceMatcher
+from hashlib import sha256
 from typing import Literal
 
 
@@ -153,6 +154,7 @@ def build_safe_failure_candidate(
     relationship: dict[str, object] | None = None,
     selected_stance: str | None = None,
     speech_act: str | None = None,
+    variant_key: str = "",
 ) -> dict[str, object]:
     """Build a fact-safe skeleton, then express it through bounded state.
 
@@ -209,7 +211,7 @@ def build_safe_failure_candidate(
     resolved_speech_act = speech_act or (
         "question" if user_text.rstrip().endswith(("?", "？")) else "statement"
     )
-    base_text = _SAFE_SPEECH_ACT_SKELETONS[resolved_speech_act]
+    base_text = _safe_speech_act_text(resolved_speech_act, variant_key)
     if resolved_speech_act == "opinion":
         topic = re.sub(r"\s+", "", user_text).strip("？?")[:48]
         if topic:
@@ -251,6 +253,46 @@ _SAFE_SPEECH_ACT_SKELETONS = {
     "statement": "我在听；刚才没接好的地方，我不会装作已经懂了。",
 }
 
+_SAFE_SPEECH_ACT_VARIANTS = {
+    "boundary_response": (
+        "这句话越过我的边界了，我不接受这种互动方式。",
+        "先停一下，这种说法我不接受。",
+        "你可以有情绪，但不能用这种方式对我说话。",
+        "这已经让我不舒服了，我会把边界说清楚。",
+    ),
+    "epistemic": (
+        "我没有足够依据，不继续猜。",
+        "这部分我不能确定，所以先不补结论。",
+        "我手里的信息不够，直接猜会误导你。",
+    ),
+    "opinion": (
+        "我现在没有足够依据替你定结论；如果只说看法，我会把判断和不确定性一起说清。",
+        "我可以说倾向，但不想把它包装成确定答案。",
+        "这件事我有一点判断，不过证据不够，我会把保留也说出来。",
+        "如果只谈看法，我愿意说；要下结论的话，现在还不够。",
+    ),
+    "question": (
+        "这个我现在没有足够依据，不想随口补一个答案。",
+        "我还不能确定，先不拿一个听起来顺的答案敷衍你。",
+        "这题我得保留一下，现有信息撑不起确定回答。",
+        "我可以继续听你补充，但现在直接回答会有点乱猜。",
+    ),
+    "statement": (
+        "我在听；刚才没接好的地方，我不会装作已经懂了。",
+        "我接到了，但有些地方还没听完整，不想假装全明白。",
+        "这句话我听见了，我先按能确认的部分接住。",
+        "我没有漏掉你这句，只是暂时不替它补上没说出的部分。",
+    ),
+}
+
+
+def _safe_speech_act_text(speech_act: str, variant_key: str) -> str:
+    variants = _SAFE_SPEECH_ACT_VARIANTS.get(speech_act)
+    if not variants or not variant_key:
+        return _SAFE_SPEECH_ACT_SKELETONS[speech_act]
+    digest = sha256(f"{speech_act}|{variant_key}".encode()).digest()
+    return variants[int.from_bytes(digest[:4], "big") % len(variants)]
+
 
 def _express_safe_skeleton(
     skeleton: dict[str, object],
@@ -288,10 +330,28 @@ def _express_safe_skeleton(
     return {**skeleton, "reply_text": " ".join(part for part in (base, suffix) if part)}
 
 
-def affect_reply_violation(affect: dict[str, object], reply_text: str) -> str | None:
+def affect_reply_violation(
+    affect: dict[str, object],
+    reply_text: str,
+    display_plan: dict[str, object] | None = None,
+) -> str | None:
     """Reject emotion claims that contradict or outrun the world projection."""
     vector = affect.get("vector")
     vector = vector if isinstance(vector, dict) else {}
+    if (
+        isinstance(display_plan, dict)
+        and display_plan.get("regulation_strategy") == "contain_spillover"
+        and re.search(
+            r"(?:"
+            r"(?:都是|全是|还不是|要不是|因为|怪)[^。！？]{0,4}你[^。！？]{0,14}(?:烦|生气|难受|来气|心情不好)|"
+            r"(?:你(?:一出现|一来|一说话|让我|把我|害我|气得我)|看到你|见到你)[^。！？]{0,14}(?:更?烦|生气|难受|来气|心情不好)|"
+            r"(?:坏心情|心情不好)[^。！？]{0,12}(?:你造成|因为你|怪你)|"
+            r"被你气"
+            r")",
+            reply_text,
+        )
+    ):
+        return "spillover_misattributed_to_user"
     negative_total = sum(
         int(vector.get(key, 0) or 0)
         for key in ("hurt", "anger", "sadness", "loneliness", "anxiety", "resentment")
@@ -342,24 +402,6 @@ def affect_reply_violation(affect: dict[str, object], reply_text: str) -> str | 
     if sadness_claim and not supports_sadness:
         return "uncommitted_companion_affect"
     return None
-
-
-def reply_proposes_new_discomfort(affect: dict[str, object], reply_text: str) -> bool:
-    """Return whether current-turn prose proposes a small sourced negative appraisal."""
-    vector = affect.get("vector")
-    vector = vector if isinstance(vector, dict) else {}
-    already_supported = any(
-        int(vector.get(key, 0) or 0) >= 4
-        for key in ("hurt", "anger", "sadness", "anxiety", "resentment")
-    )
-    if already_supported:
-        return False
-    return bool(
-        re.search(
-            r"(?:我|我这会儿|刚才)[^。！？]{0,10}(?:不舒服|介意|不高兴|有点生气|有点难过)",
-            reply_text,
-        )
-    )
 
 
 def asks_for_source_detail(user_text: str) -> bool:

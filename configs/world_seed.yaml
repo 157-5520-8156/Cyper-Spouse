@@ -47,6 +47,15 @@ protagonist:
     - dorm_routine
     - literature_society
     - photography_society
+affect_profile:
+  version: zhizhi-affect-v1
+  negative_half_life_hours: 18
+  positive_half_life_hours: 10
+  warmth_half_life_hours: 6
+  repair_evidence_required: 2
+  spillover_leakage_cap: 25
+  resentment_half_life_gain_hours: 2
+  resentment_intensity_gain: 3
 life_outcome_templates:
   literature_reading:
     location: 华东师范大学

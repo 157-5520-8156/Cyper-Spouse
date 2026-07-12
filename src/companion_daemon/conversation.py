@@ -2,7 +2,7 @@ from typing import Protocol
 
 import httpx
 
-from companion_daemon.llm import ChatModel
+from companion_daemon.llm import ChatModel, model_call_scope
 from companion_daemon.models import IncomingMessage, MoodState
 from companion_daemon.prompts import reply_prompt
 from companion_daemon.reply_postprocess import postprocess_reply_text
@@ -71,21 +71,22 @@ class PromptedConversationCore:
         self_core_block: str | None = None,
         context_block: str | None = None,
     ) -> str:
-        text = await self.model.complete(
-            reply_prompt(
-                message,
-                mood_state,
-                recent_lines,
-                platform_context,
-                self.companion_system_prompt,
-                memory_lines,
-                attachment_lines,
-                example_pairs=self.example_messages,
-                self_core_block=self_core_block,
-                context_block=context_block,
-            ),
-            temperature=0.75,
-        )
+        with model_call_scope("legacy_reply"):
+            text = await self.model.complete(
+                reply_prompt(
+                    message,
+                    mood_state,
+                    recent_lines,
+                    platform_context,
+                    self.companion_system_prompt,
+                    memory_lines,
+                    attachment_lines,
+                    example_pairs=self.example_messages,
+                    self_core_block=self_core_block,
+                    context_block=context_block,
+                ),
+                temperature=0.75,
+            )
         text = postprocess_reply_text(text, recent_lines=recent_lines, user_text=message.text)
         if self.rewrite_model and len(text) >= 5:
             text = await self._rewrite_for_naturalness(text, context_block or "无额外事实账本")
@@ -93,15 +94,16 @@ class PromptedConversationCore:
 
     async def _rewrite_for_naturalness(self, text: str, evidence: str) -> str:
         try:
-            rewritten = await self.rewrite_model.complete(
-                [
-                    {
-                        "role": "user",
-                        "content": _REWRITE_PROMPT.format(text=text, evidence=evidence),
-                    }
-                ],
-                temperature=0.2,
-            )
+            with model_call_scope("legacy_reply_rewrite"):
+                rewritten = await self.rewrite_model.complete(
+                    [
+                        {
+                            "role": "user",
+                            "content": _REWRITE_PROMPT.format(text=text, evidence=evidence),
+                        }
+                    ],
+                    temperature=0.2,
+                )
             rewritten = sanitize_chat_text(rewritten)
             if rewritten and len(rewritten) <= len(text) * 3:
                 return rewritten

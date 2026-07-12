@@ -80,6 +80,35 @@ def test_emotion_polarity_must_match_the_injected_projection() -> None:
     ) == "uncommitted_companion_affect"
 
 
+@pytest.mark.parametrize(
+    "reply_text",
+    [
+        "都是你害我心情不好，我才这么烦。",
+        "你一出现我就更烦了。",
+        "要不是你，我不会这么难受。",
+        "看到你就来气。",
+        "我的坏心情是你造成的。",
+    ],
+)
+def test_npc_spillover_cannot_be_misattributed_to_the_user(
+    reply_text: str,
+) -> None:
+    violation = affect_reply_violation(
+        {"behavior_tendency": "guarded", "vector": {"anger": 14}},
+        reply_text,
+        {"regulation_strategy": "contain_spillover", "attribution_target": "npc:roommate"},
+    )
+    assert violation == "spillover_misattributed_to_user"
+
+
+def test_npc_spillover_may_be_disclosed_without_blaming_the_user() -> None:
+    assert affect_reply_violation(
+        {"behavior_tendency": "guarded", "vector": {"anger": 14}},
+        "刚才那场争执让我有点烦，但不是你的问题。",
+        {"regulation_strategy": "contain_spillover", "attribution_target": "npc:roommate"},
+    ) is None
+
+
 def test_injected_hurt_has_a_state_backed_failure_fallback() -> None:
     candidate = build_safe_failure_candidate(
         "你还好吗？",

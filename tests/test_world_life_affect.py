@@ -149,6 +149,10 @@ async def test_npc_conflict_changes_affect_then_next_turn_deliberation_and_promp
 
     snapshot = world.snapshot(started.world_id)
     assert snapshot["last_deliberation"]["drives"]["irritation"] > baseline["anger"]
+    display = snapshot["last_affect_display"]
+    assert display["attribution_target"] == "npc:roommate-lin"
+    assert display["regulation_strategy"] == "contain_spillover"
+    assert display["leakage"] <= 25
     prompt = "\n".join(
         str(message["content"])
         for call in model.calls
@@ -157,7 +161,7 @@ async def test_npc_conflict_changes_affect_then_next_turn_deliberation_and_promp
     assert reply is not None
     assert '"anger":' in prompt
     assert "npc_conflict" in prompt
-    assert "情绪还没过去" in prompt or "不讨好" in prompt
+    assert "不要把它算到用户头上" in prompt
 
 
 def test_goal_completion_creates_traceable_positive_affect(tmp_path: Path) -> None:

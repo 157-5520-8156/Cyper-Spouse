@@ -7,7 +7,7 @@ import pytest
 
 from companion_daemon.config import Settings, get_settings
 from companion_daemon.db import CompanionStore
-from companion_daemon.runtime import build_companion_engine
+from companion_daemon.runtime import build_companion_engine, require_flash_model
 from companion_daemon.world import WorldKernel
 
 
@@ -23,9 +23,14 @@ def test_daemon_prompt_core_is_default_without_env() -> None:
     settings = Settings(_env_file=None)
 
     assert settings.conversation_core == "prompt"
-    assert settings.deepseek_model == "deepseek-v4-pro"
-    assert settings.deepseek_thinking_enabled is True
+    assert settings.deepseek_model == "deepseek-v4-flash"
+    assert settings.deepseek_thinking_enabled is False
     assert not hasattr(settings, "world_runtime_enabled")
+
+
+def test_runtime_rejects_v4_pro_override() -> None:
+    with pytest.raises(ValueError, match="disabled"):
+        require_flash_model("deepseek-v4-pro", setting="DEEPSEEK_MODEL")
 
 
 def test_removed_world_runtime_switch_cannot_disable_the_world(

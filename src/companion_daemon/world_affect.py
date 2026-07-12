@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
+from math import pow
 from typing import Any
 
 from companion_daemon.world_affinity import personality_affect_baseline
@@ -13,6 +15,16 @@ AFFECT_KEYS = (
     "hurt", "anger", "sadness", "loneliness", "anxiety", "resentment", "warmth", "joy"
 )
 RULE_VERSION = "world-affect-v1"
+DEFAULT_AFFECT_PROFILE: dict[str, object] = {
+    "version": "affect-profile-v1",
+    "negative_half_life_hours": 18,
+    "positive_half_life_hours": 10,
+    "warmth_half_life_hours": 6,
+    "repair_evidence_required": 2,
+    "spillover_leakage_cap": 25,
+    "resentment_half_life_gain_hours": 2,
+    "resentment_intensity_gain": 3,
+}
 
 
 @dataclass(frozen=True)
@@ -33,6 +45,10 @@ class AffectOutcome:
     repair_observation_seconds: int = 0
     repair_streak: int = 0
     violation_count: int = 0
+    repair_evidence_count: int = 0
+    core_affect: dict[str, object] | None = None
+    active_episodes: tuple[dict[str, object], ...] = ()
+    profile: dict[str, object] | None = None
 
 
 _EFFECTS: dict[str, dict[str, int]] = {
@@ -45,6 +61,7 @@ _EFFECTS: dict[str, dict[str, int]] = {
     "repair_attempt": {"hurt": -6, "anger": -8, "sadness": -3, "anxiety": -2, "resentment": -5, "warmth": 4},
     "repair_perfunctory": {"hurt": -1, "anger": -1},
     "repair_specific": {"hurt": -9, "anger": -9, "sadness": -4, "anxiety": -3, "resentment": -6, "warmth": 3},
+    "boundary_respected": {"hurt": -3, "anger": -2, "anxiety": -2, "resentment": -2, "warmth": 1},
     "repair_restitution": {"hurt": -12, "anger": -12, "sadness": -6, "anxiety": -4, "resentment": -8, "warmth": 6},
     "repeated_violation": {"hurt": 24, "anger": 18, "sadness": 7, "anxiety": 7, "resentment": 14, "joy": -6},
     "warmth_received": {"warmth": 5, "joy": 3, "hurt": -1},
@@ -72,6 +89,7 @@ _BEHAVIOR: dict[str, tuple[str, str, str]] = {
     "repair_attempt": ("softening", "soft", "repair was heard but not yet complete"),
     "repair_perfunctory": ("guarded", "neutral", "a bare apology was heard but needs evidence"),
     "repair_specific": ("softening", "soft", "a specific apology began an observation period"),
+    "boundary_respected": ("softening", "soft", "a later action respected the stated boundary"),
     "repair_restitution": ("softening", "soft", "corrective action began an observation period"),
     "repeated_violation": ("guarded", "guarded", "a boundary was crossed again during repair"),
     "warmth_received": ("warm", "smile", "warmth was received"),
@@ -95,8 +113,14 @@ _DECAY_PER_HOUR = {
 }
 
 
-def initial_affect(logical_at: str, *, protagonist: object = None) -> dict[str, object]:
+def initial_affect(
+    logical_at: str,
+    *,
+    protagonist: object = None,
+    profile: object = None,
+) -> dict[str, object]:
     baseline = personality_affect_baseline(protagonist)
+    affect_profile = _profile(profile)
     return _state(
         vector=dict(baseline),
         personality_baseline=baseline,
@@ -110,6 +134,10 @@ def initial_affect(logical_at: str, *, protagonist: object = None) -> dict[str, 
         last_changed_at=logical_at,
         decay_remainder_seconds=0,
         decay_anchor_at=logical_at,
+        core_affect=_core_affect(baseline, baseline, ()),
+        active_episodes=(),
+        repair_evidence_count=0,
+        profile=affect_profile,
     )
 
 
@@ -120,11 +148,16 @@ def apply_appraisal(
     *,
     source_reference: str = "",
     intensity: int | None = None,
+    target: str = "general",
+    appraisal_dimensions: dict[str, object] | None = None,
+    relationship_residue: dict[str, object] | None = None,
 ) -> AffectOutcome:
     repair_observation_seconds = int(current.get("repair_observation_seconds") or 0)
     violation_count = int(current.get("violation_count") or 0)
     repair_streak = int(current.get("repair_streak") or 0)
     repair_quality = str(current.get("repair_quality") or "")
+    repair_evidence_count = int(current.get("repair_evidence_count") or 0)
+    profile = _profile(current.get("profile"))
     if appraisal in {"boundary_violation", "control_pressure"} and (
         repair_observation_seconds > 0 or repair_streak > 0
     ):
@@ -142,6 +175,30 @@ def apply_appraisal(
                 bounded_intensity = max(1, min(100, raw_intensity))
                 scaled = int(round(delta * (50 + bounded_intensity) / 100))
         vector[key] = _clamp(vector[key] + scaled)
+    raw_episodes = current.get("active_episodes", ())
+    episodes = (
+        tuple(
+            dict(item)
+            for item in raw_episodes
+            if isinstance(item, dict) and item.get("status") != "resolved"
+        )
+        if isinstance(raw_episodes, (list, tuple))
+        else ()
+    )
+    if has_affect_effect:
+        episodes = (
+            *episodes,
+            _new_episode(
+                appraisal=appraisal,
+                logical_at=logical_at,
+                source_reference=source_reference,
+                target=target,
+                intensity=intensity,
+                dimensions=appraisal_dimensions or {},
+                relationship_residue=relationship_residue or {},
+                profile=profile,
+            ),
+        )[-16:]
     mode, expression, reason = _BEHAVIOR.get(
         appraisal,
         (
@@ -174,6 +231,7 @@ def apply_appraisal(
         repair_streak = 0
         repair_quality = ""
         repair_observation_seconds = 0
+        repair_evidence_count = 0
     elif appraisal == "repair_perfunctory":
         repair_quality = "perfunctory"
         repair_streak = 0
@@ -187,11 +245,16 @@ def apply_appraisal(
         repair_quality = "specific"
         repair_streak += 1
         repair_observation_seconds = 24 * 3600
+        repair_evidence_count = 0
         behavior_tendency = "repair_observing"
     elif appraisal == "repair_restitution":
         repair_quality = "restitution"
         repair_streak += 2
         repair_observation_seconds = 12 * 3600
+        repair_evidence_count = 0
+        behavior_tendency = "repair_observing"
+    elif repair_observation_seconds > 0 and appraisal == "boundary_respected":
+        repair_evidence_count = min(6, repair_evidence_count + 1)
         behavior_tendency = "repair_observing"
     if repair_observation_seconds > 0:
         unresolved = True
@@ -220,6 +283,10 @@ def apply_appraisal(
         repair_observation_seconds=repair_observation_seconds,
         repair_streak=repair_streak,
         violation_count=violation_count,
+        core_affect=_core_affect(vector, baseline, episodes),
+        active_episodes=episodes,
+        repair_evidence_count=repair_evidence_count,
+        profile=profile,
     )
 
 
@@ -239,7 +306,28 @@ def decay_affect(current: dict[str, object], elapsed_seconds: int, logical_at: s
     repair_observation_seconds = max(
         0, int(current.get("repair_observation_seconds") or 0) - max(0, int(elapsed_seconds))
     )
-    repair_quality = str(current.get("repair_quality") or "") if repair_observation_seconds else ""
+    repair_evidence_count = int(current.get("repair_evidence_count") or 0)
+    profile = _profile(current.get("profile"))
+    current_repair_quality = str(current.get("repair_quality") or "")
+    if current_repair_quality and repair_evidence_count < int(
+        profile["repair_evidence_required"]
+    ):
+        repair_observation_seconds = max(3600, repair_observation_seconds)
+    repair_quality = current_repair_quality if repair_observation_seconds else ""
+    episodes = _decay_episodes(current, elapsed_seconds, logical_at)
+    if (
+        current_repair_quality
+        and repair_evidence_count >= int(profile["repair_evidence_required"])
+        and negative_total < 8
+    ):
+        episodes = tuple(
+            episode
+            for episode in episodes
+            if not (
+                int(episode.get("valence") or 0) < 0
+                and str(episode.get("target") or "") == "companion"
+            )
+        )
     if repair_observation_seconds:
         unresolved = True
         behavior_tendency, mode, expression = "repair_observing", "softening", "soft"
@@ -270,6 +358,10 @@ def decay_affect(current: dict[str, object], elapsed_seconds: int, logical_at: s
         repair_observation_seconds=repair_observation_seconds,
         repair_streak=int(current.get("repair_streak") or 0),
         violation_count=int(current.get("violation_count") or 0),
+        repair_evidence_count=repair_evidence_count,
+        core_affect=_core_affect(vector, baseline, episodes),
+        active_episodes=episodes,
+        profile=profile,
     )
 
 
@@ -292,6 +384,10 @@ def outcome_payload(outcome: AffectOutcome, *, logical_at: str, event_type: str)
         "repair_observation_seconds": outcome.repair_observation_seconds,
         "repair_streak": outcome.repair_streak,
         "violation_count": outcome.violation_count,
+        "repair_evidence_count": outcome.repair_evidence_count,
+        "core_affect": dict(outcome.core_affect or {}),
+        "active_episodes": [dict(item) for item in outcome.active_episodes],
+        "profile": dict(outcome.profile or DEFAULT_AFFECT_PROFILE),
     }
     if event_type == "AffectDecayed":
         payload.update(
@@ -408,3 +504,155 @@ def _negative_total(vector: dict[str, int], baseline: dict[str, int]) -> int:
         max(0, vector[key] - baseline[key])
         for key in ("hurt", "anger", "sadness", "loneliness", "anxiety", "resentment")
     )
+
+
+def _new_episode(
+    *,
+    appraisal: str,
+    logical_at: str,
+    source_reference: str,
+    target: str,
+    intensity: int | None,
+    dimensions: dict[str, object],
+    relationship_residue: dict[str, object],
+    profile: dict[str, object],
+) -> dict[str, object]:
+    raw_intensity = 50 if intensity is None else int(intensity)
+    episode_intensity = (
+        {1: 30, 2: 50, 3: 75, 4: 95}[raw_intensity]
+        if 1 <= raw_intensity <= 4
+        else max(1, min(100, raw_intensity))
+    )
+    episode_intensity = min(
+        100,
+        episode_intensity
+        + min(10, max(0, -int(dimensions.get("norm_compatibility", 0))) // 20)
+        + min(8, max(0, -int(dimensions.get("power_delta", 0))) // 20),
+    )
+    effect = _EFFECTS.get(appraisal, {})
+    positive = sum(max(0, effect.get(key, 0)) for key in ("warmth", "joy"))
+    negative = sum(
+        max(0, effect.get(key, 0))
+        for key in ("hurt", "anger", "sadness", "loneliness", "anxiety", "resentment")
+    )
+    valence = 1 if positive > negative else -1 if negative > positive else 0
+    half_life = int(
+        profile[
+            "negative_half_life_hours"
+            if appraisal in HARMFUL_INTERACTION_APPRAISALS
+            else "positive_half_life_hours"
+        ]
+    )
+    residue_vector = relationship_residue.get("vector", {})
+    residue_vector = residue_vector if isinstance(residue_vector, dict) else {}
+    learned_resentment = max(0, int(residue_vector.get("resentment") or 0))
+    if appraisal in HARMFUL_INTERACTION_APPRAISALS:
+        half_life += min(
+            12,
+            learned_resentment
+            * int(profile["resentment_half_life_gain_hours"]),
+        )
+        episode_intensity = min(
+            100,
+            episode_intensity
+            + min(15, learned_resentment * int(profile["resentment_intensity_gain"])),
+        )
+    if appraisal in {"warmth_received", "social_warmth", "goal_progress"}:
+        half_life = int(profile["warmth_half_life_hours"])
+    basis = f"{source_reference}|{appraisal}|{logical_at}|{target}"
+    return {
+        "episode_id": f"affect:{sha256(basis.encode()).hexdigest()[:16]}",
+        "source_reference": source_reference,
+        "appraisal": appraisal,
+        "target": target,
+        "started_at": logical_at,
+        "updated_at": logical_at,
+        "intensity": episode_intensity,
+        "valence": valence,
+        "half_life_hours": half_life,
+        "status": "active",
+        "certainty": int(dimensions.get("certainty", 100)),
+        "controllability": int(dimensions.get("controllability", 50)),
+        "power_delta": int(dimensions.get("power_delta", 0)),
+        "confidence": float(dimensions.get("confidence", 1.0)),
+        "profile_version": str(profile["version"]),
+    }
+
+
+def _decay_episodes(
+    current: dict[str, object], elapsed_seconds: int, logical_at: str
+) -> tuple[dict[str, object], ...]:
+    elapsed_hours = max(0.0, float(elapsed_seconds) / 3600.0)
+    decayed: list[dict[str, object]] = []
+    raw_episodes = current.get("active_episodes", ())
+    if not isinstance(raw_episodes, (list, tuple)):
+        return ()
+    for raw in raw_episodes:
+        if not isinstance(raw, dict) or raw.get("status") == "resolved":
+            continue
+        half_life = max(1.0, float(raw.get("half_life_hours") or 12))
+        intensity = int(round(int(raw.get("intensity") or 0) * pow(0.5, elapsed_hours / half_life)))
+        if intensity < 8:
+            continue
+        decayed.append(
+            {
+                **raw,
+                "intensity": intensity,
+                "updated_at": logical_at,
+                "status": "regulated" if elapsed_seconds > 0 else str(raw.get("status") or "active"),
+            }
+        )
+    return tuple(decayed[-16:])
+
+
+def _core_affect(
+    vector: dict[str, int],
+    baseline: dict[str, int],
+    episodes: tuple[dict[str, object], ...],
+) -> dict[str, object]:
+    positive = sum(max(0, vector[key] - baseline[key]) for key in ("warmth", "joy"))
+    negative = _negative_total(vector, baseline)
+    valence = max(-100, min(100, (positive - negative) * 2))
+    arousal = max(
+        0,
+        min(
+            100,
+            int(
+                (
+                    vector["anger"]
+                    + vector["anxiety"]
+                    + vector["joy"]
+                    + vector["hurt"] // 2
+                )
+                / 2
+            ),
+        ),
+    )
+    dominance = max(
+        -100,
+        min(
+            100,
+            vector["anger"] - vector["anxiety"] - vector["hurt"] // 2,
+        ),
+    )
+    episode_valences = {int(item.get("valence") or 0) for item in episodes}
+    return {
+        "valence": valence,
+        "arousal": arousal,
+        "dominance": dominance,
+        "mixed": -1 in episode_valences and 1 in episode_valences,
+        "rule_version": "core-affect-v1",
+    }
+
+
+def _profile(value: object) -> dict[str, object]:
+    result = dict(DEFAULT_AFFECT_PROFILE)
+    if isinstance(value, dict):
+        for key, default in DEFAULT_AFFECT_PROFILE.items():
+            if key not in value:
+                continue
+            if key == "version":
+                result[key] = str(value[key])[:80]
+            elif isinstance(default, int):
+                result[key] = max(1, min(168, int(value[key])))
+    return result

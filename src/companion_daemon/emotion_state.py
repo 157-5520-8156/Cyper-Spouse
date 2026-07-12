@@ -29,6 +29,12 @@ _DEHUMANIZATION_PATTERNS = (
     r"你(?:就是)?(?:个)?(?:破AI|人工智障|垃圾程序)",
 )
 _COERCION_PATTERNS = (r"(?:给爷|给我)[^。！？]{0,8}(?:叫主人|跪|听话)",)
+_BOUNDARY_RESPECT_PATTERNS = (
+    r"你不想(?:说|聊|回答)[^。！？]{0,8}(?:就不|可以不|不用)",
+    r"(?:我会|我尊重|会尊重)[^。！？]{0,10}(?:你的边界|你的选择|你的决定)",
+    r"你说停我就停",
+    r"不再(?:逼你|追问|勉强你|命令你)",
+)
 
 
 @dataclass(frozen=True)
@@ -64,6 +70,19 @@ def interpret_interaction(
             "接受一点点，但不要立刻完全恢复热情。",
             acts=("repair",),
             target="companion",
+        )
+
+    boundary_respect = _first_match(text, _BOUNDARY_RESPECT_PATTERNS)
+    if boundary_respect:
+        return InteractionEvent(
+            "boundary_respected",
+            2,
+            "repair_followthrough",
+            "对方在后续互动里实际尊重了边界，这比重复道歉更有分量。",
+            "可以记下这次一致行动，但仍按累积证据逐步恢复。",
+            acts=("boundary_respect", "repair_followthrough"),
+            target="companion",
+            evidence_spans=(boundary_respect,),
         )
 
     sexual = _first_match(text, _SEXUAL_BOUNDARY_PATTERNS)

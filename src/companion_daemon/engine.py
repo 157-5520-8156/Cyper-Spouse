@@ -19,6 +19,10 @@ from companion_daemon.character import CharacterProfile
 from companion_daemon.context_assembler import ContextAssembler
 from companion_daemon.conversation import ConversationCore, PromptedConversationCore
 from companion_daemon.context_orchestrator import build_context_package
+from companion_daemon.contextual_appraisal import (
+    needs_contextual_appraisal,
+    propose_contextual_appraisal,
+)
 from companion_daemon.conversation_cadence import (
     ConversationCadence,
     derive_conversation_cadence,
@@ -51,7 +55,7 @@ from companion_daemon.life_runtime import (
     synchronize_life_runtime,
     runtime_prompt_line,
 )
-from companion_daemon.llm import ChatModel
+from companion_daemon.llm import ChatModel, model_call_scope
 from companion_daemon.memory import extract_memories, is_durable_user_fact
 from companion_daemon.models import (
     CompanionReply,
@@ -120,12 +124,24 @@ from companion_daemon.world_conversation import (
     only_recites_irrelevant_sources,
     only_repeats_claimed_sources,
     repeats_recent_companion_reply,
-    reply_proposes_new_discomfort,
 )
 from companion_daemon.world_media import WorldMediaPolicy
 from companion_daemon.world_reply_audit import WorldReplyAuditor
 
 logger = logging.getLogger(__name__)
+
+
+def contextual_history_for_user(
+    history: object, user_id: str
+) -> list[dict[str, object]]:
+    """Keep private dialogue context scoped to the active world user."""
+    if not isinstance(history, list):
+        return []
+    return [
+        item
+        for item in history
+        if isinstance(item, dict) and str(item.get("user_id") or "") == user_id
+    ]
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -175,6 +191,7 @@ class CompanionEngine:
         world_kernel: WorldKernel | None = None,
         world_id: str | None = None,
         world_grounding_audit_model: ChatModel | None = None,
+        interaction_appraisal_model: ChatModel | None = None,
         attachment_cache: AttachmentCache | None = None,
         attachment_fetcher: Callable[[str], Awaitable[bytes]] | None = None,
     ):
@@ -194,6 +211,7 @@ class CompanionEngine:
         self.context_assembler = ContextAssembler()
         self.world_media_policy = WorldMediaPolicy()
         self.world_grounding_audit_model = world_grounding_audit_model
+        self.interaction_appraisal_model = interaction_appraisal_model
         self.attachment_cache = attachment_cache
         self.attachment_fetcher = attachment_fetcher or self._fetch_attachment
         self.world_reply_auditor = WorldReplyAuditor()
@@ -574,15 +592,23 @@ class CompanionEngine:
             return
         action_id = self._begin_world_model_call(purpose=purpose, causation=causation)
         try:
-            raw, audit = await self.world_reply_auditor.evaluate(
-                self.world_grounding_audit_model,
-                user_text=user_text,
-                reply_text=reply_text,
-                grounding_context=grounding_context,
-            )
+            with model_call_scope(purpose):
+                raw, audit = await self.world_reply_auditor.evaluate(
+                    self.world_grounding_audit_model,
+                    user_text=user_text,
+                    reply_text=reply_text,
+                    grounding_context=grounding_context,
+                )
+        except (TimeoutError, ConnectionError, httpx.HTTPError) as exc:
+            self._fail_world_model_call(action_id, str(exc))
+            # The candidate has already passed deterministic provenance,
+            # relationship, affect, and hard-gate validation.  Provider
+            # outage must not trigger repeated calls to the same unavailable
+            # model or leave the turn unfinished.
+            return
         except Exception as exc:
             self._fail_world_model_call(action_id, str(exc))
-            raise WorldError("independent grounding audit failed") from exc
+            raise WorldError(f"grounding audit failed internally: {exc}") from exc
         self._record_world_model_output(
             purpose=purpose,
             causation=causation,
@@ -1318,10 +1344,42 @@ class CompanionEngine:
             MoodState(),
             relationship_stage=relationship_stage,
         )
+        history = contextual_history_for_user(
+            self.world_kernel.snapshot(self.world_id).get("recent_messages", []),
+            user_id,
+        )
+        contextual_payload: dict[str, object] = {}
+        if (
+            self.interaction_appraisal_model
+            and needs_contextual_appraisal(message.text, event)
+        ):
+            appraisal_action_id = self._begin_world_model_call(
+                purpose="interaction_appraisal",
+                causation=str(message.message_id or message.sent_at.isoformat()),
+            )
+            try:
+                with model_call_scope("interaction_appraisal"):
+                    raw_appraisal, contextual = await propose_contextual_appraisal(
+                        self.interaction_appraisal_model,
+                        text=message.text,
+                        recent_messages=history,
+                        relationship_stage=relationship_stage,
+                    )
+            except Exception as exc:
+                self._fail_world_model_call(appraisal_action_id, str(exc))
+            else:
+                self._record_world_model_output(
+                    purpose="interaction_appraisal",
+                    causation=str(message.message_id or message.sent_at.isoformat()),
+                    content=raw_appraisal,
+                    action_id=appraisal_action_id,
+                )
+                event = contextual.interaction_event(event)
+                contextual_payload = contextual.payload()
+                contextual_payload.pop("appraisal", None)
         appraisal = event.kind
         if appraisal == "repair_attempt":
             appraisal = classify_repair_appraisal(message.text) or appraisal
-        history = self.world_kernel.snapshot(self.world_id).get("recent_messages", [])
         if appraisal == "ordinary_message" and isinstance(history, list) and len(history) >= 2:
             preceding = history[-2] if isinstance(history[-2], dict) else {}
             if preceding.get("direction") == "out" and preceding.get("outgoing_direction") == "proactive":
@@ -1359,6 +1417,7 @@ class CompanionEngine:
                     "target": event.target,
                     "severity": event.intensity,
                     "evidence_spans": list(event.evidence_spans),
+                    **contextual_payload,
                 },
                 "intent_id": intent_id,
                 "message_id": str(message.message_id or ""),
@@ -1548,34 +1607,6 @@ class CompanionEngine:
             "任何代用户点单、下单、购买、联系或对外发送的提议，都必须对应已调度 Action。"
             "用户要求没依据就直说时，必须明确承认依据不足，不得用泛化接话回避。"
         )
-        model_action_id = self._begin_world_model_call(purpose="reply", causation=intent_id)
-        try:
-            raw = await self.model.complete([
-                {"role": "system", "content": self.companion_system_prompt},
-                {
-                    "role": "user",
-                    "content": (
-                        f"{context_block}\n\n用户: {message.text}\n"
-                        "WorldReplyJSON: 只返回 JSON。事实或经历声明要把来源的 source_id 放入 mentioned_event_ids；"
-                        "claims.text 必须逐字复制来源证据，claims.assertion 必须逐字复制 reply_text 中对应的自然陈述。"
-                        "猜测、建议和问题不是事实声明，不要为它们创建 claim："
-                        '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
-                    ),
-                },
-            ], temperature=0.75)
-        except Exception as exc:
-            self._fail_world_model_call(model_action_id, str(exc))
-            raise
-        self._record_world_model_output(
-            purpose="reply", causation=intent_id, content=raw, action_id=model_action_id
-        )
-        parsed_candidate: dict[str, object] = {
-            "reply_text": "",
-            "mentioned_event_ids": [],
-            "proposed_action_ids": [],
-            "claims": [],
-        }
-        fallback_needs_audit = False
         query_scope = classify_world_query(message.text)
         last_request = snapshot.get("last_user_request", {})
         fallback_speech_act = _safe_failure_speech_act(
@@ -1588,6 +1619,49 @@ class CompanionEngine:
             ),
             message_text=message.text,
         )
+        provider_fallback = False
+        model_action_id = self._begin_world_model_call(purpose="reply", causation=intent_id)
+        try:
+            with model_call_scope("reply"):
+                raw = await self.model.complete([
+                    {"role": "system", "content": self.companion_system_prompt},
+                    {
+                        "role": "user",
+                        "content": (
+                            f"{context_block}\n\n用户: {message.text}\n"
+                            "WorldReplyJSON: 只返回 JSON。事实或经历声明要把来源的 source_id 放入 mentioned_event_ids；"
+                            "claims.text 必须逐字复制来源证据，claims.assertion 必须逐字复制 reply_text 中对应的自然陈述。"
+                            "猜测、建议和问题不是事实声明，不要为它们创建 claim："
+                            '{"reply_text":"...","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[{"source_id":"...","text":"逐字来源证据","assertion":"reply_text 中的自然陈述"}]}。'
+                        ),
+                    },
+                ], temperature=0.75)
+        except Exception as exc:
+            self._fail_world_model_call(model_action_id, str(exc))
+            provider_fallback = True
+            raw = json.dumps(
+                build_safe_failure_candidate(
+                    message.text,
+                    None,
+                    modulation,
+                    relationship=relationship,
+                    selected_stance=chosen_stance,
+                    speech_act=fallback_speech_act,
+                    variant_key=str(message.message_id or intent_id),
+                ),
+                ensure_ascii=False,
+            )
+        if not provider_fallback:
+            self._record_world_model_output(
+                purpose="reply", causation=intent_id, content=raw, action_id=model_action_id
+            )
+        parsed_candidate: dict[str, object] = {
+            "reply_text": "",
+            "mentioned_event_ids": [],
+            "proposed_action_ids": [],
+            "claims": [],
+        }
+        fallback_needs_audit = False
         related_npc_experiences: list[dict[str, object]] = []
         urgent_turn = bool(
             communication_decision
@@ -1679,26 +1753,12 @@ class CompanionEngine:
             )
             if human_violation:
                 raise WorldError(f"human reply contract rejected: {human_violation}")
-            if reply_proposes_new_discomfort(
-                modulation, str(candidate.get("reply_text") or "")
-            ):
-                self._submit_world_with_retry(
-                    {
-                        "type": "commit_reply_affect",
-                        "world_id": self.world_id,
-                        "message_id": str(message.message_id or ""),
-                        "idempotency_key": f"reply-affect:{message.message_id}:discomfort",
-                        "causation_id": str(message.message_id or ""),
-                    }
-                )
-                refreshed = self.world_kernel.snapshot(self.world_id).get(
-                    "emotion_modulation", {}
-                )
-                if isinstance(refreshed, dict):
-                    modulation = refreshed
             affect_violation = affect_reply_violation(
                 modulation,
                 str(candidate.get("reply_text") or ""),
+                snapshot.get("last_affect_display")
+                if isinstance(snapshot.get("last_affect_display"), dict)
+                else None,
             )
             if affect_violation:
                 raise WorldError(f"world affect contract rejected: {affect_violation}")
@@ -1717,13 +1777,14 @@ class CompanionEngine:
                     "reply_text": "目前没有可以确认的互动记录，所以顺不顺利我不能乱说。",
                     "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
                 }
-            await self._audit_world_reply(
-                purpose="reply_audit",
-                causation=intent_id,
-                user_text=message.text,
-                reply_text=str(candidate["reply_text"]),
-                grounding_context=audit_context,
-            )
+            if not provider_fallback:
+                await self._audit_world_reply(
+                    purpose="reply_audit",
+                    causation=intent_id,
+                    user_text=message.text,
+                    reply_text=str(candidate["reply_text"]),
+                    grounding_context=audit_context,
+                )
         except WorldError as validation_error:
             grounded_fallback = occurrence_candidate
             if occurrence_candidate:
@@ -1832,12 +1893,13 @@ class CompanionEngine:
                     purpose="reply_repair", causation=intent_id
                 )
                 try:
-                    repaired_raw = await self.model.complete(
-                        [
-                            {"role": "system", "content": self.companion_system_prompt},
-                            {
-                                "role": "user",
-                                "content": (
+                    with model_call_scope("reply_repair"):
+                        repaired_raw = await self.model.complete(
+                            [
+                                {"role": "system", "content": self.companion_system_prompt},
+                                {
+                                    "role": "user",
+                                    "content": (
                                     f"{context_block}\n\n用户: {message.text}\n"
                                     f"上一次候选(JSON): {json.dumps(parsed_candidate, ensure_ascii=False, separators=(',', ':'))}\n"
                                     f"未通过校验：{validation_error}。"
@@ -1848,11 +1910,11 @@ class CompanionEngine:
                                     "不得使用临时 event_1/exp1 标识。claims.text 是逐字来源证据，"
                                     "claims.assertion 是 reply_text 中对应的自然陈述；猜测/建议不创建 claim。"
                                     "只返回规定的 WorldReplyJSON。"
-                                ),
-                            },
-                        ],
-                        temperature=0.2,
-                    )
+                                    ),
+                                },
+                            ],
+                            temperature=0.2,
+                        )
                 except Exception as repair_error:
                     self._fail_world_model_call(repair_action_id, str(repair_error))
                     candidate = build_safe_failure_candidate(
@@ -1915,6 +1977,9 @@ class CompanionEngine:
                         affect_violation = affect_reply_violation(
                             modulation,
                             str(candidate.get("reply_text") or ""),
+                            snapshot.get("last_affect_display")
+                            if isinstance(snapshot.get("last_affect_display"), dict)
+                            else None,
                         )
                         if affect_violation:
                             raise WorldError(
@@ -2508,7 +2573,10 @@ class CompanionEngine:
             causation = f"afterthought:{reply_sent_at.isoformat()}:{mode}"
             model_action_id = self._begin_world_model_call(purpose="afterthought", causation=causation)
             try:
-                raw = await self.model.complete([{"role": "user", "content": prompt}], temperature=0.7)
+                with model_call_scope("afterthought"):
+                    raw = await self.model.complete(
+                        [{"role": "user", "content": prompt}], temperature=0.7
+                    )
             except Exception as exc:
                 self._fail_world_model_call(model_action_id, str(exc))
                 logger.exception("world afterthought generation failed")
@@ -2534,6 +2602,9 @@ class CompanionEngine:
                 if isinstance(snapshot.get("emotion_modulation", {}), dict)
                 else {},
                 str(candidate.get("reply_text") or ""),
+                snapshot.get("last_affect_display")
+                if isinstance(snapshot.get("last_affect_display"), dict)
+                else None,
             ):
                 return None
             text = sanitize_chat_text(str(candidate["reply_text"]))
@@ -2581,10 +2652,11 @@ class CompanionEngine:
         recent_lines = self._recent_lines(canonical_user_id)
         prompt = afterthought_prompt(mode, recent_lines[-8:])
         try:
-            raw = await self.model.complete(
-                [{"role": "user", "content": prompt}],
-                temperature=0.7,
-            )
+            with model_call_scope("afterthought"):
+                raw = await self.model.complete(
+                    [{"role": "user", "content": prompt}],
+                    temperature=0.7,
+                )
         except Exception:
             logger.exception("afterthought generation failed")
             return None
@@ -2946,16 +3018,17 @@ class CompanionEngine:
                 if social_task:
                     self.store.defer_social_task(int(social_task["id"]), due_at=now + timedelta(minutes=45))
                 return decision
-        raw = await self.model.complete(
-            proactive_prompt(
-                state,
-                recent_lines,
-                self.companion_system_prompt,
-                trigger,
-                life_runtime_context=runtime_prompt_line(runtime),
-            ),
-            temperature=0.7,
-        )
+        with model_call_scope("proactive"):
+            raw = await self.model.complete(
+                proactive_prompt(
+                    state,
+                    recent_lines,
+                    self.companion_system_prompt,
+                    trigger,
+                    life_runtime_context=runtime_prompt_line(runtime),
+                ),
+                temperature=0.7,
+            )
         if self.budget_gate:
             self.budget_gate.record(estimate, note=f"proactive_decision:{trigger.type if trigger else 'none'}")
         decision = self._parse_decision(canonical_user_id, raw, state)
@@ -3188,7 +3261,10 @@ class CompanionEngine:
         causation = f"proactive:{self.world_kernel.revision(self.world_id)}"
         model_action_id = self._begin_world_model_call(purpose="proactive", causation=causation)
         try:
-            raw = await self.model.complete([{"role": "user", "content": prompt}], temperature=0.7)
+            with model_call_scope("proactive"):
+                raw = await self.model.complete(
+                    [{"role": "user", "content": prompt}], temperature=0.7
+                )
         except Exception as exc:
             self._fail_world_model_call(model_action_id, str(exc))
             self._settle_proactive_generation(
@@ -3228,6 +3304,9 @@ class CompanionEngine:
                 affect_violation = affect_reply_violation(
                     modulation if isinstance(modulation, dict) else {},
                     candidate_message,
+                    snapshot.get("last_affect_display")
+                    if isinstance(snapshot.get("last_affect_display"), dict)
+                    else None,
                 )
                 if affect_violation:
                     decision = decision.model_copy(
