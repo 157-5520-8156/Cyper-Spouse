@@ -361,6 +361,46 @@ async def test_coalescer_batches_rapid_messages() -> None:
 
 
 @pytest.mark.asyncio
+async def test_coalescer_flushes_six_messages_before_starting_a_seventh_batch() -> None:
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.seen_texts: list[str] = []
+
+        async def handle_message(self, incoming: IncomingMessage) -> CompanionReply:
+            self.seen_texts.append(incoming.text)
+            return CompanionReply(canonical_user_id="geoff", mood="calm", text="收到")
+
+    class FakeTarget:
+        def __init__(self) -> None:
+            self.replies: list[str] = []
+
+        async def reply(self, **kwargs) -> None:
+            self.replies.append(kwargs["content"])
+
+    engine = FakeEngine()
+    target = FakeTarget()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+    )
+
+    for index in range(1, 8):
+        await coalescer.add(
+            "c2c:user",
+            IncomingMessage(platform="qq", platform_user_id="user", text=f"第{index}句，"),
+            target,
+        )
+    await asyncio.sleep(0.03)
+
+    assert engine.seen_texts == [
+        "\n".join(f"第{index}句，" for index in range(1, 7)),
+        "第7句，",
+    ]
+    assert target.replies == ["收到", "收到"]
+
+
+@pytest.mark.asyncio
 async def test_coalescer_preserves_attachments() -> None:
     class FakeEngine:
         def __init__(self):
@@ -936,6 +976,163 @@ async def test_send_reply_parts_reports_interruption_after_a_partial_delivery() 
 
     assert sent is False
     assert target.replies == ["第一句。"]
+
+
+@pytest.mark.asyncio
+async def test_coalescer_persists_platform_message_id_before_settling_segment() -> None:
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.confirmed: list[tuple[str, str | None]] = []
+
+        async def handle_message(self, incoming: IncomingMessage, **kwargs) -> CompanionReply:
+            return CompanionReply(
+                canonical_user_id="geoff",
+                mood="calm",
+                text="在呢。",
+                text_parts=["在呢。"],
+                delivery_id=17,
+                world_action_id="outgoing:17",
+            )
+
+        def begin_reply_part_delivery(self, reply: CompanionReply, *, position: int) -> str:
+            assert position == 0
+            return "outgoing:17:segment:0"
+
+        def confirm_reply_part_delivery(
+            self,
+            reply: CompanionReply,
+            *,
+            segment_id: str,
+            external_receipt: str | None = None,
+        ) -> None:
+            self.confirmed.append((segment_id, external_receipt))
+
+        def confirm_reply_delivery(self, reply: CompanionReply) -> None:
+            return None
+
+    class FakeTarget:
+        async def reply(self, **kwargs) -> dict[str, str]:
+            return {"message_id": "qq-message-701"}
+
+    engine = FakeEngine()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+    )
+
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="在吗"),
+        FakeTarget(),
+    )
+    await asyncio.sleep(0.03)
+
+    assert engine.confirmed == [
+        ("outgoing:17:segment:0", "platform:message_id:qq-message-701")
+    ]
+
+
+@pytest.mark.asyncio
+async def test_coalescer_marks_claimed_segment_unknown_when_reply_io_is_ambiguous() -> None:
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.unknown: list[tuple[str, str]] = []
+            self.failed: list[str] = []
+
+        async def handle_message(self, incoming: IncomingMessage, **kwargs) -> CompanionReply:
+            return CompanionReply(
+                canonical_user_id="geoff",
+                mood="calm",
+                text="在呢。",
+                text_parts=["在呢。"],
+                delivery_id=18,
+                world_action_id="outgoing:18",
+            )
+
+        def begin_reply_part_delivery(self, reply: CompanionReply, *, position: int) -> str:
+            return "outgoing:18:segment:0"
+
+        def mark_reply_part_unknown(
+            self, reply: CompanionReply, *, segment_id: str, reason: str
+        ) -> None:
+            self.unknown.append((segment_id, reason))
+
+        def fail_reply_delivery(self, reply: CompanionReply, reason: str) -> None:
+            self.failed.append(reason)
+
+    class AmbiguousTarget:
+        async def reply(self, **kwargs) -> None:
+            raise ConnectionResetError("connection lost after request dispatch")
+
+    engine = FakeEngine()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+    )
+
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="在吗"),
+        AmbiguousTarget(),
+    )
+    await asyncio.sleep(0.03)
+
+    assert engine.unknown == [
+        ("outgoing:18:segment:0", "QQ adapter call ended without durable delivery evidence")
+    ]
+    assert engine.failed == []
+
+
+@pytest.mark.asyncio
+async def test_coalescer_keeps_segment_unknown_when_success_response_has_no_receipt() -> None:
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.unknown: list[str] = []
+            self.confirmed: list[str] = []
+
+        async def handle_message(self, incoming: IncomingMessage, **kwargs) -> CompanionReply:
+            return CompanionReply(
+                canonical_user_id="geoff",
+                mood="calm",
+                text="在呢。",
+                text_parts=["在呢。"],
+                delivery_id=19,
+                world_action_id="outgoing:19",
+            )
+
+        def begin_reply_part_delivery(self, reply: CompanionReply, *, position: int) -> str:
+            return "outgoing:19:segment:0"
+
+        def confirm_reply_part_delivery(self, reply: CompanionReply, **kwargs) -> None:
+            self.confirmed.append(kwargs["segment_id"])
+
+        def mark_reply_part_unknown(
+            self, reply: CompanionReply, *, segment_id: str, reason: str
+        ) -> None:
+            self.unknown.append(segment_id)
+
+    class ReceiptlessTarget:
+        async def reply(self, **kwargs) -> dict[str, str]:
+            return {"status": "ok"}
+
+    engine = FakeEngine()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+    )
+
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(platform="qq", platform_user_id="user", text="在吗"),
+        ReceiptlessTarget(),
+    )
+    await asyncio.sleep(0.03)
+
+    assert engine.unknown == ["outgoing:19:segment:0"]
+    assert engine.confirmed == []
 
 
 @pytest.mark.asyncio

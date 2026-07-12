@@ -131,3 +131,223 @@ def test_seeded_week_long_jump_matches_incremental_world_life(tmp_path: Path) ->
         for activity_id, activity in long_state["agenda"].items()
         if activity.get("template_id")
     )
+
+
+def _ten_day_continuity_replay(path: Path) -> dict[str, object]:
+    store = CompanionStore(path)
+    store.resolve_user("qq", "geoff")
+    world = WorldKernel(store)
+    started = world.start_from_seed_file(Path("configs/world_seed.yaml"))
+    world_id = started.world_id
+    world.submit(
+        {
+            "type": "register_user",
+            "world_id": world_id,
+            "user_id": "user:geoff",
+            "name": "geoff",
+            "idempotency_key": "ten-day:register-user",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    logical_start = datetime.fromisoformat(
+        str(world.snapshot(world_id)["clock"]["logical_at"])
+    )
+
+    def advance_to(target: datetime) -> None:
+        world.submit(
+            {
+                "type": "advance_clock",
+                "world_id": world_id,
+                "target_logical_at": target.isoformat(),
+                "observed_at": target.isoformat(),
+                "idempotency_key": f"ten-day:clock:{target.isoformat()}",
+            },
+            expected_revision=world.revision(world_id),
+        )
+
+    share_at = logical_start + timedelta(hours=13)
+    advance_to(share_at)
+    share = world.schedule_life_share_delivery(
+        world_id=world_id,
+        canonical_user_id="geoff",
+        platform="qq",
+        expires_at=share_at + timedelta(hours=2),
+        expected_revision=world.revision(world_id),
+    )
+    assert share is not None
+    assert world.begin_outgoing_action(
+        share.delivery_id,
+        expected_revision=world.revision(world_id),
+    )
+    world.settle_outgoing_action(
+        share.delivery_id,
+        delivered=True,
+        external_receipt="qq:ten-day-share",
+    )
+    world.submit(
+        {
+            "type": "appraise_turn",
+            "world_id": world_id,
+            "appraisal": "boundary_violation",
+            "intent_id": "ten-day:initial-boundary",
+            "message_id": "ten-day:initial-boundary",
+            "user_id": "user:geoff",
+            "idempotency_key": "ten-day:initial-boundary",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    hurt_charge = int(world.snapshot(world_id)["emotion_modulation"]["charge"])
+    world.submit(
+        {
+            "type": "open_conversation_thread",
+            "world_id": world_id,
+            "thread": {
+                "thread_id": "thread:ten-day-life-share",
+                "kind": "life_share",
+                "user_id": "user:geoff",
+                "origin": {
+                    "kind": "action",
+                    "reference": share.action_id,
+                },
+                "reason": "分享后等待用户是否接住",
+                "due_at": share_at.isoformat(),
+                "expires_at": (logical_start + timedelta(days=6)).isoformat(),
+                "cancel_conditions": ["user_returned"],
+                "owner": "world:conversation",
+            },
+            "idempotency_key": "ten-day:open-thread",
+        },
+        expected_revision=world.revision(world_id),
+    )
+
+    offline_at = logical_start + timedelta(days=2, hours=13)
+    advance_to(offline_at)
+
+    trace = {
+        "world_id": world_id,
+        "direction": "incoming_reply",
+        "appraisal": "ordinary_message",
+        "expression_policy": "replay delivery outcome",
+        "allowed_facts": [],
+        "observable_reason": "replay delivery outcome",
+    }
+    failed_delivery, _, failed_action = world.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="这条发送失败，不能成为聊天历史。",
+        kind="reply",
+        expires_at=offline_at + timedelta(hours=2),
+        trace={**trace, "outbound_request_id": "ten-day:failed"},
+    )
+    assert world.begin_outgoing_action(
+        failed_delivery,
+        expected_revision=world.revision(world_id),
+    )
+    world.settle_outgoing_action(
+        failed_delivery,
+        delivered=False,
+        reason="simulated adapter failure",
+    )
+
+    unknown_delivery, _, unknown_action = world.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="这条回执未知，也不能成为聊天历史。",
+        kind="reply",
+        expires_at=offline_at + timedelta(hours=2),
+        trace={**trace, "outbound_request_id": "ten-day:unknown"},
+    )
+    assert world.begin_outgoing_action(
+        unknown_delivery,
+        expected_revision=world.revision(world_id),
+    )
+    assert world.mark_outgoing_unknown(
+        unknown_delivery,
+        reason="simulated receipt timeout",
+        expected_revision=world.revision(world_id),
+    )
+
+    returned_at = logical_start + timedelta(days=4, hours=2)
+    advance_to(returned_at)
+    world.submit(
+        {
+            "type": "observe_user_message",
+            "world_id": world_id,
+            "message_id": "ten-day:user-return",
+            "user_id": "user:geoff",
+            "text": "我回来了，前几天一直在忙。",
+            "sent_at": returned_at.isoformat(),
+            "idempotency_key": "ten-day:user-return",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    world.submit(
+        {
+            "type": "appraise_turn",
+            "world_id": world_id,
+            "appraisal": "return_after_gap",
+            "intent_id": "ten-day:return-appraisal",
+            "message_id": "ten-day:user-return",
+            "user_id": "user:geoff",
+            "idempotency_key": "ten-day:return-appraisal",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    world.submit(
+        {
+            "type": "cancel_conversation_thread",
+            "world_id": world_id,
+            "thread_id": "thread:ten-day-life-share",
+            "condition": "user_returned",
+            "reason": "用户已回来，旧等待不再追发",
+            "idempotency_key": "ten-day:cancel-thread-on-return",
+        },
+        expected_revision=world.revision(world_id),
+    )
+
+    replay_end = logical_start + timedelta(days=10, hours=14)
+    advance_to(replay_end)
+    snapshot = world.snapshot(world_id)
+    report = world.rebuild_projection(world_id, "world_current_state")
+    outbound_history = [
+        row["text"]
+        for row in store.recent_messages("geoff", limit=20)
+        if row["direction"] == "out"
+    ]
+    events = world.events(world_id)
+
+    assert report.matches_live is True
+    assert report.state_hash == world.dashboard_overview(world_id)["state_hash"]
+    assert snapshot["clock"]["logical_at"] == replay_end.isoformat()
+    assert any(item["status"] == "completed" for item in snapshot["agenda"].values())
+    assert snapshot["goals"]
+    assert snapshot["npc_interactions"]
+    assert int(snapshot["emotion_modulation"]["charge"]) < hurt_charge
+    assert any(
+        event.event_type == "ConversationThreadWaitingChanged" for event in events
+    )
+    assert snapshot["conversation_threads"]["thread:ten-day-life-share"]["status"] == "cancelled"
+    assert snapshot["actions"][share.action_id]["status"] == "delivered"
+    assert snapshot["actions"][failed_action]["status"] == "failed"
+    assert snapshot["actions"][unknown_action]["status"] == "unknown"
+    assert snapshot["experiences"][share.experience_id]["shared"] is True
+    assert outbound_history == [share.text]
+    assert all(
+        action["status"] not in {"scheduled", "sending"}
+        for action in snapshot["actions"].values()
+    )
+    assert len(snapshot["experiences"]) == len(set(snapshot["experiences"]))
+    return {
+        "state_hash": report.state_hash,
+        "event_types": tuple(event.event_type for event in events),
+        "outbound_history": tuple(outbound_history),
+    }
+
+
+def test_ten_day_offline_delivery_and_return_replay_is_deterministic(
+    tmp_path: Path,
+) -> None:
+    first = _ten_day_continuity_replay(tmp_path / "ten-day-first.sqlite")
+    second = _ten_day_continuity_replay(tmp_path / "ten-day-second.sqlite")
+
+    assert first == second

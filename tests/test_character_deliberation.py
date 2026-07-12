@@ -93,6 +93,79 @@ def test_imminent_risk_can_override_no_advice_but_records_the_conflict() -> None
     assert decision.conflicts == ("respect_request_vs_prevent_harm",)
 
 
+def test_open_commitment_and_hurt_make_repair_a_replayable_option() -> None:
+    without_thread = _decide(
+        situation={"text": "你还愿意聊吗？", "risk": "low"},
+        user_request=UserRequest.from_text("你还愿意聊吗？"),
+        affect={"irritation": 4, "hurt": 28},
+        needs={"energy": 65, "boundary": 20},
+    )
+    with_thread = _decide(
+        situation={"text": "你还愿意聊吗？", "risk": "low"},
+        user_request=UserRequest.from_text("你还愿意聊吗？"),
+        affect={"irritation": 4, "hurt": 28},
+        needs={"energy": 65, "boundary": 20},
+        open_commitments=("thread:repair",),
+    )
+
+    without_score = next(
+        item.score for item in without_thread.selection.candidates
+        if item.stance == "seek_repair"
+    )
+    with_score = next(
+        item.score for item in with_thread.selection.candidates
+        if item.stance == "seek_repair"
+    )
+    assert with_score > without_score
+    assert with_thread.chosen_stance == "seek_repair"
+
+
+def test_hurt_character_can_still_choose_care_for_a_vulnerable_user() -> None:
+    decision = _decide(
+        situation={"text": "我真的撑不住了，你先陪我一下。", "risk": "low"},
+        user_request=UserRequest.from_text("我真的撑不住了，你先陪我一下。"),
+        affect={"irritation": 10, "hurt": 34},
+        needs={"energy": 55, "boundary": 35},
+    )
+
+    assert "care_despite_hurt" in decision.stances_considered
+    assert decision.chosen_stance == "care_despite_hurt"
+    assert decision.display_strategy == "offer_care_without_erasing_hurt"
+
+
+def test_exhausted_character_can_choose_silence_instead_of_forced_compliance() -> None:
+    decision = _decide(
+        situation={"text": "别劝，反正就这样。", "risk": "low"},
+        affect={"irritation": 18, "hurt": 22},
+        needs={"energy": 5, "boundary": 55},
+        relationship={"stage": "acquaintance", "trust": 20},
+        available_actions=("reply_now", "defer_reply", "remain_silent"),
+    )
+
+    assert "remain_silent" in decision.stances_considered
+    assert decision.chosen_stance == "remain_silent"
+    assert "remain_silent" in decision.action_candidates
+
+
+def test_proactive_situation_can_choose_initiate_and_replay_recorded_selection() -> None:
+    inputs = {
+        "situation": {"kind": "proactive", "text": "", "risk": "low"},
+        "user_request": UserRequest.from_text(""),
+        "open_commitments": ("thread:follow-up",),
+        "available_actions": ("initiate", "defer", "remain_silent"),
+        "affect": {"irritation": 0, "hurt": 0},
+        "needs": {"energy": 70, "initiative": 80, "boundary": 10},
+    }
+
+    decision = _decide(**inputs)
+    replay = _decide(**inputs)
+
+    assert decision == replay
+    assert "initiate" in decision.stances_considered
+    assert decision.chosen_stance == "initiate"
+    assert decision.display_strategy == "open_a_thread_from_owned_motive"
+
+
 @pytest.mark.parametrize("basis_points", [-1, 10_000])
 def test_recorded_draw_rejects_values_outside_basis_point_range(basis_points: int) -> None:
     with pytest.raises(ValueError, match="between 0 and 9999"):

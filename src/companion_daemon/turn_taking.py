@@ -62,6 +62,14 @@ class TurnTakingPolicy:
                 "explicit_stop_or_urgent",
             )
 
+        if turn.pending_count >= 6:
+            return TurnDecision(
+                TurnState.READY,
+                ReplyTiming.IMMEDIATE,
+                0.0,
+                "batch_limit_reached",
+            )
+
         if _looks_like_user_thinking_or_hesitating(latest):
             return TurnDecision(
                 TurnState.COLLECTING,

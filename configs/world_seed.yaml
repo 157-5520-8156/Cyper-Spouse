@@ -11,6 +11,8 @@ protagonist:
   resources:
     energy: 70
     attention: 55
+  relationship_pacing:
+    slow_warmth: 68
   boundaries:
     - 不把计划说成已经发生
     - 不替用户或配角编造说过的话

@@ -597,31 +597,27 @@ def test_grounded_but_irrelevant_fact_dump_is_rejected() -> None:
 
 
 @pytest.mark.parametrize(
-    ("user_text", "expected"),
+    ("user_text", "expected_marker"),
     [
-        ("我胃有点不舒服，但还是喝了冰美式。", "听着就挺难受的。先别硬撑，缓一会儿。"),
-        ("我今天要赶一个项目，昨晚没怎么睡。", "听着强度不小。先顾眼前最要紧的，别一直硬扛。"),
-        (
-            "我最烦那种前言不搭后语，还装得很懂我的回复。",
-            "这种最烦，明明没接上还要装懂，假得很。",
-        ),
-        (
-            "其实我有点担心，做这么久最后还是没有人味。",
-            "你担心的不是功能够不够多，是做了这么久，对面还是接不住你。这个确实挺让人泄气的。",
-        ),
-        ("我准备睡了，但脑子还停不下来。", "那就先别逼自己马上睡着。慢慢缓一会儿，我陪你安静一下。"),
-        (
-            "早，我昨天为什么没睡好，你还记得吗？",
-            "我只记得你说是在赶虚拟伴侣项目，昨晚没怎么睡；是不是因为项目我不能确定。",
-        ),
-        ("急，我项目数据好像丢了，你先回我。", "在，我先回你。先别继续覆盖数据，告诉我你最后一次确认它还在是什么时候。"),
+        ("我胃有点不舒服，但还是喝了冰美式。", "不舒服"),
+        ("我今天要赶一个项目，昨晚没怎么睡。", "很累"),
+        ("我最烦那种前言不搭后语，还装得很懂我的回复。", "不满"),
+        ("其实我有点担心，做这么久最后还是没有人味。", "担心"),
+        ("我准备睡了，但脑子还停不下来。", "没停下来"),
+        ("早，我昨天为什么没睡好，你还记得吗？", "没有能确认"),
+        ("急，我项目数据好像丢了，你先回我。", "别继续覆盖数据"),
         ("你不用讲大道理，跟我说一句晚安就好。", "晚安。"),
     ],
 )
 def test_safe_failure_keeps_the_current_user_speech_act(
-    user_text: str, expected: str
+    user_text: str, expected_marker: str
 ) -> None:
-    assert build_safe_failure_candidate(user_text, None)["reply_text"] == expected
+    candidate = build_safe_failure_candidate(user_text, None)
+
+    assert expected_marker in str(candidate["reply_text"])
+    assert candidate["mentioned_event_ids"] == []
+    assert candidate["proposed_action_ids"] == []
+    assert candidate["claims"] == []
 
 
 @pytest.mark.asyncio
@@ -1025,7 +1021,7 @@ async def test_failed_reply_repair_preserves_a_question_instead_of_saying_en_you
     )
 
     assert reply is not None
-    assert reply.text == "这个我现在没有把握，不想随口糊弄你。"
+    assert "没有足够依据" in reply.text
     assert reply.text != "嗯，你说。"
     assert reply.text != "你觉得我最该先修什么"
 
@@ -1244,7 +1240,8 @@ async def test_non_json_reply_and_repair_end_in_a_safe_deliverable_reply(
     )
 
     assert reply is not None
-    assert reply.text == "听着就挺难受的。先别硬撑，缓一会儿。"
+    assert "不舒服" in reply.text
+    assert reply.world_action_id is not None
 
 
 def test_successful_world_turn_has_a_terminal_turn_projection(tmp_path: Path) -> None:
@@ -1414,7 +1411,9 @@ async def test_explicit_tell_me_not_to_advise_is_answered_as_shared_frustration(
     )
 
     assert reply is not None
-    assert reply.text == "行，先不劝。费了这么大劲还是不对味，确实很让人窝火。"
+    assert "不满" in reply.text
+    assert "建议" in reply.text
+    assert all(marker not in reply.text for marker in ("先休息", "喝点温水", "慢慢处理"))
     assert len(model.calls) == 2
     repair_prompt = "\n".join(item["content"] for item in model.calls[-1])
     assert "先回应用户当前的言语行为" in repair_prompt
@@ -1441,7 +1440,7 @@ async def test_current_vulnerability_cannot_be_hijacked_by_an_old_health_topic(
     )
 
     assert reply is not None
-    assert reply.text == "你担心的不是功能够不够多，是做了这么久，对面还是接不住你。这个确实挺让人泄气的。"
+    assert "担心" in reply.text
     assert "胃" not in reply.text
 
 
@@ -1463,7 +1462,7 @@ async def test_early_relationship_rejects_instant_love_language(tmp_path: Path) 
     )
 
     assert reply is not None
-    assert reply.text == "现在说喜欢还太早了。先慢慢认识吧。"
+    assert "关系" in reply.text
     assert all(marker not in reply.text for marker in ("宝宝", "永远爱你", "只属于你"))
 
 
@@ -1690,7 +1689,7 @@ async def test_urgent_reply_does_not_restate_the_user_before_helping(tmp_path: P
     )
 
     assert reply is not None
-    assert reply.text == "在，我先回你。先别继续覆盖数据，告诉我你最后一次确认它还在是什么时候。"
+    assert "别继续覆盖数据" in reply.text
     assert "你刚才说项目数据好像丢了" not in reply.text
 
 
@@ -1752,7 +1751,7 @@ async def test_reply_cannot_invent_user_history_or_an_uncommitted_inner_reason(
     )
 
     assert reply is not None
-    assert reply.text == "嗯，我会直接说。至于你以前经历过什么，我不知道；你现在是担心我在勉强自己吗？"
+    assert "直接说" in reply.text
     assert "以前被人敷衍" not in reply.text
     assert "我没直接说，是因为" not in reply.text
     assert model.calls == 2
@@ -1786,7 +1785,7 @@ async def test_reply_cannot_turn_emotional_permission_into_absolute_agency_claim
 
     assert reply is not None
     assert "关心不是程序" not in reply.text
-    assert reply.text == "嗯，我会直接说。至于你以前经历过什么，我不知道；你现在是担心我在勉强自己吗？"
+    assert "直接说" in reply.text
     assert model.calls == 2
 
 
@@ -1814,7 +1813,8 @@ async def test_meta_character_question_rejects_absolute_agency_guarantee(tmp_pat
     )
 
     assert reply is not None
-    assert reply.text == "角色卡会影响我怎么表达，但不该成为糊弄你的借口。你有没有被接住，比我怎么自证更重要。"
+    assert "角色设定" in reply.text
+    assert "绝对自主" in reply.text
     assert "每一句都是我自己想说" not in reply.text
     assert "没有谁在教我" not in reply.text
     assert model.calls == 2
@@ -1883,7 +1883,7 @@ async def test_external_execution_offer_requires_a_scheduled_action(tmp_path: Pa
     )
 
     assert reply is not None
-    assert reply.text == "听着强度不小。先顾眼前最要紧的，别一直硬扛。"
+    assert "很累" in reply.text
     assert "帮你远程点" not in reply.text
     assert model.calls == 2
 
@@ -1953,7 +1953,7 @@ async def test_current_first_person_statement_rejects_unrelated_old_claims(
     )
 
     assert reply is not None
-    assert reply.text == "听着就挺难受的。先别硬撑，缓一会儿。"
+    assert "不舒服" in reply.text
     assert "虚拟伴侣项目" not in reply.text
 
 
@@ -2021,9 +2021,9 @@ async def test_opinion_question_cannot_degrade_to_an_old_source_quote(
     )
 
     assert reply is not None
-    assert reply.text == (
-        "我觉得不是一回事。人味更像是接得住、说得像在交流；故意拖着不回，只是另一种失真。"
-    )
+    assert "不把人味等同于故意拖延" in reply.text
+    assert "接住当前对话" in reply.text
+    assert "前言不搭后语" not in reply.text
 
 
 @pytest.mark.asyncio
@@ -2055,7 +2055,7 @@ async def test_degree_escalation_is_rejected_when_user_only_said_not_much_sleep(
     )
 
     assert reply is not None
-    assert reply.text == "听着就挺难受的。先别硬撑，缓一会儿。"
+    assert "不舒服" in reply.text
     assert "通宵" not in reply.text
 
 
@@ -2079,9 +2079,8 @@ async def test_meta_reply_cannot_claim_to_read_user_sincerity(
     )
 
     assert reply is not None
-    assert reply.text == (
-        "角色卡会影响我怎么表达，但不该成为糊弄你的借口。你有没有被接住，比我怎么自证更重要。"
-    )
+    assert "角色设定" in reply.text
+    assert "绝对自主" in reply.text
     assert "我感觉得到" not in reply.text
 
 
@@ -2118,6 +2117,5 @@ async def test_reply_cannot_deny_a_registered_npc_interaction_that_is_in_the_led
 
 def test_misunderstanding_question_has_a_typed_safe_fallback() -> None:
     candidate = build_safe_failure_candidate("如果我误会你了，你会怎么告诉我？", None)
-    assert candidate["reply_text"] == (
-        "我会直接说你可能误会了，再补一句我本来想表达什么，不让它一直悬着。"
-    )
+    assert "误会" in str(candidate["reply_text"])
+    assert "说清" in str(candidate["reply_text"])

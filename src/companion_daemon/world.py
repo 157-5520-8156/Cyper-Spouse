@@ -25,7 +25,12 @@ from companion_daemon.life_simulation import LifeSimulation
 from companion_daemon.life_evolution import LifeEvolution
 from companion_daemon.time import utc_now
 from companion_daemon.world_interaction_rules import WorldInteractionRules
-from companion_daemon.world_relationship import evaluate_relationship_stage, stage_event_payload
+from companion_daemon.world_relationship import (
+    evaluate_relationship_stage,
+    relationship_event_significance,
+    relationship_slow_warmth,
+    stage_event_payload,
+)
 from companion_daemon.world_affect import (
     apply_appraisal,
     decay_affect,
@@ -211,6 +216,7 @@ class WorldKernel:
             "reply_later": "reply",
             "media_delivery": "media",
             "sticker_delivery": "reaction",
+            "reaction_delivery": "reaction",
         }.get(action_kind, "")
         if not message_kind and "followup" in action_kind:
             message_kind = "followup"
@@ -3083,6 +3089,14 @@ class WorldKernel:
             entities = _as_dict(state["entities"], "entities")
             if not user_id or not name or user_id in entities:
                 raise WorldError("user must have a new id and name")
+            protagonist = next(
+                (
+                    _as_dict(raw, "protagonist")
+                    for raw in entities.values()
+                    if _as_dict(raw, "entity").get("kind") == "companion"
+                ),
+                {},
+            )
             return [
                 ("UserRegistered", {"id": user_id, "name": name, "kind": "user"}),
                 (
@@ -3094,6 +3108,7 @@ class WorldKernel:
                         relationship={"interaction_count": 0},
                         boundary=0,
                         reason="relationship_initialized",
+                        slow_warmth=relationship_slow_warmth(protagonist),
                     ),
                 ),
             ]
@@ -3302,6 +3317,53 @@ class WorldKernel:
             if typing == "stopped" and communication.get("typing") != "started":
                 raise WorldError("typing can stop only after it started")
             return [("TypingStateChanged", {"message_id": message_id, "typing": typing, "reason": reason})]
+        if command_type == "select_reaction":
+            message_id = str(command.get("message_id") or "")
+            reaction_id = str(command.get("reaction_id") or "").strip()
+            platform = str(command.get("platform") or "").strip()
+            known_message_ids = {
+                str(_as_dict(item, "recent message").get("message_id") or "")
+                for item in _as_list(state.get("recent_messages", []), "recent messages")
+                if _as_dict(item, "recent message").get("direction") == "in"
+            }
+            action_id = f"reaction:{platform}:{message_id}:{reaction_id}"
+            if (
+                not message_id
+                or message_id not in known_message_ids
+                or not reaction_id
+                or len(reaction_id) > 64
+                or not platform
+                or action_id in _as_dict(state["actions"], "actions")
+            ):
+                raise WorldError("reaction selection requires an observed message and new bounded reaction")
+            return [
+                (
+                    "ReactionSelected",
+                    {
+                        "action_id": action_id,
+                        "message_id": message_id,
+                        "reaction_id": reaction_id,
+                        "platform": platform,
+                        "rule_version": "world-reaction-v1",
+                    },
+                ),
+                (
+                    "ActionScheduled",
+                    {
+                        "action_id": action_id,
+                        "kind": "reaction_delivery",
+                        "expires_at": (
+                            _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
+                            + timedelta(hours=2)
+                        ).isoformat(),
+                        "payload": {
+                            "message_id": message_id,
+                            "reaction_id": reaction_id,
+                            "platform": platform,
+                        },
+                    },
+                ),
+            ]
         if command_type == "defer_decision":
             decision_id = str(command.get("decision_id") or "")
             kind = str(command.get("kind") or "")
@@ -3426,6 +3488,15 @@ class WorldKernel:
                 )
             ]
             if _as_dict(entities[entity_id], "relationship entity").get("kind") == "user":
+                protagonist = next(
+                    (
+                        _as_dict(raw, "protagonist")
+                        for raw in entities.values()
+                        if _as_dict(raw, "entity").get("kind") == "companion"
+                    ),
+                    {},
+                )
+                slow_warmth = relationship_slow_warmth(protagonist)
                 relation = dict(
                     _as_dict(
                         _as_dict(state["relationships"], "relationships").get(entity_id, {}),
@@ -3436,7 +3507,11 @@ class WorldKernel:
                     -100, min(100, int(relation.get(dimension) or 0) + delta)
                 )
                 boundary = int(_as_dict(state["needs"], "needs").get("boundary", 0))
-                stage, reason = evaluate_relationship_stage(relation, boundary=boundary)
+                stage, reason = evaluate_relationship_stage(
+                    relation,
+                    boundary=boundary,
+                    slow_warmth=slow_warmth,
+                )
                 events.append(
                     (
                         "RelationshipStageEvaluated",
@@ -3447,6 +3522,7 @@ class WorldKernel:
                             relationship=relation,
                             boundary=boundary,
                             reason=reason,
+                            slow_warmth=slow_warmth,
                         ),
                     )
                 )
@@ -3810,7 +3886,33 @@ class WorldKernel:
                 events.append(("MediaShared", {"request_id": str(payload["request_id"]), "action_id": action_id}))
             if action.get("kind") == "sticker_delivery" and status == "delivered":
                 events.append(("StickerShared", {"action_id": action_id}))
+            if action.get("kind") == "reaction_delivery" and status == "delivered":
+                events.append(
+                    (
+                        "ReactionShared",
+                        {
+                            "action_id": action_id,
+                            "message_id": str(payload["message_id"]),
+                            "reaction_id": str(payload["reaction_id"]),
+                            "external_receipt": result.get("external_receipt"),
+                        },
+                    )
+                )
             return events
+        if command_type == "mark_external_action_unknown":
+            action_id = str(command.get("action_id") or "")
+            reason = str(command.get("reason") or "").strip()
+            action = _as_dict(
+                _as_dict(state["actions"], "actions").get(action_id), "external action"
+            )
+            if action.get("status") not in {"scheduled", "sending"} or not reason:
+                raise WorldError("only an unresolved external action can become unknown")
+            return [
+                (
+                    "ActionDeliveryUncertain",
+                    {"action_id": action_id, "reason": reason[:300]},
+                )
+            ]
         if command_type == "commit_experience":
             raise WorldError("experiences are committed only by validated life outcomes")
         if command_type == "record_model_proposal":
@@ -4004,9 +4106,20 @@ class WorldKernel:
             )
             user_id = str(command.get("user_id") or "")
             if user_id:
-                user = _as_dict(_as_dict(state["entities"], "entities").get(user_id), "appraised user")
+                entities = _as_dict(state["entities"], "entities")
+                user = _as_dict(entities.get(user_id), "appraised user")
                 if user.get("kind") != "user":
                     raise WorldError("turn appraisal user must be a registered user")
+                protagonist = next(
+                    (
+                        _as_dict(raw, "protagonist")
+                        for raw in entities.values()
+                        if _as_dict(raw, "entity").get("kind") == "companion"
+                    ),
+                    {},
+                )
+                slow_warmth = relationship_slow_warmth(protagonist)
+                event_significance = relationship_event_significance(appraisal)
                 events.append(("RelationshipAppraised", {"user_id": user_id, "appraisal": appraisal, "rule_version": self.interaction_rules.RULE_VERSION}))
                 events.extend(
                     ("RelationshipChanged", {"entity_id": user_id, "dimension": dimension, "delta": delta})
@@ -4027,7 +4140,12 @@ class WorldKernel:
                 current_stage = str(relation.get("stage") or "stranger")
                 boundary = int(_as_dict(state["needs"], "needs").get("boundary", 0))
                 boundary += int(consequence.need_deltas.get("boundary", 0))
-                stage, reason = evaluate_relationship_stage(relation, boundary=boundary)
+                stage, reason = evaluate_relationship_stage(
+                    relation,
+                    boundary=boundary,
+                    slow_warmth=slow_warmth,
+                    event_significance=event_significance,
+                )
                 events.append(
                     (
                         "RelationshipStageEvaluated",
@@ -4038,6 +4156,8 @@ class WorldKernel:
                             relationship=relation,
                             boundary=boundary,
                             reason=reason,
+                            slow_warmth=slow_warmth,
+                            event_significance=event_significance,
                         ),
                     )
                 )
@@ -4755,6 +4875,9 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         action["status"] = str(_as_dict(payload["result"], "result")["status"])
         action["result"] = payload["result"]
         _reduce_media_action_terminal(next_state, action, str(_as_dict(payload["result"], "result")["status"]))
+        _reduce_reaction_action_terminal(
+            next_state, action, str(_as_dict(payload["result"], "result")["status"])
+        )
         result = _as_dict(payload["result"], "result")
         if (
             action.get("kind") == "outgoing_message"
@@ -4776,15 +4899,18 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         action["status"] = "expired"
         action["reason"] = payload.get("reason")
         _reduce_media_action_terminal(next_state, action, "expired")
+        _reduce_reaction_action_terminal(next_state, action, "expired")
     elif event.event_type == "ActionCancelled":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["status"] = "cancelled"
         action["reason"] = payload.get("reason")
         _reduce_media_action_terminal(next_state, action, "cancelled")
+        _reduce_reaction_action_terminal(next_state, action, "cancelled")
     elif event.event_type == "ActionDeliveryUncertain":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["status"] = "unknown"
         action["reason"] = payload.get("reason")
+        _reduce_reaction_action_terminal(next_state, action, "unknown")
     elif event.event_type == "ExternalResultRecorded":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         if action.get("kind") == "tool_execution":
@@ -4957,6 +5083,17 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "StickerShared":
         sticker = _as_dict(_as_dict(next_state["stickers"], "stickers")[str(payload["action_id"])], "sticker")
         sticker["status"] = "shared"
+    elif event.event_type == "ReactionSelected":
+        _as_dict(next_state["reactions"], "reactions")[str(payload["action_id"])] = {
+            **payload, "status": "selected"
+        }
+    elif event.event_type == "ReactionShared":
+        reaction = _as_dict(
+            _as_dict(next_state["reactions"], "reactions")[str(payload["action_id"])],
+            "reaction",
+        )
+        reaction["status"] = "shared"
+        reaction["external_receipt"] = payload.get("external_receipt")
     elif event.event_type == "ModelProposalRecorded":
         item = {**payload, "status": "recorded"}
         _as_dict(next_state["proposals"], "proposals")[str(item["proposal_id"])] = item
@@ -5253,6 +5390,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "media": {},
         "npc_interactions": {},
         "stickers": {},
+        "reactions": {},
         "tool_actions": {},
         "outbound_policy_audit": [],
         "controlled_transgressions": [],
@@ -5285,6 +5423,18 @@ def _reduce_media_action_terminal(state: dict[str, object], action: dict[str, ob
         return
     media["status"] = "generation_failed" if kind == "media_generation" else "delivery_failed"
     media["failure_status"] = status
+
+
+def _reduce_reaction_action_terminal(
+    state: dict[str, object], action: dict[str, object], status: str
+) -> None:
+    if action.get("kind") != "reaction_delivery" or status == "delivered":
+        return
+    reaction = _as_dict(state.get("reactions", {}), "reactions").get(
+        str(action.get("action_id") or "")
+    )
+    if isinstance(reaction, dict):
+        reaction["status"] = "delivery_failed" if status == "failed" else status
 
 
 def _action_console_rank(status: str) -> int:

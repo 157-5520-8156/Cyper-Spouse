@@ -146,6 +146,86 @@ def test_stage_thresholds_are_deterministic() -> None:
         assert reason == "relationship_progression"
 
 
+def test_slow_warm_personality_and_event_significance_shape_stage_thresholds() -> None:
+    evidence = {
+        "stage": "stranger",
+        "interaction_count": 5,
+        "trust": 25,
+        "closeness": 20,
+    }
+
+    slow_stage, slow_reason = evaluate_relationship_stage(
+        evidence,
+        slow_warmth=90,
+        event_significance=0,
+    )
+    significant_stage, significant_reason = evaluate_relationship_stage(
+        evidence,
+        slow_warmth=90,
+        event_significance=1,
+    )
+
+    assert (slow_stage, slow_reason) == ("stranger", "relationship_steady")
+    assert (significant_stage, significant_reason) == (
+        "acquaintance",
+        "relationship_progression",
+    )
+
+
+def test_world_reads_protagonist_slow_warmth_and_audits_event_significance(
+    tmp_path: Path,
+) -> None:
+    kernel = WorldKernel(CompanionStore(tmp_path / "slow-warm-stage.sqlite"))
+    started = kernel.submit(
+        {
+            "type": "start_world",
+            "seed": {
+                "world_id": "slow-warm-stage",
+                "logical_at": "2026-07-11T09:00:00+00:00",
+                "protagonist": {
+                    "id": "zhizhi",
+                    "name": "沈知栀",
+                    "kind": "companion",
+                    "relationship_pacing": {"slow_warmth": 90},
+                },
+                "daily_schedule": [],
+                "npcs": [],
+            },
+        },
+        expected_revision=0,
+    )
+    kernel.submit(
+        {
+            "type": "register_user",
+            "world_id": started.world_id,
+            "user_id": "user:geoff",
+            "name": "geoff",
+        },
+        expected_revision=started.revision,
+    )
+
+    for index in range(1, 5):
+        _appraise(kernel, started.world_id, index, "warmth_received")
+    assert kernel.snapshot(started.world_id)["relationships"]["user:geoff"]["stage"] == "stranger"
+
+    _appraise(kernel, started.world_id, 5, "warmth_received")
+    relation = kernel.snapshot(started.world_id)["relationships"]["user:geoff"]
+    evaluated = [
+        event
+        for event in kernel.events(started.world_id)
+        if event.event_type == "RelationshipStageEvaluated"
+    ][-1]
+
+    assert relation["stage"] == "acquaintance"
+    assert evaluated.payload["slow_warmth"] == 90
+    assert evaluated.payload["event_significance"] == 1
+    assert evaluated.payload["effective_thresholds"] == {
+        "interaction_count": 6,
+        "trust": 22,
+        "closeness": 0,
+    }
+
+
 
 def test_logical_time_alone_does_not_promote_relationship(tmp_path: Path) -> None:
     from datetime import timedelta
@@ -226,8 +306,11 @@ async def test_world_reply_prompt_reads_the_projected_friend_stage(tmp_path: Pat
             return '{"reply_text":"嗯，我听着。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
 
     kernel, world_id = _world(tmp_path)
-    for index in range(1, 13):
+    for index in range(1, 25):
         _appraise(kernel, world_id, index, "warmth_received")
+        if kernel.snapshot(world_id)["relationships"]["user:geoff"]["stage"] == "friend":
+            break
+    assert kernel.snapshot(world_id)["relationships"]["user:geoff"]["stage"] == "friend"
     model = CapturingModel()
     engine = CompanionEngine(
         kernel.store,

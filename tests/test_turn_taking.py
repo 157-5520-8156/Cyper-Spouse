@@ -99,3 +99,18 @@ def test_explicit_stop_replies_quickly() -> None:
 
     assert decision.timing == ReplyTiming.IMMEDIATE
     assert decision.wait_seconds == 0.2
+
+
+def test_batch_limit_forces_a_replayable_immediate_flush() -> None:
+    decision = TurnTakingPolicy(long_wait_seconds=30).decide(
+        TurnInput(
+            pending_count=6,
+            latest_text="还有第六句，",
+            merged_text="\n".join(f"第{index}句" for index in range(1, 7)),
+        )
+    )
+
+    assert decision.state == TurnState.READY
+    assert decision.timing == ReplyTiming.IMMEDIATE
+    assert decision.wait_seconds == 0
+    assert decision.reason == "batch_limit_reached"

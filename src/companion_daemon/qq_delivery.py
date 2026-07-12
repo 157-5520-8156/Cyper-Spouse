@@ -1,6 +1,7 @@
 """Outbound QQ routing shared by immediate and background companion work."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from pathlib import Path
 
 from companion_daemon.config import Settings
@@ -22,13 +23,23 @@ class QQDelivery:
         return await self._official_client().send_c2c_text(recipient_id, text, is_wakeup=True)
 
     @staticmethod
-    def receipt_candidate(response: dict[str, object] | None) -> str | None:
+    def receipt_candidate(response: object | None) -> str | None:
         """Extract a persisted platform identifier without claiming final delivery."""
         if not response:
             return None
-        for key in ("message_id", "id", "msg_id"):
-            if response.get(key) not in {None, ""}:
-                return f"platform:{key}:{response[key]}"
+        candidates = [response]
+        nested = response.get("data") if isinstance(response, Mapping) else getattr(response, "data", None)
+        if nested:
+            candidates.append(nested)
+        for candidate in candidates:
+            for key in ("message_id", "id", "msg_id"):
+                value = (
+                    candidate.get(key)
+                    if isinstance(candidate, Mapping)
+                    else getattr(candidate, key, None)
+                )
+                if value not in {None, ""}:
+                    return f"platform:{key}:{value}"
         return None
 
     async def send_image(self, recipient_id: str, image_path: Path, *, content: str | None = None) -> None:

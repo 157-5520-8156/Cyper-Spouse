@@ -20,6 +20,7 @@ from companion_daemon.im_timing import between_part_delay_seconds, initial_reply
 from companion_daemon.multimodal import attachment_kind
 from companion_daemon.process_lock import AlreadyRunningError
 from companion_daemon.qq_client import QQOfficialClient
+from companion_daemon.qq_delivery import QQDelivery
 from companion_daemon.qq_outbound_owner import (
     QQOutboundOwnerLease,
     qq_outbound_owner_lock_path,
@@ -53,6 +54,34 @@ GHOST_CONTEXT_HINT = (
 class ReplyTarget:
     async def reply(self, **kwargs) -> object:
         raise NotImplementedError
+
+
+class MissingDeliveryEvidenceError(RuntimeError):
+    """The adapter call returned, but supplied no durable delivery evidence."""
+
+
+def _mark_claimed_reply_segment_unknown(
+    engine: object,
+    reply: CompanionReply,
+    *,
+    segment_id: str,
+    reason: str,
+) -> bool:
+    marker = getattr(engine, "mark_reply_part_unknown", None)
+    if callable(marker):
+        marker(reply, segment_id=segment_id, reason=reason)
+        return True
+    kernel = getattr(engine, "world_kernel", None)
+    world_id = getattr(engine, "world_id", None)
+    if kernel is None or world_id is None or reply.delivery_id is None:
+        return False
+    kernel.mark_outgoing_segment_unknown(
+        reply.delivery_id,
+        segment_id,
+        reason=reason,
+        expected_revision=kernel.revision(world_id),
+    )
+    return True
 
 
 @dataclass
@@ -133,6 +162,11 @@ class QQMessageCoalescer:
                 self._pending[key].append(
                     QueuedQQMessage(incoming=prior, reply_target=reply_target)
                 )
+        if len(self._pending[key]) >= 6:
+            existing = self._tasks.get(key)
+            if existing and not existing.done():
+                existing.cancel()
+            await self._flush_later(key, 0.0)
         if key in self._deferred:
             self._cancel_deferred(key)
             deferred = self._deferred.pop(key, None)
@@ -436,6 +470,7 @@ class QQMessageCoalescer:
                 incoming=merged, reply_target=reply_target, reply=reply
             )
             claimed_segments: dict[int, str] = {}
+            settled_segments: set[str] = set()
 
             def before_part(index: int, _part: str) -> None:
                 if hasattr(self.engine, "begin_reply_part_delivery"):
@@ -445,12 +480,20 @@ class QQMessageCoalescer:
                     if segment_id:
                         claimed_segments[index] = segment_id
 
-            def after_part(index: int, _part: str) -> None:
+            def after_part(index: int, _part: str, response: object) -> None:
                 segment_id = claimed_segments.get(index)
                 if segment_id and hasattr(self.engine, "confirm_reply_part_delivery"):
+                    external_receipt = QQDelivery.receipt_candidate(response)
+                    if not external_receipt:
+                        raise MissingDeliveryEvidenceError(
+                            "QQ reply returned without a platform message id or queryable receipt"
+                        )
                     self.engine.confirm_reply_part_delivery(
-                        reply, segment_id=segment_id
+                        reply,
+                        segment_id=segment_id,
+                        external_receipt=external_receipt,
                     )
+                    settled_segments.add(segment_id)
 
             sent_completely = await _send_reply_parts(
                 reply_target,
@@ -480,7 +523,23 @@ class QQMessageCoalescer:
                 return False
         except Exception:
             logger.exception("failed to send QQ reply")
-            if hasattr(self.engine, "fail_reply_delivery"):
+            uncertain_reason = "QQ adapter call ended without durable delivery evidence"
+            uncertain_segments = [
+                segment_id
+                for segment_id in claimed_segments.values()
+                if segment_id not in settled_segments
+            ] if "claimed_segments" in locals() else []
+            for segment_id in uncertain_segments:
+                try:
+                    _mark_claimed_reply_segment_unknown(
+                        self.engine,
+                        reply,
+                        segment_id=segment_id,
+                        reason=uncertain_reason,
+                    )
+                except Exception:
+                    logger.exception("failed to persist uncertain QQ segment")
+            if not uncertain_segments and hasattr(self.engine, "fail_reply_delivery"):
                 self.engine.fail_reply_delivery(reply, "QQ text delivery failed")
             return False
         finally:
@@ -925,7 +984,7 @@ async def _send_reply_parts(
     human_timing: bool = True,
     should_continue: Callable[[], bool] | None = None,
     before_part: Callable[[int, str], None] | None = None,
-    after_part: Callable[[int, str], None] | None = None,
+    after_part: Callable[[int, str, object], None] | None = None,
 ) -> bool:
     rng = rng or random.Random()
     for index, part in enumerate(parts):
@@ -938,9 +997,9 @@ async def _send_reply_parts(
                 return False
         if before_part:
             before_part(index, part)
-        await reply_target.reply(content=part, msg_seq=_reply_msg_seq())
+        response = await reply_target.reply(content=part, msg_seq=_reply_msg_seq())
         if after_part:
-            after_part(index, part)
+            after_part(index, part, response)
     return True
 
 

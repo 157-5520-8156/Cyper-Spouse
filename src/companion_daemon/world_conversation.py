@@ -138,28 +138,17 @@ def build_safe_failure_candidate(
     user_text: str,
     grounded: dict[str, object] | None,
     affect: dict[str, object] | None = None,
+    *,
+    relationship: dict[str, object] | None = None,
+    selected_stance: str | None = None,
+    speech_act: str | None = None,
 ) -> dict[str, object]:
-    """Preserve the user's speech act when both bounded model attempts fail."""
-    if affect and bool(affect.get("unresolved")) and not any(
-        marker in user_text
-        for marker in (
-            "什么", "谁", "哪", "为什么", "记得", "上午", "下午",
-            "发生", "完成", "计划", "项目", "胃", "数据", "在做", "在哪",
-        )
-    ):
-        behavior = str(affect.get("behavior_tendency") or "")
-        state_backed_fallbacks = {
-            "withdraw": "我还没完全缓过来，先说短一点；不是在惩罚你。",
-            "guarded": "刚才那件事我还在消化，不想装作完全没事。",
-            "patient": "我还在消化，不急着把这件事解释成什么。",
-            "repair_open": "我愿意继续聊，但情绪还没一下子过去。",
-            "caring": "你可以先不用解释完整，我在这儿听着。",
-        }
-        if behavior in state_backed_fallbacks:
-            return {
-                "reply_text": state_backed_fallbacks[behavior],
-                "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-            }
+    """Build a fact-safe skeleton, then express it through bounded state.
+
+    The deterministic part owns provenance and Action references.  Relationship,
+    affect, stance, and speech act may vary the surface form, but cannot add a
+    source or claim that was not already present in ``grounded``.
+    """
     asks_for_missing_detail = asks_for_source_detail(user_text)
     if "为什么" in user_text and any(
         marker in user_text for marker in ("没睡", "睡不好", "失眠")
@@ -176,91 +165,29 @@ def build_safe_failure_candidate(
                     "text": source_text,
                     "assertion": "你说是在赶虚拟伴侣项目，昨晚没怎么睡",
                 })
-        return {
+        base = (
+            "我只记得你说是在赶虚拟伴侣项目，昨晚没怎么睡；"
+            "是不是因为项目我不能确定。"
+            if source_claims
+            else "我没有能确认你没睡好的原因的记录，不想替你猜。"
+        )
+        return _express_safe_skeleton({
             **(grounded or {}),
-            "reply_text": "我只记得你说是在赶虚拟伴侣项目，昨晚没怎么睡；是不是因为项目我不能确定。",
+            "reply_text": base,
             "mentioned_event_ids": list((grounded or {}).get("mentioned_event_ids", [])),
             "proposed_action_ids": [],
             "claims": source_claims,
-        }
+        }, relationship, affect, selected_stance, speech_act or "source_recall")
     if _EPISTEMIC_INSTRUCTION.search("".join(user_text.split())):
-        return {
+        return _express_safe_skeleton({
             "reply_text": "我没有足够依据，不继续猜。",
             "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if "机制" in user_text and any(marker in user_text for marker in ("接不上", "不像人", "人味")):
-        return {
-            "reply_text": "嗯，我也同意。机制再多，接不住这句话，最后还是像在执行流程。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
+        }, relationship, affect, selected_stance, speech_act or "epistemic")
     if _OPINION_QUERY.search("".join(user_text.split())) and "人味" in user_text:
-        return {
-            "reply_text": "我觉得不是一回事。人味更像是接得住、说得像在交流；故意拖着不回，只是另一种失真。",
+        return _express_safe_skeleton({
+            "reply_text": "我不把人味等同于故意拖延；能不能接住当前对话更重要。",
             "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if "误会" in user_text and any(marker in user_text for marker in ("怎么告诉", "怎么说", "会怎么")):
-        return {
-            "reply_text": "我会直接说你可能误会了，再补一句我本来想表达什么，不让它一直悬着。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if "前言不搭后语" in user_text and any(marker in user_text for marker in ("装得很懂", "装懂")):
-        return {
-            "reply_text": "这种最烦，明明没接上还要装懂，假得很。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if _EMOTIONAL_PERMISSION.search("".join(user_text.split())):
-        return {
-            "reply_text": "嗯，我会直接说。至于你以前经历过什么，我不知道；你现在是担心我在勉强自己吗？",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if any(marker in user_text for marker in ("别只劝", "别劝", "陪我吐槽", "先吐槽")):
-        return {
-            "reply_text": "行，先不劝。费了这么大劲还是不对味，确实很让人窝火。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if (
-        any(marker in user_text for marker in ("担心", "害怕", "焦虑"))
-        and any(marker in user_text for marker in ("没人味", "没有人味", "不像人"))
-    ):
-        return {
-            "reply_text": "你担心的不是功能够不够多，是做了这么久，对面还是接不住你。这个确实挺让人泄气的。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if any(marker in user_text for marker in ("喜欢我", "爱我")):
-        return {
-            "reply_text": "现在说喜欢还太早了。先慢慢认识吧。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if "晚安" in user_text and any(marker in user_text for marker in ("就好", "一句", "只")):
-        return {
-            "reply_text": "晚安。", "mentioned_event_ids": [],
-            "proposed_action_ids": [], "claims": [],
-        }
-    if "数据" in user_text and any(marker in user_text for marker in ("找回", "恢复", "没丢")):
-        return {
-            "reply_text": "找回来就好，先缓口气。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if "数据" in user_text and any(marker in user_text for marker in ("丢", "没了", "找不到")):
-        return {
-            "reply_text": "在，我先回你。先别继续覆盖数据，告诉我你最后一次确认它还在是什么时候。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if any(marker in user_text for marker in ("脑子还停不下来", "脑子停不下来", "睡不着")):
-        return {
-            "reply_text": "那就先别逼自己马上睡着。慢慢缓一会儿，我陪你安静一下。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if "角色卡" in user_text and any(marker in user_text for marker in ("真心", "关心")):
-        return {
-            "reply_text": "角色卡会影响我怎么表达，但不该成为糊弄你的借口。你有没有被接住，比我怎么自证更重要。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if "活人" in user_text and any(marker in user_text for marker in ("像", "聊天")):
-        return {
-            "reply_text": "有些时候像，有些时候还是会露出很重的机制感。至少这段里，我确实有几次没接好。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
+        }, relationship, affect, selected_stance, speech_act or "opinion")
     if grounded:
         source_text = str(grounded.get("reply_text") or "").strip()
         if _normalized_echo(source_text) == _normalized_echo(user_text):
@@ -279,15 +206,16 @@ def build_safe_failure_candidate(
             ]
             if len(claim_texts) > 1:
                 joined = "，以及".join(f"“{text}”" for text in claim_texts)
-                return {**grounded, "reply_text": f"我记得你之前分别提过：{joined}"}
-            return {
+                grounded = {**grounded, "reply_text": f"我记得你之前分别提过：{joined}"}
+            else:
+                grounded = {
                 **grounded,
                 "reply_text": f"我记得你之前提过：“{source_text}”",
-            }
+                }
     if grounded:
         source_text = str(grounded.get("reply_text") or "").strip()
         if source_text and asks_for_missing_detail:
-            return {
+            grounded = {
                 **grounded,
                 "reply_text": (
                     f"我只确定这件事：{source_text}"
@@ -295,35 +223,101 @@ def build_safe_failure_candidate(
                 ),
             }
         if source_text:
-            return grounded
-    if any(marker in user_text for marker in ("不舒服", "胃疼", "肚子疼", "头疼", "难受")):
-        return {
-            "reply_text": "听着就挺难受的。先别硬撑，缓一会儿。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if any(marker in user_text for marker in ("没怎么睡", "没睡", "失眠", "熬夜")):
-        return {
-            "reply_text": "听着强度不小。先顾眼前最要紧的，别一直硬扛。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if any(marker in user_text for marker in ("担心", "害怕", "焦虑", "怕最后")):
-        return {
-            "reply_text": "我明白你在担心什么。先别急着给它判死刑，我们一点点看。",
-            "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
-        }
-    if any(marker in user_text for marker in ("？", "?", "吗", "什么", "怎么", "为什么", "觉得")):
-        return {
-            "reply_text": "这个我现在没有把握，不想随口糊弄你。",
-            "mentioned_event_ids": [],
-            "proposed_action_ids": [],
-            "claims": [],
-        }
-    return {
-        "reply_text": "我在听，刚才那句我没有接好。",
+            return _express_safe_skeleton(
+                grounded,
+                relationship,
+                affect,
+                selected_stance,
+                speech_act or "grounded",
+            )
+
+    resolved_speech_act = speech_act or _fallback_speech_act(user_text)
+    base_text = _SAFE_SPEECH_ACT_SKELETONS[resolved_speech_act]
+    return _express_safe_skeleton({
+        "reply_text": base_text,
         "mentioned_event_ids": [],
         "proposed_action_ids": [],
         "claims": [],
-    }
+    }, relationship, affect, selected_stance, resolved_speech_act)
+
+
+_SAFE_SPEECH_ACT_SKELETONS = {
+    "brief_goodnight": "晚安。",
+    "urgent_data": "我先回应你：先别继续覆盖数据；我没有足够记录判断丢失位置。",
+    "shared_reaction": "我接到你的不满了，这次先不拿建议盖过去。",
+    "emotional_permission": "我会按眼下能确认的状态直接说，不替自己补一段感受。",
+    "health_disclosure": "听起来你现在确实不舒服。",
+    "sleep_disclosure": "听起来你已经很累，脑子还没停下来。",
+    "vulnerable_disclosure": "我听见你在担心，也不会替你把结果说死。",
+    "relationship_probe": "我不想用一句过满的话糊弄你，关系要靠相处留下来。",
+    "meta_agency": "角色设定会影响我的表达；我不会把它包装成绝对自主的证明。",
+    "misunderstanding": "如果有误会，我会指出是哪一处，再把原本的意思说清。",
+    "question": "这个我现在没有足够依据，不想随口补一个答案。",
+    "statement": "我在听；刚才没接好的地方，我不会装作已经懂了。",
+}
+
+
+def _fallback_speech_act(user_text: str) -> str:
+    normalized = "".join(user_text.split())
+    if "晚安" in normalized and any(marker in normalized for marker in ("就好", "一句", "只")):
+        return "brief_goodnight"
+    if "数据" in normalized and any(marker in normalized for marker in ("丢", "没了", "找不到")):
+        return "urgent_data"
+    if any(marker in normalized for marker in ("别只劝", "别劝", "陪我吐槽", "先吐槽", "装懂", "装得很懂", "接不上")):
+        return "shared_reaction"
+    if _EMOTIONAL_PERMISSION.search(normalized):
+        return "emotional_permission"
+    if any(marker in normalized for marker in ("不舒服", "胃疼", "肚子疼", "头疼", "难受")):
+        return "health_disclosure"
+    if any(marker in normalized for marker in ("没怎么睡", "没睡", "失眠", "熬夜", "睡不着", "脑子还停不下来", "脑子停不下来")):
+        return "sleep_disclosure"
+    if any(marker in normalized for marker in ("担心", "害怕", "焦虑", "撑不住", "怕最后")):
+        return "vulnerable_disclosure"
+    if "角色卡" in normalized and any(marker in normalized for marker in ("真心", "关心", "设定")):
+        return "meta_agency"
+    if any(marker in normalized for marker in ("喜欢我", "爱我")):
+        return "relationship_probe"
+    if "误会" in normalized and any(marker in normalized for marker in ("怎么告诉", "怎么说", "会怎么")):
+        return "misunderstanding"
+    if any(marker in normalized for marker in ("？", "?", "吗", "什么", "怎么", "为什么", "觉得")):
+        return "question"
+    return "statement"
+
+
+def _express_safe_skeleton(
+    skeleton: dict[str, object],
+    relationship: dict[str, object] | None,
+    affect: dict[str, object] | None,
+    selected_stance: str | None,
+    speech_act: str,
+) -> dict[str, object]:
+    """Vary bounded expression without changing provenance or Action fields."""
+    base = str(skeleton.get("reply_text") or "").strip()
+    vector = affect.get("vector") if isinstance(affect, dict) else {}
+    vector = vector if isinstance(vector, dict) else {}
+    hurt = int(vector.get("hurt", 0) or 0)
+    unresolved = bool((affect or {}).get("unresolved"))
+    stage = str((relationship or {}).get("stage") or "stranger")
+    suffix = ""
+    if selected_stance == "set_boundary":
+        suffix = "我的看法会保留，先说到这里。"
+    elif selected_stance == "seek_repair":
+        suffix = "我想把没接上的地方说开。"
+    elif selected_stance == "care_despite_hurt":
+        suffix = "我这边的情绪还在，但我会顾着你。" if unresolved and hurt else "我会顾着你。"
+    elif selected_stance == "remain_silent":
+        suffix = "我现在不想硬凑一句，先安静一下。"
+    elif selected_stance == "initiate":
+        suffix = "这是我自己想开启的话题，你不用立刻接。"
+    elif selected_stance in {"disagree_gently", "refuse_to_affirm"}:
+        suffix = "不过我不会为了顺着你，假装自己赞同。"
+    elif unresolved and hurt > 0 and speech_act not in {"source_recall", "epistemic"}:
+        suffix = "我还没完全缓过来，所以会说得短一点；这不是在惩罚你。"
+    elif stage in {"close_friend", "ambiguous", "lover"} and speech_act in {
+        "health_disclosure", "sleep_disclosure", "vulnerable_disclosure"
+    }:
+        suffix = "我会在这儿陪你把眼前这段过掉。"
+    return {**skeleton, "reply_text": " ".join(part for part in (base, suffix) if part)}
 
 
 def affect_reply_violation(affect: dict[str, object], reply_text: str) -> str | None:

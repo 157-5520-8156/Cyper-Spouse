@@ -104,10 +104,11 @@ def test_repair_state_fallback_does_not_claim_the_user_just_apologized() -> None
             "unresolved": True,
             "vector": {"hurt": 12, "warmth": 4},
         },
+        selected_stance="seek_repair",
     )
 
-    assert candidate["reply_text"] == "我愿意继续聊，但情绪还没一下子过去。"
-    assert "修复" not in str(candidate["reply_text"])
+    assert "说开" in str(candidate["reply_text"])
+    assert "道歉" not in str(candidate["reply_text"])
 
 
 def test_caring_state_has_a_presence_fallback_without_inventing_history() -> None:
@@ -119,9 +120,49 @@ def test_caring_state_has_a_presence_fallback_without_inventing_history() -> Non
             "unresolved": True,
             "vector": {"hurt": 10, "warmth": 4},
         },
+        selected_stance="care_despite_hurt",
     )
 
-    assert candidate["reply_text"] == "你可以先不用解释完整，我在这儿听着。"
+    assert "我会顾着你" in str(candidate["reply_text"])
+    assert "情绪还在" in str(candidate["reply_text"])
+
+
+def test_safe_fallback_preserves_sources_and_actions_but_not_one_personality_line() -> None:
+    grounded = {
+        "reply_text": "你说今晚要处理数据恢复。",
+        "mentioned_event_ids": ["message:data"],
+        "proposed_action_ids": ["action:check-backup"],
+        "claims": [
+            {
+                "source_id": "message:data",
+                "text": "今晚要处理数据恢复",
+                "assertion": "你说今晚要处理数据恢复",
+            }
+        ],
+    }
+
+    guarded = build_safe_failure_candidate(
+        "那你怎么看？",
+        grounded,
+        {"unresolved": True, "vector": {"hurt": 30}},
+        relationship={"stage": "acquaintance"},
+        selected_stance="set_boundary",
+    )
+    caring = build_safe_failure_candidate(
+        "那你怎么看？",
+        grounded,
+        {"unresolved": True, "vector": {"hurt": 30}},
+        relationship={"stage": "close_friend"},
+        selected_stance="care_despite_hurt",
+    )
+
+    assert guarded["reply_text"] != caring["reply_text"]
+    for candidate in (guarded, caring):
+        assert candidate["mentioned_event_ids"] == ["message:data"]
+        assert candidate["proposed_action_ids"] == ["action:check-backup"]
+        assert candidate["claims"] == grounded["claims"]
+    assert "先说到这里" in str(guarded["reply_text"])
+    assert "我会顾着你" in str(caring["reply_text"])
 
 
 @pytest.mark.asyncio
@@ -156,8 +197,8 @@ def test_mechanism_discussion_has_a_shared_reaction_fallback() -> None:
         "对，我也觉得机制再多，接不上对话就还是不像人。", None
     )
 
-    assert "接不住这句话" in str(candidate["reply_text"])
-    assert "执行流程" in str(candidate["reply_text"])
+    assert "不满" in str(candidate["reply_text"])
+    assert "建议" in str(candidate["reply_text"])
 
 
 def test_user_vulnerability_can_be_answered_while_hurt_remains(tmp_path: Path) -> None:

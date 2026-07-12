@@ -1353,6 +1353,27 @@ class CompanionEngine:
             return None
         if communication_decision and communication_decision.attention == "do_not_disturb":
             return None
+        post_appraisal = self.world_kernel.snapshot(self.world_id)
+        post_deliberation = post_appraisal.get("last_deliberation", {})
+        post_stance = (
+            str(post_deliberation.get("stance") or "")
+            if isinstance(post_deliberation, dict)
+            else ""
+        )
+        if post_stance == "remain_silent":
+            decision_id = f"silence:{message.message_id}"
+            self._submit_world_with_retry(
+                {
+                    "type": "defer_decision",
+                    "world_id": self.world_id,
+                    "decision_id": decision_id,
+                    "kind": "deliberate_silence",
+                    "reason": "character_deliberation_selected_remain_silent",
+                    "review_at": (self._world_logical_now() + timedelta(minutes=30)).isoformat(),
+                    "idempotency_key": f"defer:{decision_id}",
+                }
+            )
+            return None
         image_path, media_action_id, media_reason = await self._maybe_generate_world_image(
             user_id=user_id, message=message
         )
@@ -1803,7 +1824,11 @@ class CompanionEngine:
                 except Exception as repair_error:
                     self._fail_world_model_call(repair_action_id, str(repair_error))
                     candidate = build_safe_failure_candidate(
-                        message.text, grounded_fallback, modulation
+                        message.text,
+                        grounded_fallback,
+                        modulation,
+                        relationship=relationship,
+                        selected_stance=chosen_stance,
                     )
                     fallback_needs_audit = True
                 else:
@@ -1885,7 +1910,11 @@ class CompanionEngine:
                         )
                     except WorldError:
                         candidate = build_safe_failure_candidate(
-                            message.text, grounded_fallback, modulation
+                            message.text,
+                            grounded_fallback,
+                            modulation,
+                            relationship=relationship,
+                            selected_stance=chosen_stance,
                         )
                         fallback_needs_audit = True
         if fallback_needs_audit:
@@ -2251,6 +2280,70 @@ class CompanionEngine:
                 "action_id": reply.sticker_action_id,
                 "result": {"kind": "sticker_delivery", "status": "delivered"},
                 "idempotency_key": f"sticker-delivered:{reply.sticker_action_id}",
+            }
+        )
+
+    def begin_reaction_delivery(
+        self, incoming: IncomingMessage, reply: CompanionReply
+    ) -> str | None:
+        """Select a reaction in the ledger before an adapter attempts it."""
+        if (
+            not self.world_kernel
+            or not self.world_id
+            or not incoming.message_id
+            or not reply.suggested_reaction
+        ):
+            return None
+        action_id = (
+            f"reaction:{incoming.platform}:{incoming.message_id}:{reply.suggested_reaction}"
+        )
+        self._submit_world_with_retry(
+            {
+                "type": "select_reaction",
+                "world_id": self.world_id,
+                "message_id": str(incoming.message_id),
+                "reaction_id": reply.suggested_reaction,
+                "platform": incoming.platform,
+                "outbound_kind": "reaction",
+                "outbound_trigger": "reply_reaction",
+                "idempotency_key": f"select:{action_id}",
+            }
+        )
+        return action_id
+
+    def settle_reaction_delivery(
+        self,
+        action_id: str | None,
+        *,
+        status: str,
+        external_receipt: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        if not action_id or not self.world_kernel or not self.world_id:
+            return
+        if status == "unknown":
+            self._submit_world_with_retry(
+                {
+                    "type": "mark_external_action_unknown",
+                    "world_id": self.world_id,
+                    "action_id": action_id,
+                    "reason": reason or "adapter_result_uncertain",
+                    "idempotency_key": f"reaction-unknown:{action_id}",
+                }
+            )
+            return
+        self._submit_world_with_retry(
+            {
+                "type": "record_external_result",
+                "world_id": self.world_id,
+                "action_id": action_id,
+                "result": {
+                    "kind": "reaction_delivery",
+                    "status": status,
+                    "external_receipt": external_receipt,
+                    "reason": reason,
+                },
+                "idempotency_key": f"reaction-result:{action_id}:{status}",
             }
         )
 
@@ -3035,23 +3128,47 @@ class CompanionEngine:
             }
             if outreach.requires_deliberation else None
         )
-        delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(
-            canonical_user_id=canonical_user_id,
-            platform=decision.platform,
-            text=text,
-            kind="proactive",
-            expires_at=self._world_logical_now() + timedelta(hours=4),
-            trace={
-                "world_id": self.world_id,
-                "direction": "proactive",
-                "appraisal": decision.trigger_type or "proactive",
-                "expression_policy": "主动消息只轻轻开口，不索取回应。",
-                "allowed_facts": [str(item["value"]) for item in self._current_world_facts(snapshot)],
-                "short_lived_constraint": None,
-                "observable_reason": decision.private_thought[:160],
-                "outbound_override": outbound_override,
-            },
-        )
+        try:
+            delivery_id, trace_id, action_id = self.world_kernel.queue_outgoing_action(
+                canonical_user_id=canonical_user_id,
+                platform=decision.platform,
+                text=text,
+                kind="proactive",
+                expires_at=self._world_logical_now() + timedelta(hours=4),
+                trace={
+                    "world_id": self.world_id,
+                    "direction": "proactive",
+                    "appraisal": decision.trigger_type or "proactive",
+                    "expression_policy": "主动消息只轻轻开口，不索取回应。",
+                    "allowed_facts": [str(item["value"]) for item in self._current_world_facts(snapshot)],
+                    "short_lived_constraint": None,
+                    "observable_reason": decision.private_thought[:160],
+                    "outbound_override": outbound_override,
+                },
+            )
+        except WorldError as exc:
+            reason = str(exc)
+            if "transgression_" not in reason and "outbound policy rejected" not in reason:
+                raise
+            self._submit_world_with_retry(
+                {
+                    "type": "defer_decision",
+                    "world_id": self.world_id,
+                    "decision_id": f"impulse:{model_action_id}:policy",
+                    "kind": "withheld_impulse",
+                    "reason": reason[:160],
+                    "review_at": (self._world_logical_now() + timedelta(minutes=45)).isoformat(),
+                    "idempotency_key": f"defer:impulse:{model_action_id}:policy",
+                }
+            )
+            return decision.model_copy(
+                update={
+                    "should_send": False,
+                    "message": None,
+                    "message_type": "none",
+                    "private_thought": f"这次越过预算还没恢复：{reason}。",
+                }
+            )
         return decision.model_copy(
             update={"message": text, "delivery_id": delivery_id, "turn_trace_id": trace_id, "world_action_id": action_id}
         )

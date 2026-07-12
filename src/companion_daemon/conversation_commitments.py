@@ -30,6 +30,10 @@ WaitingPhase = Literal[
     "letting_go",
     "revisit_later",
 ]
+ConversationStatus = Literal[
+    "open", "answered", "skipped", "meta", "cancelled", "expired"
+]
+ConversationTerminalState = Literal["resolved", "cancelled", "expired"]
 
 RULE_VERSION = "conversation-commitments-v1"
 
@@ -86,8 +90,8 @@ class ConversationThread:
     expires_at: datetime
     cancel_conditions: tuple[str, ...]
     owner: str
-    status: str = "open"
-    terminal_state: str | None = None
+    status: ConversationStatus = "open"
+    terminal_state: ConversationTerminalState | None = None
     waiting_phase: WaitingPhase = "not_due"
     waiting_changed_at: datetime | None = None
     rule_version: str = RULE_VERSION

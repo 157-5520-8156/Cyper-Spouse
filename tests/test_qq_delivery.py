@@ -8,6 +8,15 @@ import companion_daemon.onebot_adapter as onebot_adapter
 from companion_daemon.qq_delivery import QQDelivery
 
 
+def test_receipt_candidate_supports_official_objects_and_onebot_data_envelopes() -> None:
+    assert QQDelivery.receipt_candidate(SimpleNamespace(id="official-81")) == (
+        "platform:id:official-81"
+    )
+    assert QQDelivery.receipt_candidate(
+        {"status": "ok", "data": {"message_id": 82}}
+    ) == "platform:message_id:82"
+
+
 @pytest.mark.asyncio
 async def test_napcat_delivery_sends_background_text_to_configured_qq(monkeypatch: pytest.MonkeyPatch) -> None:
     requests: list[httpx.Request] = []

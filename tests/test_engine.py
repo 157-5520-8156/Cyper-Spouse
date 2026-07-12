@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -399,7 +400,7 @@ async def test_world_image_request_uses_generation_and_delivery_actions(tmp_path
     await engine.handle_message(
         IncomingMessage(platform="qq", platform_user_id="geoff", text="你好", message_id="media-register")
     )
-    for index in range(1, 35):
+    for index in range(1, 55):
         world.submit(
             {
                 "type": "appraise_turn",
@@ -412,6 +413,9 @@ async def test_world_image_request_uses_generation_and_delivery_actions(tmp_path
             },
             expected_revision=world.revision(world_id),
         )
+        if world.snapshot(world_id)["relationships"]["user:geoff"]["stage"] == "close_friend":
+            break
+    assert world.snapshot(world_id)["relationships"]["user:geoff"]["stage"] == "close_friend"
 
     reply = await engine.handle_message(
         IncomingMessage(platform="qq", platform_user_id="geoff", text="能发一张自拍吗", message_id="media-request")
@@ -702,6 +706,56 @@ async def test_world_proactive_can_deliberately_override_open_thread_soft_pressu
     assert override["cost"] == 20
     assert override["strike"] == 1
     assert "open_conversation_thread" in str(override["reason"])
+
+
+@pytest.mark.asyncio
+async def test_world_remain_silent_stance_creates_no_outgoing_message(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class ModelMustNotRun:
+        async def complete(self, messages, *, temperature: float) -> str:
+            raise AssertionError("remain_silent must settle before reply generation")
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    original = world.character_deliberation.decide
+
+    def choose_silence(*args, **kwargs):
+        decision = original(*args, **kwargs)
+        return replace(
+            decision,
+            chosen_stance="remain_silent",
+            display_strategy="withhold_expression_without_fabricating_agreement",
+            selection=replace(decision.selection, chosen_stance="remain_silent"),
+        )
+
+    monkeypatch.setattr(world.character_deliberation, "decide", choose_silence)
+    engine = CompanionEngine(
+        store, ModelMustNotRun(), TEST_PROMPT, world_kernel=world, world_id=world_id
+    )
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            text="我说完了。",
+            message_id="deliberate-silence",
+        )
+    )
+
+    assert reply is None
+    snapshot = world.snapshot(world_id)
+    assert snapshot["last_deliberation"]["stance"] == "remain_silent"
+    assert any(
+        item["kind"] == "deliberate_silence" and item["status"] == "deferred"
+        for item in snapshot["decisions"].values()
+    )
+    assert not any(
+        item["kind"] == "outgoing_message"
+        for item in snapshot["actions"].values()
+    )
 
 
 @pytest.mark.asyncio

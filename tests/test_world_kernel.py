@@ -137,7 +137,7 @@ def test_world_user_relationship_and_emotion_are_reduced_from_turn_appraisal(tmp
         "stage": "stranger",
         "interaction_count": 1,
         "stage_reason": "relationship_steady",
-        "stage_rule_version": "world-relationship-v1",
+        "stage_rule_version": "world-relationship-v2",
         "stage_changed_at": NOW.isoformat(),
     }
     affect = snapshot["emotion_modulation"]

@@ -173,14 +173,14 @@ mechanisms:
   - id: multimedia-analysis-and-generation
     status: partial
     sources: [AttachmentObserved, MediaRequest, PrivacyDecision]
-    events: [MediaRequested, MediaGenerated, MediaShared]
+    events: [MediaRequested, MediaGenerated, MediaShared, ReactionSelected, ReactionShared]
     reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [media_actions, attachment_summaries]
+    projections: [media_actions, attachment_summaries, reactions]
     decision_consumers: [multimodal-analyzer, image-generator, CharacterDeliberation]
     actions: [vision, transcription, image-generation, media-delivery]
     terminal_states: [delivered, failed, cancelled, expired, unknown]
     adapters: [qq-official, napcat, onebot]
-    tests: [tests/test_world_kernel.py::test_media_generation_and_delivery_are_separate_world_actions]
+    tests: [tests/test_world_kernel.py::test_media_generation_and_delivery_are_separate_world_actions, tests/test_world_reaction.py::test_reaction_is_selected_scheduled_and_shared_only_after_adapter_receipt]
 
   - id: attachment-retention
     status: structure

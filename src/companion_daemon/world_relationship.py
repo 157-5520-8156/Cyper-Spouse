@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import ceil
 from typing import Literal, cast
 
 
 RelationshipStage = Literal[
     "stranger", "acquaintance", "friend", "close_friend", "ambiguous", "lover"
 ]
-RULE_VERSION = "world-relationship-v1"
+RULE_VERSION = "world-relationship-v2"
 
 STAGES: tuple[RelationshipStage, ...] = (
     "stranger", "acquaintance", "friend", "close_friend", "ambiguous", "lover"
@@ -23,6 +24,56 @@ _THRESHOLDS: dict[RelationshipStage, tuple[int, int, int]] = {
     "ambiguous": (70, 55, 55),
     "lover": (120, 70, 75),
 }
+
+_SIGNIFICANCE_BY_APPRAISAL = {
+    "warmth_received": 1,
+    "user_vulnerable": 2,
+    "return_after_gap": 1,
+    "repair_specific": 2,
+    "repair_restitution": 3,
+}
+
+
+def relationship_slow_warmth(protagonist: dict[str, object]) -> int:
+    """Read the explicit relationship pacing parameter from Character Core.
+
+    Fifty preserves the historical baseline.  Faster or slower characters can
+    vary the threshold without changing global policy, and malformed seeds are
+    bounded rather than becoming an unreviewed relationship shortcut.
+    """
+    raw = protagonist.get("relationship_pacing", 50)
+    if isinstance(raw, dict):
+        raw = raw.get("slow_warmth", 50)
+    try:
+        return max(0, min(100, int(raw)))
+    except (TypeError, ValueError):
+        return 50
+
+
+def relationship_event_significance(appraisal: str) -> int:
+    """Return bounded relationship evidence for one observed appraisal.
+
+    Only constructive, sourced appraisals receive progression credit.  A
+    boundary violation is emotionally significant, but must never help a
+    relationship promote merely because it was dramatic.
+    """
+    return _SIGNIFICANCE_BY_APPRAISAL.get(str(appraisal), 0)
+
+
+def _effective_thresholds(
+    stage: RelationshipStage,
+    *,
+    slow_warmth: int,
+) -> tuple[int, int, int]:
+    count, trust, closeness = _THRESHOLDS[stage]
+    pacing = max(0, min(100, int(slow_warmth)))
+    count_factor = max(0.5, 1.0 + ((pacing - 50) / 100))
+    metric_factor = max(0.75, 1.0 + ((pacing - 50) / 200))
+    return (
+        ceil(count * count_factor),
+        ceil(trust * metric_factor),
+        ceil(closeness * metric_factor),
+    )
 
 
 @dataclass(frozen=True)
@@ -81,6 +132,8 @@ def evaluate_relationship_stage(
     relationship: dict[str, object],
     *,
     boundary: int = 0,
+    slow_warmth: int = 50,
+    event_significance: int = 0,
 ) -> tuple[RelationshipStage, str]:
     """Return the bounded next stage and an auditable transition reason.
 
@@ -103,9 +156,13 @@ def evaluate_relationship_stage(
 
     if current_index < len(STAGES) - 1:
         candidate = STAGES[current_index + 1]
-        required_count, required_trust, required_closeness = _THRESHOLDS[candidate]
+        required_count, required_trust, required_closeness = _effective_thresholds(
+            candidate,
+            slow_warmth=slow_warmth,
+        )
+        effective_count = interaction_count + max(0, min(3, int(event_significance)))
         if (
-            interaction_count >= required_count
+            effective_count >= required_count
             and trust >= required_trust
             and closeness >= required_closeness
         ):
@@ -133,8 +190,23 @@ def stage_event_payload(
     relationship: dict[str, object],
     boundary: int,
     reason: str,
+    slow_warmth: int = 50,
+    event_significance: int = 0,
 ) -> dict[str, object]:
     """Build one self-describing stage event payload for audit/replay."""
+    evaluation_stage = (
+        cast(RelationshipStage, from_stage) if from_stage in STAGES else stage
+    )
+    current_index = STAGES.index(evaluation_stage)
+    threshold_stage = (
+        STAGES[current_index + 1]
+        if current_index < len(STAGES) - 1
+        else evaluation_stage
+    )
+    required_count, required_trust, required_closeness = _effective_thresholds(
+        threshold_stage,
+        slow_warmth=slow_warmth,
+    )
     return {
         "entity_id": entity_id,
         "stage": stage,
@@ -148,5 +220,12 @@ def stage_event_payload(
             "boundary": int(boundary),
         },
         "reason": reason,
+        "slow_warmth": max(0, min(100, int(slow_warmth))),
+        "event_significance": max(0, min(3, int(event_significance))),
+        "effective_thresholds": {
+            "interaction_count": required_count,
+            "trust": required_trust,
+            "closeness": required_closeness,
+        },
         "rule_version": RULE_VERSION,
     }

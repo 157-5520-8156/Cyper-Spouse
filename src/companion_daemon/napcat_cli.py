@@ -65,11 +65,33 @@ def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> Fast
         emoji_id = qq_emoji_id(reply.suggested_reaction)
         if not emoji_id or not incoming.message_id:
             return
-        await send_onebot_emoji_like(
-            api_url,
-            message_id=incoming.message_id,
-            emoji_id=emoji_id,
-            access_token=access_token,
+        action_id = engine.begin_reaction_delivery(incoming, reply)
+        try:
+            result = await send_onebot_emoji_like(
+                api_url,
+                message_id=incoming.message_id,
+                emoji_id=emoji_id,
+                access_token=access_token,
+            )
+        except Exception as exc:
+            engine.settle_reaction_delivery(
+                action_id,
+                status="unknown",
+                reason=f"adapter_result_uncertain:{type(exc).__name__}",
+            )
+            raise
+        if result.get("status") == "failed" or int(result.get("retcode") or 0) != 0:
+            engine.settle_reaction_delivery(
+                action_id,
+                status="failed",
+                reason=str(result.get("message") or "onebot_reaction_rejected")[:300],
+            )
+            return
+        receipt = f"onebot-reaction:{incoming.message_id}:{emoji_id}"
+        engine.settle_reaction_delivery(
+            action_id,
+            status="delivered",
+            external_receipt=receipt,
         )
 
     coalescer = QQMessageCoalescer(

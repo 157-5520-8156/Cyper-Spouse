@@ -14,8 +14,12 @@ Stance = Literal[
     "disagree_gently",
     "refuse_to_affirm",
     "set_boundary",
+    "seek_repair",
+    "care_despite_hurt",
     "care_override",
     "defer",
+    "remain_silent",
+    "initiate",
 ]
 SelectionMode = Literal["highest_score", "recorded_weighted"]
 
@@ -99,7 +103,7 @@ class DeliberationDecision:
 class CharacterDeliberation:
     """Choose an explainable stance from state and an optional recorded draw."""
 
-    RULE_VERSION = "character-deliberation-v1"
+    RULE_VERSION = "character-deliberation-v2"
 
     def decide(
         self,
@@ -114,9 +118,14 @@ class CharacterDeliberation:
         *,
         recorded_draw: RecordedDraw | None = None,
     ) -> DeliberationDecision:
-        del open_commitments
         appraisal, conflicts, scores = self._score_stances(
-            situation, self_core, relationship, affect, needs, user_request
+            situation,
+            self_core,
+            relationship,
+            affect,
+            needs,
+            user_request,
+            open_commitments,
         )
         candidates = tuple(
             StanceCandidate(stance=stance, score=score, weight=max(1, score))
@@ -160,13 +169,36 @@ class CharacterDeliberation:
         affect: Mapping[str, object],
         needs: Mapping[str, object],
         request: UserRequest,
+        open_commitments: Sequence[object],
     ) -> tuple[str, tuple[str, ...], tuple[tuple[Stance, int], ...]]:
+        open_commitment_count = len(tuple(open_commitments))
+        energy = _number(needs, "energy", 50)
+        hurt = _number(affect, "hurt", 0)
+        boundary = _number(needs, "boundary", 0)
+        stage = str(relationship.get("stage", "stranger"))
+        trust = _number(relationship, "trust", 0)
+        text = str(situation.get("text") or "")
+        vulnerable = any(
+            marker in text
+            for marker in ("撑不住", "崩溃", "害怕", "难受", "救命", "陪我")
+        )
+        if str(situation.get("kind") or "") == "proactive":
+            initiative = _number(needs, "initiative", 50)
+            return (
+                "self_initiated_contact",
+                ("desire_to_connect_vs_respect_attention",),
+                (
+                    ("initiate", 45 + initiative // 4 + open_commitment_count * 12),
+                    ("defer", 35 + max(0, 45 - energy)),
+                    (
+                        "remain_silent",
+                        20 + max(0, 35 - energy) * 2 + boundary // 3,
+                    ),
+                ),
+            )
         if request.kind == "avoid_address":
             return "boundary_request", (), (("comply", 100), ("set_boundary", 25))
         if request.kind == "selfie_request":
-            stage = str(relationship.get("stage", "stranger"))
-            hurt = _number(affect, "hurt", 0)
-            boundary = _number(needs, "boundary", 0)
             closeness_bonus = 35 if stage in {"close_friend", "ambiguous", "lover"} else 0
             return (
                 "media_request",
@@ -178,13 +210,39 @@ class CharacterDeliberation:
                 ),
             )
         if request.kind != "no_advice":
-            return "ordinary_request", (), (("comply", 70), ("defer", 20))
+            repair_score = (
+                30 + hurt // 2 + trust // 10 + open_commitment_count * 30
+            )
+            care_score = (
+                25
+                + (55 if vulnerable else 0)
+                + _number(self_core, "care", 50) // 5
+                + hurt // 6
+            )
+            return (
+                "vulnerable_disclosure" if vulnerable else "ordinary_request",
+                (
+                    ("care_for_user_vs_preserve_own_hurt",)
+                    if vulnerable and hurt > 0
+                    else ("repair_vs_self_protection",)
+                    if hurt > 0 and open_commitment_count
+                    else ()
+                ),
+                (
+                    ("comply", 70),
+                    ("seek_repair", repair_score),
+                    ("care_despite_hurt", care_score),
+                    ("defer", 20 + max(0, 40 - energy)),
+                    (
+                        "remain_silent",
+                        10 + max(0, 30 - energy) * 2 + boundary // 4 + hurt // 5,
+                    ),
+                ),
+            )
 
         care = _number(self_core, "care", 50)
         directness = _number(self_core, "directness", 50)
-        energy = _number(needs, "energy", 50)
         irritation = _number(affect, "irritation", 0)
-        stage = str(relationship.get("stage", "stranger"))
         close_bonus = 15 if stage in {"close_friend", "ambiguous", "lover"} else 0
         low_energy_bonus = max(0, 45 - energy)
         risk = str(situation.get("risk", "low"))
@@ -203,6 +261,24 @@ class CharacterDeliberation:
                 ("disagree_gently", care * 11 // 20 + directness * 9 // 20 + close_bonus),
                 ("refuse_to_affirm", 25 + irritation // 3),
                 ("defer", 35 + low_energy_bonus * 2),
+                (
+                    "seek_repair",
+                    25 + hurt // 2 + trust // 10 + open_commitment_count * 25,
+                ),
+                (
+                    "care_despite_hurt",
+                    20
+                    + (50 if vulnerable else 0)
+                    + care // 5
+                    + hurt // 6,
+                ),
+                (
+                    "remain_silent",
+                    40
+                    + max(0, 35 - energy) * 3
+                    + hurt // 2
+                    + boundary // 3,
+                ),
             ),
         )
 
@@ -227,8 +303,12 @@ def _display_strategy(stance: Stance) -> str:
         "disagree_gently": "acknowledge_then_state_one_objection",
         "refuse_to_affirm": "decline_without_escalating",
         "set_boundary": "state_boundary_briefly",
+        "seek_repair": "name_the_gap_and_invite_repair",
+        "care_despite_hurt": "offer_care_without_erasing_hurt",
         "care_override": "name_concern_and_prioritize_safety",
         "defer": "acknowledge_and_pause",
+        "remain_silent": "withhold_expression_without_fabricating_agreement",
+        "initiate": "open_a_thread_from_owned_motive",
     }[stance]
 
 
