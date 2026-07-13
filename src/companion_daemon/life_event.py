@@ -1,12 +1,14 @@
 import argparse
 import asyncio
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 import logging
 from pathlib import Path
 import re
 
-from companion_daemon.budget import ESTIMATES, BudgetGate
+from companion_daemon.budget import BudgetGate, image_render_estimate
+from companion_daemon.companion_turn import CompanionTurn, DispatchAcceptance, TurnBeat
 from companion_daemon.config import get_settings
 from companion_daemon.image_generation import OpenAIImageGenerator, life_image_prompt
 from companion_daemon.life_runtime import advance_life_runtime, runtime_prompt_line
@@ -15,10 +17,52 @@ from companion_daemon.relationship import relationship_status_line
 from companion_daemon.social_followups import cancel_life_share_followup_for_event
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.stickers import load_stickers
+from companion_daemon.time import utc_now
 
 
 logger = logging.getLogger(__name__)
 LOCAL_INVITATION_RE = re.compile(r"你要不要(?:也)?(?:来|去|一起|过来)[^。！？!?]*[。！？!?]?")
+
+# Keep receipt parsing fixed to the production adapter even when the command's
+# delivery class is replaced by a test or deployment-specific transport.
+_QQ_RECEIPT_CANDIDATE = QQDelivery.receipt_candidate
+
+
+class _QQLifeShareTurnTransport:
+    """Turn transport for a World-authorized QQ life-share Action.
+
+    A successful request is not proof of a user-visible message.  Only a
+    platform identifier makes the segment delivered; a response without one
+    remains unknown.  Some OneBot-style adapters do return an explicit failure
+    payload, which can safely become a failed Action.
+    """
+
+    def __init__(self, delivery: QQDelivery, recipient_id: str) -> None:
+        self.delivery = delivery
+        self.recipient_id = recipient_id
+
+    async def dispatch(self, beat: TurnBeat) -> DispatchAcceptance:
+        response = await self.delivery.send_text(self.recipient_id, beat.text)
+        receipt = _QQ_RECEIPT_CANDIDATE(response)
+        if receipt:
+            return DispatchAcceptance(status="delivered", external_receipt=receipt)
+        if _explicit_qq_failure(response):
+            return DispatchAcceptance(
+                status="failed",
+                reason="qq_adapter_explicit_failure",
+            )
+        return DispatchAcceptance(
+            status="unknown",
+            reason="qq_life_share_returned_without_durable_receipt",
+        )
+
+
+def _explicit_qq_failure(response: object) -> bool:
+    """Recognize a declared adapter rejection, never infer it from absence."""
+    if not isinstance(response, Mapping):
+        return False
+    status = str(response.get("status") or "").strip().lower()
+    return status in {"failed", "failure", "error", "rejected"}
 
 
 @dataclass(frozen=True)
@@ -300,19 +344,16 @@ async def _run_world_life_event(engine, *, user_id: str, send: bool, sandbox: bo
     if not scheduled:
         print("life event not shared: world policy deferred it")
         return False
-    if not engine.world_kernel.begin_outgoing_action(scheduled.delivery_id, expected_revision=scheduled.revision):
-        return False
-    try:
-        response = await delivery.send_text(recipient_id, scheduled.text)
-    except Exception as exc:
-        engine.world_kernel.settle_outgoing_action(scheduled.delivery_id, delivered=False, reason=str(exc))
-        return False
-    engine.world_kernel.settle_outgoing_action(
-        scheduled.delivery_id,
-        delivered=True,
-        external_receipt=(QQDelivery.receipt_candidate(response) if hasattr(QQDelivery, "receipt_candidate") else None),
+    outcome = await CompanionTurn(
+        engine,
+        _QQLifeShareTurnTransport(delivery, recipient_id),
+    ).dispatch_scheduled(
+        action_id=scheduled.action_id,
+        delivery_id=scheduled.delivery_id,
+        observed_at=utc_now(),
+        idempotency_key=f"life-share:{scheduled.delivery_id}",
     )
-    return True
+    return outcome.terminal_state == "delivered"
 
 
 def _record_shared_life_event(

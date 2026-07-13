@@ -571,9 +571,16 @@ class TurnFrameCompiler:
 
     @staticmethod
     def _strongest_affect(affect: dict[str, object]) -> tuple[str, int] | None:
+        # ``emotion_modulation`` also contains operational projection fields
+        # (charge, violation count, decay bookkeeping, etc.).  They describe
+        # state around an emotion; they are not emotional dimensions and must
+        # never be surfaced as a model tendency.
+        vector = TurnFrameCompiler._mapping(affect.get("vector"))
         candidates = [
             (str(key), int(value))
-            for key, value in affect.items()
-            if isinstance(value, (int, float)) and int(value) > 0
+            for key, value in vector.items()
+            if isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and int(value) > 0
         ]
         return max(candidates, key=lambda item: item[1]) if candidates else None

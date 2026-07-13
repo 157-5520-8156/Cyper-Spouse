@@ -106,7 +106,7 @@ def test_advisories_are_non_authoritative_and_bound_to_frame_evidence() -> None:
             "clock": {},
             "recent_messages": [],
             "relationships": {"user:geoff": {"stage": "acquaintance"}},
-            "emotion_modulation": {"hurt": 50},
+            "emotion_modulation": {"vector": {"hurt": 50}},
             "facts": {},
             "experiences": {},
             "conversation_threads": {
@@ -124,6 +124,42 @@ def test_advisories_are_non_authoritative_and_bound_to_frame_evidence() -> None:
     assert {item.kind for item in advisories} >= {"affect", "relationship", "continuity"}
     assert all(item.source_event_ids for item in advisories)
     assert all(item.confidence <= 1.0 for item in advisories)
+
+
+def test_affect_advisory_uses_emotion_vector_not_projection_metadata() -> None:
+    """Only real affect dimensions may steer ordinary reply generation."""
+    compiler = TurnFrameCompiler()
+    frame = compiler.compile(
+        world_id="world:1",
+        revision=7,
+        state_hash="b" * 64,
+        snapshot={
+            "clock": {},
+            "recent_messages": [],
+            "relationships": {},
+            "emotion_modulation": {
+                "vector": {"hurt": 18, "warmth": 7},
+                # These are projection/control metadata, not emotions.  Their
+                # larger values previously won the strongest-affect scan.
+                "charge": 94,
+                "violation_count": 12,
+                "repair_evidence_count": 3,
+            },
+            "facts": {},
+            "experiences": {},
+            "conversation_threads": {},
+            "actions": {},
+            "agenda": {},
+        },
+        user_id="user:geoff",
+        message=IncomingMessage(platform="qq", platform_user_id="geoff", text="嗯。"),
+    )
+
+    affect = next(item for item in compiler.advisories(frame) if item.kind == "affect")
+
+    assert affect.intensity == 18
+    assert "hurt" in affect.tendency
+    assert "charge" not in affect.tendency
 
 
 def test_turn_frame_does_not_repeat_the_current_input_in_recent_history() -> None:
