@@ -364,11 +364,7 @@ class CompanionTurn:
         Action as a normal turn.
         """
         try:
-            reply = self.engine.prepare_adapter_failure_reply(
-                turn.message,
-                "接着说就好。",
-                failure_reason="first_visible_timeout_before_action_staged",
-            )
+            reply = self.engine.prepare_first_visible_timeout_reply(turn.message)
             if reply.delivery_id is None or not reply.world_action_id:
                 raise WorldError("timeout fallback did not stage an outgoing Action")
             presentation = TurnPresentation(

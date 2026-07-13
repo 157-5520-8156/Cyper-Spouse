@@ -3407,6 +3407,34 @@ class CompanionEngine:
             world_action_id=action_id,
         )
 
+    def prepare_first_visible_timeout_reply(self, message: IncomingMessage) -> CompanionReply:
+        """Create a fact-free first beat that still acknowledges this message.
+
+        ``CompanionTurn`` reaches this path only after its whole first-visible
+        budget expires before normal generation staged an Action.  It must not
+        buy another model call, but a fixed "keep going" string is wrong for
+        many ordinary disclosures.  Reuse the same deterministic speech-act
+        fallback as the normal World path and then stage it through the
+        authoritative delivery ledger.
+        """
+        query_scope = classify_world_query(message.text)
+        candidate = build_safe_failure_candidate(
+            message.text,
+            None,
+            speech_act=_safe_failure_speech_act(
+                query_scope,
+                appraisal="ordinary_message",
+                request_kind="",
+                message_text=message.text,
+            ),
+            variant_key=str(message.message_id or ""),
+        )
+        return self.prepare_adapter_failure_reply(
+            message,
+            str(candidate["reply_text"]),
+            failure_reason="first_visible_timeout_before_action_staged",
+        )
+
     def begin_reply_part_delivery(
         self, reply: CompanionReply, *, position: int
     ) -> str | None:

@@ -913,7 +913,38 @@ async def test_generation_timeout_still_delivers_a_ledgered_minimal_first_beat(t
     assert outcome.visible_status == "delivered"
     assert outcome.degraded is True
     assert outcome.degradation_reason == "first_visible_timeout"
-    assert [beat.text for beat in transport.beats] == ["接着说就好。"]
+    assert [beat.text for beat in transport.beats] == [
+        "我在这儿；刚才没接好的地方，我不会装作已经懂了。"
+    ]
+    action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
+    assert action["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_generation_timeout_acknowledges_a_current_disclosure(tmp_path: Path) -> None:
+    transport = RecordingTransport(
+        DispatchAcceptance(status="delivered", external_receipt="unused")
+    )
+    runtime, world, world_id = _turn_runtime(tmp_path, transport, model=SlowReplyModel())
+    envelope = TurnEnvelope.from_message(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="turn-timeout-current-disclosure",
+            text="我明天考试。",
+        ),
+        idempotency_key="qq:geoff:turn-timeout-current-disclosure",
+    )
+
+    outcome = await runtime.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=5, complete_by_ms=100),
+    )
+
+    assert outcome.visible_status == "delivered"
+    assert [beat.text for beat in transport.beats] == [
+        "你提到“考试”。这句话我接到了，也不会替你把程度说重。"
+    ]
     action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
     assert action["status"] == "delivered"
 

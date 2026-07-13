@@ -250,7 +250,7 @@ def build_safe_failure_candidate(
             r"(?:昨天|昨晚|今天|明天|现在|刚才|这会儿|此刻)",
             "",
             re.sub(r"\s+", "", user_text).replace("我", ""),
-        ).strip()[:64]
+        ).strip("。！？!?")[:64]
         if current:
             base_text = f"你提到“{current}”。这句话我接到了，也不会替你把程度说重。"
     return _express_safe_skeleton({
