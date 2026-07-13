@@ -6,6 +6,7 @@ from companion_daemon.model_call_policy import (
     GroundingAuditRisk,
     ModelCallRequest,
     ProviderCircuitState,
+    resolve_model_route,
     TurnModelCallBudget,
 )
 
@@ -83,6 +84,52 @@ def test_warm_complex_expression_may_route_to_strong_thinking() -> None:
     assert decision.allowed is True
     assert decision.model_tier == "strong"
     assert decision.thinking is True
+
+
+def test_requested_strong_thinking_is_explicitly_downgraded_without_an_expressive_model() -> None:
+    decision = TurnModelCallBudget().decide(
+        turn=_turn("warm"),
+        request=ModelCallRequest(
+            purpose="reply",
+            calls_used=0,
+            complexity="cross_turn_relation_repair",
+        ),
+        grounding=GroundingAuditRisk().assess(CandidateGroundingSignals(reply_text="")),
+        circuit=ProviderCircuitState.closed(),
+    )
+
+    route = resolve_model_route(
+        decision,
+        expressive_available=False,
+        expressive_thinking_enabled=False,
+    )
+
+    assert route.model_tier == "flash"
+    assert route.thinking is False
+    assert route.degradation_reason == "expressive_model_unavailable"
+
+
+def test_available_non_thinking_expressive_model_never_claims_a_thinking_route() -> None:
+    decision = TurnModelCallBudget().decide(
+        turn=_turn("cold"),
+        request=ModelCallRequest(
+            purpose="reply",
+            calls_used=0,
+            complexity="high_pragmatic_ambiguity",
+        ),
+        grounding=GroundingAuditRisk().assess(CandidateGroundingSignals(reply_text="")),
+        circuit=ProviderCircuitState.closed(),
+    )
+
+    route = resolve_model_route(
+        decision,
+        expressive_available=True,
+        expressive_thinking_enabled=False,
+    )
+
+    assert route.model_tier == "strong"
+    assert route.thinking is False
+    assert route.degradation_reason == "expressive_thinking_unavailable"
 
 
 def test_hot_complex_turn_stays_on_flash_instead_of_serially_escalating() -> None:

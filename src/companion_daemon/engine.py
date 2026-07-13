@@ -86,6 +86,7 @@ from companion_daemon.model_call_policy import (
     ModelCallRequest,
     ProviderCircuitState,
     TurnModelCallBudget,
+    resolve_model_route,
 )
 from companion_daemon.memory import extract_memories, is_durable_user_fact
 from companion_daemon.mind_proposal import (
@@ -2254,6 +2255,13 @@ class CompanionEngine:
             grounding=pre_generation_grounding,
             circuit=circuit_state,
         )
+        reply_route = resolve_model_route(
+            reply_call_decision,
+            expressive_available=self.expressive_model is not None,
+            expressive_thinking_enabled=bool(
+                getattr(self.expressive_model, "thinking_enabled", False)
+            ),
+        )
         model_action_id = self._begin_world_model_call(purpose="reply", causation=intent_id)
         try:
             if not reply_call_decision.allowed:
@@ -2261,7 +2269,7 @@ class CompanionEngine:
             with model_call_scope("reply", action_id=model_action_id):
                 reply_model = (
                     self.expressive_model
-                    if reply_call_decision.model_tier == "strong"
+                    if reply_route.model_tier == "strong"
                     and self.expressive_model is not None
                     else self.model
                 )

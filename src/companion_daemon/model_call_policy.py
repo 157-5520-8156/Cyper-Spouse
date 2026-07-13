@@ -143,6 +143,47 @@ class ModelCallDecision:
     thinking: bool = False
 
 
+@dataclass(frozen=True)
+class ResolvedModelRoute:
+    """The capability actually selected for one model call.
+
+    Policy states what would be valuable.  Runtime capability determines what
+    can honestly be claimed in traces and cost/latency baselines.
+    """
+
+    model_tier: Literal["flash", "strong"]
+    thinking: bool
+    degraded: bool = False
+    degradation_reason: str | None = None
+
+
+def resolve_model_route(
+    decision: ModelCallDecision,
+    *,
+    expressive_available: bool,
+    expressive_thinking_enabled: bool,
+) -> ResolvedModelRoute:
+    if decision.model_tier != "strong":
+        return ResolvedModelRoute("flash", False)
+    if not expressive_available:
+        return ResolvedModelRoute(
+            "flash",
+            False,
+            degraded=True,
+            degradation_reason="expressive_model_unavailable",
+        )
+    return ResolvedModelRoute(
+        "strong",
+        bool(decision.thinking and expressive_thinking_enabled),
+        degraded=bool(decision.thinking and not expressive_thinking_enabled),
+        degradation_reason=(
+            "expressive_thinking_unavailable"
+            if decision.thinking and not expressive_thinking_enabled
+            else None
+        ),
+    )
+
+
 class TurnModelCallBudget:
     """Choose a bounded call envelope from immutable turn observations."""
 
