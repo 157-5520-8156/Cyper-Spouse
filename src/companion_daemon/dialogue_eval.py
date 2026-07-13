@@ -166,7 +166,7 @@ class BaselineReport:
 
     def as_dict(self) -> dict[str, object]:
         return {
-            "schema_version": 2,
+            "schema_version": 3,
             "model_profile": self.model_profile,
             "definition": self.definition,
             "summaries": [summary.as_dict() for summary in self.summaries],
@@ -231,7 +231,11 @@ class BaselineSummary:
 
 @dataclass(frozen=True)
 class BaselineComparison:
-    """Explicit evidence status for the architecture's normal-chat latency gate."""
+    """Separate latency evidence from safety/naturalness evidence.
+
+    ``status`` remains the latency-gate result for CLI compatibility.  It is
+    deliberately never a claim that conversation quality has passed.
+    """
 
     status: str
     hot_samples_per_variant: int
@@ -240,6 +244,8 @@ class BaselineComparison:
     bare_hot_p95_ms: int | None
     permitted_full_hot_p95_ms: int | None
     reasons: tuple[str, ...]
+    quality_status: str = "unproven"
+    quality_reasons: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -250,6 +256,9 @@ class BaselineComparison:
             "bare_hot_p95_ms": self.bare_hot_p95_ms,
             "permitted_full_hot_p95_ms": self.permitted_full_hot_p95_ms,
             "reasons": list(self.reasons),
+            "latency_status": self.status,
+            "quality_status": self.quality_status,
+            "quality_reasons": list(self.quality_reasons),
         }
 
 
@@ -582,7 +591,8 @@ def assess_baseline(
         if bare_p95 is not None
         else None
     )
-    reasons: list[str] = [
+    reasons: list[str] = []
+    quality_reasons: list[str] = [
         "Human blind evaluation remains required for naturalness; heuristic issue counts are diagnostic."
     ]
     if not live:
@@ -600,9 +610,34 @@ def assess_baseline(
     )
     if missing_visible_latency:
         reasons.append("Both variants need visible hot deliveries before latency can be assessed.")
+    if full_hot is None or bare_hot is None:
+        quality_status = "insufficient_evidence"
+        quality_reasons.append("Both variants need hot samples before paired quality diagnostics are meaningful.")
+    elif full_hot.visible_count != full_hot.sample_count or bare_hot.visible_count != bare_hot.sample_count:
+        quality_status = "heuristic_fail"
+        quality_reasons.append("At least one hot sample lacked a visible delivered reply.")
+    elif full_hot.hard_issue_count:
+        quality_status = "heuristic_fail"
+        quality_reasons.append(
+            f"Full hot path produced {full_hot.hard_issue_count} heuristic hard issue(s); inspect samples before blind review."
+        )
+    else:
+        quality_status = "requires_blind_evaluation"
+        if full_hot.issue_count:
+            quality_reasons.append(
+                f"Full hot path has {full_hot.issue_count} style diagnostic issue(s); track them, but do not treat them as a human score."
+            )
     if not live or hot_samples < _BASELINE_MIN_HOT_SAMPLES or missing_visible_latency:
         return BaselineComparison(
-            "insufficient_evidence", hot_samples, full_p50, full_p95, bare_p95, permitted, tuple(reasons)
+            "insufficient_evidence",
+            hot_samples,
+            full_p50,
+            full_p95,
+            bare_p95,
+            permitted,
+            tuple(reasons),
+            quality_status,
+            tuple(quality_reasons),
         )
     failures: list[str] = []
     if full_p50 > _BASELINE_HOT_P50_TARGET_MS:
@@ -625,6 +660,8 @@ def assess_baseline(
         bare_p95,
         permitted,
         tuple(reasons + failures),
+        quality_status,
+        tuple(quality_reasons),
     )
 
 
@@ -1154,9 +1191,10 @@ def format_baseline_report(report: BaselineReport) -> str:
         )
     comparison = report.comparison
     lines.append(
-        "baseline verdict={} hot_samples={} full_hot_p50_ms={} full_hot_p95_ms={} "
+        "baseline latency_verdict={} quality_status={} hot_samples={} full_hot_p50_ms={} full_hot_p95_ms={} "
         "bare_hot_p95_ms={} permitted_full_hot_p95_ms={}".format(
             comparison.status,
+            comparison.quality_status,
             comparison.hot_samples_per_variant,
             comparison.full_hot_p50_ms,
             comparison.full_hot_p95_ms,
@@ -1165,6 +1203,7 @@ def format_baseline_report(report: BaselineReport) -> str:
         )
     )
     lines.extend(f"baseline evidence: {reason}" for reason in comparison.reasons)
+    lines.extend(f"baseline quality evidence: {reason}" for reason in comparison.quality_reasons)
     return "\n".join(lines)
 
 

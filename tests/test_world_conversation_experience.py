@@ -1417,14 +1417,21 @@ async def test_exact_experience_quote_is_diagnosed_without_a_full_repair(
 
 
 @pytest.mark.asyncio
-async def test_non_interruptible_high_attention_activity_defers_an_ordinary_message(
+async def test_non_interruptible_activity_is_an_advisory_not_a_pre_model_veto(
     tmp_path: Path,
 ) -> None:
-    class UnusedModel:
-        async def complete(self, messages, *, temperature: float) -> str:
-            raise AssertionError("a deferred turn must not call the model")
+    class Model:
+        def __init__(self) -> None:
+            self.calls = 0
+            self.prompts: list[str] = []
 
-    world, world_id, engine = _world_engine(tmp_path, UnusedModel())
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            self.prompts.append("\n".join(str(item["content"]) for item in messages))
+            return '{"reply_text":"我看见了。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    model = Model()
+    world, world_id, engine = _world_engine(tmp_path, model)
     start = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
     world.advance(
         world_id,
@@ -1441,9 +1448,12 @@ async def test_non_interruptible_high_attention_activity_defers_an_ordinary_mess
         )
     )
 
-    assert reply is None
+    assert reply is not None
+    assert model.calls >= 1
+    assert any("通讯节奏建议: 倾向=deferred" in prompt for prompt in model.prompts)
+    assert any("不是静默指令" in prompt for prompt in model.prompts)
     snapshot = world.snapshot(world_id)
-    assert snapshot["communication"]["attention"] == "deferred"
+    assert snapshot["communication"]["attention"] == "seen"
     assert {item["attention"] for item in snapshot["communication"]["candidates"]} == {
         "seen", "deferred", "do_not_disturb"
     }
@@ -1453,12 +1463,16 @@ async def test_non_interruptible_high_attention_activity_defers_an_ordinary_mess
         for action in snapshot["actions"].values()
         if action["kind"] == "reply_later" and action["status"] == "scheduled"
     ]
-    assert len(scheduled) == 1
+    assert scheduled == []
     active = next(item for item in snapshot["agenda"].values() if item["status"] == "active")
     assert active["attention_demand"] >= 75
     assert active["interruptible"] is False
-    assert "active_world_activity_not_interruptible:" in snapshot["communication"]["reason"]
-    assert scheduled[0]["payload"]["due_at"] <= active["ends_at"]
+    attention_events = [
+        event for event in world.events(world_id) if event.event_type == "MessageAttentionDecided"
+    ]
+    assert attention_events[-1].payload["reason"].startswith(
+        "model_advisory:active_world_activity_not_interruptible:"
+    )
 
 
 def test_attention_wait_shrinks_during_the_ending_activity_phase() -> None:

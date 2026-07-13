@@ -52,7 +52,7 @@ async def test_baseline_runner_keeps_bare_and_full_variants_isolated() -> None:
     assert all("legacy" not in turn.variant for turn in report.turns)
     assert all(turn.run_index == 1 for turn in report.turns)
     assert {turn.cadence for turn in report.turns} == {"cold", "hot"}
-    assert report.as_dict()["schema_version"] == 2
+    assert report.as_dict()["schema_version"] == 3
     assert report.definition["scenario_set_sha256"]
     assert report.comparison.status == "insufficient_evidence"
     full_hot = next(
@@ -92,6 +92,7 @@ def test_live_baseline_gate_requires_samples_then_checks_absolute_and_relative_s
     )
 
     assert passed.status == "pass"
+    assert passed.quality_status == "requires_blind_evaluation"
     assert passed.permitted_full_hot_p95_ms == 5_000
     assert failed.status == "fail"
     assert any("P50" in reason for reason in failed.reasons)
@@ -322,11 +323,12 @@ def test_dialogue_eval_cli_fake_model_smoke_does_not_touch_production_db(tmp_pat
     )
 
     assert completed.returncode in {0, 1}
-    assert "baseline verdict=insufficient_evidence" in completed.stdout
+    assert "baseline latency_verdict=insufficient_evidence" in completed.stdout
     assert "world mode forbids legacy behaviour write" not in completed.stderr
     persisted = json.loads(report_path.read_text(encoding="utf-8"))
-    assert persisted["schema_version"] == 2
+    assert persisted["schema_version"] == 3
     assert persisted["comparison"]["status"] == "insufficient_evidence"
+    assert persisted["comparison"]["quality_status"] == "requires_blind_evaluation"
 
 
 def test_dialogue_eval_context_cli_smoke() -> None:

@@ -1003,12 +1003,16 @@ async def test_world_proactive_can_deliberately_override_open_thread_soft_pressu
 
 
 @pytest.mark.asyncio
-async def test_world_remain_silent_stance_creates_no_outgoing_message(
+async def test_world_remain_silent_stance_is_advisory_and_does_not_veto_a_turn(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class ModelMustNotRun:
+    class ModelStillRuns:
+        def __init__(self) -> None:
+            self.calls = 0
+
         async def complete(self, messages, *, temperature: float) -> str:
-            raise AssertionError("remain_silent must settle before reply generation")
+            self.calls += 1
+            return '{"reply_text":"我听到了。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
 
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
@@ -1026,9 +1030,8 @@ async def test_world_remain_silent_stance_creates_no_outgoing_message(
         )
 
     monkeypatch.setattr(world.character_deliberation, "decide", choose_silence)
-    engine = CompanionEngine(
-        store, ModelMustNotRun(), TEST_PROMPT, world_kernel=world, world_id=world_id
-    )
+    model = ModelStillRuns()
+    engine = CompanionEngine(store, model, TEST_PROMPT, world_kernel=world, world_id=world_id)
 
     reply = await engine.handle_message(
         IncomingMessage(
@@ -1039,14 +1042,12 @@ async def test_world_remain_silent_stance_creates_no_outgoing_message(
         )
     )
 
-    assert reply is None
+    assert reply is not None
+    assert model.calls == 1
     snapshot = world.snapshot(world_id)
     assert snapshot["last_deliberation"]["stance"] == "remain_silent"
+    assert not any(item["kind"] == "deliberate_silence" for item in snapshot["decisions"].values())
     assert any(
-        item["kind"] == "deliberate_silence" and item["status"] == "deferred"
-        for item in snapshot["decisions"].values()
-    )
-    assert not any(
         item["kind"] == "outgoing_message"
         for item in snapshot["actions"].values()
     )

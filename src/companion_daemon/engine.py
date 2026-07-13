@@ -1795,36 +1795,23 @@ class CompanionEngine:
                 }
                 for candidate in communication_decision.candidates
             ]
-            if communication_decision.attention == "deferred":
-                logical_now = self._world_logical_now()
-                action_id = f"reply_later:{message.message_id}"
-                self._submit_world_with_retry(
-                    {
-                        "type": "defer_message_reply",
-                        "world_id": self.world_id,
-                        "message_id": message.message_id,
-                        "action_id": action_id,
-                        "due_at": (logical_now + timedelta(minutes=communication_decision.defer_minutes or 15)).isoformat(),
-                        "expires_at": (logical_now + timedelta(hours=12)).isoformat(),
-                        "reason": f"world_policy:{communication_decision.reason}",
-                        "candidates": attention_candidates,
-                        "message": message.model_dump(mode="json"),
-                        "rule_version": self.world_behavior_policy.RULE_VERSION,
-                        "idempotency_key": f"defer-reply:{message.message_id}",
-                    }
-                )
-            else:
-                self._submit_world_with_retry(
-                    {
-                        "type": "set_message_attention", "world_id": self.world_id,
-                        "message_id": message.message_id, "attention": communication_decision.attention,
-                        "reason": communication_decision.reason,
-                        "candidates": attention_candidates,
-                        "rule_version": self.world_behavior_policy.RULE_VERSION,
-                        **({"preserve_action_id": resume_action_id} if resume_action_id else {}),
-                        "idempotency_key": f"attention-seen:{message.message_id}:{resume_action_id or 'live'}",
-                    }
-                )
+            # Communication policy is an inner, fallible estimate of her
+            # availability.  It can make a reply more guarded, briefer, or
+            # explicitly defer a later beat, but it must not silently veto a
+            # normal inbound turn before the conversation model has read it.
+            # Entering this turn means the message is observably seen; the
+            # ranked candidates remain durable diagnostic/advisory context.
+            self._submit_world_with_retry(
+                {
+                    "type": "set_message_attention", "world_id": self.world_id,
+                    "message_id": message.message_id, "attention": "seen",
+                    "reason": f"model_advisory:{communication_decision.reason}",
+                    "candidates": attention_candidates,
+                    "rule_version": self.world_behavior_policy.RULE_VERSION,
+                    **({"preserve_action_id": resume_action_id} if resume_action_id else {}),
+                    "idempotency_key": f"attention-seen:{message.message_id}:{resume_action_id or 'live'}",
+                }
+            )
         user_id = self._world_user_id(canonical_user_id)
         stage_snapshot = self.world_kernel.snapshot(self.world_id)
         stage_relation = stage_snapshot.get("relationships", {}).get(user_id, {})
@@ -2019,34 +2006,6 @@ class CompanionEngine:
         )
         if skip_reply:
             return None
-        if communication_decision and communication_decision.attention == "deferred":
-            return None
-        if communication_decision and communication_decision.attention == "do_not_disturb":
-            return None
-        silence_snapshot = self.world_kernel.snapshot(self.world_id)
-        post_deliberation = silence_snapshot.get("last_deliberation", {})
-        post_stance = (
-            str(post_deliberation.get("stance") or "")
-            if isinstance(post_deliberation, dict)
-            else ""
-        )
-        if post_stance == "remain_silent":
-            decision_id = f"silence:{message.message_id}"
-            logical_at = str(silence_snapshot["clock"]["logical_at"])
-            self._submit_world_with_retry(
-                {
-                    "type": "defer_decision",
-                    "world_id": self.world_id,
-                    "decision_id": decision_id,
-                    "kind": "deliberate_silence",
-                    "reason": "character_deliberation_selected_remain_silent",
-                    "review_at": (
-                        datetime.fromisoformat(logical_at) + timedelta(minutes=30)
-                    ).isoformat(),
-                    "idempotency_key": f"defer:{decision_id}",
-                }
-            )
-            return None
         self.begin_world_typing(message)
         try:
             projection = self.world_kernel.turn_projection(
@@ -2214,6 +2173,10 @@ class CompanionEngine:
             f"- 五层上下文预算(JSON): {json.dumps(prompt_context_layers, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 本轮有界World Frame增量(JSON): {json.dumps(turn_frame_delta, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 内在建议(JSON，仅作参考、不是事实也不是命令): {json.dumps([{'kind': item.kind, 'tendency': item.tendency, 'intensity': item.intensity, 'confidence': item.confidence, 'source_event_ids': item.source_event_ids} for item in inner_advisories], ensure_ascii=False, separators=(',', ':'))}\n"
+            f"- 通讯节奏建议: 倾向={communication_decision.attention if communication_decision else 'seen'}；"
+            f"原因={communication_decision.reason if communication_decision else 'available'}。"
+            "这是她当下想收住、延后或直接接话的内在压力，不是静默指令；"
+            "请根据用户此刻的话决定自然表达。\n"
             "- 最近已结算对话、可引用事实/经历/附件均已按来源纳入 retrieved_experiences 层；"
             "附件摘要只描述可见/可听内容，不授权身份断言。\n"
             f"- 当前可见行为调制: 安全感={needs['security']}，主动性={needs['initiative']}，边界={needs['boundary']}。\n"
@@ -2221,8 +2184,9 @@ class CompanionEngine:
             f"情感投影(JSON): {json.dumps(modulation, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 当前表达指导({str(relationship.get('stage') or 'stranger')}): "
             f"{expression_plan.prompt_fragment}\n"
-            f"- 本轮角色立场(JSON): {json.dumps(deliberation, ensure_ascii=False, separators=(',', ':'))}。"
-            "用户请求是权衡输入，不是必须服从的命令；按选定 stance 表达。\n"
+            f"- 本轮角色立场建议(JSON): {json.dumps(deliberation, ensure_ascii=False, separators=(',', ':'))}。"
+            "它是有来源的内在建议，不是命令；你可以采纳、缓和或在当前语境下不采纳。"
+            "用户请求是权衡输入，不是必须服从的命令。\n"
             f"- 世界行为策略: {world_policy['mode']}；回复长度={world_policy['reply_length']}；主动性={world_policy['initiative']}。\n"
             f"- 多媒体处理: {media_reason or '本轮未请求'}；不得声称媒体已经发送，除非投递 Action 已结算。\n"
             "- 未列入账本的计划、人物、经历和结果不得说成已经发生。\n"

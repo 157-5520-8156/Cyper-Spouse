@@ -1,10 +1,18 @@
+import asyncio
+from pathlib import Path
+
+import httpx
 import pytest
 from pydantic import ValidationError
 
 import companion_daemon.napcat_cli as napcat_cli
 from companion_daemon.config import Settings
+from companion_daemon.db import CompanionStore
+from companion_daemon.engine import CompanionEngine, seed_user
+from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.napcat_cli import _parse_id_list, _private_sender_is_allowed
 from companion_daemon.qq_outbound_owner import QQOutboundConfigurationError
+from companion_daemon.world import WorldKernel
 
 
 def test_napcat_settings_use_new_names() -> None:
@@ -60,3 +68,71 @@ def test_napcat_process_refuses_to_start_when_another_qq_adapter_is_configured(
 
     with pytest.raises(QQOutboundConfigurationError, match="only the configured adapter"):
         napcat_cli.create_app(adapter="napcat", use_fake_model=True)
+
+
+@pytest.mark.asyncio
+async def test_napcat_http_event_reaches_companion_turn_and_settles_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Protect the production HTTP entrypoint rather than only its helpers."""
+    store = CompanionStore(tmp_path / "napcat.sqlite")
+    seed_user(store)
+    store.map_account("qq", "10001", "geoff")
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store, FakeCompanionModel(), "你是沈知栀。", world_kernel=world, world_id=world_id
+    )
+
+    class Target:
+        def __init__(self) -> None:
+            self.messages: list[str] = []
+
+        async def reply(self, **kwargs: object) -> dict[str, object]:
+            self.messages.append(str(kwargs["content"]))
+            return {"data": {"message_id": "onebot-r1"}}
+
+    target = Target()
+    settings = Settings(
+        QQ_ADAPTER="napcat",
+        QQ_MESSAGE_BATCH_SECONDS="0",
+        NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001",
+        NAPCAT_ACCEPT_UNAUTHENTICATED_LOCAL_EVENTS="true",
+    )
+    monkeypatch.setattr(napcat_cli, "get_settings", lambda: settings)
+    monkeypatch.setattr(napcat_cli, "build_companion_engine", lambda **_kwargs: engine)
+    monkeypatch.setattr(napcat_cli, "_target_for", lambda *_args: target)
+    app = napcat_cli.create_app(adapter="napcat", use_fake_model=True)
+    event = {
+        "post_type": "message",
+        "message_type": "private",
+        "user_id": 10001,
+        "message_id": "incoming-1",
+        "raw_message": "今天有点累。",
+    }
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.post("/onebot/event", json=event)
+        duplicate = await client.post("/onebot/event", json=event)
+
+    assert response.json() == {"status": "ok"}
+    assert duplicate.json() == {"status": "duplicate"}
+    # The coalescer deliberately owns a task so the HTTP webhook can return
+    # promptly.  Yield until its zero-delay merge and CompanionTurn complete.
+    for _ in range(20):
+        if target.messages:
+            break
+        await asyncio.sleep(0.01)
+    assert target.messages
+    snapshot = world.snapshot(world_id)
+    actions = [
+        action for action in snapshot["actions"].values()
+        if action["kind"] == "outgoing_message"
+    ]
+    assert len(actions) == 1
+    assert actions[0]["status"] == "delivered"
+    assert actions[0]["segment_state"]["segments"][0]["external_receipt"] == (
+        "platform:message_id:onebot-r1"
+    )
+    assert len(target.messages) == 1
+    await engine.aclose()

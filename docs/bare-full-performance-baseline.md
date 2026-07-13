@@ -14,7 +14,7 @@ World 事实、Action 或工具副作用不能泄漏给 bare control。
 
 ## 记录内容
 
-报告为 schema v2 JSON，必须通过 `--report` 保留。每一个 turn 都记录：
+报告为 schema v3 JSON，必须通过 `--report` 保留。每一个 turn 都记录：
 
 - variant、场景、`run_index`、`turn_index`、`cadence`（首轮为 cold，其后为 hot）；
 - 可见状态、首次成功 transport dispatch 的时间、整轮完成时间；
@@ -48,16 +48,18 @@ companion-eval-dialogue --baseline --live --repetitions 3 \
 
 ## 自动判定和仍需人工证据
 
-当且仅当为 live、两个 variant 都有至少 20 个可比 hot 样本、且两者均有可见 dispatch 时，报告才会
-给出 `pass` 或 `fail`。自动门为：
+当且仅当为 live、两个 variant 都有至少 20 个可比 hot 样本、且两者均有可见 dispatch 时，报告的
+`latency_status` 才会给出 `pass` 或 `fail`。自动门为：
 
 - full hot P50 首次可见回复不高于 3 秒；
 - full hot P95 不高于 5 秒；
 - full hot P95 不高于 `max(5s, bare P95 + 1s, bare P95 × 1.5)`。
 
-否则状态为 `insufficient_evidence`，并明确列出缺少的条件。`--assert-live-slo` 会把非 `pass`
+否则延迟状态为 `insufficient_evidence`，并明确列出缺少的条件。`--assert-live-slo` 会把非 `pass`
 转成非零退出码，供可控的真实验收运行使用；普通 fake/小样本命令不会误报成功。
 
-自然度 issue、硬事实 issue、模型次数和 token 只作为可比诊断，不能替代盲评。完成架构文档中的
+报告同时单列 `quality_status`：若缺可见投递或出现 heuristic hard issue，它会是
+`heuristic_fail`；否则仍是 `requires_blind_evaluation`，而不是“质量通过”。自然度 issue、硬事实
+issue、模型次数和 token 只作为可比诊断，不能替代盲评。完成架构文档中的
 “full 不显著弱于 bare”仍需让评审者在不知道 variant 的情况下对同一输入评分；真实用户数周数据、
 实际网络/平台队列分布和供应商真实 TTFT 同样是此仓库无法自行制造的外部证据。
