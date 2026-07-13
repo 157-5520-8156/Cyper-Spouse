@@ -103,6 +103,34 @@ class TurnOptions:
 
     context_hint: str | None = None
     turn_context: object | None = None
+    # A delayed reply is still the original user turn, but it must preserve
+    # the scheduled Action that authorized the later response.  Keeping this
+    # inside the turn options prevents scheduler callers from reaching around
+    # CompanionTurn to invoke Engine's resume-only argument directly.
+    resume_action_id: str | None = None
+
+
+@dataclass(frozen=True)
+class ScheduledTurnFrame:
+    """Bounded metadata for a World-authorized continuation.
+
+    A scheduler has no fresh platform observation, so it cannot manufacture a
+    normal ``TurnEnvelope`` for a pulse.  This frame freezes the source Action,
+    recipient identity, timing and idempotency scope that a delayed reply or a
+    conversation pulse needs.  It deliberately carries no prompt internals.
+    """
+
+    source_action_id: str
+    canonical_user_id: str
+    platform: str
+    platform_user_id: str
+    observed_at: datetime
+    idempotency_key: str
+    kind: Literal["reply_later", "conversation_pulse"]
+    message: IncomingMessage | None = None
+    reply_sent_at: datetime | None = None
+    mode: str | None = None
+    frozen_cadence: Literal["hot", "warm", "cold", "unknown"] = "unknown"
 
 
 @dataclass(frozen=True)
@@ -320,6 +348,7 @@ class CompanionTurn:
                 complete_by_observed_at=complete_by_at,
                 context_hint=options.context_hint,
                 turn_context=options.turn_context,
+                resume_action_id=options.resume_action_id,
             )
             if reply is None:
                 return self._outcome(
@@ -562,6 +591,245 @@ class CompanionTurn:
                 idempotency_prefix=idempotency_key,
             )
         return settled
+
+    async def resume_scheduled_reply(
+        self,
+        frame: ScheduledTurnFrame,
+        *,
+        budget: ResponseBudget,
+        context_hint: str | None = None,
+        turn_context: object | None = None,
+    ) -> TurnOutcome:
+        """Resume a World ``reply_later`` action through the normal turn path.
+
+        Scheduler recovery used to call ``engine.handle_message`` and then
+        separately dispatch a reply.  That split silently lost the frozen
+        adapter boundary and made it too easy to bypass turn-level timeout and
+        delivery convergence.  A delayed reply now has the same generation,
+        Action and receipt semantics as a live message; only its authorization
+        source differs.
+        """
+        self._validate_scheduled_frame(frame, expected_kind="reply_later")
+        if frame.message is None:
+            raise ValueError("reply_later frame requires its original IncomingMessage")
+        raw_message_id = str(frame.message.message_id or "").strip()
+        if not raw_message_id:
+            raise ValueError("reply_later frame requires an original message_id")
+        # The delayed Action was authored against the original World message
+        # id.  Unlike a fresh adapter observation, do not replace that id with
+        # the adapter-bound idempotency key before Engine can resume it.
+        envelope = TurnEnvelope(
+            message=frame.message.model_copy(deep=True),
+            idempotency_key=f"{frame.message.platform}:{frame.message.platform_user_id}:{raw_message_id}",
+            world_id=self.engine.world_id,
+            canonical_user_id=frame.canonical_user_id,
+            platform=frame.message.platform,
+            platform_message_ids=(raw_message_id,),
+            frozen_cadence=frame.frozen_cadence,
+        )
+        try:
+            outcome = await self.respond(
+                envelope,
+                budget=budget,
+                options=TurnOptions(
+                    context_hint=context_hint,
+                    turn_context=turn_context,
+                    resume_action_id=frame.source_action_id,
+                ),
+            )
+        except Exception:
+            self._cancel_scheduled_source(frame, reason="scheduled_reply_generation_failed")
+            raise
+
+        # ``None`` is a deliberate model decision to leave the delayed thread
+        # closed.  It is a completed scheduling decision, not an unknown send.
+        if outcome.visible_status == "delivered" or (
+            not outcome.action_ids and outcome.degradation_reason == "no_reply_selected"
+        ):
+            self._complete_scheduled_source(frame, result_kind="delay")
+        elif outcome.visible_status in {"failed", "unknown"}:
+            self._mark_scheduled_source_unknown(
+                frame,
+                reason=outcome.degradation_reason or "scheduled_reply_delivery_unresolved",
+            )
+        return outcome
+
+    async def deliver_conversation_pulse(
+        self,
+        frame: ScheduledTurnFrame,
+        *,
+        budget: ResponseBudget,
+    ) -> TurnOutcome:
+        """Generate, stage, dispatch and settle one World conversation pulse.
+
+        The scheduler supplies only the already-authorized continuation frame.
+        Model generation, afterthought Action staging and receipt settlement all
+        remain inside this deep module so a restart cannot turn a coroutine
+        return into a false delivery claim.
+        """
+        self._validate_scheduled_frame(frame, expected_kind="conversation_pulse")
+        if frame.reply_sent_at is None:
+            raise ValueError("conversation_pulse frame requires reply_sent_at")
+        mode = (frame.mode or "quick_continue").strip() or "quick_continue"
+        try:
+            async with asyncio.timeout(max(0.001, budget.complete_by_ms / 1000)):
+                text = await self.engine.generate_afterthought(
+                    frame.canonical_user_id,
+                    frame.reply_sent_at,
+                    mode=mode,
+                )
+        except TimeoutError:
+            self._mark_scheduled_source_unknown(
+                frame, reason="conversation_pulse_generation_budget_exhausted"
+            )
+            return self._scheduled_outcome(
+                frame,
+                action_ids=(),
+                status="unknown",
+                degraded=True,
+                reason="conversation_pulse_generation_budget_exhausted",
+            )
+        except Exception:
+            self._cancel_scheduled_source(frame, reason="conversation_pulse_generation_failed")
+            raise
+        if not text:
+            self._cancel_scheduled_source(frame, reason="conversation_pulse_withheld")
+            return self._scheduled_outcome(
+                frame,
+                action_ids=(),
+                status="failed",
+                degraded=False,
+                reason="no_afterthought_selected",
+            )
+        try:
+            delivery_id = self.engine.queue_afterthought_delivery(
+                frame.canonical_user_id, frame.platform, text
+            )
+            world = self.engine.world_kernel
+            world_id = self.engine.world_id
+            assert world is not None and world_id is not None
+            action_id = world.action_id_for_delivery(world_id, delivery_id)
+            if not action_id:
+                raise WorldError("conversation pulse outbox has no World Action")
+            settled = await self.dispatch_scheduled(
+                action_id=action_id,
+                delivery_id=delivery_id,
+                observed_at=frame.observed_at,
+                idempotency_key=frame.idempotency_key,
+            )
+        except Exception:
+            self._cancel_scheduled_source(frame, reason="conversation_pulse_delivery_setup_failed")
+            raise
+        terminal = settled.terminal_state
+        if terminal == "delivered":
+            self._complete_scheduled_source(frame, result_kind="pulse")
+        else:
+            self._mark_scheduled_source_unknown(
+                frame,
+                reason="conversation_pulse_delivery_unresolved",
+            )
+        return self._scheduled_outcome(
+            frame,
+            action_ids=(action_id,),
+            status=terminal or "accepted",
+            degraded=terminal in {"failed", "unknown", "cancelled"},
+            reason=(
+                "conversation_pulse_delivery_unresolved"
+                if terminal in {"failed", "unknown", "cancelled"}
+                else None
+            ),
+        )
+
+    def _validate_scheduled_frame(
+        self,
+        frame: ScheduledTurnFrame,
+        *,
+        expected_kind: Literal["reply_later", "conversation_pulse"],
+    ) -> None:
+        if frame.kind != expected_kind:
+            raise ValueError(f"expected {expected_kind} frame, got {frame.kind}")
+        if not frame.source_action_id or not frame.idempotency_key:
+            raise ValueError("scheduled frame requires source action and idempotency key")
+        if not frame.platform or not frame.platform_user_id or not frame.canonical_user_id:
+            raise ValueError("scheduled frame requires platform and canonical recipient identity")
+        if self.engine.store.resolve_user(frame.platform, frame.platform_user_id) != frame.canonical_user_id:
+            raise WorldError("scheduled frame user does not match its platform account")
+        source = self._action(frame.source_action_id)
+        if str(source.get("kind") or "") != expected_kind:
+            raise WorldError("scheduled frame source Action kind does not match")
+
+    def _complete_scheduled_source(self, frame: ScheduledTurnFrame, *, result_kind: str) -> None:
+        world = self.engine.world_kernel
+        world_id = self.engine.world_id
+        assert world is not None and world_id is not None
+        source = self._action(frame.source_action_id)
+        if source.get("status") not in {"scheduled", "sending"}:
+            return
+        world.record_external_result(
+            frame.source_action_id,
+            {"kind": result_kind, "status": "delivered"},
+            world_id=world_id,
+            expected_revision=world.revision(world_id),
+            idempotency_key=f"{frame.idempotency_key}:source-delivered",
+        )
+
+    def _mark_scheduled_source_unknown(self, frame: ScheduledTurnFrame, *, reason: str) -> None:
+        world = self.engine.world_kernel
+        world_id = self.engine.world_id
+        assert world is not None and world_id is not None
+        source = self._action(frame.source_action_id)
+        if source.get("status") not in {"scheduled", "sending"}:
+            return
+        world.submit(
+            {
+                "type": "mark_external_action_unknown",
+                "world_id": world_id,
+                "action_id": frame.source_action_id,
+                "reason": reason[:300],
+                "idempotency_key": f"{frame.idempotency_key}:source-unknown",
+            },
+            expected_revision=world.revision(world_id),
+        )
+
+    def _cancel_scheduled_source(self, frame: ScheduledTurnFrame, *, reason: str) -> None:
+        world = self.engine.world_kernel
+        world_id = self.engine.world_id
+        assert world is not None and world_id is not None
+        source = self._action(frame.source_action_id)
+        if source.get("status") not in {"scheduled", "sending"}:
+            return
+        world.submit(
+            {
+                "type": "cancel_action",
+                "world_id": world_id,
+                "action_id": frame.source_action_id,
+                "reason": reason[:300],
+                "idempotency_key": f"{frame.idempotency_key}:source-cancelled",
+            },
+            expected_revision=world.revision(world_id),
+        )
+
+    def _scheduled_outcome(
+        self,
+        frame: ScheduledTurnFrame,
+        *,
+        action_ids: tuple[str, ...],
+        status: VisibleStatus,
+        degraded: bool,
+        reason: str | None,
+    ) -> TurnOutcome:
+        world = self.engine.world_kernel
+        world_id = self.engine.world_id
+        assert world is not None and world_id is not None
+        return TurnOutcome(
+            turn_id=frame.source_action_id,
+            committed_revision=world.revision(world_id),
+            action_ids=action_ids,
+            visible_status=status,
+            degraded=degraded,
+            degradation_reason=reason,
+        )
+
     def _settle_external_observation(
         self, observation: ExternalObservation
     ) -> SettlementOutcome:

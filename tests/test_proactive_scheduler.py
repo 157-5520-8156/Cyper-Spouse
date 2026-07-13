@@ -16,6 +16,7 @@ from companion_daemon.proactive_scheduler import (
     recover_world_due_conversation_pulses,
 )
 from companion_daemon.db import CompanionStore
+from companion_daemon.companion_turn import CompanionTurn, TurnOutcome
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.world import WorldKernel
@@ -188,6 +189,57 @@ async def test_scheduled_deferred_reply_recovery_does_not_cancel_its_source_acti
 
 
 @pytest.mark.asyncio
+async def test_world_due_reply_recovery_enters_companion_turn_before_engine_generation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The scheduler must not retain an Engine handle-message bypass."""
+    from datetime import timedelta
+
+    store = CompanionStore(tmp_path / "world.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。", world_kernel=world, world_id=world_id)
+    message = IncomingMessage(platform="qq", platform_user_id="openid", text="晚点说", message_id="turn-seam")
+    action_id = str(engine.create_deferred_reply_task(message, defer_minutes=1, reason="busy"))
+    due_at = datetime.fromisoformat(str(world.snapshot(world_id)["actions"][action_id]["payload"]["due_at"]))
+    world.advance(world_id, due_at + timedelta(minutes=1), expected_revision=world.revision(world_id))
+
+    frames = []
+
+    async def routed(self, frame, *, budget, context_hint=None, turn_context=None):
+        frames.append((frame, budget, context_hint, turn_context))
+        return TurnOutcome(
+            turn_id=frame.source_action_id,
+            committed_revision=world.revision(world_id),
+            action_ids=(),
+            visible_status="delivered",
+        )
+
+    async def direct_engine_bypass(*_args, **_kwargs):
+        raise AssertionError("scheduler must enter CompanionTurn, not engine.handle_message")
+
+    class FakeDelivery:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(CompanionTurn, "resume_scheduled_reply", routed)
+    monkeypatch.setattr(engine, "handle_message", direct_engine_bypass)
+    monkeypatch.setattr(proactive_scheduler, "QQDelivery", FakeDelivery)
+    monkeypatch.setattr(proactive_scheduler, "get_settings", lambda: SimpleNamespace())
+
+    assert await recover_world_due_replies(engine, send=True, sandbox=True) == 1
+    frame, budget, hint, turn_context = frames[0]
+    assert frame.source_action_id == action_id
+    assert frame.canonical_user_id == "geoff"
+    assert frame.message == message
+    assert frame.frozen_cadence == "cold"
+    assert budget == proactive_scheduler.SCHEDULED_CONTINUATION_BUDGET
+    assert hint == proactive_scheduler.DEFERRED_RECOVERY_CONTEXT_HINT
+    assert turn_context is None
+
+
+@pytest.mark.asyncio
 async def test_world_conversation_pulse_recovery_uses_world_action(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     from datetime import timedelta
 
@@ -268,6 +320,63 @@ async def test_world_conversation_pulse_recovery_marks_unreceipted_dispatch_unkn
         and action["status"] == "unknown"
         for action in snapshot["actions"].values()
     )
+
+
+@pytest.mark.asyncio
+async def test_world_conversation_pulse_recovery_enters_companion_turn_before_afterthought_generation(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pulse is a scheduled Turn, not scheduler-owned model orchestration."""
+    from datetime import timedelta
+
+    store = CompanionStore(tmp_path / "world.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。", world_kernel=world, world_id=world_id)
+    logical_at = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
+    action_id = engine.schedule_conversation_pulse(
+        canonical_user_id="geoff",
+        platform="qq",
+        platform_user_id="openid",
+        reply_sent_at=logical_at,
+        mode="quick_continue",
+        delay_seconds=1,
+        remaining=[],
+    )
+    world.advance(world_id, logical_at + timedelta(minutes=1), expected_revision=world.revision(world_id))
+
+    frames = []
+
+    async def routed(self, frame, *, budget):
+        frames.append((frame, budget))
+        return TurnOutcome(
+            turn_id=frame.source_action_id,
+            committed_revision=world.revision(world_id),
+            action_ids=(),
+            visible_status="delivered",
+        )
+
+    async def direct_engine_bypass(*_args, **_kwargs):
+        raise AssertionError("scheduler must enter CompanionTurn, not engine.generate_afterthought")
+
+    class FakeDelivery:
+        def __init__(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(CompanionTurn, "deliver_conversation_pulse", routed)
+    monkeypatch.setattr(engine, "generate_afterthought", direct_engine_bypass)
+    monkeypatch.setattr(proactive_scheduler, "QQDelivery", FakeDelivery)
+    monkeypatch.setattr(proactive_scheduler, "get_settings", lambda: SimpleNamespace())
+
+    assert await recover_world_due_conversation_pulses(engine, send=True, sandbox=True) == 1
+    frame, budget = frames[0]
+    assert frame.source_action_id == action_id
+    assert frame.canonical_user_id == "geoff"
+    assert frame.reply_sent_at == logical_at
+    assert frame.mode == "quick_continue"
+    assert frame.frozen_cadence == "cold"
+    assert budget == proactive_scheduler.SCHEDULED_CONTINUATION_BUDGET
 
 
 @pytest.mark.asyncio
