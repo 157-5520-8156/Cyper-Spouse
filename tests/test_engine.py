@@ -229,7 +229,7 @@ async def test_world_mode_typing_transitions_do_not_touch_legacy_mood(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_world_communication_policy_defers_busy_low_energy_turn_as_world_actions(tmp_path: Path) -> None:
+async def test_low_energy_is_advisory_and_does_not_hard_veto_a_reply(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
     world = WorldKernel(store)
@@ -245,12 +245,13 @@ async def test_world_communication_policy_defers_busy_low_energy_turn_as_world_a
     )
 
     snapshot = world.snapshot(world_id)
-    assert reply is None
-    assert snapshot["communication"]["attention"] == "deferred"
-    assert snapshot["communication"]["rule_version"] == "world-behavior-v1"
-    scheduled = [item for item in snapshot["actions"].values() if item["status"] == "scheduled"]
-    assert [item["kind"] for item in scheduled] == ["reply_later"]
-    assert snapshot["communication"]["deferred_action_id"] == scheduled[0]["action_id"]
+    assert reply is not None
+    assert reply.world_action_id is not None
+    assert snapshot["actions"][reply.world_action_id]["status"] == "delivered"
+    assert not any(
+        item["kind"] == "reply_later" and item["status"] == "scheduled"
+        for item in snapshot["actions"].values()
+    )
 
 
 @pytest.mark.asyncio
@@ -370,7 +371,7 @@ async def test_misquoted_current_scene_is_salvaged_as_exact_grounded_text(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_world_communication_policy_does_not_reply_to_high_boundary_pressure(tmp_path: Path) -> None:
+async def test_boundary_pressure_is_advisory_and_does_not_hard_veto_a_reply(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
     world = WorldKernel(store)
@@ -385,8 +386,9 @@ async def test_world_communication_policy_does_not_reply_to_high_boundary_pressu
         IncomingMessage(platform="qq", platform_user_id="geoff", text="你现在就必须发给我", message_id="policy-dnd")
     )
 
-    assert reply is None
-    assert world.snapshot(world_id)["communication"]["attention"] == "do_not_disturb"
+    assert reply is not None
+    assert reply.world_action_id is not None
+    assert world.snapshot(world_id)["actions"][reply.world_action_id]["status"] == "delivered"
 
 
 @pytest.mark.asyncio
@@ -735,11 +737,10 @@ async def test_world_proactive_keeps_soft_quality_signals_without_serial_audit(
 
     decision = await engine.proactive_tick("geoff")
 
-    assert decision.should_send is True
-    assert decision.world_action_id is not None
+    assert decision.should_send is False
+    assert decision.world_action_id is None
     assert model.calls == 1
-    trace = world.snapshot(world_id)["actions"][decision.world_action_id]["trace"]
-    assert "human_reply_contract:relationship_language_exceeds_current_closeness" in trace["quality_signals"]
+    assert "关系阶段" in decision.private_thought
 
 
 @pytest.mark.asyncio

@@ -91,7 +91,7 @@ def test_dashboard_visual_baseline_manifest_matches_captured_files() -> None:
         assert Image.open(path).format == "JPEG"
 
 
-def test_debug_state_and_memory_controls(tmp_path: Path, monkeypatch) -> None:
+def test_debug_state_and_memory_controls_reject_direct_mutation(tmp_path: Path, monkeypatch) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
     engine = CompanionEngine(store, FakeCompanionModel(), "你是沈知栀。")
@@ -104,10 +104,9 @@ def test_debug_state_and_memory_controls(tmp_path: Path, monkeypatch) -> None:
     state_response = client.post(
         "/debug/geoff/state",
         json={"updates": {"mood": "curious", "trust": 42, "unknown": "ignored"}},
-    ).json()
-    assert state_response["state"]["mood"] == "curious"
-    assert state_response["state"]["trust"] == 42
-    assert state_response["updated"] == ["mood", "trust"]
+    )
+    assert state_response.status_code == 409
+    assert "forbids direct state mutation" in state_response.json()["detail"]
 
     add_response = client.post(
         "/debug/geoff/memories",
@@ -116,14 +115,13 @@ def test_debug_state_and_memory_controls(tmp_path: Path, monkeypatch) -> None:
             "content": "用户喜欢桂花乌龙",
             "confidence": 0.8,
         },
-    ).json()
-    assert add_response == {"ok": True}
-    context = client.get("/debug/geoff/context?preview_text=你好").json()
-    assert not any("桂花乌龙" in line for line in context["memories"])
-    assert any("桂花乌龙" in row["content"] for row in context["available_memories"])
+    )
+    assert add_response.status_code == 409
+    assert "forbids direct memory mutation" in add_response.json()["detail"]
 
     delete_response = client.delete(
         "/debug/geoff/memories",
         params={"kind": "favorite_thing", "content": "用户喜欢桂花乌龙"},
-    ).json()
-    assert delete_response == {"deleted": 1}
+    )
+    assert delete_response.status_code == 409
+    assert "forbids direct memory mutation" in delete_response.json()["detail"]
