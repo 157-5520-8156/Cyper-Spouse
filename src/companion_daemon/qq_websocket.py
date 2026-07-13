@@ -1990,9 +1990,6 @@ class CompanionQQClient(botpy.Client):
 
     async def on_ready(self) -> None:
         logger.info("QQ WebSocket client is ready: %s", self.robot.name)
-        recovered = self.engine.recover_pending_media()
-        if recovered:
-            logger.info("resumed %s pending media outbox item(s)", recovered)
 
     async def on_c2c_message_create(self, message: C2CMessage) -> None:
         user_id = message.author.user_openid

@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from companion_daemon.attachment_cache import AttachmentCache
-from companion_daemon.budget import ESTIMATES, BudgetGate, image_render_estimate
+from companion_daemon.budget import ESTIMATES, BudgetGate
 from companion_daemon.character import CharacterProfile
 from companion_daemon.context_assembler import ContextAssembler
 from companion_daemon.conversation import ConversationCore, PromptedConversationCore
@@ -46,13 +46,6 @@ from companion_daemon.memory_consolidation import (
     should_consolidate,
     consolidate_memories,
 )
-from companion_daemon.media_preferences import (
-    load_media_preferences,
-    persist_media_preferences,
-    update_media_preferences_from_text,
-)
-from companion_daemon.media_shot import MediaShotDirector, MediaShotPlan, MediaShotPlanner
-from companion_daemon.world_media_intent import WorldMediaIntentPolicy
 from companion_daemon.image_agency import decide_image_agency, image_agency_prompt_line
 from companion_daemon.image_generation import (
     ImageGenerator,
@@ -370,15 +363,9 @@ class CompanionEngine:
         self.world_behavior_policy = WorldBehaviorPolicy()
         self.context_assembler = ContextAssembler()
         self.world_media_policy = WorldMediaPolicy()
-        self.world_media_intent_policy = WorldMediaIntentPolicy()
-        self.media_shot_planner = MediaShotPlanner()
         self.interaction_appraisal_model = interaction_appraisal_model
         self.interaction_deep_appraisal_model = interaction_deep_appraisal_model
         self.expressive_model = expressive_model
-        # This director never selects an opportunity or changes world facts.
-        # It only gives an already-frozen shot a bounded, human-feeling visual
-        # expression; the regular model is a compatible fallback in lean setups.
-        self.media_shot_director = MediaShotDirector(expressive_model or model)
         self.attachment_cache = attachment_cache
         self.attachment_fetcher = attachment_fetcher or self._fetch_attachment
         self.managed_async_resources = managed_async_resources
@@ -1097,8 +1084,6 @@ class CompanionEngine:
             f"{user_id}|{message.message_id}|{request.type}|{request.directive}".encode("utf-8")
         ).hexdigest()[:20]
         existing = snapshot.get("media", {}).get(request_id, {})
-        shot_plan: MediaShotPlan | None = None
-        personal_media = decision.kind in {"selfie", "character_media", "relationship_private"}
         if isinstance(existing, dict):
             if existing.get("status") in {"generated", "shared"} and existing.get("artifact_path"):
                 return str(existing["artifact_path"]), f"media-delivery:{request_id}", "existing_media_request"
@@ -1107,11 +1092,6 @@ class CompanionEngine:
                 and existing.get("status") in {"requested", "generation_failed", "delivery_failed", "rejected"}
             ):
                 return None, None, f"existing_media_{existing['status']}"
-            if _background and personal_media and existing.get("status") == "requested":
-                try:
-                    shot_plan = MediaShotPlan.from_payload(existing.get("shot_plan"))
-                except ValueError:
-                    return None, None, "existing_media_missing_shot_plan"
         if not decision.allowed:
             self._submit_world_with_retry(
                 {
@@ -1140,31 +1120,16 @@ class CompanionEngine:
                     }
                 )
                 return None, None, decision.reason
-        if personal_media and shot_plan is None:
-            shot_plan = self.media_shot_planner.plan(snapshot, decision, request_id)
-            shot_plan = await self.media_shot_director.direct(shot_plan)
         if not _background:
-            command = {
+            self._submit_world_with_retry(
+                {
                     "type": "request_media", "world_id": self.world_id,
                     "request_id": request_id, "user_id": user_id, "media_kind": decision.kind,
-                    "capture_mode": decision.capture_mode or "handheld_selfie",
                     "topic": decision.prompt_topic, "reason": decision.reason,
-                    "delivery_context": message.model_dump(
-                        mode="json",
-                        exclude={
-                            "attachments",
-                            "emoji",
-                            "sticker_kind",
-                            "reply_target",
-                            "source_message_ids",
-                        },
-                    ),
                     "rule_version": self.world_media_policy.RULE_VERSION,
                     "idempotency_key": f"media-request:{request_id}",
                 }
-            if shot_plan is not None:
-                command["shot_plan"] = shot_plan.to_payload()
-            self._submit_world_with_retry(command)
+            )
             if self.media_delivery_handler:
                 self._schedule_world_media_generation(user_id=user_id, message=message)
                 return None, None, "media_generation_pending"
@@ -1178,20 +1143,7 @@ class CompanionEngine:
                 idempotency_key=f"media-generation-failed:{request_id}",
             )
             return None, None, "image_generator_unavailable"
-        media_kind = str(existing.get("media_kind") or decision.kind)
-        profile = "relationship_private" if media_kind == "relationship_private" else "everyday_selfie"
-        scene_topic = decision.prompt_topic
-        if shot_plan is not None:
-            scene_topic += shot_plan.prompt_block()
-        references = visual_reference_paths(
-            self.visual_identity_path,
-            profile=profile,
-            relationship_tier=shot_plan.relationship_tier if shot_plan else decision.intimacy_tier,
-            scene_hint=scene_topic,
-        )
-        estimate = image_render_estimate(
-            reference_count=len(references), attempts=2 if self.image_quality_gate else 1
-        )
+        estimate = ESTIMATES["image_generation"]
         if self.budget_gate and not self.budget_gate.check(estimate, automatic=True).allowed:
             await self._settle_background_media_result(
                 action_id=action_id,
@@ -1201,12 +1153,12 @@ class CompanionEngine:
                 idempotency_key=f"media-generation-budget:{request_id}",
             )
             return None, None, "budget_gate_blocked"
+        profile = "relationship_private" if decision.kind == "relationship_private" else "everyday_selfie"
         prompt = life_image_prompt(
-            scene_topic,
-            kind="character_media" if media_kind in {"selfie", "character_media", "relationship_private"} else "life",
+            decision.prompt_topic,
+            kind="selfie" if decision.kind in {"selfie", "relationship_private"} else "life",
             profile=profile,
-            relationship_tier=shot_plan.relationship_tier if shot_plan else decision.intimacy_tier,
-            capture_mode=shot_plan.capture_mode if shot_plan else decision.capture_mode or "handheld_selfie",
+            relationship_tier=decision.intimacy_tier,
             visual_identity_path=self.visual_identity_path,
         )
         output_path = self.image_output_dir / f"world-{request_id}.png"
@@ -1215,7 +1167,11 @@ class CompanionEngine:
                 self.image_generator,
                 prompt,
                 output_path=output_path,
-                reference_images=references,
+                reference_images=visual_reference_paths(
+                    self.visual_identity_path,
+                    profile=profile,
+                    relationship_tier=decision.intimacy_tier,
+                ),
                 quality_gate=self.image_quality_gate,
             )
         except Exception as exc:
@@ -1228,10 +1184,7 @@ class CompanionEngine:
             )
             return None, None, "media_generation_failed"
         if self.budget_gate:
-            self.budget_gate.record(
-                image_render_estimate(reference_count=len(references), attempts=generated.attempts),
-                note=f"world_media:{media_kind}:attempts={generated.attempts}",
-            )
+            self.budget_gate.record(estimate, note=f"world_media:{decision.kind}")
         artifact_path = str(generated.path)
         await self._settle_background_media_result(
             action_id=action_id,
@@ -1259,54 +1212,6 @@ class CompanionEngine:
         self._media_tasks.add(task)
         task.add_done_callback(self._media_tasks.discard)
 
-    def recover_pending_media(self) -> int:
-        """Resume scheduled media work after an adapter or process restart.
-
-        The world ledger is the outbox.  Only a bounded incoming-message
-        envelope is persisted with each media request, so recovery never needs
-        to guess a recipient from current conversation state.
-        """
-        if not self.world_kernel or not self.world_id or not self.media_delivery_handler:
-            return 0
-        snapshot = self.world_kernel.snapshot(self.world_id)
-        media = snapshot.get("media", {})
-        actions = snapshot.get("actions", {})
-        if not isinstance(media, dict):
-            return 0
-        recovered = 0
-        for item in media.values():
-            if not isinstance(item, dict) or item.get("status") not in {"requested", "generated"}:
-                continue
-            raw_message = item.get("delivery_context")
-            if not isinstance(raw_message, dict):
-                continue
-            try:
-                message = IncomingMessage.model_validate(raw_message)
-            except Exception:
-                logger.warning("skipped unrecoverable media outbox item with invalid delivery context")
-                continue
-            request_id = str(item.get("request_id") or "")
-            if item.get("status") == "generated" and isinstance(actions, dict):
-                delivery_action_id = f"media-delivery:{request_id}"
-                if delivery_action_id not in actions:
-                    try:
-                        self._submit_world_with_retry(
-                            {
-                                "type": "schedule_media_delivery",
-                                "world_id": self.world_id,
-                                "request_id": request_id,
-                                "idempotency_key": f"media-delivery:{request_id}",
-                            }
-                        )
-                    except Exception:
-                        logger.exception("failed to restore media delivery action: %s", request_id)
-                        continue
-            self._schedule_world_media_generation(
-                user_id=str(item.get("user_id") or ""), message=message
-            )
-            recovered += 1
-        return recovered
-
     async def _complete_world_media_generation(
         self, *, user_id: str, message: IncomingMessage
     ) -> None:
@@ -1332,17 +1237,9 @@ class CompanionEngine:
             )
             return
 
-        # Legacy adapters return a boolean; newer QQ adapters return a durable
-        # dispatch receipt.  A true legacy result is still a positive adapter
-        # acknowledgement and must reconcile the media outbox.
-        if isinstance(delivery, bool):
-            status = "delivered" if delivery else "failed"
-            receipt = "legacy_adapter_confirmed" if delivery else ""
-            reason = ""
-        else:
-            status = str(getattr(delivery, "status", "unknown"))
-            receipt = str(getattr(delivery, "external_receipt", "") or "").strip()
-            reason = str(getattr(delivery, "reason", "") or "").strip()
+        status = str(getattr(delivery, "status", "unknown"))
+        receipt = str(getattr(delivery, "external_receipt", "") or "").strip()
+        reason = str(getattr(delivery, "reason", "") or "").strip()
         if status == "delivered" and receipt:
             await self._settle_background_media_result(
                 action_id=action_id,
@@ -1589,15 +1486,6 @@ class CompanionEngine:
         runtime = synchronize_life_runtime(self.store, canonical_user_id, next_state)
 
         self.store.save_incoming(canonical_user_id, message)
-        preferences = load_media_preferences(self.store, canonical_user_id)
-        updated_preferences = update_media_preferences_from_text(message.text, preferences)
-        if updated_preferences is not None:
-            persist_media_preferences(
-                self.store,
-                canonical_user_id,
-                updated_preferences,
-                source=f"{message.platform}:{message.message_id or 'turn'}",
-            )
         self.store.record_interaction_event(
             canonical_user_id,
             event_kind=event.kind,
@@ -1941,15 +1829,6 @@ class CompanionEngine:
                 "defer_delivery must remain true"
             )
         effective_cadence = cadence or self.conversation_cadence(message)
-        preferences = load_media_preferences(self.store, canonical_user_id)
-        updated_preferences = update_media_preferences_from_text(message.text, preferences)
-        if updated_preferences is not None:
-            persist_media_preferences(
-                self.store,
-                canonical_user_id,
-                updated_preferences,
-                source=f"{message.platform}:{message.message_id or 'turn'}",
-            )
         for action_id, action in self.world_kernel.snapshot(self.world_id)["actions"].items():
             is_life_share = bool(action.get("trace", {}).get("life_share"))
             if action["kind"] == "decision_review" and action["status"] == "scheduled":
@@ -4014,12 +3893,7 @@ class CompanionEngine:
     ) -> Path | None:
         if not image_requested or not self.image_generator or not self.character_profile:
             return None
-        references = visual_reference_paths(
-            self.visual_identity_path, scene_hint=message.text
-        )
-        estimate = image_render_estimate(
-            reference_count=len(references), attempts=2 if self.image_quality_gate else 1
-        )
+        estimate = ESTIMATES["image_generation"]
         if self.budget_gate:
             decision = self.budget_gate.check(estimate, automatic=True)
             if not decision.allowed:
@@ -4045,14 +3919,11 @@ class CompanionEngine:
             self.image_generator,
             payload.prompt,
             output_path=output_path,
-            reference_images=references,
+            reference_images=visual_reference_paths(self.visual_identity_path),
             quality_gate=self.image_quality_gate,
         )
         if self.budget_gate:
-            self.budget_gate.record(
-                image_render_estimate(reference_count=len(references), attempts=generated.attempts),
-                note=f"chat_image:{payload.mode}:{payload.directive[:40]}:attempts={generated.attempts}",
-            )
+            self.budget_gate.record(estimate, note=f"chat_image:{payload.mode}:{payload.directive[:40]}")
         self.store.upsert_memory(
             canonical_user_id,
             kind="generated_image",
@@ -4620,12 +4491,6 @@ class CompanionEngine:
             )
             return decision
         text = sanitize_chat_text(decision.message)
-        await self._maybe_attach_world_proactive_media(
-            canonical_user_id=canonical_user_id,
-            decision=decision,
-            snapshot=snapshot,
-            impulse_id=impulse_id,
-        )
         outbound_override = (
             {
                 "reason": f"deliberation_selected_outreach_despite:{outreach.reason}",
@@ -4686,51 +4551,6 @@ class CompanionEngine:
         return decision.model_copy(
             update={"message": text, "delivery_id": delivery_id, "turn_trace_id": trace_id, "world_action_id": action_id}
         )
-
-    async def _maybe_attach_world_proactive_media(
-        self,
-        *,
-        canonical_user_id: str,
-        decision: ProactiveDecision,
-        snapshot: dict[str, object],
-        impulse_id: str,
-    ) -> None:
-        """Schedule an independent QQ photo only after world outreach chose to initiate."""
-        if (
-            decision.platform != "qq"
-            or not self.media_delivery_handler
-            or not self.image_generator
-            or not self.world_kernel
-            or not self.world_id
-        ):
-            return
-        choice = self.world_media_intent_policy.choose(snapshot, request_id=impulse_id)
-        if choice is None:
-            return
-        recipient = self.store.platform_user_id(canonical_user_id, "qq")
-        if not recipient:
-            return
-        directive = {
-            "atmosphere_record": "发一张生活照",
-            "check_in_pose": "发一张打卡照",
-            "companion_candid": "发一张朋友拍的抓拍",
-            "playful_share": "发一张搞怪随手照",
-            "outfit_mirror": "发一张镜子里的穿搭照",
-            "unfiltered_moment": "发一张不太精致的随手照",
-            "private_keepsake": "发一张私密生活照",
-        }[choice.intent]
-        message = IncomingMessage(
-            platform="qq",
-            platform_user_id=recipient,
-            text=directive,
-            message_id=f"{impulse_id}:media:{choice.intent}",
-        )
-        try:
-            await self._maybe_generate_world_image(
-                user_id=self._world_user_id(canonical_user_id), message=message
-            )
-        except Exception:
-            logger.exception("world proactive media scheduling failed: %s", choice.intent)
 
     def _deterministic_life_share_decision(
         self,
@@ -5163,9 +4983,6 @@ class CompanionEngine:
     ) -> ProactiveDecision:
         if not decision.should_send or decision.message_type not in {"image", "text_image"}:
             return decision
-        preferences = load_media_preferences(self.store, canonical_user_id)
-        if not preferences.allow_proactive_images:
-            return decision.model_copy(update={"message_type": "text" if decision.message else "none"})
         if not self.image_generator or not self.character_profile:
             return decision.model_copy(update={"message_type": "text" if decision.message else "none"})
         if state.relationship_stage not in {"friend", "close_friend", "ambiguous", "lover"}:
@@ -5173,22 +4990,7 @@ class CompanionEngine:
         if state.mood in {"guarded", "hurt"} or state.boundary_level >= 35:
             return decision.model_copy(update={"message_type": "text" if decision.message else "none"})
 
-        topic = decision.message or decision.private_thought
-        capture_mode = self.world_media_policy.proactive_capture_mode(topic)
-        if capture_mode == "unfiltered" and (
-            not preferences.allow_unfiltered_media
-            or not self._proactive_unfiltered_media_allowed(
-                canonical_user_id, state, cooldown_days=preferences.unfiltered_cooldown_days
-            )
-        ):
-            capture_mode = "handheld_selfie"
-        kind = "character_media" if state.relationship_stage in {"close_friend", "ambiguous", "lover"} and state.trust >= 55 else "life"
-        references = visual_reference_paths(
-            self.visual_identity_path, scene_hint=f"{capture_mode}:{topic}"
-        )
-        estimate = image_render_estimate(
-            reference_count=len(references), attempts=2 if self.image_quality_gate else 1
-        )
+        estimate = ESTIMATES["image_generation"]
         if self.budget_gate:
             budget_decision = self.budget_gate.check(estimate, automatic=True)
             if not budget_decision.allowed:
@@ -5201,56 +5003,26 @@ class CompanionEngine:
                 )
                 return decision.model_copy(update={"message_type": "text" if decision.message else "none"})
 
+        kind = "selfie" if state.relationship_stage in {"close_friend", "ambiguous", "lover"} and state.trust >= 55 else "life"
+        topic = decision.message or decision.private_thought
         output_path = self.image_output_dir / f"proactive-{canonical_user_id}-{int(utc_now().timestamp())}.png"
         generated = await render_character_image(
             self.image_generator,
-            life_image_prompt(
-                topic,
-                kind=kind,
-                capture_mode=capture_mode,
-                visual_identity_path=self.visual_identity_path,
-            ),
+            life_image_prompt(topic, kind=kind, visual_identity_path=self.visual_identity_path),
             output_path=output_path,
-            reference_images=references,
+            reference_images=visual_reference_paths(self.visual_identity_path),
             quality_gate=self.image_quality_gate,
         )
         if self.budget_gate:
-            self.budget_gate.record(
-                image_render_estimate(reference_count=len(references), attempts=generated.attempts),
-                note=f"proactive_image:{kind}:{topic[:40]}:attempts={generated.attempts}",
-            )
+            self.budget_gate.record(estimate, note=f"proactive_image:{kind}:{topic[:40]}")
         self.store.upsert_memory(
             canonical_user_id,
             kind="generated_image",
-            content=f"proactive_{kind}:{capture_mode}: {topic[:120]}",
+            content=f"proactive_{kind}: {topic[:120]}",
             source=str(generated.path),
             confidence=0.82,
         )
-        if capture_mode == "unfiltered":
-            self.store.upsert_memory(
-                canonical_user_id,
-                kind="proactive_unfiltered_media",
-                content="shared a low-stakes unfiltered personal media moment",
-                source=str(generated.path),
-                confidence=1.0,
-            )
         return decision.model_copy(update={"image_path": str(generated.path)})
-
-    def _proactive_unfiltered_media_allowed(
-        self, canonical_user_id: str, state: MoodState, *, cooldown_days: int = 7
-    ) -> bool:
-        if state.relationship_stage not in {"close_friend", "ambiguous", "lover"}:
-            return False
-        previous = self.store.latest_memory(
-            canonical_user_id, kind="proactive_unfiltered_media"
-        )
-        if previous is None:
-            return True
-        try:
-            previous_at = datetime.fromisoformat(str(previous["updated_at"]))
-        except ValueError:
-            return False
-        return utc_now() - previous_at >= timedelta(days=cooldown_days)
 
 
 def _deep_night_afterthought_allowed(state: MoodState, recent_rows: list[dict[str, str]]) -> bool:
