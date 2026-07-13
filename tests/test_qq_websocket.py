@@ -12,12 +12,14 @@ from companion_daemon.models import CompanionReply, IncomingMessage, MessageAtta
 from companion_daemon.qq_websocket import (
     CompanionQQClient,
     QQMessageCoalescer,
+    QQTurnPresenter,
     _attachments_from_botpy,
     _clean_content,
     _afterthought_plans,
     classify_mid_reply_interruption,
     _send_reply_parts,
 )
+from companion_daemon.companion_turn import DispatchAcceptance, ExternalObservation, TurnPresentation
 from companion_daemon.turn_taking import TurnTakingPolicy
 from companion_daemon.world import WorldKernel
 from companion_daemon.world import WorldError
@@ -1342,6 +1344,76 @@ async def test_coalescer_sends_generated_image_after_text_reply() -> None:
     await asyncio.sleep(0.03)
 
     assert sent == [("user", "assets/life/reply.png")]
+
+
+@pytest.mark.asyncio
+async def test_turn_presenter_requires_a_durable_receipt_for_expression_delivery() -> None:
+    """An adapter return is not proof that a sticker or image was delivered."""
+
+    class Engine:
+        world_id = "world-1"
+
+        @staticmethod
+        def begin_reaction_delivery(
+            _incoming: IncomingMessage, _reply: CompanionReply
+        ) -> str:
+            return "reaction-action"
+
+    observations: list[ExternalObservation] = []
+
+    async def settle(observation: ExternalObservation):
+        observations.append(observation)
+
+    async def send_sticker(_incoming: IncomingMessage, _reply: CompanionReply) -> dict[str, str]:
+        return {"message_id": "sticker-receipt"}
+
+    async def send_image_without_receipt(
+        _incoming: IncomingMessage, _reply: CompanionReply
+    ) -> dict[str, str]:
+        return {"status": "ok"}
+
+    async def send_reaction(
+        _incoming: IncomingMessage, _reply: CompanionReply
+    ) -> DispatchAcceptance:
+        return DispatchAcceptance(status="delivered", external_receipt="onebot-reaction:1:2")
+
+    terminal: list[bool] = []
+    presenter = QQTurnPresenter(
+        Engine(),  # type: ignore[arg-type]
+        on_reply=None,
+        on_sticker=send_sticker,
+        on_image=send_image_without_receipt,
+        on_reaction=send_reaction,
+        after_delivered=None,
+        after_terminal=lambda: terminal.append(True),
+        settle_external=settle,
+    )
+    incoming = IncomingMessage(
+        platform="qq", platform_user_id="user", message_id="message-1", text="看看"
+    )
+    presentation = TurnPresentation(
+        action_id="text-action",
+        incoming=incoming,
+        canonical_user_id="user",
+        suggested_reaction="haha",
+        sticker_path="sticker.png",
+        image_path="image.png",
+        media_action_id="media-action",
+        sticker_action_id="sticker-action",
+    )
+
+    await presenter.before_text(presentation)
+    await presenter.after_text(presentation, "delivered")
+
+    assert terminal == [True]
+    assert [(item.action_id, item.kind, item.status) for item in observations] == [
+        ("reaction-action", "media_result", "delivered"),
+        ("sticker-action", "media_result", "delivered"),
+        ("media-action", "timeout", None),
+    ]
+    assert observations[1].external_receipt is None
+    assert observations[1].payload["external_receipt"] == "platform:message_id:sticker-receipt"
+    assert observations[2].payload["reason"] == "qq_image_returned_without_durable_receipt"
 
 
 @pytest.mark.asyncio

@@ -17,7 +17,9 @@ from companion_daemon.engine import CompanionEngine
 from companion_daemon.companion_turn import (
     CompanionTurn,
     DispatchAcceptance,
+    ExternalObservation,
     ResponseBudget,
+    SettlementOutcome,
     TurnBeat,
     TurnEnvelope,
     TurnOptions,
@@ -98,11 +100,14 @@ class QQTurnPresenter(TurnPresenter):
         engine: CompanionEngine,
         *,
         on_reply: Callable[[CompanionReply], Awaitable[None]] | None,
-        on_sticker: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None,
-        on_image: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None,
-        on_reaction: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None,
+        on_sticker: Callable[[IncomingMessage, CompanionReply], Awaitable[object | None]] | None,
+        on_image: Callable[[IncomingMessage, CompanionReply], Awaitable[object | None]] | None,
+        on_reaction: Callable[
+            [IncomingMessage, CompanionReply], Awaitable[DispatchAcceptance | None]
+        ] | None,
         after_delivered: Callable[[CompanionReply], Awaitable[None]] | None,
         after_terminal: Callable[[], None],
+        settle_external: Callable[[ExternalObservation], Awaitable[SettlementOutcome]] | None = None,
     ) -> None:
         self.engine = engine
         self.on_reply = on_reply
@@ -111,6 +116,7 @@ class QQTurnPresenter(TurnPresenter):
         self.on_reaction = on_reaction
         self.after_delivered = after_delivered
         self.after_terminal = after_terminal
+        self.settle_external = settle_external
 
     @staticmethod
     def _reply(presentation: TurnPresentation) -> CompanionReply:
@@ -130,41 +136,175 @@ class QQTurnPresenter(TurnPresenter):
         if self.on_reaction is None or not presentation.suggested_reaction:
             return
         try:
-            await self.on_reaction(presentation.incoming, self._reply(presentation))
-        except Exception:
+            reply = self._reply(presentation)
+            if self.settle_external is None:
+                await self.on_reaction(presentation.incoming, reply)
+                return
+            action_id = self.engine.begin_reaction_delivery(presentation.incoming, reply)
+            if not action_id:
+                return
+            acceptance = await self.on_reaction(presentation.incoming, reply)
+            await self._settle_dispatch_acceptance(action_id, acceptance, effect="reaction")
+        except Exception as exc:
             logger.exception("failed to send QQ reaction before text")
+            if "action_id" in locals():
+                await self._settle_expression(
+                    action_id,
+                    status="unknown",
+                    reason=f"qq_reaction_exception:{type(exc).__name__}",
+                )
 
     async def after_text(self, presentation: TurnPresentation, terminal_state: str) -> None:
         reply = self._reply(presentation)
         try:
             if terminal_state != "delivered":
-                self.engine.fail_media_delivery(reply, f"text_delivery_{terminal_state}")
-                self.engine.fail_sticker_delivery(reply, f"text_delivery_{terminal_state}")
+                await self._settle_expression(
+                    presentation.media_action_id,
+                    status="cancelled",
+                    reason=f"text_delivery_{terminal_state}",
+                )
+                await self._settle_expression(
+                    presentation.sticker_action_id,
+                    status="cancelled",
+                    reason=f"text_delivery_{terminal_state}",
+                )
                 return
             if self.on_sticker and reply.sticker_path:
                 try:
-                    await self.on_sticker(presentation.incoming, reply)
-                    self.engine.confirm_sticker_delivery(reply)
-                except Exception:
+                    response = await self.on_sticker(presentation.incoming, reply)
+                    await self._settle_expression_response(
+                        presentation.sticker_action_id, response, effect="sticker"
+                    )
+                except Exception as exc:
                     logger.exception("failed to send QQ sticker reply")
-                    self.engine.fail_sticker_delivery(reply, "QQ sticker delivery failed")
+                    await self._settle_expression(
+                        presentation.sticker_action_id,
+                        status="unknown",
+                        reason=f"qq_sticker_exception:{type(exc).__name__}",
+                    )
             elif reply.sticker_path:
-                self.engine.fail_sticker_delivery(reply, "sticker adapter unavailable")
+                await self._settle_expression(
+                    presentation.sticker_action_id,
+                    status="failed",
+                    reason="sticker_adapter_unavailable",
+                )
             if self.on_image and reply.image_path:
                 try:
-                    await self.on_image(presentation.incoming, reply)
-                    self.engine.confirm_media_delivery(reply)
-                except Exception:
+                    response = await self.on_image(presentation.incoming, reply)
+                    await self._settle_expression_response(
+                        presentation.media_action_id, response, effect="image"
+                    )
+                except Exception as exc:
                     logger.exception("failed to send QQ image reply")
-                    self.engine.fail_media_delivery(reply, "QQ image delivery failed")
+                    await self._settle_expression(
+                        presentation.media_action_id,
+                        status="unknown",
+                        reason=f"qq_image_exception:{type(exc).__name__}",
+                    )
             elif reply.image_path:
-                self.engine.fail_media_delivery(reply, "image adapter unavailable")
+                await self._settle_expression(
+                    presentation.media_action_id,
+                    status="failed",
+                    reason="image_adapter_unavailable",
+                )
             if self.on_reply:
                 await self.on_reply(reply)
             if self.after_delivered:
                 await self.after_delivered(reply)
         finally:
             self.after_terminal()
+
+    async def _settle_expression_response(
+        self, action_id: str | None, response: object | None, *, effect: str
+    ) -> None:
+        receipt = QQDelivery.receipt_candidate(response)
+        if receipt:
+            await self._settle_expression(
+                action_id,
+                status="delivered",
+                external_receipt=receipt,
+            )
+            return
+        await self._settle_expression(
+            action_id,
+            status="unknown",
+            reason=f"qq_{effect}_returned_without_durable_receipt",
+        )
+
+    async def _settle_dispatch_acceptance(
+        self,
+        action_id: str,
+        acceptance: DispatchAcceptance | None,
+        *,
+        effect: str,
+    ) -> None:
+        if acceptance is None or acceptance.status in {"accepted", "unknown"}:
+            await self._settle_expression(
+                action_id,
+                status="unknown",
+                reason=(
+                    acceptance.reason
+                    if acceptance is not None and acceptance.reason
+                    else f"qq_{effect}_returned_without_durable_receipt"
+                ),
+            )
+            return
+        await self._settle_expression(
+            action_id,
+            status=acceptance.status,
+            external_receipt=acceptance.external_receipt,
+            reason=acceptance.reason,
+        )
+
+    async def _settle_expression(
+        self,
+        action_id: str | None,
+        *,
+        status: str,
+        external_receipt: str | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Record a non-text result through the owning CompanionTurn.
+
+        ``None`` means no expression action was planned.  The small legacy
+        fallback keeps non-World test doubles usable, while production World
+        paths never call the old Engine convenience methods from this adapter.
+        """
+        if not action_id:
+            return
+        if self.settle_external is None:
+            return
+        observed_at = utc_now()
+        if status == "unknown":
+            await self.settle_external(
+                ExternalObservation(
+                    action_id=action_id,
+                    kind="timeout",
+                    observed_at=observed_at,
+                    idempotency_key=f"qq-expression-unknown:{action_id}:{reason or 'unknown'}",
+                    payload={"reason": reason or "adapter_result_uncertain"},
+                    world_id=self.engine.world_id,
+                )
+            )
+            return
+        await self.settle_external(
+            ExternalObservation(
+                action_id=action_id,
+                kind="media_result",
+                observed_at=observed_at,
+                idempotency_key=(
+                    f"qq-expression:{status}:{action_id}:"
+                    f"{external_receipt or reason or 'terminal'}"
+                ),
+                status=status,  # type: ignore[arg-type]
+                payload={
+                    "status": status,
+                    "external_receipt": external_receipt,
+                    "reason": reason,
+                },
+                world_id=self.engine.world_id,
+            )
+        )
 
 
 class MissingDeliveryEvidenceError(RuntimeError):
@@ -242,9 +382,11 @@ class QQMessageCoalescer:
         delay_seconds: float,
         turn_policy: TurnTakingPolicy | None = None,
         on_reply: Callable[[CompanionReply], Awaitable[None]] | None = None,
-        on_sticker: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None = None,
-        on_image: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None = None,
-        on_reaction: Callable[[IncomingMessage, CompanionReply], Awaitable[None]] | None = None,
+        on_sticker: Callable[[IncomingMessage, CompanionReply], Awaitable[object | None]] | None = None,
+        on_image: Callable[[IncomingMessage, CompanionReply], Awaitable[object | None]] | None = None,
+        on_reaction: Callable[
+            [IncomingMessage, CompanionReply], Awaitable[DispatchAcceptance | None]
+        ] | None = None,
         human_timing: bool = False,
         enable_reply_decision: bool = False,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -868,6 +1010,7 @@ class QQMessageCoalescer:
             sleep=self.sleep,
             presenter=presenter,
         )
+        presenter.settle_external = runtime.settle
         self._active_turns[key] = runtime
         await runtime.start()
         try:
@@ -1470,42 +1613,37 @@ class CompanionQQClient(botpy.Client):
     async def _log_reply(self, reply: CompanionReply) -> None:
         logger.info("replied to %s; mood=%s", reply.canonical_user_id, reply.mood)
 
-    async def _send_reply_sticker(self, incoming: IncomingMessage, reply: CompanionReply) -> None:
+    async def _send_reply_sticker(
+        self, incoming: IncomingMessage, reply: CompanionReply
+    ) -> object | None:
         if reply.sticker_path:
-            await self._send_local_image(incoming, Path(reply.sticker_path))
+            return await self._send_local_image(incoming, Path(reply.sticker_path))
+        return None
 
-    async def _send_reply_image(self, incoming: IncomingMessage, reply: CompanionReply) -> None:
+    async def _send_reply_image(self, incoming: IncomingMessage, reply: CompanionReply) -> object | None:
         if reply.image_path:
-            await self._send_local_image(incoming, Path(reply.image_path))
+            return await self._send_local_image(incoming, Path(reply.image_path))
+        return None
 
     async def _reject_unsupported_reply_reaction(
         self, incoming: IncomingMessage, reply: CompanionReply
-    ) -> None:
-        """Close the world action truthfully when official QQ cannot attach reactions."""
-        action_id = self.engine.begin_reaction_delivery(incoming, reply)
-        if not action_id:
-            return
-        self.engine.settle_reaction_delivery(
-            action_id,
-            status="failed",
-            reason="official_qq_reaction_unsupported",
-        )
-        logger.info(
-            "official QQ adapter does not support message reactions; recorded failed action: %s",
-            action_id,
+    ) -> DispatchAcceptance:
+        """Report the platform capability; the turn owns Action settlement."""
+        return DispatchAcceptance(
+            status="failed", reason="official_qq_reaction_unsupported"
         )
 
-    async def _send_local_image(self, incoming: IncomingMessage, path: Path) -> None:
+    async def _send_local_image(self, incoming: IncomingMessage, path: Path) -> object | None:
         if not self.qq_api:
-            return
+            return None
         if incoming.channel_id:
-            await self.qq_api.send_group_local_image(
+            return await self.qq_api.send_group_local_image(
                 incoming.channel_id,
                 path,
                 msg_id=incoming.message_id,
             )
         else:
-            await self.qq_api.send_c2c_local_image(
+            return await self.qq_api.send_c2c_local_image(
                 incoming.platform_user_id,
                 path,
                 msg_id=incoming.message_id,

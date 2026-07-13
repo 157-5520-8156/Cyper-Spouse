@@ -487,7 +487,15 @@ class CompanionTurn:
 
         allowed_kinds = {
             "tool_result": {"tool_execution"},
-            "media_result": {"media_generation", "media_delivery"},
+            # Stickers and reactions are expression media.  Keeping them in
+            # this canonical result family prevents adapters from inventing a
+            # second, engine-private settlement path for non-text effects.
+            "media_result": {
+                "media_generation",
+                "media_delivery",
+                "sticker_delivery",
+                "reaction_delivery",
+            },
         }
         if action_kind not in allowed_kinds[observation.kind]:
             raise WorldError(

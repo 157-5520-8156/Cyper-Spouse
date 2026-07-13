@@ -24,6 +24,7 @@ from companion_daemon.onebot_adapter import (
     parse_onebot_event,
     send_onebot_emoji_like,
 )
+from companion_daemon.companion_turn import DispatchAcceptance
 from companion_daemon.qq_websocket import QQMessageCoalescer
 from companion_daemon.process_lock import AlreadyRunningError
 from companion_daemon.qq_outbound_owner import (
@@ -55,18 +56,21 @@ def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> Fast
 
     engine = build_companion_engine(use_fake_model=use_fake_model)
 
-    async def send_reply_image(incoming: IncomingMessage, reply: CompanionReply) -> None:
+    async def send_reply_image(
+        incoming: IncomingMessage, reply: CompanionReply
+    ) -> object | None:
         image_path = reply.sticker_path or reply.image_path
         if not image_path:
-            return
+            return None
         target = _target_for(incoming, api_url, access_token)
-        await target.send_image(Path(image_path))
+        return await target.send_image(Path(image_path))
 
-    async def send_reaction(incoming: IncomingMessage, reply: CompanionReply) -> None:
+    async def send_reaction(
+        incoming: IncomingMessage, reply: CompanionReply
+    ) -> DispatchAcceptance | None:
         emoji_id = qq_emoji_id(reply.suggested_reaction)
         if not emoji_id or not incoming.message_id:
-            return
-        action_id = engine.begin_reaction_delivery(incoming, reply)
+            return None
         try:
             result = await send_onebot_emoji_like(
                 api_url,
@@ -75,22 +79,17 @@ def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> Fast
                 access_token=access_token,
             )
         except Exception as exc:
-            engine.settle_reaction_delivery(
-                action_id,
+            return DispatchAcceptance(
                 status="unknown",
                 reason=f"adapter_result_uncertain:{type(exc).__name__}",
             )
-            raise
         if result.get("status") == "failed" or int(result.get("retcode") or 0) != 0:
-            engine.settle_reaction_delivery(
-                action_id,
+            return DispatchAcceptance(
                 status="failed",
                 reason=str(result.get("message") or "onebot_reaction_rejected")[:300],
             )
-            return
         receipt = f"onebot-reaction:{incoming.message_id}:{emoji_id}"
-        engine.settle_reaction_delivery(
-            action_id,
+        return DispatchAcceptance(
             status="delivered",
             external_receipt=receipt,
         )
