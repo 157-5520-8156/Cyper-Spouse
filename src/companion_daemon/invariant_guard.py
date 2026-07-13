@@ -47,6 +47,12 @@ class InvariantGuard:
     Action references.
     """
 
+    def __init__(self, *, enabled: bool = True) -> None:
+        # This switch exists only to make the boundary falsifiable in tests.
+        # Runtime construction always uses the safe default and no application
+        # configuration exposes it.
+        self._enabled = enabled
+
     def resolve(
         self,
         world: WorldKernel,
@@ -56,6 +62,12 @@ class InvariantGuard:
         user_id: str,
         evidence: HardEvidenceContext | None = None,
     ) -> GuardResolution:
+        if not self._enabled:
+            return GuardResolution(
+                "accept",
+                candidate=dict(candidate),
+                reason="hard_invariant_disabled_for_test",
+            )
         try:
             accepted = world.validate_reply_candidate(
                 world_id, candidate, user_id=user_id

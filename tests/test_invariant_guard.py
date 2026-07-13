@@ -78,6 +78,29 @@ def test_guard_hard_rejects_uncommitted_fact_reference(tmp_path: Path) -> None:
     assert result.reason
 
 
+def test_disabled_guard_allows_a_deliberately_ungrounded_fact_for_falsification(
+    tmp_path: Path,
+) -> None:
+    kernel, world_id = _world(tmp_path)
+    candidate = {
+        "reply_text": "我在西湖边喝咖啡。",
+        "mentioned_event_ids": [],
+        "proposed_action_ids": [],
+        "claims": [],
+    }
+
+    enabled = InvariantGuard().resolve(
+        kernel, world_id, candidate, user_id="user:geoff"
+    )
+    disabled = InvariantGuard(enabled=False).resolve(
+        kernel, world_id, candidate, user_id="user:geoff"
+    )
+
+    assert enabled.disposition == "hard_reject"
+    assert disabled.disposition == "accept"
+    assert disabled.candidate == candidate
+
+
 def test_guard_locally_redacts_one_unsettleable_sentence(tmp_path: Path) -> None:
     kernel, world_id = _world(tmp_path)
 
