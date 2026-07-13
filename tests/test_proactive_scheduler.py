@@ -143,7 +143,7 @@ async def test_world_due_reply_recovery_marks_unreceipted_dispatch_unknown(
 
 
 @pytest.mark.asyncio
-async def test_policy_deferred_reply_recovery_does_not_cancel_itself_or_reobserve_message(
+async def test_scheduled_deferred_reply_recovery_does_not_cancel_its_source_action(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from datetime import timedelta
@@ -152,14 +152,11 @@ async def test_policy_deferred_reply_recovery_does_not_cancel_itself_or_reobserv
     seed_user(store)
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
-    world.submit(
-        {"type": "change_need", "world_id": world_id, "need": "energy", "delta": -50},
-        expected_revision=world.revision(world_id),
-    )
     engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。", world_kernel=world, world_id=world_id)
     message = IncomingMessage(platform="qq", platform_user_id="openid", text="在吗", message_id="policy-recover")
-    assert await engine.handle_message(message) is None
-    action_id = str(world.snapshot(world_id)["communication"]["deferred_action_id"])
+    # Low energy is now an Advisory, not a hard no-reply gate.  Create the
+    # explicitly authorized delayed Action that restart recovery owns.
+    action_id = str(engine.create_deferred_reply_task(message, defer_minutes=1, reason="busy"))
 
     class FakeDelivery:
         def __init__(self, *args, **kwargs):
