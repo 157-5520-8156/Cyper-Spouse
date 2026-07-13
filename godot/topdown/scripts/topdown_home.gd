@@ -36,7 +36,7 @@ func _ready() -> void:
 		object["resolved_color"] = _color_for(String(object.get("color", "paper"))).to_html()
 		var furniture := TopdownFurniture.new()
 		furniture.name = String(object["id"])
-		furniture.configure(object, room.tile_size())
+		furniture.configure(object, room.tile_size(), room.origin())
 		furniture_root.add_child(furniture)
 		furniture_by_id[object["id"]] = furniture
 	actor.name = "Zhizhi"

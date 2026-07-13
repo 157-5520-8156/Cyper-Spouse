@@ -73,9 +73,15 @@ func anchor_for(name: String) -> Vector2i:
 func interaction_for(scene_state: Dictionary) -> Dictionary:
 	var location := String(scene_state.get("location", ""))
 	var action := String(scene_state.get("action", ""))
+	# An explicit daemon action is more specific than a broad location. For example,
+	# `phone` in the living room must select the phone pose, not generic relaxation.
 	for interaction_name in data.get("interactions", {}):
 		var interaction: Dictionary = data["interactions"][interaction_name]
-		if action in interaction.get("actions", []) or location in interaction.get("locations", []):
+		if action in interaction.get("actions", []):
+			return interaction.duplicate(true)
+	for interaction_name in data.get("interactions", {}):
+		var interaction: Dictionary = data["interactions"][interaction_name]
+		if location in interaction.get("locations", []):
 			return interaction.duplicate(true)
 	return {}
 

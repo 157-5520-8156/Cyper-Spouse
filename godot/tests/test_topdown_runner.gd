@@ -23,6 +23,7 @@ func _init() -> void:
 	var bridge := RoomStateBridge.new()
 	var state := bridge.scene_state_from_body(JSON.stringify({"dashboard": {"scene": {"location": "desk", "action": "study"}}}).to_utf8_buffer())
 	_expect(room.interaction_for(state).get("object") == "desk", "daemon study state maps to desk interaction")
+	_expect(room.interaction_for({"location": "living", "action": "phone"}).get("object") == "sofa", "explicit phone action wins over living fallback")
 	if failures.is_empty():
 		print("Top-down room tests passed")
 		quit(0)

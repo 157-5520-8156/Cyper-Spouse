@@ -11,6 +11,7 @@ var path: Array[Vector2i] = []
 var target_tile := Vector2.ZERO
 var facing := "down"
 var action := "idle"
+var expression := "neutral"
 var clock := 0.0
 
 
@@ -33,6 +34,7 @@ func configure(next_room: TopdownRoomManifest, next_navigation: TopdownNavigatio
 func set_scene_state(scene_state: Dictionary) -> String:
 	var interaction := room.interaction_for(scene_state)
 	action = String(scene_state.get("action", "idle"))
+	expression = String(scene_state.get("expression", "neutral"))
 	if interaction.is_empty():
 		var fallback := room.anchor_for(String(scene_state.get("location", "rug")))
 		target_tile = Vector2(fallback) + Vector2(0.5, 0.5)
@@ -92,12 +94,15 @@ func _update_visual() -> void:
 	var row: int = int({"down": 0, "left": 1, "right": 2, "up": 3}.get(facing, 0))
 	var frame: int = int(floor(clock * 9.0)) % 4 if walking else 0
 	sprite.frame = row * 7 + frame
+	# The existing daemon expression becomes a restrained mood tint rather than a
+	# separate, incompatible character sprite sheet.
+	sprite.modulate = _expression_tint()
 
 
 func _draw() -> void:
 	if not path.is_empty() or action == "idle":
 		return
-	var label: String = String({"study": "⌨", "eat": "✦", "relax": "…", "read_phone": "▣", "type_phone": "▣", "sleep": "z", "wash": "·", "tidy": "✦"}.get(action, "·"))
+	var label: String = String({"study": "⌨", "eat": "✦", "relax": "…", "social": "…", "phone": "▣", "read_phone": "▣", "type_phone": "▣", "notice_phone": "▣", "glance_phone": "▣", "sleep": "z", "wash": "·", "tidy": "✦"}.get(action, "·"))
 	var font := ThemeDB.fallback_font
 	var wobble := sin(clock * 3.0) * 2.0
 	draw_string(font, Vector2(-4, -34 + wobble), label, HORIZONTAL_ALIGNMENT_LEFT, -1, 16, Color("#fff0a5"))
@@ -107,3 +112,14 @@ func _facing_for(movement: Vector2) -> String:
 	if absf(movement.x) > absf(movement.y):
 		return "right" if movement.x > 0 else "left"
 	return "down" if movement.y > 0 else "up"
+
+
+func _expression_tint() -> Color:
+	match expression:
+		"happy", "excited", "playful":
+			return Color("#fff2cf")
+		"tired", "sleepy", "sad":
+			return Color("#b9c8d8")
+		"focused", "serious", "thoughtful":
+			return Color("#d6e9dd")
+	return Color.WHITE

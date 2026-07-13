@@ -7,10 +7,12 @@ var active := false
 var pulse := 0.0
 
 
-func configure(next_definition: Dictionary, next_tile_size: int) -> void:
+func configure(next_definition: Dictionary, next_tile_size: int, room_origin: Vector2) -> void:
 	definition = next_definition.duplicate(true)
 	tile_size = next_tile_size
-	position = Vector2(
+	# Furniture, actor and floor tiles share the manifest's one screen origin.
+	# The Node2D origin is the bottom centre (the furniture "feet") for y-sorting.
+	position = room_origin + Vector2(
 		(float(definition.get("x", 0)) + float(definition.get("width", 1)) * 0.5) * tile_size,
 		(float(definition.get("y", 0)) + float(definition.get("height", 1))) * tile_size
 	)

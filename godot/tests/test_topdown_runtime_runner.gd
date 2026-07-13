@@ -16,6 +16,12 @@ func _run() -> void:
 		push_error("Top-down scene did not create its actor and furniture")
 		quit(1)
 		return
+	var desk: TopdownFurniture = scene.furniture_by_id["desk"]
+	var expected_desk_position: Vector2 = scene.room.origin() + Vector2(4, 3) * scene.room.tile_size()
+	if desk.position != expected_desk_position:
+		push_error("Furniture must share the manifest origin with floor and actor tiles")
+		quit(1)
+		return
 	var mapping: String = scene.actor.snap_scene_state({"location": "desk", "action": "study"})
 	if mapping != "desk · study" or scene.actor.path.size() != 0:
 		push_error("Top-down actor could not snap to the desk interaction")
@@ -24,6 +30,11 @@ func _run() -> void:
 	scene._set_active_object(scene.room.interaction_for({"location": "desk", "action": "study"}))
 	if not scene.furniture_by_id["desk"].active:
 		push_error("Top-down interaction did not highlight the active furniture")
+		quit(1)
+		return
+	scene.actor.snap_scene_state({"location": "living", "action": "phone", "expression": "focused"})
+	if scene.actor.expression != "focused" or scene.actor.action != "phone":
+		push_error("Top-down actor did not consume action and expression state")
 		quit(1)
 		return
 	print("Top-down runtime test passed")

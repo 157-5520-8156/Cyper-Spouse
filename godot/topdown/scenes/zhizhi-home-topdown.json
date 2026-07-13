@@ -40,7 +40,7 @@
     "study": {"object": "desk", "locations": ["desk"], "actions": ["study"], "approach": [4, 3], "facing": "up"},
     "eat": {"object": "dining", "locations": ["kitchen", "dining"], "actions": ["eat"], "approach": [9, 5], "facing": "up"},
     "relax": {"object": "sofa", "locations": ["sofa", "living"], "actions": ["relax", "social"], "approach": [5, 9], "facing": "up"},
-    "phone": {"object": "sofa", "locations": ["sofa", "living"], "actions": ["read_phone", "type_phone", "notice_phone", "glance_phone"], "approach": [5, 9], "facing": "up"},
+    "phone": {"object": "sofa", "locations": ["sofa", "living"], "actions": ["phone", "read_phone", "type_phone", "notice_phone", "glance_phone"], "approach": [5, 9], "facing": "up"},
     "sleep": {"object": "bed", "locations": ["bed", "bedroom"], "actions": ["sleep"], "approach": [15, 4], "facing": "up"},
     "wash": {"object": "sink", "locations": ["vanity", "bathroom"], "actions": ["wash"], "approach": [13, 3], "facing": "up"},
     "tidy": {"object": "desk", "locations": ["desk"], "actions": ["tidy"], "approach": [4, 3], "facing": "up"}
