@@ -3971,8 +3971,30 @@ class CompanionEngine:
                     )
                     return
             logger.info("triggering memory consolidation for %s", canonical_user_id)
-            await consolidate_memories(self.store, self.model, canonical_user_id)
-            await build_self_core(self.store, self.model, canonical_user_id, state)
+            memory_action_id = f"legacy-memory:{canonical_user_id}:{uuid4().hex}"
+            memory_reservation_id = self._reserve_model_call_budget(
+                action_id=memory_action_id,
+                estimated_cny=self._estimate_model_call_reserve_cny(
+                    model=self.model, purpose="memory_consolidation", cadence="warm",
+                    prompt_characters=sum(len(str(row["kind"])) + len(str(row["content"])) + 8 for row in self.store.memories(canonical_user_id, limit=40)),
+                ),
+            )
+            try:
+                await consolidate_memories(self.store, self.model, canonical_user_id, action_id=memory_action_id, budget_reservation_id=memory_reservation_id)
+            finally:
+                self._release_model_call_budget(memory_reservation_id)
+            self_core_action_id = f"legacy-self-core:{canonical_user_id}:{uuid4().hex}"
+            self_core_reservation_id = self._reserve_model_call_budget(
+                action_id=self_core_action_id,
+                estimated_cny=self._estimate_model_call_reserve_cny(
+                    model=self.model, purpose="self_core_generation", cadence="warm",
+                    prompt_characters=sum(len(str(row["kind"])) + len(str(row["content"])) + 8 for row in self.store.memories(canonical_user_id, limit=40)),
+                ),
+            )
+            try:
+                await build_self_core(self.store, self.model, canonical_user_id, state, action_id=self_core_action_id, budget_reservation_id=self_core_reservation_id)
+            finally:
+                self._release_model_call_budget(self_core_reservation_id)
             if self.budget_gate:
                 self.budget_gate.record(estimate, note="memory_consolidation:self_core")
         except Exception:
