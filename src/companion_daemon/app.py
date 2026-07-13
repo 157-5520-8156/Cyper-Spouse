@@ -14,6 +14,7 @@ from companion_daemon.companion_turn import (
     DispatchAcceptance,
     ResponseBudget,
     TurnEnvelope,
+    TurnOptions,
 )
 from companion_daemon.dashboard_ui import DASHBOARD_HTML
 from companion_daemon.world_console_ui import WORLD_CONSOLE_HTML
@@ -142,12 +143,19 @@ async def post_message(message: IncomingMessage) -> CompanionReply | JSONRespons
     )
     turn = CompanionTurn(engine, transport, presenter=presenter)
     presenter.settle_external = turn.settle
+    turn_context = engine.freeze_turn_context(message)
     outcome = await turn.respond(
         TurnEnvelope.from_message(
             message,
             idempotency_key=f"{message.platform}:{message.platform_user_id}:{message.message_id}",
+            world_id=engine.world_id,
+            canonical_user_id=engine.store.resolve_user(
+                message.platform, message.platform_user_id
+            ),
+            frozen_cadence=turn_context.cadence.heat,
         ),
         budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=turn_context),
     )
     await turn.wait_for_delivery_continuations()
     if not transport.text:

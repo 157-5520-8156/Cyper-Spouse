@@ -2,7 +2,7 @@ import argparse
 import asyncio
 from hashlib import sha256
 
-from companion_daemon.companion_turn import CompanionTurn, ResponseBudget, TurnEnvelope
+from companion_daemon.companion_turn import CompanionTurn, ResponseBudget, TurnEnvelope, TurnOptions
 from companion_daemon.models import IncomingMessage
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.turn_transports import CaptureTurnTransport
@@ -19,14 +19,21 @@ async def run_simulation(text: str, fake: bool) -> None:
         )
         transport = CaptureTurnTransport(receipt_namespace="simulator")
         turn = CompanionTurn(engine, transport)
+        turn_context = engine.freeze_turn_context(message)
         outcome = await turn.respond(
             TurnEnvelope.from_message(
                 message,
                 idempotency_key=(
                     f"{message.platform}:{message.platform_user_id}:{message.message_id}"
                 ),
+                world_id=engine.world_id,
+                canonical_user_id=engine.store.resolve_user(
+                    message.platform, message.platform_user_id
+                ),
+                frozen_cadence=turn_context.cadence.heat,
             ),
             budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+            options=TurnOptions(turn_context=turn_context),
         )
         await turn.wait_for_delivery_continuations()
         if not transport.text:
