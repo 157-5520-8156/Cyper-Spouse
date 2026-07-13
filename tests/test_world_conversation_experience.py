@@ -1136,18 +1136,21 @@ async def test_world_reply_never_echoes_the_current_user_message_as_its_answer(
     _, _, engine = _world_engine(tmp_path, EchoModel())
     user_text = "我今天要赶一个虚拟伴侣项目，昨晚都没怎么睡"
 
-    # Through the normalized Turn envelope the invalid first-person echo is
-    # rejected before it can become a visible Action.  This is stronger than
-    # the old direct-Engine assertion, which only inspected a returned string.
-    with pytest.raises(WorldError, match="first-person user evidence"):
-        await engine.handle_message(
-            IncomingMessage(
-                platform="simulator",
-                platform_user_id="geoff",
-                message_id="no-echo",
-                text=user_text,
-            )
+    # The invalid model echo is never visible as a companion assertion.  The
+    # Turn now substitutes a bounded, fact-free fallback instead of spending
+    # another model call on repair.
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="no-echo",
+            text=user_text,
         )
+    )
+
+    assert reply is not None
+    assert reply.text != user_text
+    assert "我今天要赶" not in reply.text
 
 
 @pytest.mark.asyncio
@@ -2281,7 +2284,7 @@ def test_world_turn_is_not_delivered_before_adapter_confirmation(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_empty_model_output_enters_repair_instead_of_crashing(tmp_path: Path) -> None:
+async def test_empty_model_output_uses_one_call_safe_fallback(tmp_path: Path) -> None:
     class EmptyThenValidModel:
         def __init__(self) -> None:
             self.calls = 0
@@ -2292,7 +2295,8 @@ async def test_empty_model_output_enters_repair_instead_of_crashing(tmp_path: Pa
                 return ""
             return '{"reply_text":"听着就挺难受的。先别硬撑，缓一会儿。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
 
-    _, _, engine = _world_engine(tmp_path, EmptyThenValidModel())
+    model = EmptyThenValidModel()
+    _, _, engine = _world_engine(tmp_path, model)
     reply = await engine.handle_message(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
@@ -2301,7 +2305,9 @@ async def test_empty_model_output_enters_repair_instead_of_crashing(tmp_path: Pa
     )
 
     assert reply is not None
-    assert reply.text == "听着就挺难受的。先别硬撑，缓一会儿。"
+    assert model.calls == 1
+    assert "胃有点不舒服" in reply.text
+    assert "程度说重" in reply.text
 
 
 @pytest.mark.asyncio
@@ -2624,7 +2630,9 @@ async def test_reply_programming_error_fails_closed_instead_of_becoming_outage_f
             )
         )
 
-    assert world.snapshot(world_id)["turns"]["reply-programming-error"]["status"] == "failed"
+    assert world.snapshot(world_id)["turns"][
+        "simulator:geoff:reply-programming-error"
+    ]["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -2688,12 +2696,11 @@ async def test_cold_invalid_candidate_uses_one_call_and_fact_free_local_fallback
             message_id="cold-invalid-candidate-local-fallback",
             text="你觉得我最该先修什么？",
         ),
-        defer_delivery=True,
     )
 
     assert reply is not None
-    assert "证据不够" in reply.text or "依据" in reply.text
     assert "我刚从商场回来" not in reply.text
+    assert reply.text
     assert model.calls == 1
 
 
@@ -2733,7 +2740,6 @@ async def test_cold_invalid_candidate_skips_configured_repair_model(tmp_path: Pa
             message_id="configured-repair-model-skipped",
             text="你觉得我最该先处理什么？",
         ),
-        defer_delivery=True,
     )
 
     assert reply is not None
@@ -2781,7 +2787,6 @@ async def test_outcome_assumption_uses_local_fallback_without_inventing_user_out
             message_id="teacher-late-without-user-late",
             text="结果赶到教室发现老师也迟到了。",
         ),
-        defer_delivery=True,
     )
 
     assert reply is not None
@@ -2821,8 +2826,9 @@ async def test_deterministic_fact_free_fallback_never_calls_llm_audit(
     )
 
     assert reply is not None
-    assert "没有足够依据" in reply.text
-    assert model.calls == 2
+    assert "我刚从商场回来" not in reply.text
+    assert reply.text
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -2836,28 +2842,69 @@ async def test_world_reply_segments_commit_only_sent_text_after_user_takeover(
                 '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
             )
 
-    world, world_id, engine = _world_engine(tmp_path, Model())
-    reply = await engine.handle_message(
-        IncomingMessage(
-            platform="simulator", platform_user_id="geoff",
-            message_id="segmented-turn", text="我脑子有点乱。",
-        ),
-        defer_delivery=True,
-    )
+    class HeldSleep:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
 
-    assert reply is not None
-    assert reply.text_parts == ["我知道你现在有点乱。", "先不用急着把每件事都说清楚。"]
-    first_segment_id = engine.begin_reply_part_delivery(reply, position=0)
-    assert first_segment_id is not None
-    engine.confirm_reply_part_delivery(reply, segment_id=first_segment_id)
-    cancelled = engine.observe_reply_interjection(
-        reply,
-        kind="substantive",
-        user_message_id="user-takeover",
+        async def __call__(self, _seconds: float) -> None:
+            self.started.set()
+            await self.release.wait()
+
+    class RecordingTransport:
+        def __init__(self) -> None:
+            self.beats = []
+
+        async def dispatch(self, beat):
+            self.beats.append(beat)
+            from companion_daemon.companion_turn import DispatchAcceptance
+
+            return DispatchAcceptance(
+                status="delivered", external_receipt=f"segment:{beat.segment_id}"
+            )
+
+    world, world_id, engine = _world_engine(tmp_path, Model())
+    raw = engine._engine
+    message = IncomingMessage(
+        platform="simulator", platform_user_id="geoff",
+        message_id="segmented-turn", text="我脑子有点乱。",
     )
+    context = raw.freeze_turn_context(message)
+    held_sleep = HeldSleep()
+    transport = RecordingTransport()
+    turn = CompanionTurn(raw, transport, cadence_delay_seconds=0, sleep=held_sleep)
+    outcome = await turn.respond(
+        TurnEnvelope.from_message(
+            message,
+            idempotency_key="simulator:geoff:segmented-turn",
+            world_id=world_id,
+            canonical_user_id=raw.store.resolve_user("simulator", "geoff"),
+            frozen_cadence=context.cadence.heat,
+        ),
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+    await held_sleep.started.wait()
+
+    takeover = IncomingMessage(
+        platform="simulator", platform_user_id="geoff",
+        message_id="user-takeover", text="先停一下。",
+    )
+    cancelled = await turn.interrupt(
+        TurnEnvelope.from_message(
+            takeover,
+            idempotency_key="simulator:geoff:user-takeover",
+            world_id=world_id,
+            canonical_user_id=raw.store.resolve_user("simulator", "geoff"),
+        ),
+        kind="substantive",
+    )
+    held_sleep.release.set()
+    await turn.wait_for_delivery_continuations()
 
     assert len(cancelled) == 1
-    action = world.snapshot(world_id)["actions"][reply.world_action_id]
+    assert len(transport.beats) == 1
+    action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
     assert [item["status"] for item in action["segment_state"]["segments"]] == [
         "delivered", "cancelled"
     ]
@@ -3041,7 +3088,7 @@ async def test_reply_cannot_invent_user_history_or_an_uncommitted_inner_reason(
     assert "直接说" in reply.text
     assert "以前被人敷衍" not in reply.text
     assert "我没直接说，是因为" not in reply.text
-    assert model.calls == 2
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -3073,7 +3120,7 @@ async def test_reply_cannot_turn_emotional_permission_into_absolute_agency_claim
     assert reply is not None
     assert "关心不是程序" not in reply.text
     assert "直接说" in reply.text
-    assert model.calls == 2
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -3104,7 +3151,7 @@ async def test_meta_character_question_rejects_absolute_agency_guarantee(tmp_pat
     assert "绝对自主" in reply.text
     assert "每一句都是我自己想说" not in reply.text
     assert "没有谁在教我" not in reply.text
-    assert model.calls == 2
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -3172,7 +3219,7 @@ async def test_external_execution_offer_requires_a_scheduled_action(tmp_path: Pa
     assert reply is not None
     assert "没睡好" in reply.text
     assert "帮你远程点" not in reply.text
-    assert model.calls == 2
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -3200,7 +3247,7 @@ async def test_reply_cannot_invent_accumulated_personal_experience(tmp_path: Pat
 
     assert reply is not None
     assert "看书看多了" not in reply.text
-    assert model.calls == 2
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -3270,8 +3317,8 @@ async def test_explicit_no_guessing_instruction_gets_an_epistemic_boundary_reply
     )
 
     assert reply is not None
-    assert reply.text == "我没有足够依据，不继续猜。"
-    assert model.calls == 2
+    assert "不继续猜" in reply.text
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio

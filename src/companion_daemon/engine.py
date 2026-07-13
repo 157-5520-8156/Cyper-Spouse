@@ -2740,7 +2740,24 @@ class CompanionEngine:
             # from the user speech act and current modulation.  Both paths
             # still converge through the Guard below.
             if grounded_fallback is not None:
-                candidate = grounded_fallback
+                # ``grounded_reply_from_mentions`` deliberately returns the
+                # source text verbatim.  That is useful for provenance, but a
+                # first-person user memory cannot become visible as though it
+                # were the companion speaking.  Reframe it before the one
+                # hard guard, rather than reviving the second model repair.
+                candidate = (
+                    build_safe_failure_candidate(
+                        message.text,
+                        grounded_fallback,
+                        modulation,
+                        relationship=relationship,
+                        selected_stance=chosen_stance,
+                        speech_act=fallback_speech_act,
+                        variant_key=str(message.message_id or intent_id),
+                    )
+                    if bool(grounded_fallback.get("_user_sourced"))
+                    else grounded_fallback
+                )
             else:
                 candidate = build_safe_failure_candidate(
                     message.text,
