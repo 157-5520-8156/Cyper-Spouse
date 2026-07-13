@@ -206,6 +206,19 @@ def _is_plain_nonfactual_support(text: str) -> bool:
     )
 
 
+async def _complete_structured_model(
+    model: ChatModel,
+    messages: list[dict[str, str]],
+    *,
+    temperature: float,
+) -> str:
+    """Use provider JSON mode when available; adapters retain ChatModel parity."""
+    complete_json = getattr(model, "complete_json", None)
+    if callable(complete_json):
+        return await complete_json(messages, temperature=temperature)
+    return await model.complete(messages, temperature=temperature)
+
+
 def _recover_plain_chat_candidate(
     raw: str, *, user_text: str
 ) -> dict[str, object] | None:
@@ -418,7 +431,7 @@ class CompanionEngine:
         if not decision.allowed:
             raise ConnectionError(decision.reason)
         return await complete_with_timeout(
-            model.complete(messages, temperature=temperature),
+            _complete_structured_model(model, messages, temperature=temperature),
             timeout_seconds=decision.soft_timeout_seconds,
         )
 
@@ -2166,7 +2179,7 @@ class CompanionEngine:
                     else self.model
                 )
                 raw = await complete_with_timeout(
-                    reply_model.complete([
+                    _complete_structured_model(reply_model, [
                         {"role": "system", "content": self.companion_system_prompt},
                         {
                             "role": "user",
@@ -2524,6 +2537,22 @@ class CompanionEngine:
                 repaired_raw = None
             else:
                 repaired_raw = ""
+            if repaired_raw is not None and frozen_turn.cadence.heat == "hot":
+                # In an active back-and-forth, a rejected candidate must never
+                # buy a second full model wait.  Preserve the hard rejection,
+                # then land a locally grounded reply in the same visible turn.
+                candidate = build_safe_failure_candidate(
+                    message.text,
+                    grounded_fallback,
+                    modulation,
+                    relationship=relationship,
+                    selected_stance=chosen_stance,
+                    speech_act=fallback_speech_act,
+                    variant_key=str(message.message_id or intent_id),
+                )
+                fallback_needs_audit = True
+                quality_signals.append("hot_turn_repair_local_fallback")
+                repaired_raw = None
             # Other failures get one bounded chance to repair their wording.
             # Exact-source fallback is safe but conversationally destructive,
             # so it is reserved for a second validation failure.

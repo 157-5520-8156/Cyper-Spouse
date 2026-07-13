@@ -226,7 +226,13 @@ class DeepSeekChatModel:
             transport=transport,
         )
 
-    def request_payload(self, messages: list[dict[str, str]], *, temperature: float) -> dict[str, object]:
+    def request_payload(
+        self,
+        messages: list[dict[str, str]],
+        *,
+        temperature: float,
+        json_object: bool = False,
+    ) -> dict[str, object]:
         payload: dict[str, object] = {
             "model": self.model,
             "messages": messages,
@@ -239,9 +245,22 @@ class DeepSeekChatModel:
         else:
             payload["thinking"] = {"type": "disabled"}
             payload["temperature"] = temperature
+        if json_object:
+            payload["response_format"] = {"type": "json_object"}
         return payload
 
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
+        return await self._complete(messages, temperature=temperature, json_object=False)
+
+    async def complete_json(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> str:
+        """Request one JSON object without changing the generic ChatModel API."""
+        return await self._complete(messages, temperature=temperature, json_object=True)
+
+    async def _complete(
+        self, messages: list[dict[str, str]], *, temperature: float, json_object: bool
+    ) -> str:
         started = monotonic()
         purpose = _MODEL_CALL_PURPOSE.get()
         call_meta = _MODEL_CALL_META.get()
@@ -254,7 +273,9 @@ class DeepSeekChatModel:
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json",
                 },
-                json=self.request_payload(messages, temperature=temperature),
+                json=self.request_payload(
+                    messages, temperature=temperature, json_object=json_object
+                ),
             )
             response.raise_for_status()
             payload = response.json()

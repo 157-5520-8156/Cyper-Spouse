@@ -38,6 +38,23 @@ def test_deepseek_nonthinking_payload_keeps_temperature() -> None:
     assert payload["temperature"] == 0.55
 
 
+def test_deepseek_json_payload_requests_one_object() -> None:
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+    )
+
+    payload = model.request_payload(
+        [{"role": "user", "content": "hi"}],
+        temperature=0.55,
+        json_object=True,
+    )
+
+    assert payload["response_format"] == {"type": "json_object"}
+
+
 @pytest.mark.asyncio
 async def test_deepseek_completion_reports_real_usage_with_call_purpose() -> None:
     captured = []

@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from companion_daemon.db import CompanionStore
+from companion_daemon.conversation_cadence import ConversationCadence, FrozenTurnContext
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.models import IncomingMessage
 from companion_daemon.sanitize import sanitize_world_chat_text
@@ -272,6 +273,25 @@ def test_world_claim_can_separate_exact_evidence_from_natural_assertion(tmp_path
     )
 
     assert accepted["claims"][0]["assertion"] == "你之前说在赶一个虚拟伴侣项目，昨晚没怎么睡。"
+
+    aliased = world.validate_reply_candidate(
+        world_id,
+        {
+            "reply_text": "你提到在赶虚拟伴侣项目。",
+            "mentioned_event_ids": ["user-conversation:temporary-model-id"],
+            "proposed_action_ids": [],
+            "claims": [
+                {
+                    "source_id": "user-conversation:temporary-model-id",
+                    "text": "我今天要赶一个虚拟伴侣项目，昨晚都没怎么睡。",
+                    "assertion": "你提到在赶虚拟伴侣项目。",
+                }
+            ],
+        },
+    )
+
+    assert aliased["mentioned_event_ids"] == ["message:natural-user-memory"]
+    assert aliased["claims"][0]["source_id"] == "message:natural-user-memory"
 
     with pytest.raises(WorldError, match="first-person user evidence"):
         world.validate_reply_candidate(
@@ -1300,6 +1320,45 @@ async def test_non_json_reply_and_repair_end_in_a_safe_deliverable_reply(
     assert reply is not None
     assert "不舒服" in reply.text
     assert reply.world_action_id is not None
+
+
+@pytest.mark.asyncio
+async def test_hot_turn_hard_reject_uses_local_fallback_without_repair(
+    tmp_path: Path,
+) -> None:
+    class UnsupportedActionModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return '{"reply_text":"我已经替你点好了。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    model = UnsupportedActionModel()
+    world, world_id, engine = _world_engine(tmp_path, model)
+    observed_at = datetime.now().astimezone()
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="hot-hard-reject",
+            sent_at=observed_at,
+            text="我有点累。",
+        ),
+        turn_context=FrozenTurnContext(
+            turn_id="hot-hard-reject",
+            world_id=world_id,
+            user_id="user:geoff",
+            observed_at=observed_at,
+            cadence=ConversationCadence("hot", 1.0, 4, "test_hot_repair"),
+        ),
+    )
+
+    assert reply is not None
+    assert "已经替你点好了" not in reply.text
+    assert model.calls == 1
+    trace = world.snapshot(world_id)["actions"][reply.world_action_id]["trace"]
+    assert "hot_turn_repair_local_fallback" in trace["quality_signals"]
 
 
 @pytest.mark.asyncio

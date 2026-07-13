@@ -2775,11 +2775,33 @@ class WorldKernel:
             )
         _, current_scene_source = self._current_scene_source(state)
         known = set(experiences) | set(visible_facts) | set(conversation_sources) | {current_scene_source["source_id"]}
+        sources = {
+            **{record_id: str(_as_dict(item, "experience")["content"]) for record_id, item in experiences.items()},
+            **{record_id: str(_as_dict(item, "fact")["value"]) for record_id, item in visible_facts.items()},
+            **conversation_sources,
+            current_scene_source["source_id"]: current_scene_source["content"],
+        }
         mentioned = [
             str(item)
             for item in _as_list(candidate.get("mentioned_event_ids", []), "mentioned_event_ids")
         ]
-        claims = _as_list(candidate.get("claims", []), "claims")
+        raw_claims = _as_list(candidate.get("claims", []), "claims")
+        claims: list[dict[str, object]] = []
+        source_rewrites: dict[str, str] = {}
+        for raw_claim in raw_claims:
+            claim = dict(_as_dict(raw_claim, "reply claim"))
+            source_id = str(claim.get("source_id") or "")
+            text = str(claim.get("text") or "").strip()
+            if source_id and source_id not in known and text:
+                exact_sources = [
+                    known_id for known_id, source_text in sources.items()
+                    if text in source_text
+                ]
+                if len(exact_sources) == 1:
+                    source_rewrites[source_id] = exact_sources[0]
+                    claim["source_id"] = exact_sources[0]
+            claims.append(claim)
+        mentioned = [source_rewrites.get(source_id, source_id) for source_id in mentioned]
         mentioned = list(
             dict.fromkeys(
                 [
@@ -2796,12 +2818,6 @@ class WorldKernel:
         unknown = [source_id for source_id in mentioned if source_id not in known]
         if unknown:
             raise WorldError(f"reply cites uncommitted world records: {', '.join(unknown)}")
-        sources = {
-            **{record_id: str(_as_dict(item, "experience")["content"]) for record_id, item in experiences.items()},
-            **{record_id: str(_as_dict(item, "fact")["value"]) for record_id, item in visible_facts.items()},
-            **conversation_sources,
-            current_scene_source["source_id"]: current_scene_source["content"],
-        }
         normalized_claims: list[dict[str, str]] = []
         epistemic_reply = bool(
             re.search(r"(?:我猜|我觉得可能|可能|也许|或许|大概|说不准|未必)", reply_text)
