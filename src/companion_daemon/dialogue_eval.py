@@ -1286,6 +1286,7 @@ def main(argv: list[str] | None = None) -> int:
             )
         )
         if args.report:
+            args.report.parent.mkdir(parents=True, exist_ok=True)
             args.report.write_text(
                 json.dumps(report.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
             )

@@ -332,7 +332,7 @@ def test_scenario_summary_separates_hard_failures_from_style_diagnostics() -> No
 
 
 def test_dialogue_eval_cli_fake_model_smoke_does_not_touch_production_db(tmp_path) -> None:
-    report_path = tmp_path / "baseline.json"
+    report_path = tmp_path / "new-report-directory" / "baseline.json"
     completed = subprocess.run(
         [
             sys.executable,
