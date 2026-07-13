@@ -634,6 +634,20 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
 
 ## 16. 迁移计划：替换，不叠加
 
+### 当前实施证据（2026-07-13）
+
+这不是完成声明；以下状态只记录已由代码与回归覆盖的边界，未覆盖项继续作为验收缺口：
+
+| 阶段 | 已验证 | 仍需完成/证明 |
+| --- | --- | --- |
+| Phase 0 | 已有 bare/full 基线工具；一次真实模型样本的 hot full P50 约 2.5s、P95 约 3.6s | 真实模型每变体至少 20 个 hot 样本、QQ 合并等待计入的端到端基线、人工盲评 |
+| Phase 1 | QQ/NapCat 文本和 simulator 经过 `CompanionTurn.respond`；平台、tool、media 与 timeout 可经 `settle` 幂等结算 | HTTP 调试入口、后台媒体恢复与 afterthought 仍需完全收口到同一 seam |
+| Phase 2–5 | 有界 TurnFrame、Advisory、单一 hard guard、PrivateImpression/Commitment 与 Expression Beat 已在主路径使用 | 长对话校准与各字段的体验效度尚未由外部用户数据证明 |
+| Phase 6 | 多段文本 receipt、用户插话取消、QQ 图片/贴纸/反应的真实回执语义已覆盖；无 durable receipt 记为 `unknown` | 后台媒体、afterthought 的 receipt 与 sleep 旁路仍待迁移；需补 NapCat 适配器级回归矩阵 |
+| 模型与成本 | Flash 默认；强模型/thinking 路由会在能力缺失时显式降级；V4 Flash/Pro 都有版本化价格 | 记录每次调用的实际 thinking 路由并把它纳入生产基线；未知新模型价格需持续更新 |
+
+当前原则：不得为通过旧的“拒绝回复”测试而恢复软机制硬拦截；若旧测试要求低置信情绪、疲惫或普通边界压力直接静默，应改写为验证自然收住、边界表达或延后 Action，而非把它们重新变成表达审批器。
+
 ### Phase 0：建立体验基线
 
 - 固定普通聊天、关系修复、口是心非、多段 Action、NPC/世界事实五组回放；
