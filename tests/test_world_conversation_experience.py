@@ -186,6 +186,54 @@ async def test_hot_story_fallback_never_replaces_current_event_with_old_quote(
 
 
 @pytest.mark.asyncio
+async def test_hot_fallback_does_not_recall_an_unrelated_old_message(
+    tmp_path: Path,
+) -> None:
+    """A failed reply to a new disclosure must stay with that disclosure."""
+
+    class Model:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return (
+                    '{"reply_text":"明天考试，今晚确实会绷着。","mentioned_event_ids":[],'
+                    '"proposed_action_ids":[],"claims":[]}'
+                )
+            prompt = "\n".join(str(item.get("content") or "") for item in messages)
+            assert "不要把对当前输入的回应写成“我记得你之前提过”" in prompt
+            return (
+                '{"reply_text":"毛概确实难背。","mentioned_event_ids":[],'
+                '"proposed_action_ids":[],"claims":[]}'
+            )
+
+    _, _, engine = _world_engine(tmp_path, Model())
+    await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="unrelated-source-first",
+            text="我明天考试。",
+        )
+    )
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="unrelated-source-current",
+            text="毛概，好难背。",
+        )
+    )
+
+    assert reply is not None
+    assert "毛概确实难背" in reply.text
+    assert "我记得你之前" not in reply.text
+    assert "明天考试" not in reply.text
+
+
+@pytest.mark.asyncio
 async def test_world_reply_uses_model_selected_expression_beats_as_one_action(
     tmp_path: Path,
 ) -> None:
