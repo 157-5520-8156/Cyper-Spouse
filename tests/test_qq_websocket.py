@@ -1509,6 +1509,59 @@ async def test_turn_presenter_requires_a_durable_receipt_for_expression_delivery
 
 
 @pytest.mark.asyncio
+async def test_turn_presenter_settles_onebot_image_rejection_as_failed() -> None:
+    class Engine:
+        world_id = "world-1"
+
+        @staticmethod
+        def begin_reaction_delivery(
+            _incoming: IncomingMessage, _reply: CompanionReply
+        ) -> str:
+            return "reaction-action"
+
+    observations: list[ExternalObservation] = []
+
+    async def settle(observation: ExternalObservation) -> None:
+        observations.append(observation)
+
+    async def reject_image(
+        _incoming: IncomingMessage, _reply: CompanionReply
+    ) -> DispatchAcceptance:
+        return DispatchAcceptance(status="failed", reason="permission denied")
+
+    presenter = QQTurnPresenter(
+        Engine(),  # type: ignore[arg-type]
+        on_reply=None,
+        on_sticker=None,
+        on_image=reject_image,
+        on_reaction=None,
+        after_delivered=None,
+        after_terminal=lambda: None,
+        settle_external=settle,
+    )
+    incoming = IncomingMessage(
+        platform="qq", platform_user_id="user", message_id="message-1", text="看看"
+    )
+    presentation = TurnPresentation(
+        action_id="text-action",
+        incoming=incoming,
+        canonical_user_id="user",
+        suggested_reaction=None,
+        sticker_path=None,
+        image_path="image.png",
+        media_action_id="media-action",
+        sticker_action_id=None,
+    )
+
+    await presenter.after_text(presentation, "delivered")
+
+    assert [(item.action_id, item.kind, item.status) for item in observations] == [
+        ("media-action", "media_result", "failed"),
+    ]
+    assert observations[0].payload["reason"] == "permission denied"
+
+
+@pytest.mark.asyncio
 async def test_new_hot_message_cancels_and_settles_claimed_turn_before_merge_recovery(
     tmp_path: Path,
 ) -> None:

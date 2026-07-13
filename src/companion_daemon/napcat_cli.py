@@ -6,6 +6,7 @@ CompanionEngine and QQ message coalescer as the official QQ bot adapter.
 from __future__ import annotations
 
 import argparse
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 import logging
 from pathlib import Path
@@ -26,6 +27,7 @@ from companion_daemon.onebot_adapter import (
 )
 from companion_daemon.companion_turn import DispatchAcceptance
 from companion_daemon.qq_websocket import QQMessageCoalescer
+from companion_daemon.qq_delivery import QQDelivery
 from companion_daemon.process_lock import AlreadyRunningError
 from companion_daemon.qq_outbound_owner import (
     QQOutboundOwnerLease,
@@ -36,6 +38,51 @@ from companion_daemon.runtime import build_companion_engine
 from companion_daemon.turn_taking import TurnTakingPolicy
 
 logger = logging.getLogger(__name__)
+
+
+def onebot_image_dispatch_acceptance(result: object | None) -> DispatchAcceptance:
+    """Classify a OneBot image-send response without inventing delivery evidence.
+
+    OneBot/NapCat's synchronous response is usable as a delivery receipt only
+    when it contains the created message's identifier.  A successful-looking
+    envelope without one remains uncertain: it might represent a partial
+    adapter failure or an API variant we do not yet understand.
+    """
+    if isinstance(result, Mapping):
+        status = str(result.get("status") or "").strip().lower()
+        retcode = result.get("retcode")
+        try:
+            rejected = retcode is not None and int(str(retcode)) != 0
+        except (TypeError, ValueError):
+            rejected = False
+        if status == "failed" or rejected:
+            reason = str(
+                result.get("message")
+                or result.get("wording")
+                or "onebot_image_rejected"
+            )[:300]
+            return DispatchAcceptance(status="failed", reason=reason)
+
+    receipt = QQDelivery.receipt_candidate(result)
+    if receipt:
+        return DispatchAcceptance(status="delivered", external_receipt=receipt)
+    return DispatchAcceptance(
+        status="unknown",
+        reason="onebot_image_returned_without_durable_receipt",
+    )
+
+
+async def send_onebot_image_with_acceptance(
+    target: OneBotReplyTarget, image_path: Path
+) -> DispatchAcceptance:
+    """Send one image and preserve the adapter's real receipt semantics."""
+    try:
+        return onebot_image_dispatch_acceptance(await target.send_image(image_path))
+    except Exception as exc:
+        return DispatchAcceptance(
+            status="unknown",
+            reason=f"onebot_image_exception:{type(exc).__name__}",
+        )
 
 
 def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> FastAPI:
@@ -58,12 +105,12 @@ def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> Fast
 
     async def send_reply_image(
         incoming: IncomingMessage, reply: CompanionReply
-    ) -> object | None:
+    ) -> DispatchAcceptance:
         image_path = reply.sticker_path or reply.image_path
         if not image_path:
-            return None
+            return DispatchAcceptance(status="failed", reason="onebot_image_path_missing")
         target = _target_for(incoming, api_url, access_token)
-        return await target.send_image(Path(image_path))
+        return await send_onebot_image_with_acceptance(target, Path(image_path))
 
     async def send_reaction(
         incoming: IncomingMessage, reply: CompanionReply

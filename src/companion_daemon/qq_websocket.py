@@ -224,6 +224,10 @@ class QQTurnPresenter(TurnPresenter):
     async def _settle_expression_response(
         self, action_id: str | None, response: object | None, *, effect: str
     ) -> None:
+        if isinstance(response, DispatchAcceptance):
+            if action_id:
+                await self._settle_dispatch_acceptance(action_id, response, effect=effect)
+            return
         receipt = QQDelivery.receipt_candidate(response)
         if receipt:
             await self._settle_expression(
@@ -457,6 +461,16 @@ class QQMessageCoalescer:
             image_path=str(image_path),
         )
         response = await self.on_image(incoming, reply)
+        if isinstance(response, DispatchAcceptance):
+            if response.status == "accepted":
+                return DispatchAcceptance(
+                    status="unknown",
+                    reason=(
+                        response.reason
+                        or "qq_image_returned_without_durable_receipt"
+                    ),
+                )
+            return response
         receipt = QQDelivery.receipt_candidate(response)
         if receipt:
             return DispatchAcceptance(status="delivered", external_receipt=receipt)

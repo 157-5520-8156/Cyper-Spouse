@@ -10,7 +10,13 @@ from companion_daemon.config import Settings
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
-from companion_daemon.napcat_cli import _parse_id_list, _private_sender_is_allowed
+from companion_daemon.companion_turn import DispatchAcceptance
+from companion_daemon.napcat_cli import (
+    _parse_id_list,
+    _private_sender_is_allowed,
+    onebot_image_dispatch_acceptance,
+    send_onebot_image_with_acceptance,
+)
 from companion_daemon.qq_outbound_owner import QQOutboundConfigurationError
 from companion_daemon.world import WorldKernel
 
@@ -55,6 +61,63 @@ def test_napcat_private_message_allowlist() -> None:
     assert _private_sender_is_allowed("456", allowed_ids)
     assert not _private_sender_is_allowed("789", allowed_ids)
     assert _private_sender_is_allowed("789", set())
+
+
+@pytest.mark.parametrize(
+    "result, expected_receipt",
+    [
+        ({"status": "ok", "retcode": 0, "data": {"message_id": "image-42"}}, "platform:message_id:image-42"),
+        ({"status": "ok", "retcode": 0, "data": {"id": "image-43"}}, "platform:id:image-43"),
+        ({"status": "ok", "retcode": 0, "data": {"msg_id": "image-44"}}, "platform:msg_id:image-44"),
+    ],
+)
+def test_napcat_image_result_is_delivered_only_with_a_message_receipt(
+    result: dict[str, object], expected_receipt: str
+) -> None:
+    assert onebot_image_dispatch_acceptance(result) == DispatchAcceptance(
+        status="delivered", external_receipt=expected_receipt
+    )
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"status": "failed", "retcode": 0, "message": "permission denied"},
+        {"status": "ok", "retcode": 100, "message": "send rejected"},
+    ],
+)
+def test_napcat_image_result_marks_explicit_onebot_rejection_failed(
+    result: dict[str, object],
+) -> None:
+    outcome = onebot_image_dispatch_acceptance(result)
+
+    assert outcome.status == "failed"
+    assert outcome.reason
+
+
+def test_napcat_image_result_without_a_message_receipt_stays_unknown() -> None:
+    assert onebot_image_dispatch_acceptance({"status": "ok", "retcode": 0, "data": {}}) == (
+        DispatchAcceptance(
+            status="unknown",
+            reason="onebot_image_returned_without_durable_receipt",
+        )
+    )
+
+
+@pytest.mark.asyncio
+async def test_napcat_image_send_exception_stays_unknown() -> None:
+    class FailingTarget:
+        async def send_image(self, _image_path: Path) -> dict[str, object]:
+            raise httpx.ConnectError("NapCat unavailable")
+
+    outcome = await send_onebot_image_with_acceptance(
+        FailingTarget(),  # type: ignore[arg-type]
+        Path("unused.png"),
+    )
+
+    assert outcome == DispatchAcceptance(
+        status="unknown", reason="onebot_image_exception:ConnectError"
+    )
 
 
 def test_napcat_process_refuses_to_start_when_another_qq_adapter_is_configured(
