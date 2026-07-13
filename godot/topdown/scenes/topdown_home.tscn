@@ -1,0 +1,20 @@
+[gd_scene load_steps=2 format=3]
+
+[ext_resource type="Script" path="res://topdown/scripts/topdown_home.gd" id="1_home"]
+
+[node name="TopdownZhizhiHome" type="Node2D"]
+script = ExtResource("1_home")
+
+[node name="DaemonPoll" type="HTTPRequest" parent="."]
+
+[node name="Hud" type="CanvasLayer" parent="."]
+
+[node name="Status" type="Label" parent="Hud"]
+offset_left = 20.0
+offset_top = 16.0
+theme_override_colors/font_color = Color(0.98, 0.94, 0.78, 1)
+theme_override_colors/font_shadow_color = Color(0.12, 0.08, 0.1, 1)
+theme_override_constants/shadow_offset_x = 2
+theme_override_constants/shadow_offset_y = 2
+theme_override_font_sizes/font_size = 12
+text = "Zhizhi Home · loading"

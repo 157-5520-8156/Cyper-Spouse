@@ -3,7 +3,7 @@ config_version=5
 
 [application]
 config/name="Zhizhi Home"
-run/main_scene="res://scenes/main.tscn"
+run/main_scene="res://topdown/scenes/topdown_home.tscn"
 config/features=PackedStringArray("4.7", "GL Compatibility")
 
 [display]
@@ -24,6 +24,7 @@ anti_aliasing/quality/screen_space_aa=0
 [zhizhi]
 daemon_context_url="http://127.0.0.1:8767/debug/geoff/context"
 manifest_path="res://scenes/zhizhi-home.json"
+topdown_manifest_path="res://topdown/scenes/zhizhi-home-topdown.json"
 capture_mode=false
 
 [input]

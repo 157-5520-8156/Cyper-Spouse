@@ -1,0 +1,49 @@
+{
+  "schema": "topdown-room-v1",
+  "id": "zhizhi-home-topdown",
+  "grid": {"width": 18, "height": 13, "tile_size": 32, "origin": [60, 86]},
+  "palette": {
+    "grass": "#85b86c", "grass_dark": "#6da15c", "wall": "#f0d4a6", "wall_shadow": "#b77a5d",
+    "floor": "#c98c5c", "floor_dark": "#a86646", "rug_blue": "#385866", "rug_sage": "#718678",
+    "oak": "#704633", "cream": "#e8d6b0", "teal": "#4f7771", "pink": "#c88785",
+    "navy": "#25444d", "sage": "#71866c", "brass": "#d0a15f", "linen": "#d5c9ae", "paper": "#f2e7cc"
+  },
+  "rooms": [
+    {"id": "work", "rect": [1, 1, 6, 5], "floor": "#c98c5c"},
+    {"id": "kitchen", "rect": [7, 1, 7, 5], "floor": "#d8bb90"},
+    {"id": "bedroom", "rect": [14, 1, 3, 7], "floor": "#c98c5c"},
+    {"id": "living", "rect": [1, 6, 13, 6], "floor": "#bd7d54"}
+  ],
+  "objects": [
+    {"id": "work-rug", "kind": "rug", "x": 1, "y": 3, "width": 5, "height": 2, "color": "rug_blue", "solid": false},
+    {"id": "desk", "kind": "desk", "x": 2, "y": 2, "width": 4, "height": 1, "color": "oak"},
+    {"id": "chair", "kind": "chair", "x": 3, "y": 3, "width": 1, "height": 1, "color": "sage"},
+    {"id": "bookcase", "kind": "bookcase", "x": 1, "y": 1, "width": 1, "height": 2, "color": "oak"},
+    {"id": "kitchen-tile", "kind": "rug", "x": 7, "y": 1, "width": 7, "height": 4, "color": "cream", "solid": false},
+    {"id": "counter", "kind": "counter", "x": 8, "y": 1, "width": 4, "height": 1, "color": "teal"},
+    {"id": "fridge", "kind": "fridge", "x": 12, "y": 1, "width": 1, "height": 2, "color": "teal"},
+    {"id": "sink", "kind": "sink", "x": 13, "y": 2, "width": 1, "height": 1, "color": "cream"},
+    {"id": "dining-rug", "kind": "rug", "x": 8, "y": 3, "width": 4, "height": 2, "color": "rug_sage", "solid": false},
+    {"id": "dining", "kind": "table", "x": 9, "y": 3, "width": 2, "height": 2, "color": "oak"},
+    {"id": "dining-chair-a", "kind": "chair", "x": 8, "y": 4, "width": 1, "height": 1, "color": "oak"},
+    {"id": "dining-chair-b", "kind": "chair", "x": 11, "y": 4, "width": 1, "height": 1, "color": "oak"},
+    {"id": "bed-rug", "kind": "rug", "x": 14, "y": 4, "width": 3, "height": 3, "color": "pink", "solid": false},
+    {"id": "bed", "kind": "bed", "x": 14, "y": 2, "width": 3, "height": 2, "color": "pink"},
+    {"id": "bedside", "kind": "table", "x": 16, "y": 4, "width": 1, "height": 1, "color": "oak"},
+    {"id": "living-rug", "kind": "rug", "x": 3, "y": 8, "width": 8, "height": 3, "color": "rug_sage", "solid": false},
+    {"id": "sofa", "kind": "sofa", "x": 3, "y": 8, "width": 4, "height": 1, "color": "linen"},
+    {"id": "coffee", "kind": "table", "x": 7, "y": 9, "width": 2, "height": 1, "color": "oak"},
+    {"id": "plant", "kind": "plant", "x": 11, "y": 8, "width": 1, "height": 1, "color": "sage"},
+    {"id": "console", "kind": "counter", "x": 1, "y": 11, "width": 3, "height": 1, "color": "oak"}
+  ],
+  "interactions": {
+    "study": {"object": "desk", "locations": ["desk"], "actions": ["study"], "approach": [4, 3], "facing": "up"},
+    "eat": {"object": "dining", "locations": ["kitchen", "dining"], "actions": ["eat"], "approach": [9, 5], "facing": "up"},
+    "relax": {"object": "sofa", "locations": ["sofa", "living"], "actions": ["relax", "social"], "approach": [5, 9], "facing": "up"},
+    "phone": {"object": "sofa", "locations": ["sofa", "living"], "actions": ["read_phone", "type_phone", "notice_phone", "glance_phone"], "approach": [5, 9], "facing": "up"},
+    "sleep": {"object": "bed", "locations": ["bed", "bedroom"], "actions": ["sleep"], "approach": [15, 4], "facing": "up"},
+    "wash": {"object": "sink", "locations": ["vanity", "bathroom"], "actions": ["wash"], "approach": [13, 3], "facing": "up"},
+    "tidy": {"object": "desk", "locations": ["desk"], "actions": ["tidy"], "approach": [4, 3], "facing": "up"}
+  },
+  "anchors": {"entry": [10, 11], "rug": [10, 10], "window": [13, 4], "desk": [4, 3], "kitchen": [9, 5], "sofa": [5, 9], "bed": [15, 4], "vanity": [13, 3]}
+}
