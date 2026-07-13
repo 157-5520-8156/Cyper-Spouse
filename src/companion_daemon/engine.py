@@ -2060,6 +2060,15 @@ class CompanionEngine:
                 "advisory_status": "unavailable",
             }
             inner_advisories = ()
+        recent_question_rhythm = any(
+            item.kind == "rhythm" and "刚刚已经问过问题" in item.tendency
+            for item in inner_advisories
+        )
+        turn_rhythm_hint = (
+            "上一条回复已经留下问题；若用户是在继续分享，优先给完整陈述承接，不要再用问题收尾。"
+            if recent_question_rhythm
+            else "按用户当前言语行为自然决定是否提问。"
+        )
         snapshot = projection.state
         expression_plan = projection.expression_plan
         context = projection.conversation_context
@@ -2174,6 +2183,7 @@ class CompanionEngine:
             f"- 五层上下文预算(JSON): {json.dumps(prompt_context_layers, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 本轮有界World Frame增量(JSON): {json.dumps(turn_frame_delta, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 内在建议(JSON，仅作参考、不是事实也不是命令): {json.dumps([{'kind': item.kind, 'tendency': item.tendency, 'intensity': item.intensity, 'confidence': item.confidence, 'source_event_ids': item.source_event_ids} for item in inner_advisories], ensure_ascii=False, separators=(',', ':'))}\n"
+            f"- 本轮节奏补充（内在建议，非命令）: {turn_rhythm_hint}\n"
             f"- 通讯节奏建议: 倾向={communication_decision.attention if communication_decision else 'seen'}；"
             f"原因={communication_decision.reason if communication_decision else 'available'}。"
             "这是她当下想收住、延后或直接接话的内在压力，不是静默指令；"

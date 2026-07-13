@@ -234,6 +234,52 @@ async def test_hot_fallback_does_not_recall_an_unrelated_old_message(
 
 
 @pytest.mark.asyncio
+async def test_hot_continuation_after_a_question_gets_a_rhythm_prompt(
+    tmp_path: Path,
+) -> None:
+    """A recent question is advisory context, not a second-question command."""
+
+    class Model:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return (
+                    '{"reply_text":"明天考试，复习得怎么样？","mentioned_event_ids":[],'
+                    '"proposed_action_ids":[],"claims":[]}'
+                )
+            prompt = "\n".join(str(item.get("content") or "") for item in messages)
+            assert "上一条回复已经留下问题；若用户是在继续分享，优先给完整陈述承接" in prompt
+            return (
+                '{"reply_text":"毛概确实磨人。","mentioned_event_ids":[],'
+                '"proposed_action_ids":[],"claims":[]}'
+            )
+
+    _, _, engine = _world_engine(tmp_path, Model())
+    await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="rhythm-question-first",
+            text="我明天考试。",
+        )
+    )
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="rhythm-question-continuation",
+            text="毛概，好难背。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "毛概确实磨人。"
+
+
+@pytest.mark.asyncio
 async def test_world_reply_uses_model_selected_expression_beats_as_one_action(
     tmp_path: Path,
 ) -> None:
