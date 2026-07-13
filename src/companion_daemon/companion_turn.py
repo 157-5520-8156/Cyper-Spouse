@@ -97,6 +97,13 @@ class TurnTransport(Protocol):
     async def dispatch(self, beat: TurnBeat) -> DispatchAcceptance: ...
 
 
+class _SettlementOnlyTransport:
+    """Construction aid for background results that cannot dispatch text."""
+
+    async def dispatch(self, _beat: TurnBeat) -> DispatchAcceptance:
+        raise RuntimeError("settlement-only turn cannot dispatch an outgoing segment")
+
+
 @runtime_checkable
 class ReceiptLookupTransport(Protocol):
     """Optional durable-receipt recovery capability of a Turn transport.
@@ -484,7 +491,6 @@ class CompanionTurn:
                 idempotency_prefix=idempotency_key,
             )
         return settled
-
     def _settle_external_observation(
         self, observation: ExternalObservation
     ) -> SettlementOutcome:
@@ -1281,3 +1287,15 @@ class CompanionTurn:
             degraded=degraded,
             degradation_reason=reason,
         )
+
+
+async def settle_external_result(
+    engine: CompanionEngine, observation: ExternalObservation
+) -> SettlementOutcome:
+    """Settle a background external result without creating an adapter bypass.
+
+    Engine-owned workers use this narrow helper only when no live inbound turn
+    owns the result (for example image render completion after a restart).
+    The authoritative write remains ``CompanionTurn.settle``.
+    """
+    return await CompanionTurn(engine, _SettlementOnlyTransport()).settle(observation)

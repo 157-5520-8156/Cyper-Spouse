@@ -371,7 +371,10 @@ class CompanionEngine:
         self.attachment_cache = attachment_cache
         self.attachment_fetcher = attachment_fetcher or self._fetch_attachment
         self.managed_async_resources = managed_async_resources
-        self.media_delivery_handler: Callable[[IncomingMessage, Path], Awaitable[bool]] | None = None
+        # The adapter returns a receipt-bearing delivery outcome.  A legacy
+        # boolean is intentionally still accepted at this boundary, but it is
+        # treated as delivery *uncertain* rather than as proof of delivery.
+        self.media_delivery_handler: Callable[[IncomingMessage, Path], Awaitable[object]] | None = None
         self._media_tasks: set[asyncio.Task[None]] = set()
         # Semantic appraisals are advisory side work.  Retaining their tasks
         # makes shutdown deterministic and avoids orphaning a provider call.
@@ -458,10 +461,63 @@ class CompanionEngine:
 
     def set_media_delivery_handler(
         self,
-        handler: Callable[[IncomingMessage, Path], Awaitable[bool]] | None,
+        handler: Callable[[IncomingMessage, Path], Awaitable[object]] | None,
     ) -> None:
         """Enable text-first image delivery for an adapter owning the outbound send."""
         self.media_delivery_handler = handler
+
+    async def _settle_background_media_result(
+        self,
+        *,
+        action_id: str,
+        result_kind: str,
+        status: str,
+        idempotency_key: str,
+        payload: dict[str, object] | None = None,
+        reason: str | None = None,
+    ) -> None:
+        """Converge a background media result through CompanionTurn.
+
+        Background rendering and adapter delivery have no inbound turn to own
+        them, but they are still external observations.  This preserves the
+        same authoritative World settlement seam used by text, stickers, and
+        reactions.  In particular, a transport result without a durable
+        receipt is an uncertainty, never a successful delivery.
+        """
+        if not self.world_kernel or not self.world_id:
+            return
+        from companion_daemon.companion_turn import ExternalObservation, settle_external_result
+
+        if status == "unknown":
+            observation = ExternalObservation(
+                action_id=action_id,
+                observed_at=utc_now(),
+                idempotency_key=idempotency_key,
+                kind="timeout",
+                reason=reason or "background_media_delivery_without_durable_receipt",
+                world_id=self.world_id,
+            )
+        else:
+            result = {"kind": result_kind, "status": status, **(payload or {})}
+            if reason:
+                result.setdefault("reason", reason)
+            observation = ExternalObservation(
+                action_id=action_id,
+                observed_at=utc_now(),
+                idempotency_key=idempotency_key,
+                kind="media_result",
+                status=status,  # type: ignore[arg-type]
+                payload=result,
+                reason=reason,
+                world_id=self.world_id,
+            )
+        for _ in range(3):
+            try:
+                await settle_external_result(self, observation)
+                return
+            except ConcurrencyConflict:
+                await asyncio.sleep(0)
+        raise ConcurrencyConflict(f"background media settlement conflicted repeatedly: {action_id}")
 
     @staticmethod
     async def _fetch_attachment(url: str) -> bytes:
@@ -1081,22 +1137,22 @@ class CompanionEngine:
                 return None, None, "media_generation_pending"
         action_id = f"media-generation:{request_id}"
         if not self.image_generator:
-            self._submit_world_with_retry(
-                {
-                    "type": "record_external_result", "world_id": self.world_id, "action_id": action_id,
-                    "result": {"kind": "media_generation", "status": "failed", "reason": "image_generator_unavailable"},
-                    "idempotency_key": f"media-generation-failed:{request_id}",
-                }
+            await self._settle_background_media_result(
+                action_id=action_id,
+                result_kind="media_generation",
+                status="failed",
+                reason="image_generator_unavailable",
+                idempotency_key=f"media-generation-failed:{request_id}",
             )
             return None, None, "image_generator_unavailable"
         estimate = ESTIMATES["image_generation"]
         if self.budget_gate and not self.budget_gate.check(estimate, automatic=True).allowed:
-            self._submit_world_with_retry(
-                {
-                    "type": "record_external_result", "world_id": self.world_id, "action_id": action_id,
-                    "result": {"kind": "media_generation", "status": "failed", "reason": "budget_gate_blocked"},
-                    "idempotency_key": f"media-generation-budget:{request_id}",
-                }
+            await self._settle_background_media_result(
+                action_id=action_id,
+                result_kind="media_generation",
+                status="failed",
+                reason="budget_gate_blocked",
+                idempotency_key=f"media-generation-budget:{request_id}",
             )
             return None, None, "budget_gate_blocked"
         profile = "relationship_private" if decision.kind == "relationship_private" else "everyday_selfie"
@@ -1121,26 +1177,26 @@ class CompanionEngine:
                 quality_gate=self.image_quality_gate,
             )
         except Exception as exc:
-            self._submit_world_with_retry(
-                {
-                    "type": "record_external_result", "world_id": self.world_id, "action_id": action_id,
-                    "result": {"kind": "media_generation", "status": "failed", "reason": str(exc)[:300]},
-                    "idempotency_key": f"media-generation-failed:{request_id}",
-                }
+            await self._settle_background_media_result(
+                action_id=action_id,
+                result_kind="media_generation",
+                status="failed",
+                reason=str(exc)[:300],
+                idempotency_key=f"media-generation-failed:{request_id}",
             )
             return None, None, "media_generation_failed"
         if self.budget_gate:
             self.budget_gate.record(estimate, note=f"world_media:{decision.kind}")
         artifact_path = str(generated.path)
-        self._submit_world_with_retry(
-            {
-                "type": "record_external_result", "world_id": self.world_id, "action_id": action_id,
-                "result": {
-                    "kind": "media_generation", "status": "delivered", "artifact_path": artifact_path,
-                    "artifact_hash": sha256(generated.path.read_bytes()).hexdigest(),
-                },
-                "idempotency_key": f"media-generated:{request_id}",
-            }
+        await self._settle_background_media_result(
+            action_id=action_id,
+            result_kind="media_generation",
+            status="delivered",
+            payload={
+                "artifact_path": artifact_path,
+                "artifact_hash": sha256(generated.path.read_bytes()).hexdigest(),
+            },
+            idempotency_key=f"media-generated:{request_id}",
         )
         self._submit_world_with_retry(
             {
@@ -1171,31 +1227,46 @@ class CompanionEngine:
         if not image_path or not action_id or not self.media_delivery_handler:
             return
         try:
-            delivered = await self.media_delivery_handler(message, Path(image_path))
+            delivery = await self.media_delivery_handler(message, Path(image_path))
         except Exception as exc:
             logger.exception("background world media delivery failed")
-            delivered = False
-            failure = str(exc)[:300]
-        else:
-            failure = "adapter reported image delivery failure"
-        if delivered:
-            self._submit_world_with_retry(
-                {
-                    "type": "record_external_result", "world_id": self.world_id,
-                    "action_id": action_id,
-                    "result": {"kind": "media_delivery", "status": "delivered"},
-                    "idempotency_key": f"media-delivered:{action_id}",
-                }
+            await self._settle_background_media_result(
+                action_id=action_id,
+                result_kind="media_delivery",
+                status="unknown",
+                reason=f"media_delivery_exception:{str(exc)[:250]}",
+                idempotency_key=f"media-unknown:{action_id}",
             )
-        else:
-            self._submit_world_with_retry(
-                {
-                    "type": "record_external_result", "world_id": self.world_id,
-                    "action_id": action_id,
-                    "result": {"kind": "media_delivery", "status": "failed", "reason": failure},
-                    "idempotency_key": f"media-failed:{action_id}",
-                }
+            return
+
+        status = str(getattr(delivery, "status", "unknown"))
+        receipt = str(getattr(delivery, "external_receipt", "") or "").strip()
+        reason = str(getattr(delivery, "reason", "") or "").strip()
+        if status == "delivered" and receipt:
+            await self._settle_background_media_result(
+                action_id=action_id,
+                result_kind="media_delivery",
+                status="delivered",
+                payload={"external_receipt": receipt},
+                idempotency_key=f"media-delivered:{action_id}",
             )
+            return
+        if status == "failed":
+            await self._settle_background_media_result(
+                action_id=action_id,
+                result_kind="media_delivery",
+                status="failed",
+                reason=reason or "adapter_reported_image_delivery_failure",
+                idempotency_key=f"media-failed:{action_id}",
+            )
+            return
+        await self._settle_background_media_result(
+            action_id=action_id,
+            result_kind="media_delivery",
+            status="unknown",
+            reason=reason or "media_delivery_without_durable_receipt",
+            idempotency_key=f"media-unknown:{action_id}",
+        )
 
     def _maybe_schedule_world_sticker(
         self, *, message: IncomingMessage, appraisal: str

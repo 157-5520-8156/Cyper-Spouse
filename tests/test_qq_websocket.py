@@ -39,6 +39,45 @@ def test_reply_msg_seq_is_positive() -> None:
 
 
 @pytest.mark.asyncio
+async def test_background_media_requires_a_durable_qq_receipt() -> None:
+    class Store:
+        def resolve_user(self, _platform: str, _platform_user_id: str) -> str:
+            return "geoff"
+
+    class Engine:
+        store = Store()
+
+    async def no_receipt(_incoming: IncomingMessage, _reply: CompanionReply) -> None:
+        return None
+
+    coalescer = QQMessageCoalescer(  # type: ignore[arg-type]
+        Engine(), delay_seconds=0.0, on_image=no_receipt
+    )
+    outcome = await coalescer._deliver_background_media(
+        IncomingMessage(platform="qq", platform_user_id="user", text="发一张看看"),
+        Path("assets/life/example.png"),
+    )
+
+    assert outcome.status == "unknown"
+    assert outcome.reason == "qq_image_returned_without_durable_receipt"
+
+    async def with_receipt(_incoming: IncomingMessage, _reply: CompanionReply) -> dict[str, str]:
+        return {"id": "qq-image-42"}
+
+    coalescer = QQMessageCoalescer(  # type: ignore[arg-type]
+        Engine(), delay_seconds=0.0, on_image=with_receipt
+    )
+    outcome = await coalescer._deliver_background_media(
+        IncomingMessage(platform="qq", platform_user_id="user", text="发一张看看"),
+        Path("assets/life/example.png"),
+    )
+
+    assert outcome == DispatchAcceptance(
+        status="delivered", external_receipt="platform:id:qq-image-42"
+    )
+
+
+@pytest.mark.asyncio
 async def test_world_failure_is_visible_to_user_and_observable_instead_of_becoming_task_noise() -> (
     None
 ):

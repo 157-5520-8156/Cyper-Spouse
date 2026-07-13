@@ -421,10 +421,12 @@ class QQMessageCoalescer:
         if callable(set_media_delivery_handler):
             set_media_delivery_handler(self._deliver_background_media)
 
-    async def _deliver_background_media(self, incoming: IncomingMessage, image_path: Path) -> bool:
+    async def _deliver_background_media(
+        self, incoming: IncomingMessage, image_path: Path
+    ) -> DispatchAcceptance:
         """Send an image after its text reply, outside the reply-generation latency path."""
         if self.on_image is None:
-            return False
+            return DispatchAcceptance(status="failed", reason="qq_image_adapter_unavailable")
         canonical_user_id = self.engine.store.resolve_user(
             incoming.platform, incoming.platform_user_id
         )
@@ -434,8 +436,13 @@ class QQMessageCoalescer:
             text="",
             image_path=str(image_path),
         )
-        await self.on_image(incoming, reply)
-        return True
+        response = await self.on_image(incoming, reply)
+        receipt = QQDelivery.receipt_candidate(response)
+        if receipt:
+            return DispatchAcceptance(status="delivered", external_receipt=receipt)
+        return DispatchAcceptance(
+            status="unknown", reason="qq_image_returned_without_durable_receipt"
+        )
 
     async def add(self, key: str, incoming: IncomingMessage, reply_target: ReplyTarget) -> None:
         self._cancel_afterthought(key)
