@@ -107,19 +107,13 @@ uv run companion-proactive --user geoff --sandbox --send
 
 Use `--send` sparingly. QQ official single-chat proactive messages have strict limits.
 
-Send one local original sticker/image to the mapped QQ private chat:
+`companion-send-sticker` has been retired. A manually chosen local image has
+no World-authorized expression Action or conversational causation, so sending
+it directly would bypass durable receipt settlement. Stickers are now sent
+only when a World-backed companion turn schedules them.
 
 ```bash
 uv run companion-send-sticker --user geoff --category happy --sandbox
-```
-
-This has been verified in sandbox using the generated sticker assets.
-
-Verified examples:
-
-```text
-sent sticker: happy -> assets/stickers/rin-happy.png
-sent sticker: teasing -> assets/stickers/rin-teasing.png
 ```
 
 ## SillyTavern

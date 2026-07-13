@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-from pathlib import Path
 
 from companion_daemon.companion_turn import CompanionTurn, DispatchAcceptance, TurnBeat
 from companion_daemon.config import get_settings
@@ -81,44 +80,35 @@ async def _run_with_engine(engine, *, user_id: str, send: bool, sandbox: bool) -
         print("not sent: decision did not produce a QQ message")
         return
 
+    if not (getattr(engine, "world_kernel", None) is not None and decision.world_action_id):
+        # The legacy store has no unknown receipt state nor an immutable
+        # Action to receive an ExternalObservation.  Its old CLI path treated
+        # a successful send coroutine as user-visible delivery and immediately
+        # mutated relationship/life state.  Retire that unsafe sender instead
+        # of preserving an incompatible second confirmation protocol.
+        print("not sent: legacy proactive delivery is retired; migrate to a World-backed engine")
+        return
+
     settings = get_settings()
     delivery = QQDelivery(settings, sandbox=sandbox)
     recipient_id = delivery.proactive_recipient_id() or engine.store.platform_user_id(user_id, "qq")
     if not recipient_id:
         print("not sent: no outbound QQ recipient configured for this user")
         return
-    if getattr(engine, "world_kernel", None) is not None and decision.world_action_id:
-        # World media is an independent Action scheduled by the media worker.
-        # Sending a decision.image_path here would create an untracked second
-        # side effect, so this CLI is intentionally responsible only for the
-        # authoritative text Action.
-        outcome = await _dispatch_world_proactive(
-            engine,
-            delivery=delivery,
-            recipient_id=recipient_id,
-            decision=decision,
-        )
-        if outcome.terminal_state == "delivered":
-            print("sent: QQ proactive wakeup message")
-        else:
-            print(f"proactive message not confirmed: {outcome.terminal_state or 'accepted'}")
-        return
-    try:
-        if decision.image_path:
-            await delivery.send_image(recipient_id, Path(decision.image_path), content=decision.message)
-        elif decision.sticker_path:
-            await delivery.send_image(recipient_id, Path(decision.sticker_path), content=decision.message)
-        elif decision.message:
-            await delivery.send_text(recipient_id, decision.message)
-        else:
-            print("not sent: no text or sticker payload")
-            engine.fail_proactive_delivery(decision, "empty proactive payload")
-            return
-    except Exception as exc:
-        engine.fail_proactive_delivery(decision, str(exc))
-        raise
-    engine.confirm_proactive_delivery(decision)
-    print("sent: QQ proactive wakeup message")
+    # World media is an independent Action scheduled by the media worker.
+    # Sending a decision.image_path here would create an untracked second side
+    # effect, so this CLI is intentionally responsible only for the
+    # authoritative text Action.
+    outcome = await _dispatch_world_proactive(
+        engine,
+        delivery=delivery,
+        recipient_id=recipient_id,
+        decision=decision,
+    )
+    if outcome.terminal_state == "delivered":
+        print("sent: QQ proactive wakeup message")
+    else:
+        print(f"proactive message not confirmed: {outcome.terminal_state or 'accepted'}")
 
 
 def main() -> None:

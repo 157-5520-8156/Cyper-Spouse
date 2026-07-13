@@ -62,6 +62,43 @@ async def test_proactive_run_closes_engine_when_generation_raises(
 
 
 @pytest.mark.asyncio
+async def test_legacy_proactive_send_is_retired_without_delivery_or_confirmation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    decision = SimpleNamespace(
+        private_thought="想说一句。",
+        should_send=True,
+        platform="qq",
+        message_type="text",
+        message="刚刚想起一件小事。",
+        sticker_path=None,
+        image_path=None,
+        world_action_id=None,
+        delivery_id=42,
+    )
+
+    class FakeEngine:
+        world_kernel = None
+
+        async def proactive_tick(self, _user_id: str) -> SimpleNamespace:
+            return decision
+
+        def confirm_proactive_delivery(self, _decision: object) -> None:
+            raise AssertionError("retired legacy path must not confirm delivery")
+
+        def fail_proactive_delivery(self, _decision: object, _reason: str) -> None:
+            raise AssertionError("retired legacy path must not mutate delivery state")
+
+    class FakeDelivery:
+        def __init__(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("retired legacy path must not construct a delivery adapter")
+
+    monkeypatch.setattr(proactive_cli, "QQDelivery", FakeDelivery)
+
+    await proactive_cli._run_with_engine(FakeEngine(), user_id="geoff", send=True, sandbox=True)
+
+
+@pytest.mark.asyncio
 async def test_world_proactive_cli_settles_through_turn_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

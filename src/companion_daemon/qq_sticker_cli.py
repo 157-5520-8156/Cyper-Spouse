@@ -1,40 +1,37 @@
 import argparse
 import asyncio
-from pathlib import Path
 
-from companion_daemon.config import get_settings
-from companion_daemon.qq_client import QQOfficialClient
-from companion_daemon.runtime import build_companion_engine
-from companion_daemon.stickers import load_stickers
+async def run(user_id: str, category: str, *, sandbox: bool) -> bool:
+    """Retire the untracked manual sticker sender.
 
+    A local image upload is an externally visible expression.  It cannot be
+    honestly represented as a World delivery when this command has neither a
+    World-authorized sticker Action nor a stable conversational causation
+    record.  In particular, treating an HTTP coroutine return as proof of a
+    share would recreate the old direct-send/implicit-confirm bypass.
 
-async def run(user_id: str, category: str, *, sandbox: bool) -> None:
-    settings = get_settings()
-    if not settings.qq_bot_app_id or not settings.qq_bot_secret:
-        raise SystemExit("QQ_BOT_APP_ID and QQ_BOT_SECRET are required")
-
-    engine = build_companion_engine()
-    openid = engine.store.platform_user_id(user_id, "qq")
-    if not openid:
-        raise SystemExit(f"No QQ account mapping for canonical user {user_id!r}")
-
-    catalog = load_stickers(str(settings.stickers_path))
-    sticker = next((item for item in catalog.stickers if item.category == category), None)
-    if not sticker:
-        raise SystemExit(f"Unknown sticker category: {category}")
-
-    api_base_url = "https://sandbox.api.sgroup.qq.com" if sandbox else "https://api.sgroup.qq.com"
-    client = QQOfficialClient(
-        settings.qq_bot_app_id,
-        settings.qq_bot_secret,
-        api_base_url=api_base_url,
+    Keep the console entry point as a clear migration notice instead of
+    silently deleting an operator command.  Stickers selected during a normal
+    turn are scheduled by the World and settled by ``CompanionTurn`` through
+    the platform receipt seam.
+    """
+    # Do not even construct the runtime: that avoids opening a model client or
+    # loading mutable state for a command that is forbidden to produce a side
+    # effect.  The legacy runtime is equally unsupported because it cannot
+    # settle an unknown image receipt either.
+    del user_id, category, sandbox
+    print(
+        "not sent: companion-send-sticker is retired; manual sticker uploads "
+        "bypass World authorization and receipt settlement. Send through a "
+        "World-backed companion turn instead."
     )
-    await client.send_c2c_local_image(openid, Path(sticker.path))
-    print(f"sent sticker: {sticker.category} -> {sticker.path}")
+    return False
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Send one local sticker image to a QQ C2C user.")
+    parser = argparse.ArgumentParser(
+        description="Retired: manual sticker uploads bypass World delivery settlement."
+    )
     parser.add_argument("--user", default="geoff", help="Canonical user id.")
     parser.add_argument("--category", default="happy", help="Sticker category.")
     parser.add_argument("--sandbox", action="store_true", help="Use QQ sandbox API.")
