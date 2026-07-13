@@ -96,6 +96,11 @@ class ModelCallUsage:
     cadence: str = ""
     attempt: int = 1
     budget_reservation_id: str = ""
+    # The effective provider request mode, not an inferred token heuristic.
+    # Flash can legitimately run with or without thinking, so model name alone
+    # cannot support a truthful latency/cost baseline.
+    thinking_enabled: bool = False
+    reasoning_effort: str = ""
     # ``unknown`` means the provider may have accepted or charged the call.
     # Only a concrete local/provider rejection may use ``not_billed``.
     billing_state: str = "unknown"
@@ -345,6 +350,8 @@ class DeepSeekChatModel:
                     budget_reservation_id=str(
                         call_meta.get("budget_reservation_id") or ""
                     ),
+                    thinking_enabled=self.thinking_enabled,
+                    reasoning_effort=self.reasoning_effort,
                     billing_state="unknown",
                 )
             )
@@ -386,6 +393,8 @@ class DeepSeekChatModel:
                     budget_reservation_id=str(
                         call_meta.get("budget_reservation_id") or ""
                     ),
+                    thinking_enabled=self.thinking_enabled,
+                    reasoning_effort=self.reasoning_effort,
                     billing_state=billing_state,
                 )
             )
@@ -414,6 +423,8 @@ class DeepSeekChatModel:
                 cadence=str(call_meta.get("cadence") or ""),
                 attempt=max(1, int(call_meta.get("attempt") or 1)),
                 budget_reservation_id=str(call_meta.get("budget_reservation_id") or ""),
+                thinking_enabled=self.thinking_enabled,
+                reasoning_effort=self.reasoning_effort,
                 billing_state="known",
             )
         )

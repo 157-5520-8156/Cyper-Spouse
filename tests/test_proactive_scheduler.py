@@ -240,6 +240,26 @@ async def test_world_due_reply_recovery_enters_companion_turn_before_engine_gene
 
 
 @pytest.mark.asyncio
+async def test_legacy_deferred_recovery_redirects_world_backed_engine_to_turn_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = SimpleNamespace(world_kernel=object(), world_id="world-1")
+    calls: list[tuple[object, bool, bool, datetime | None]] = []
+    observed_at = datetime(2026, 7, 14, 9, 0)
+
+    async def routed(engine_arg, *, send: bool, sandbox: bool, now: datetime | None) -> int:
+        calls.append((engine_arg, send, sandbox, now))
+        return 3
+
+    monkeypatch.setattr(proactive_scheduler, "recover_world_due_replies", routed)
+
+    assert await proactive_scheduler.recover_overdue_deferred_replies(
+        engine, send=True, sandbox=True, now=observed_at
+    ) == 3
+    assert calls == [(engine, True, True, observed_at)]
+
+
+@pytest.mark.asyncio
 async def test_world_conversation_pulse_recovery_uses_world_action(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     from datetime import timedelta
 
@@ -377,6 +397,26 @@ async def test_world_conversation_pulse_recovery_enters_companion_turn_before_af
     assert frame.mode == "quick_continue"
     assert frame.frozen_cadence == "cold"
     assert budget == proactive_scheduler.SCHEDULED_CONTINUATION_BUDGET
+
+
+@pytest.mark.asyncio
+async def test_legacy_pulse_recovery_redirects_world_backed_engine_to_turn_seam(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = SimpleNamespace(world_kernel=object(), world_id="world-1")
+    calls: list[tuple[object, bool, bool, datetime | None]] = []
+    observed_at = datetime(2026, 7, 14, 9, 0)
+
+    async def routed(engine_arg, *, send: bool, sandbox: bool, now: datetime | None) -> int:
+        calls.append((engine_arg, send, sandbox, now))
+        return 2
+
+    monkeypatch.setattr(proactive_scheduler, "recover_world_due_conversation_pulses", routed)
+
+    assert await proactive_scheduler.recover_overdue_conversation_pulses(
+        engine, send=True, sandbox=True, now=observed_at
+    ) == 2
+    assert calls == [(engine, True, True, observed_at)]
 
 
 @pytest.mark.asyncio

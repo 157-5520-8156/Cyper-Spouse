@@ -226,6 +226,8 @@ class CompanionStore:
                   pricing_version text not null default '',
                   estimated_cost_usd real not null default 0,
                   budget_reservation_id text not null default '',
+                  thinking_enabled integer not null default 0,
+                  reasoning_effort text not null default '',
                   created_at text not null
                 );
                 create index if not exists idx_model_usage_created
@@ -464,6 +466,12 @@ class CompanionStore:
                 "model_usage_events",
                 "budget_reservation_id",
                 "text not null default ''",
+            )
+            self._ensure_column(
+                conn, "model_usage_events", "thinking_enabled", "integer not null default 0"
+            )
+            self._ensure_column(
+                conn, "model_usage_events", "reasoning_effort", "text not null default ''"
             )
             self._ensure_column(conn, "model_budget_reservations", "started_at", "text")
             self._ensure_column(
@@ -2579,6 +2587,8 @@ class CompanionStore:
         cadence: str = "",
         attempt: int = 1,
         budget_reservation_id: str = "",
+        thinking_enabled: bool = False,
+        reasoning_effort: str = "",
         billing_state: str = "",
     ) -> None:
         from companion_daemon.usage_metrics import estimate_model_cost_usd
@@ -2602,8 +2612,9 @@ class CompanionStore:
                   completion_tokens, reasoning_tokens, cache_hit_tokens,
                   cache_miss_tokens, total_tokens, error, world_id, turn_id,
                   action_id, cadence, attempt, pricing_version,
-                  estimated_cost_usd, budget_reservation_id, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  estimated_cost_usd, budget_reservation_id, thinking_enabled,
+                  reasoning_effort, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     purpose[:80],
@@ -2625,6 +2636,8 @@ class CompanionStore:
                     pricing_version[:80],
                     max(0.0, float(estimated_cost_usd)),
                     budget_reservation_id[:160],
+                    int(bool(thinking_enabled)),
+                    reasoning_effort[:40],
                     utc_now().isoformat(),
                 ),
             )
@@ -3003,13 +3016,24 @@ class CompanionStore:
                 (len(prefix), prefix),
             ).fetchall()
         groups: dict[str, list[sqlite3.Row]] = {}
+        routes: dict[str, list[sqlite3.Row]] = {}
         turns: dict[str, list[sqlite3.Row]] = {}
+        turn_routes: dict[str, dict[str, list[sqlite3.Row]]] = {}
         for row in rows:
             group_key = "|".join((str(row["purpose"]), str(row["cadence"]), str(row["model"])))
             groups.setdefault(group_key, []).append(row)
+            route_key = "|".join(
+                (
+                    str(row["model"]),
+                    f"thinking={int(bool(row['thinking_enabled']))}",
+                    str(row["reasoning_effort"] or "default"),
+                )
+            )
+            routes.setdefault(route_key, []).append(row)
             turn_id = str(row["turn_id"] or "")
             if turn_id:
                 turns.setdefault(turn_id, []).append(row)
+                turn_routes.setdefault(turn_id, {}).setdefault(route_key, []).append(row)
         return {
             "window": window,
             "currency_rate": {"cny_per_usd": max(0.0, float(cny_per_usd))},
@@ -3018,9 +3042,20 @@ class CompanionStore:
                 key: aggregate_usage_rows(items, cny_per_usd=cny_per_usd)
                 for key, items in groups.items()
             },
+            "routes": {
+                key: aggregate_usage_rows(items, cny_per_usd=cny_per_usd)
+                for key, items in routes.items()
+            },
             "turns": {
                 key: aggregate_usage_rows(items, cny_per_usd=cny_per_usd)
                 for key, items in turns.items()
+            },
+            "turn_routes": {
+                turn_id: {
+                    route_key: aggregate_usage_rows(items, cny_per_usd=cny_per_usd)
+                    for route_key, items in routes.items()
+                }
+                for turn_id, routes in turn_routes.items()
             },
         }
 

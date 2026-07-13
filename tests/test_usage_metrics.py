@@ -110,6 +110,8 @@ def test_usage_report_links_calls_to_turn_and_reports_percentiles_and_cost(tmp_p
             action_id=f"action-{attempt}",
             cadence="hot",
             attempt=attempt,
+            thinking_enabled=attempt != 2,
+            reasoning_effort="high" if attempt != 2 else "",
         )
 
     report = store.model_usage_report("day", datetime.now(UTC), cny_per_usd=7.2)
@@ -125,6 +127,11 @@ def test_usage_report_links_calls_to_turn_and_reports_percentiles_and_cost(tmp_p
     group = report["groups"]["reply|hot|deepseek-v4-flash"]
     assert group["failed_calls"] == 1
     assert group["attempts"] == 3
+    assert report["routes"]["deepseek-v4-flash|thinking=1|high"]["calls"] == 2
+    assert report["routes"]["deepseek-v4-flash|thinking=0|default"]["calls"] == 1
+    assert report["turn_routes"]["turn-9"]["deepseek-v4-flash|thinking=1|high"][
+        "calls"
+    ] == 2
 
 
 def test_model_usage_schema_adds_linkage_columns_to_an_existing_database(tmp_path: Path) -> None:
@@ -155,3 +162,9 @@ def test_model_usage_schema_adds_linkage_columns_to_an_existing_database(tmp_pat
 
     report = store.model_usage_report("day", datetime.now(UTC))
     assert report["turns"]["migrated-turn"]["calls"] == 1
+    with store.connect() as conn:
+        row = conn.execute(
+            "select thinking_enabled, reasoning_effort from model_usage_events"
+        ).fetchone()
+    assert row["thinking_enabled"] == 0
+    assert row["reasoning_effort"] == ""

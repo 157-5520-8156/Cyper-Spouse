@@ -1134,7 +1134,13 @@ async def _run_full_baseline_turn(
 def _usage_for_turn(engine, turn_id: str) -> dict[str, object]:
     report = engine.store.model_usage_report("day", utc_now())
     turns = report.get("turns", {})
-    return dict(turns.get(turn_id, {})) if isinstance(turns, dict) else {}
+    if not isinstance(turns, dict):
+        return {}
+    usage = dict(turns.get(turn_id, {}))
+    turn_routes = report.get("turn_routes", {})
+    if isinstance(turn_routes, dict) and isinstance(turn_routes.get(turn_id), dict):
+        usage["routes"] = dict(turn_routes[turn_id])
+    return usage
 
 
 async def run_scenario_suite(

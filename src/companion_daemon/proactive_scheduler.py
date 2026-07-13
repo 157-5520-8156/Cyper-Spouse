@@ -215,6 +215,13 @@ async def recover_overdue_deferred_replies(
     retained: replaying the same incoming turn would otherwise create duplicate
     conversation history.
     """
+    # These compatibility helpers are imported by operational scripts as well
+    # as by ``scheduler_loop``.  Redirect a World-backed engine before it can
+    # make an untracked QQ call and then reach the legacy confirmation guard.
+    if getattr(engine, "world_kernel", None) is not None:
+        return await recover_world_due_replies(
+            engine, send=send, sandbox=sandbox, now=now
+        )
     if not send or not hasattr(engine.store, "claim_due_social_tasks"):
         return 0
     now = now or datetime.now().astimezone()
@@ -356,6 +363,12 @@ async def recover_overdue_conversation_pulses(
     stage after a grace period, and every incoming turn cancels its task through
     ``CompanionEngine.handle_message`` before it can be claimed.
     """
+    # See ``recover_overdue_deferred_replies``: a direct caller must receive
+    # the same World receipt seam as the scheduler loop.
+    if getattr(engine, "world_kernel", None) is not None:
+        return await recover_world_due_conversation_pulses(
+            engine, send=send, sandbox=sandbox, now=now
+        )
     if not send or not hasattr(engine.store, "claim_due_social_tasks"):
         return 0
     now = now or datetime.now().astimezone()

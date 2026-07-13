@@ -99,6 +99,8 @@ async def test_deepseek_completion_reports_real_usage_with_call_purpose() -> Non
     assert usage.cache_hit_tokens == 80
     assert usage.cache_miss_tokens == 40
     assert usage.total_tokens == 138
+    assert usage.thinking_enabled is False
+    assert usage.reasoning_effort == "high"
     assert usage.latency_ms >= 0
 
 
