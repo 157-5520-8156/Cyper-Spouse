@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timedelta
 from pathlib import Path
+import ssl
 
 import pytest
 
@@ -2310,6 +2311,28 @@ async def test_provider_outage_returns_a_local_fact_safe_reply(tmp_path: Path) -
         )
         for event in world.events(world_id)
     )
+
+
+@pytest.mark.asyncio
+async def test_provider_tls_error_returns_a_local_fact_safe_reply(tmp_path: Path) -> None:
+    class TlsFailingModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            raise ssl.SSLError(1, "TLS provider alert")
+
+    _world, _world_id, engine = _world_engine(tmp_path, TlsFailingModel())
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="provider-tls-outage",
+            text="我今天有点累。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text
+    assert reply.delivery_id is not None
 
 
 @pytest.mark.asyncio

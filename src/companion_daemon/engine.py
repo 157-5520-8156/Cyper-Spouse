@@ -3,6 +3,7 @@ from hashlib import sha256
 import json
 import logging
 import re
+import ssl
 from dataclasses import asdict
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -2278,7 +2279,7 @@ class CompanionEngine:
         except asyncio.CancelledError:
             self._fail_world_model_call(model_action_id, "caller_cancelled")
             raise
-        except (TimeoutError, ConnectionError, httpx.HTTPError) as exc:
+        except (TimeoutError, ConnectionError, httpx.HTTPError, ssl.SSLError) as exc:
             self._fail_world_model_call(model_action_id, str(exc))
             provider_fallback = True
             raw = json.dumps(
