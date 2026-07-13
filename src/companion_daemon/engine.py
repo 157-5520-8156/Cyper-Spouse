@@ -1810,6 +1810,7 @@ class CompanionEngine:
     ) -> CompanionReply | None:
         """World-mode turn path; legacy state tables are not behavioural inputs here."""
         assert self.world_kernel and self.world_id
+        effective_cadence = cadence or self.conversation_cadence(message)
         await self._analyze_world_attachments(canonical_user_id, message)
         for action_id, action in self.world_kernel.snapshot(self.world_id)["actions"].items():
             is_life_share = bool(action.get("trace", {}).get("life_share"))
@@ -1858,7 +1859,7 @@ class CompanionEngine:
                 text=message.text,
                 resumed_action=bool(resume_action_id),
                 user_id=self._world_user_id(canonical_user_id),
-                cadence=cadence,
+                cadence=effective_cadence,
             )
             attention_candidates = [
                 {
@@ -1918,6 +1919,7 @@ class CompanionEngine:
             message.text,
             history,
             active_affect=active_user_affect,
+            cadence=effective_cadence.heat,
         )
         if user_affect is not None:
             event = user_affect_interaction_event(user_affect)
@@ -1933,7 +1935,7 @@ class CompanionEngine:
             world_id=self.world_id,
             user_id=user_id,
             observed_at=message.sent_at,
-            cadence=cadence or self.conversation_cadence(message),
+            cadence=effective_cadence,
         )
         call_budget = TurnModelCallBudget()
         remaining_model_budget_cny = (

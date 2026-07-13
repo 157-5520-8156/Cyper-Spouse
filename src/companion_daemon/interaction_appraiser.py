@@ -172,6 +172,7 @@ def appraise_user_affect(
     recent_messages: Sequence[Mapping[str, object]],
     *,
     active_affect: Mapping[str, object] | None = None,
+    cadence: str | None = None,
 ) -> UserAffectAppraisal | None:
     """Recognise contextual disappointment without treating every terse turn as harm."""
     compact = re.sub(r"\s+", "", text.strip())
@@ -253,7 +254,97 @@ def appraise_user_affect(
         return UserAffectAppraisal(
             "confusion", 2, True, 0.9, (confused.group(0),)
         )
+    implicit = _hot_implicit_disappointment(
+        text,
+        compact,
+        prior,
+        cadence=cadence,
+    )
+    if implicit is not None:
+        return implicit
     return None
+
+
+_IMPLICIT_DISAPPOINTMENT_CUES = re.compile(
+    r"(?:行吧|好吧|呵呵|你(?:好像|挺|是不是)?忙(?:啊|呢|的)?)[。！!？?，,]*$"
+)
+_LOW_ATTUNEMENT_REPLY = re.compile(
+    r"(?:"
+    r"(?:嗯+|哦+|好吧?)[。！!？?，,]*"
+    r"|刚看到[，,]?(?:我在|在呢)[。！!？?，,]*"
+    r"|(?:嗯|哦)[，,]?(?:那|挺)?(?:挺好|好的|不错)[。！!？?，,]*"
+    r"|(?:然后呢|怎么了)[？?]*"
+    r")$"
+)
+
+
+def _hot_implicit_disappointment(
+    original_text: str,
+    compact: str,
+    prior: Sequence[Mapping[str, object]],
+    *,
+    cadence: str | None,
+) -> UserAffectAppraisal | None:
+    """Recognise only a tight, observable failure-to-attune sequence.
+
+    ``行吧`` and ``呵呵`` have many benign uses.  They become a persistable
+    user-affect observation only when they immediately follow a substantive
+    user share and a recognisably generic companion response in an observed
+    hot exchange.  This deliberately does not claim to read sarcasm in
+    isolation, and does not invoke a second model.
+    """
+    if cadence != "hot" or not _IMPLICIT_DISAPPOINTMENT_CUES.fullmatch(compact):
+        return None
+    history = list(prior)
+    # At the Engine seam the just-observed user input is already in World
+    # history.  Unit callers may instead supply history that ends at the
+    # companion reply; support both without treating an older exchange as
+    # immediate context.
+    if (
+        history
+        and str(history[-1].get("direction") or "") == "in"
+        and re.sub(r"\s+", "", str(history[-1].get("text") or "")) == compact
+    ):
+        history.pop()
+    if len(history) < 2:
+        return None
+    share = history[-2]
+    reply = history[-1]
+    if (
+        str(share.get("direction") or "") != "in"
+        or str(reply.get("direction") or "") != "out"
+    ):
+        return None
+    share_text = str(share.get("text") or "").strip()
+    reply_text = str(reply.get("text") or "").strip()
+    if not _is_substantive_share(share_text) or not _looks_low_attunement(reply_text):
+        return None
+    return UserAffectAppraisal(
+        "disappointment",
+        2,
+        True,
+        0.72,
+        (original_text.strip()[:80], reply_text[:80]),
+    )
+
+
+def _is_substantive_share(text: str) -> bool:
+    compact = re.sub(r"\s+", "", text)
+    # A short factual question or acknowledgement does not establish that the
+    # companion has failed to receive a meaningful personal share.
+    if len(compact) < 16:
+        return False
+    return bool(
+        re.search(
+            r"(?:我|今天|刚刚|终于|一直|心里|感觉|朋友|工作|offer|面试|家里|生病|难过|开心|复杂)",
+            compact,
+            re.IGNORECASE,
+        )
+    )
+
+
+def _looks_low_attunement(text: str) -> bool:
+    return bool(_LOW_ATTUNEMENT_REPLY.fullmatch(re.sub(r"\s+", "", text)))
 
 
 def user_affect_interaction_event(

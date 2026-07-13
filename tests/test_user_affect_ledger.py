@@ -224,6 +224,62 @@ async def test_ambiguous_low_energy_reply_keeps_committed_disappointment_active(
 
 
 @pytest.mark.asyncio
+async def test_hot_implicit_disappointment_is_ledgered_before_the_same_reply(
+    tmp_path: Path,
+) -> None:
+    engine, store = _engine(tmp_path)
+
+    class AppraisalProbe:
+        calls = 0
+
+        async def complete(self, messages, *, temperature):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            raise AssertionError("hot local affect should not request an appraisal model")
+
+    appraisal_probe = AppraisalProbe()
+    engine.interaction_appraisal_model = appraisal_probe
+    engine.interaction_deep_appraisal_model = appraisal_probe
+    first = await engine.handle_message(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            text="今天终于把那个等了很久的 offer 拿到了，心里特别复杂。",
+            message_id="hot-share",
+        )
+    )
+    assert first is not None
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="行吧", message_id="hot-implicit"
+        ),
+        turn_context=FrozenTurnContext(
+            turn_id="hot-implicit",
+            world_id=engine.world_id,
+            user_id="user:geoff",
+            observed_at=datetime.fromisoformat(
+                engine.world_kernel.snapshot(engine.world_id)["clock"]["logical_at"]
+            ),
+            cadence=ConversationCadence("hot", 2.0, 2, "active_back_and_forth"),
+        ),
+    )
+
+    assert reply is not None
+    trace = store.recent_turn_traces("geoff")[-1]
+    assert trace["appraisal"] == "user_withdrawing"
+    affect = engine.world_kernel.snapshot(engine.world_id)["user_affect"]["user:geoff"]
+    assert affect["kind"] == "disappointment"
+    assert affect["intensity"] == 2
+    assert affect["source_message_id"] == "hot-implicit"
+    await asyncio.gather(*tuple(engine._appraisal_tasks))
+    assert appraisal_probe.calls == 0
+    # The primary reply, not a trailing appraiser task, receives the repair
+    # direction in the same hot turn.
+    prompt = engine.model.calls[-1][1]["content"]
+    assert '"kind":"repair"' in prompt
+
+
+@pytest.mark.asyncio
 async def test_repeated_mild_disappointment_crosses_ledger_threshold_only_on_repeat(
     tmp_path: Path,
 ) -> None:

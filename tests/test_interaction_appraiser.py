@@ -9,6 +9,7 @@ from companion_daemon.interaction_appraiser import (
     InteractionAppraiser,
     InteractionEvidence,
     TurnAppraisalInput,
+    appraise_user_affect,
 )
 from companion_daemon.models import IncomingMessage
 
@@ -228,6 +229,54 @@ def test_interaction_evidence_is_built_from_platform_observations() -> None:
     assert evidence.reply_target == "boundary:9"
     assert evidence.source_event_ids == ("qq:30", "qq:31")
     assert evidence.reply_delay_seconds == 4.5
+
+
+@pytest.mark.parametrize("cue", ["你挺忙的", "行吧", "呵呵"])
+def test_hot_implicit_disappointment_requires_an_immediately_unattuned_share_reply(
+    cue: str,
+) -> None:
+    appraisal = appraise_user_affect(
+        cue,
+        (
+            {"direction": "in", "text": "今天我终于拿到那个一直在等的 offer 了，心里很复杂。"},
+            {"direction": "out", "text": "刚看到，我在。"},
+        ),
+        cadence="hot",
+    )
+
+    assert appraisal is not None
+    assert appraisal.kind == "disappointment"
+    assert appraisal.intensity == 2
+    assert appraisal.should_persist is True
+    assert appraisal.evidence_spans == (cue, "刚看到，我在。")
+
+
+@pytest.mark.parametrize(
+    ("cue", "history", "cadence"),
+    [
+        (
+            "行吧",
+            (
+                {"direction": "in", "text": "午饭吃了什么？"},
+                {"direction": "out", "text": "我吃了面，你呢？"},
+            ),
+            "hot",
+        ),
+        (
+            "呵呵",
+            (
+                {"direction": "in", "text": "今天我终于拿到那个一直在等的 offer 了，心里很复杂。"},
+                {"direction": "out", "text": "刚看到，我在。"},
+            ),
+            "warm",
+        ),
+        ("你挺忙的", (), "hot"),
+    ],
+)
+def test_implicit_disappointment_does_not_treat_terse_language_as_a_standalone_harm(
+    cue: str, history: tuple[dict[str, str], ...], cadence: str,
+) -> None:
+    assert appraise_user_affect(cue, history, cadence=cadence) is None
 
 
 @pytest.mark.asyncio
