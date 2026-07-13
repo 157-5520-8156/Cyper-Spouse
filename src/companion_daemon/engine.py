@@ -169,7 +169,6 @@ from companion_daemon.world_conversation import (
     only_recites_irrelevant_sources,
     only_repeats_claimed_sources,
     repeats_recent_companion_reply,
-    recover_structured_reply,
 )
 from companion_daemon.world_media import WorldMediaPolicy
 
@@ -1826,6 +1825,11 @@ class CompanionEngine:
     ) -> CompanionReply | None:
         """World-mode turn path; legacy state tables are not behavioural inputs here."""
         assert self.world_kernel and self.world_id
+        if not defer_delivery and not skip_reply:
+            raise WorldError(
+                "World reply generation requires CompanionTurn-owned delivery; "
+                "defer_delivery must remain true"
+            )
         effective_cadence = cadence or self.conversation_cadence(message)
         await self._analyze_world_attachments(canonical_user_id, message)
         for action_id, action in self.world_kernel.snapshot(self.world_id)["actions"].items():
@@ -2627,7 +2631,7 @@ class CompanionEngine:
                     grounding_diagnostic_recommended
                     or grounding.requires_independent_audit
                 )
-        except WorldError as validation_error:
+        except WorldError:
             grounded_fallback = occurrence_candidate
             # A minimal acknowledgement is a discourse signal, not a request
             # to recall prior sources.  In particular, an invalid candidate
@@ -2728,220 +2732,27 @@ class CompanionEngine:
                     grounded_fallback = self.world_kernel.grounded_reply_from_mentions(
                         self.world_id, parsed_candidate, user_id=user_id
                     )
-            # Current-scene questions have one complete authoritative answer;
-            # do not spend another external call after a hallucinated scene.
-            if (
-                (query_scope.asks_current_scene or occurrence_candidate)
-                and grounded_fallback is not None
-            ):
+            # Candidate/guard failure is terminal for model generation in this
+            # turn.  A repair call used to make warm and cold turns pay a
+            # second provider wait, while adding another untrusted proposal to
+            # the same factual boundary.  Prefer the authoritative grounded
+            # answer where one exists; otherwise produce a fact-free response
+            # from the user speech act and current modulation.  Both paths
+            # still converge through the Guard below.
+            if grounded_fallback is not None:
                 candidate = grounded_fallback
-                fallback_needs_audit = True
-                repaired_raw = None
             else:
-                repaired_raw = ""
-            if repaired_raw is not None and frozen_turn.cadence.heat == "hot":
-                # In an active back-and-forth, a rejected candidate must never
-                # buy a second full model wait.  Preserve the hard rejection,
-                # then land a locally grounded reply in the same visible turn.
                 candidate = build_safe_failure_candidate(
                     message.text,
-                    grounded_fallback,
+                    None,
                     modulation,
                     relationship=relationship,
                     selected_stance=chosen_stance,
                     speech_act=fallback_speech_act,
                     variant_key=str(message.message_id or intent_id),
                 )
-                fallback_needs_audit = True
-                quality_signals.append("hot_turn_repair_local_fallback")
-                repaired_raw = None
-            # Other failures get one bounded chance to repair their wording.
-            # Exact-source fallback is safe but conversationally destructive,
-            # so it is reserved for a second validation failure.
-            repair_decision = call_budget.decide(
-                turn=frozen_turn,
-                request=ModelCallRequest(
-                    purpose="reply_repair",
-                    calls_used=calls_used,
-                    ambiguous=appraisal_risk.request_model_proposal,
-                    complexity=(
-                        "cross_turn_relation_repair"
-                        if user_affect is not None
-                        and user_affect.kind in {"disappointment", "confusion"}
-                        else "complex_grounding_conflict"
-                    ),
-                    recovery_probe=self.provider_circuit_state().status == "half_open",
-                    remaining_budget_cny=remaining_after_calls(calls_used),
-                    estimated_call_cost_cny=0.02,
-                ),
-                grounding=pre_generation_grounding,
-                circuit=self.provider_circuit_state(),
-            )
-            if repaired_raw is not None and not repair_decision.allowed:
-                repaired_raw = None
-                candidate = build_safe_failure_candidate(
-                    message.text,
-                    grounded_fallback,
-                    modulation,
-                    relationship=relationship,
-                    selected_stance=chosen_stance,
-                    speech_act=fallback_speech_act,
-                )
-                fallback_needs_audit = True
-            if repaired_raw is None:
-                pass
-            else:
-                repair_action_id = self._begin_world_model_call(
-                    purpose="reply_repair", causation=intent_id
-                )
-                try:
-                    with model_call_scope(
-                        "reply_repair", action_id=repair_action_id
-                    ):
-                        repair_model = (
-                            self.reply_repair_model
-                            if repair_decision.model_tier == "strong"
-                            and self.reply_repair_model is not None
-                            else self.model
-                        )
-                        repaired_raw = await self._bounded_world_model_complete(
-                            repair_model,
-                            [
-                                {"role": "system", "content": self.companion_system_prompt},
-                                {
-                                    "role": "user",
-                                    "content": (
-                                    f"{context_block}\n\n用户: {message.text}\n"
-                                    f"上一次候选(JSON): {json.dumps(parsed_candidate, ensure_ascii=False, separators=(',', ':'))}\n"
-                                    f"未通过校验：{validation_error}。"
-                                    "只修复无依据的声明，保留用户问题的语义和自然接话；"
-                                    "先回应用户当前的言语行为，再引用直接相关事实；"
-                                    "不得用建议替代用户明确要求的陪伴或吐槽，不得突然升级关系口径；"
-                                    "资料没有回答的细节要明确说不知道。不得补造来源，"
-                                    "不得使用临时 event_1/exp1 标识。claims.text 是逐字来源证据，"
-                                    "claims.assertion 是 reply_text 中对应的自然陈述；猜测/建议不创建 claim。"
-                                    "只返回规定的 WorldReplyJSON。"
-                                    ),
-                                },
-                            ],
-                            purpose="reply_repair",
-                            temperature=0.2,
-                        )
-                except asyncio.CancelledError:
-                    self._fail_world_model_call(repair_action_id, "caller_cancelled")
-                    raise
-                except Exception as repair_error:
-                    self._fail_world_model_call(repair_action_id, str(repair_error))
-                    candidate = build_safe_failure_candidate(
-                        message.text,
-                        grounded_fallback,
-                        modulation,
-                        relationship=relationship,
-                        selected_stance=chosen_stance,
-                        speech_act=fallback_speech_act,
-                    )
-                    fallback_needs_audit = True
-                else:
-                    self._record_world_model_output(
-                        purpose="reply_repair",
-                        causation=intent_id,
-                        content=repaired_raw,
-                        action_id=repair_action_id,
-                    )
-                    try:
-                        try:
-                            mind_proposal = parse_mind_proposal(repaired_raw)
-                            repaired_candidate = mind_proposal.candidate
-                        except WorldError:
-                            try:
-                                repaired_candidate = recover_structured_reply(repaired_raw)
-                                mind_proposal = None
-                            except (ValueError, json.JSONDecodeError) as recovery_error:
-                                raise WorldError(
-                                    "reply repair did not contain recoverable JSON"
-                                ) from recovery_error
-                        candidate, guard_resolution = self._guard_reply_candidate(
-                            repaired_candidate,
-                            user_id=user_id,
-                            hard_evidence=hard_evidence,
-                        )
-                        if guard_resolution.disposition == "requires_action_settlement":
-                            action_settlement_ids = guard_resolution.action_ids
-                        if only_repeats_claimed_sources(message.text, candidate):
-                            quality_signals.append("repeats_claimed_source")
-                        if only_echoes_user_message(message.text, candidate):
-                            quality_signals.append("echoes_current_user_message")
-                        if only_recites_irrelevant_sources(message.text, candidate):
-                            quality_signals.append("recites_irrelevant_sources")
-                        if repeats_recent_companion_reply(
-                            candidate, list(snapshot.get("recent_messages", []))
-                        ):
-                            quality_signals.append("repeats_recent_companion_reply")
-                        human_violation = human_reply_contract_violation(
-                            message.text,
-                            candidate,
-                            relationship,
-                            urgent_turn=urgent_turn,
-                            meta_agency_query=query_scope.asks_meta_agency,
-                            single_experience_requested=query_scope.asks_single_experience,
-                            current_first_person_statement=query_scope.is_first_person_statement,
-                            epistemic_honesty_requested=query_scope.asks_epistemic_honesty,
-                            opinion_requested=query_scope.asks_opinion,
-                            recent_user_texts=[
-                                str(item.get("text") or "")
-                                for item in snapshot.get("recent_messages", [])
-                                if item.get("direction") == "in" and str(item.get("text") or "").strip()
-                            ],
-                            chosen_stance=chosen_stance,
-                        )
-                        if human_violation:
-                            quality_signals.append(
-                                f"human_reply_contract:{human_violation}"
-                            )
-                        affect_violation = expression_plan.validate(
-                            str(candidate.get("reply_text") or "")
-                        )
-                        if affect_violation:
-                            quality_signals.append(
-                                f"expression_plan:{affect_violation}"
-                            )
-                        repaired_claims = candidate.get("claims", [])
-                        repaired_mentions = candidate.get("mentioned_event_ids", [])
-                        repaired_actions = candidate.get("proposed_action_ids", [])
-                        repaired_text = str(candidate["reply_text"])
-                        repaired_grounding = GroundingAuditRisk().assess(
-                            CandidateGroundingSignals(
-                                reply_text=repaired_text,
-                                claims=tuple(
-                                    str(item.get("source_id") or "")
-                                    for item in repaired_claims
-                                    if isinstance(item, dict)
-                                ) if isinstance(repaired_claims, list) else (),
-                                mentioned_event_ids=tuple(str(item) for item in repaired_mentions)
-                                if isinstance(repaired_mentions, list) else (),
-                                proposed_action_ids=tuple(str(item) for item in repaired_actions)
-                                if isinstance(repaired_actions, list) else (),
-                                has_factual_language=bool(
-                                    re.search(
-                                        r"我(?:刚|今天|昨天|明天|在|去了|从|已经|有个|认识)"
-                                        r"|\d{2,}|我[一二两三四五六七八九十]+(?:天|周|月|年)前",
-                                        repaired_text,
-                                    )
-                                ),
-                            )
-                        )
-                        if repaired_grounding.requires_independent_audit:
-                            grounding_diagnostic_recommended = True
-                    except WorldError:
-                        candidate = build_safe_failure_candidate(
-                            message.text,
-                            grounded_fallback,
-                            modulation,
-                            relationship=relationship,
-                            selected_stance=chosen_stance,
-                            speech_act=fallback_speech_act,
-                        )
-                        fallback_needs_audit = True
+            fallback_needs_audit = True
+            quality_signals.append("reply_validation_local_fallback")
         if fallback_needs_audit:
             candidate, guard_resolution = self._guard_reply_candidate(
                 candidate, user_id=user_id, hard_evidence=hard_evidence
@@ -3109,8 +2920,6 @@ class CompanionEngine:
             appraisal_risk=appraisal_risk,
             turn=frozen_turn,
         )
-        if not defer_delivery:
-            self.confirm_reply_delivery(reply)
         return reply
 
     def _material_private_impression_proposal(
@@ -3400,19 +3209,33 @@ class CompanionEngine:
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         mark_phone_typing(self.store, canonical_user_id)
 
+    def _reject_world_legacy_confirmation(self, api: str) -> None:
+        """Keep pre-Turn ``confirm_*`` bookkeeping out of authoritative World mode.
+
+        These methods only remain for the non-World compatibility runtime,
+        whose store outbox is the delivery ledger.  A World Action has segment
+        claims, durable receipt semantics and unknown-state convergence that
+        cannot be recreated by an Engine-local "send then confirm" call.
+        Callers in World mode must use ``CompanionTurn.dispatch_scheduled`` or
+        ``CompanionTurn.settle`` instead.
+        """
+        # A kernel without a selected World is an invalid/incomplete World
+        # configuration, not permission to fall back to the legacy store.
+        if self.world_kernel is not None:
+            raise WorldError(
+                f"{api} is a legacy compatibility API and cannot settle World Actions; "
+                "use CompanionTurn.dispatch_scheduled or CompanionTurn.settle"
+            )
+
     def confirm_reply_delivery(self, reply: CompanionReply) -> TurnCommit | None:
+        self._reject_world_legacy_confirmation("confirm_reply_delivery")
         if reply.delivery_id is None:
             return None
-        if self.world_kernel and reply.world_action_id:
-            delivered = self.world_kernel.settle_outgoing_action(reply.delivery_id, delivered=True)
-        else:
-            delivered = self.store.resolve_outgoing_and_turn_trace(
-                reply.delivery_id, reply.turn_trace_id, delivered=True
-            )
+        delivered = self.store.resolve_outgoing_and_turn_trace(
+            reply.delivery_id, reply.turn_trace_id, delivered=True
+        )
         if not delivered or delivered["status"] != "planned":
             return None
-        if self.world_kernel and reply.world_action_id:
-            return TurnCommit(reply.turn_trace_id, reply.delivery_id, "delivered")
         state = self.store.get_mood_state(reply.canonical_user_id)
         expressed = apply_expression_after_reply(
             state,
@@ -3562,6 +3385,7 @@ class CompanionEngine:
         external_receipt: str | None = None,
     ) -> None:
         """Commit one adapter-confirmed segment and no unsent text."""
+        self._reject_world_legacy_confirmation("confirm_reply_part_delivery")
         if not self.world_kernel or reply.delivery_id is None:
             return
         self.world_kernel.settle_outgoing_segment(
@@ -3610,6 +3434,7 @@ class CompanionEngine:
         return TurnCommit(reply.turn_trace_id, reply.delivery_id, "failed", reason)
 
     def confirm_media_delivery(self, reply: CompanionReply) -> None:
+        self._reject_world_legacy_confirmation("confirm_media_delivery")
         if not self.world_kernel or not self.world_id or not reply.media_action_id:
             return
         self._submit_world_with_retry(
@@ -3638,6 +3463,7 @@ class CompanionEngine:
         )
 
     def confirm_sticker_delivery(self, reply: CompanionReply) -> None:
+        self._reject_world_legacy_confirmation("confirm_sticker_delivery")
         if not self.world_kernel or not self.world_id or not reply.sticker_action_id:
             return
         self._submit_world_with_retry(
@@ -3984,17 +3810,13 @@ class CompanionEngine:
         *,
         delivery_id: int | None = None,
     ) -> None:
+        self._reject_world_legacy_confirmation("confirm_afterthought_delivery")
         if delivery_id is None:
             delivery_id = self.queue_afterthought_delivery(canonical_user_id, platform, text)
-        if self.world_kernel and self.world_id:
-            delivered = self.world_kernel.settle_outgoing_action(delivery_id, delivered=True)
-        else:
-            delivered = self.store.resolve_outgoing_and_turn_trace(
-                delivery_id, self.store.turn_trace_id_for_delivery(delivery_id), delivered=True
-            )
+        delivered = self.store.resolve_outgoing_and_turn_trace(
+            delivery_id, self.store.turn_trace_id_for_delivery(delivery_id), delivered=True
+        )
         if not delivered or delivered["status"] != "planned":
-            return
-        if self.world_kernel and self.world_id:
             return
         state = self.store.get_mood_state(canonical_user_id)
         expressed = apply_expression_after_reply(state, was_proactive=True)
@@ -4016,8 +3838,7 @@ class CompanionEngine:
                 )
 
     def confirm_life_event_delivery(self, canonical_user_id: str, platform: str = "qq") -> None:
-        if self.world_kernel and self.world_id:
-            return
+        self._reject_world_legacy_confirmation("confirm_life_event_delivery")
         self.store.record_proactive_delivery(canonical_user_id, f"{platform}:life_event")
         state = self.store.get_mood_state(canonical_user_id)
         expressed = apply_expression_after_reply(state, was_proactive=True)
@@ -4747,17 +4568,13 @@ class CompanionEngine:
         return decision.model_copy(update={"delivery_id": delivery_id, "turn_trace_id": trace_id})
 
     def confirm_proactive_delivery(self, decision: ProactiveDecision) -> None:
+        self._reject_world_legacy_confirmation("confirm_proactive_delivery")
         if decision.delivery_id is None:
             return
-        if self.world_kernel and decision.world_action_id:
-            delivered = self.world_kernel.settle_outgoing_action(decision.delivery_id, delivered=True)
-        else:
-            delivered = self.store.resolve_outgoing_and_turn_trace(
-                decision.delivery_id, decision.turn_trace_id, delivered=True
-            )
+        delivered = self.store.resolve_outgoing_and_turn_trace(
+            decision.delivery_id, decision.turn_trace_id, delivered=True
+        )
         if not delivered or delivered["status"] != "planned":
-            return
-        if self.world_kernel and decision.world_action_id:
             return
         self.store.record_proactive_delivery(decision.canonical_user_id, str(delivered["platform"]))
         state = self.store.get_mood_state(decision.canonical_user_id)
