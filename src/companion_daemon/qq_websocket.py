@@ -933,17 +933,17 @@ class QQMessageCoalescer:
                     receipt = QQDelivery.receipt_candidate(response)
                     if receipt:
                         mark_first_visible()
+                    if prepared_reply is not None and prepared_reply.delivery_id is not None and not receipt:
+                        raise MissingDeliveryEvidenceError(
+                            "QQ fallback returned without durable delivery evidence"
+                        )
                     if segment_id and hasattr(self.engine, "confirm_reply_part_delivery"):
-                        if not receipt:
-                            raise MissingDeliveryEvidenceError(
-                                "QQ fallback returned without durable delivery evidence"
-                            )
                         self.engine.confirm_reply_part_delivery(
                             prepared_reply,
                             segment_id=segment_id,
                             external_receipt=receipt,
                         )
-                    if prepared_reply is not None and hasattr(
+                    if receipt and prepared_reply is not None and hasattr(
                         self.engine, "confirm_reply_delivery"
                     ):
                         self.engine.confirm_reply_delivery(prepared_reply)
@@ -954,6 +954,7 @@ class QQMessageCoalescer:
                         "prepared_reply" in locals()
                         and prepared_reply is not None
                         and hasattr(self.engine, "fail_reply_delivery")
+                        and not isinstance(fallback_error, MissingDeliveryEvidenceError)
                     ):
                         self.engine.fail_reply_delivery(
                             prepared_reply, f"QQ adapter fallback failed: {fallback_error}"
@@ -1286,6 +1287,7 @@ class QQMessageCoalescer:
             )
             claimed_segments: dict[int, str] = {}
             settled_segments: set[str] = set()
+            durable_text_receipts: list[str] = []
 
             def before_part(index: int, _part: str) -> None:
                 if hasattr(self.engine, "begin_reply_part_delivery"):
@@ -1295,8 +1297,17 @@ class QQMessageCoalescer:
 
             def after_part(index: int, _part: str, response: object) -> None:
                 segment_id = claimed_segments.get(index)
+                external_receipt = QQDelivery.receipt_candidate(response)
+                # A legacy outbox row is still a real delivery claim.  Do not
+                # turn a successful HTTP return into a delivered conversation
+                # merely because this adapter path predates CompanionTurn.
+                if reply.delivery_id is not None and not external_receipt:
+                    raise MissingDeliveryEvidenceError(
+                        "QQ reply returned without a platform message id or queryable receipt"
+                    )
+                if external_receipt:
+                    durable_text_receipts.append(external_receipt)
                 if segment_id and hasattr(self.engine, "confirm_reply_part_delivery"):
-                    external_receipt = QQDelivery.receipt_candidate(response)
                     if not external_receipt:
                         raise MissingDeliveryEvidenceError(
                             "QQ reply returned without a platform message id or queryable receipt"
@@ -1307,7 +1318,7 @@ class QQMessageCoalescer:
                         external_receipt=external_receipt,
                     )
                     settled_segments.add(segment_id)
-                if QQDelivery.receipt_candidate(response) and on_first_visible:
+                if external_receipt and on_first_visible:
                     on_first_visible()
 
             sent_completely = await _send_reply_parts(
@@ -1343,7 +1354,7 @@ class QQMessageCoalescer:
                         reply, "QQ reply interrupted before all parts were sent"
                     )
                 return False
-        except Exception:
+        except Exception as send_error:
             logger.exception("failed to send QQ reply")
             uncertain_reason = "QQ adapter call ended without durable delivery evidence"
             uncertain_segments = (
@@ -1365,7 +1376,11 @@ class QQMessageCoalescer:
                     )
                 except Exception:
                     logger.exception("failed to persist uncertain QQ segment")
-            if not uncertain_segments and hasattr(self.engine, "fail_reply_delivery"):
+            if (
+                not uncertain_segments
+                and not isinstance(send_error, MissingDeliveryEvidenceError)
+                and hasattr(self.engine, "fail_reply_delivery")
+            ):
                 self.engine.fail_reply_delivery(reply, "QQ text delivery failed")
             return False
         finally:
@@ -1377,13 +1392,17 @@ class QQMessageCoalescer:
                     else "reply_send_stopped",
                 )
             self._active_sends.pop(key, None)
-        if hasattr(self.engine, "confirm_reply_delivery"):
+        if durable_text_receipts and hasattr(self.engine, "confirm_reply_delivery"):
             self.engine.confirm_reply_delivery(reply)
         if self.on_sticker and reply.sticker_path:
             try:
-                await self.on_sticker(merged, reply)
-                if hasattr(self.engine, "confirm_sticker_delivery"):
+                sticker_response = await self.on_sticker(merged, reply)
+                if QQDelivery.receipt_candidate(sticker_response) and hasattr(
+                    self.engine, "confirm_sticker_delivery"
+                ):
                     self.engine.confirm_sticker_delivery(reply)
+                elif reply.sticker_action_id:
+                    logger.warning("QQ sticker returned without durable delivery evidence")
             except Exception:
                 logger.exception("failed to send QQ sticker reply")
                 if hasattr(self.engine, "fail_sticker_delivery"):
@@ -1392,9 +1411,13 @@ class QQMessageCoalescer:
             self.engine.fail_sticker_delivery(reply, "sticker adapter unavailable")
         if self.on_image and reply.image_path:
             try:
-                await self.on_image(merged, reply)
-                if hasattr(self.engine, "confirm_media_delivery"):
+                image_response = await self.on_image(merged, reply)
+                if QQDelivery.receipt_candidate(image_response) and hasattr(
+                    self.engine, "confirm_media_delivery"
+                ):
                     self.engine.confirm_media_delivery(reply)
+                elif reply.media_action_id:
+                    logger.warning("QQ image returned without durable delivery evidence")
             except Exception:
                 logger.exception("failed to send QQ image reply")
                 if hasattr(self.engine, "fail_media_delivery"):
@@ -1602,7 +1625,10 @@ class QQMessageCoalescer:
                     idempotency_key=f"afterthought:{delivery_id}",
                 )
                 return text if outcome.terminal_state == "delivered" else None
-            await reply_target.reply(content=text, msg_seq=_reply_msg_seq())
+            response = await reply_target.reply(content=text, msg_seq=_reply_msg_seq())
+            if not QQDelivery.receipt_candidate(response):
+                logger.warning("QQ afterthought returned without durable delivery evidence")
+                return None
             if hasattr(self.engine, "confirm_afterthought_delivery"):
                 self.engine.confirm_afterthought_delivery(
                     canonical_user_id,

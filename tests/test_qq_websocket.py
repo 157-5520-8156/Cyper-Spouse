@@ -286,8 +286,9 @@ async def test_afterthought_episode_uses_original_reply_time_and_stays_bounded()
         def __init__(self):
             self.replies: list[str] = []
 
-        async def reply(self, **kwargs) -> None:
+        async def reply(self, **kwargs) -> dict[str, str]:
             self.replies.append(kwargs["content"])
+            return {"message_id": f"afterthought-episode-{len(self.replies)}"}
 
     class AlwaysSendRandom:
         def uniform(self, low: float, high: float) -> float:
@@ -379,8 +380,9 @@ async def test_afterthought_uses_outbox_delivery_confirmation() -> None:
         def __init__(self):
             self.replies: list[str] = []
 
-        async def reply(self, **kwargs) -> None:
+        async def reply(self, **kwargs) -> dict[str, str]:
             self.replies.append(kwargs["content"])
+            return {"message_id": "afterthought-42"}
 
     class AlwaysSendRandom:
         def uniform(self, low: float, high: float) -> float:
@@ -1399,6 +1401,122 @@ async def test_coalescer_keeps_segment_unknown_when_success_response_has_no_rece
 
     assert engine.unknown == ["outgoing:19:segment:0"]
     assert engine.confirmed == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_coalescer_does_not_confirm_outbox_delivery_without_receipt() -> None:
+    """A legacy outbox row remains unsettled when QQ only acknowledges the request."""
+
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.confirmed: list[int] = []
+            self.failed: list[str] = []
+
+        async def handle_message(self, _incoming: IncomingMessage, **_kwargs: object) -> CompanionReply:
+            return CompanionReply(
+                canonical_user_id="geoff",
+                mood="calm",
+                text="在呢。",
+                delivery_id=20,
+            )
+
+        def confirm_reply_delivery(self, reply: CompanionReply) -> None:
+            assert reply.delivery_id is not None
+            self.confirmed.append(reply.delivery_id)
+
+        def fail_reply_delivery(self, _reply: CompanionReply, reason: str) -> None:
+            self.failed.append(reason)
+
+    class ReceiptlessTarget:
+        async def reply(self, **_kwargs: object) -> dict[str, str]:
+            return {"status": "accepted"}
+
+    engine = FakeEngine()
+    coalescer = QQMessageCoalescer(engine, delay_seconds=0.01, human_timing=False)
+
+    delivered = await coalescer._generate_and_send(
+        IncomingMessage(platform="qq", platform_user_id="user", text="在吗"),
+        ReceiptlessTarget(),
+        key="c2c:user",
+    )
+
+    assert delivered is False
+    assert engine.confirmed == []
+    assert engine.failed == []
+
+
+@pytest.mark.asyncio
+async def test_legacy_afterthought_does_not_confirm_without_receipt() -> None:
+    class Store:
+        def resolve_user(self, _platform: str, _platform_user_id: str) -> str:
+            return "geoff"
+
+    class Engine:
+        store = Store()
+
+        async def generate_afterthought(
+            self, _user_id: str, _reply_sent_at: datetime, *, mode: str
+        ) -> str:
+            assert mode == "quick_continue"
+            return "补一句。"
+
+        def queue_afterthought_delivery(self, *_args: object) -> int:
+            return 21
+
+        def confirm_afterthought_delivery(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("receiptless afterthought must not be confirmed")
+
+    class ReceiptlessTarget:
+        async def reply(self, **_kwargs: object) -> dict[str, str]:
+            return {"status": "accepted"}
+
+    coalescer = QQMessageCoalescer(Engine(), delay_seconds=0.01, human_timing=False)
+    result = await coalescer._fire_afterthought(
+        "c2c:user",
+        AfterthoughtPlan("quick_continue", 0.0, 1.0),
+        IncomingMessage(platform="qq", platform_user_id="user", text="刚刚那件事"),
+        ReceiptlessTarget(),
+        datetime(2026, 7, 10, tzinfo=timezone.utc),
+    )
+
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_legacy_expression_does_not_confirm_without_receipt() -> None:
+    class Engine:
+        async def handle_message(self, _incoming: IncomingMessage, **_kwargs: object) -> CompanionReply:
+            return CompanionReply(
+                canonical_user_id="geoff",
+                mood="calm",
+                text="给你。",
+                media_action_id="media:22",
+                image_path="assets/life/example.png",
+            )
+
+        def confirm_media_delivery(self, _reply: CompanionReply) -> None:
+            raise AssertionError("receiptless image must not be confirmed")
+
+    class Target:
+        async def reply(self, **_kwargs: object) -> dict[str, str]:
+            return {"message_id": "text-22"}
+
+    async def image_without_receipt(
+        _incoming: IncomingMessage, _reply: CompanionReply
+    ) -> dict[str, str]:
+        return {"status": "accepted"}
+
+    coalescer = QQMessageCoalescer(
+        Engine(), delay_seconds=0.01, human_timing=False, on_image=image_without_receipt
+    )
+
+    delivered = await coalescer._generate_and_send(
+        IncomingMessage(platform="qq", platform_user_id="user", text="发一张"),
+        Target(),
+        key="c2c:user",
+    )
+
+    assert delivered is True
 
 
 @pytest.mark.asyncio
