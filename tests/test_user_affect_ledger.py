@@ -6,10 +6,17 @@ import json
 import pytest
 
 from companion_daemon.db import CompanionStore
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    ResponseBudget,
+    TurnEnvelope,
+    TurnOptions,
+)
 from companion_daemon.conversation_cadence import ConversationCadence, FrozenTurnContext
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import IncomingMessage
+from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.turn_frame import TurnFrameCompiler
 from companion_daemon.world import WorldKernel
 from companion_daemon.emotion_state import InteractionEvent
@@ -38,12 +45,50 @@ def _engine(tmp_path: Path) -> tuple[CompanionEngine, CompanionStore]:
     )
 
 
+async def _respond_world_turn(
+    engine: CompanionEngine,
+    message: IncomingMessage,
+    *,
+    turn_context: FrozenTurnContext | None = None,
+):
+    """Exercise World generation and authoritative receipt settlement."""
+
+    context = turn_context or engine.freeze_turn_context(message)
+    transport = CaptureTurnTransport(receipt_namespace="user-affect-ledger")
+    envelope = TurnEnvelope.from_message(
+        message,
+        idempotency_key=(
+            f"{message.platform}:{message.platform_user_id}:{message.message_id}"
+        ),
+        world_id=engine.world_id,
+        canonical_user_id=engine.store.resolve_user(
+            message.platform, message.platform_user_id
+        ),
+        frozen_cadence=context.cadence.heat,
+    )
+    turn = CompanionTurn(engine, transport, cadence_delay_seconds=0)
+    outcome = await turn.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+    await turn.wait_for_delivery_continuations()
+    return outcome
+
+
+def _source_message_id(message_id: str) -> str:
+    """World records platform-scoped source IDs at the public turn boundary."""
+
+    return f"qq:geoff:{message_id}"
+
+
 @pytest.mark.asyncio
 async def test_withdrawing_after_an_unmet_share_is_appraised_and_kept_until_repaired(
     tmp_path: Path,
 ) -> None:
     engine, store = _engine(tmp_path)
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -52,7 +97,8 @@ async def test_withdrawing_after_an_unmet_share_is_appraised_and_kept_until_repa
         )
     )
 
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -70,7 +116,7 @@ async def test_withdrawing_after_an_unmet_share_is_appraised_and_kept_until_repa
     assert affect["unresolved"] is True
     assert any(
         event.event_type == "UserAffectAppraised"
-        and event.payload["source_message_id"] == "withdraw-1"
+        and event.payload["source_message_id"] == _source_message_id("withdraw-1")
         for event in engine.world_kernel.events(engine.world_id)
     )
 
@@ -80,13 +126,15 @@ async def test_confusion_about_the_companion_requests_repair_instead_of_curiosit
     tmp_path: Path,
 ) -> None:
     engine, store = _engine(tmp_path)
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="我今天去玩密室了", message_id="share-2"
         )
     )
 
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -111,7 +159,8 @@ async def test_new_confusion_does_not_implicitly_settle_prior_disappointment(
         ("withdraw-mixed", "算了，你看你的书吧"),
         ("confused-mixed", "什么意思？我没懂"),
     ):
-        await engine.handle_message(
+        await _respond_world_turn(
+            engine,
             IncomingMessage(
                 platform="qq", platform_user_id="geoff", text=text, message_id=message_id
             )
@@ -121,11 +170,12 @@ async def test_new_confusion_does_not_implicitly_settle_prior_disappointment(
     assert affect["kind"] == "confusion"
     assert affect["settles_source_message_id"] == ""
     assert {item["source_message_id"] for item in affect["active_episodes"]} == {
-        "withdraw-mixed",
-        "confused-mixed",
+        _source_message_id("withdraw-mixed"),
+        _source_message_id("confused-mixed"),
     }
 
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -148,14 +198,16 @@ async def test_mild_disappointment_resolved_in_the_same_turn_is_not_ledgered(
     tmp_path: Path, resolved_text: str,
 ) -> None:
     engine, _ = _engine(tmp_path)
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="我今天去玩密室了", message_id="share-3"
         )
     )
     revision_before = engine.world_kernel.revision(engine.world_id)
 
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -178,12 +230,14 @@ async def test_explicit_disappointment_with_natural_intensifiers_is_not_missed(
     tmp_path: Path,
 ) -> None:
     engine, _ = _engine(tmp_path)
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="我想分享件事", message_id="share-intensified"
         )
     )
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -207,7 +261,8 @@ async def test_ambiguous_low_energy_reply_keeps_committed_disappointment_active(
         ("withdraw-low-energy", "算了，你看你的书吧"),
         ("terse-low-energy", "还行吧"),
     ):
-        await engine.handle_message(
+        await _respond_world_turn(
+            engine,
             IncomingMessage(
                 platform="qq", platform_user_id="geoff", text=text, message_id=message_id
             )
@@ -216,10 +271,10 @@ async def test_ambiguous_low_energy_reply_keeps_committed_disappointment_active(
     assert store.recent_turn_traces("geoff")[-1]["appraisal"] == "user_withdrawing"
     affect = engine.world_kernel.snapshot(engine.world_id)["user_affect"]["user:geoff"]
     assert affect["kind"] == "disappointment"
-    assert affect["source_message_id"] == "terse-low-energy"
+    assert affect["source_message_id"] == _source_message_id("terse-low-energy")
     assert affect["unresolved"] is True
     assert [item["source_message_id"] for item in affect["active_episodes"]] == [
-        "terse-low-energy"
+        _source_message_id("terse-low-energy")
     ]
 
 
@@ -239,7 +294,8 @@ async def test_hot_implicit_disappointment_is_ledgered_before_the_same_reply(
     appraisal_probe = AppraisalProbe()
     engine.interaction_appraisal_model = appraisal_probe
     engine.interaction_deep_appraisal_model = appraisal_probe
-    first = await engine.handle_message(
+    first = await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -249,7 +305,8 @@ async def test_hot_implicit_disappointment_is_ledgered_before_the_same_reply(
     )
     assert first is not None
 
-    reply = await engine.handle_message(
+    reply = await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="行吧", message_id="hot-implicit"
         ),
@@ -270,7 +327,7 @@ async def test_hot_implicit_disappointment_is_ledgered_before_the_same_reply(
     affect = engine.world_kernel.snapshot(engine.world_id)["user_affect"]["user:geoff"]
     assert affect["kind"] == "disappointment"
     assert affect["intensity"] == 2
-    assert affect["source_message_id"] == "hot-implicit"
+    assert affect["source_message_id"] == _source_message_id("hot-implicit")
     await asyncio.gather(*tuple(engine._appraisal_tasks))
     assert appraisal_probe.calls == 0
     # The primary reply, not a trailing appraiser task, receives the repair
@@ -284,12 +341,14 @@ async def test_repeated_mild_disappointment_crosses_ledger_threshold_only_on_rep
     tmp_path: Path,
 ) -> None:
     engine, _ = _engine(tmp_path)
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="我想分享件事", message_id="mild-share"
         )
     )
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="有点扫兴", message_id="mild-first"
         )
@@ -301,14 +360,15 @@ async def test_repeated_mild_disappointment_crosses_ledger_threshold_only_on_rep
     ]
     assert first_events == []
 
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="还是有点扫兴", message_id="mild-repeat"
         )
     )
     affect = engine.world_kernel.snapshot(engine.world_id)["user_affect"]["user:geoff"]
     assert affect["intensity"] == 2
-    assert affect["source_message_id"] == "mild-repeat"
+    assert affect["source_message_id"] == _source_message_id("mild-repeat")
 
 
 @pytest.mark.asyncio
@@ -321,7 +381,8 @@ async def test_committed_disappointment_is_closed_by_an_explicit_repair_settleme
         ("withdraw-2", "算了，不说了"),
         ("settled-1", "没事了，这次你接住了"),
     ):
-        await engine.handle_message(
+        await _respond_world_turn(
+            engine,
             IncomingMessage(
                 platform="qq", platform_user_id="geoff", text=text, message_id=message_id
             )
@@ -330,7 +391,7 @@ async def test_committed_disappointment_is_closed_by_an_explicit_repair_settleme
     affect = engine.world_kernel.snapshot(engine.world_id)["user_affect"]["user:geoff"]
     assert affect["kind"] == "repaired"
     assert affect["unresolved"] is False
-    assert affect["settles_source_message_id"] == "withdraw-2"
+    assert affect["settles_source_message_id"] == _source_message_id("withdraw-2")
     assert (
         engine.world_kernel.rebuild_projection(engine.world_id, "world_current_state").matches_live
         is True
@@ -342,12 +403,14 @@ async def test_logical_weeks_expire_old_user_disappointment_before_an_unrelated_
     tmp_path: Path,
 ) -> None:
     engine, _ = _engine(tmp_path)
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="我想分享件事", message_id="expiry-share"
         )
     )
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="算了，不说了", message_id="expiry-withdraw"
         )
@@ -368,7 +431,7 @@ async def test_logical_weeks_expire_old_user_disappointment_before_an_unrelated_
     assert "user:geoff" not in after["user_affect"]
     assert any(
         event.event_type == "UserAffectExpired"
-        and event.payload["source_message_id"] == "expiry-withdraw"
+        and event.payload["source_message_id"] == _source_message_id("expiry-withdraw")
         for event in engine.world_kernel.events(engine.world_id)
     )
     frame = TurnFrameCompiler().compile(
@@ -389,12 +452,14 @@ async def test_fresh_or_reinforced_user_disappointment_still_guides_the_next_tur
     tmp_path: Path,
 ) -> None:
     engine, _ = _engine(tmp_path)
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="我想分享件事", message_id="renew-share"
         )
     )
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="算了，不说了", message_id="renew-withdraw"
         )
@@ -406,7 +471,8 @@ async def test_fresh_or_reinforced_user_disappointment_still_guides_the_next_tur
         datetime.fromisoformat(first["clock"]["logical_at"]) + timedelta(days=6),
         expected_revision=engine.world_kernel.revision(engine.world_id),
     )
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="我还是有点失望", message_id="renew-low-energy"
         )
@@ -414,7 +480,7 @@ async def test_fresh_or_reinforced_user_disappointment_still_guides_the_next_tur
 
     renewed = engine.world_kernel.snapshot(engine.world_id)
     affect = renewed["user_affect"]["user:geoff"]
-    assert affect["source_message_id"] == "renew-low-energy"
+    assert affect["source_message_id"] == _source_message_id("renew-low-energy")
     assert affect["expires_at"] > first_expires_at
     frame = TurnFrameCompiler().compile(
         world_id=engine.world_id,
@@ -516,12 +582,14 @@ async def test_model_validated_implicit_withdrawal_is_committed_after_first_repl
     appraisal_model = AppraisalModel()
     engine.interaction_appraisal_model = appraisal_model
     engine.interaction_deep_appraisal_model = appraisal_model
-    second_reply = await engine.handle_message(
+    second_reply = await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="我去玩密室了", message_id="share-model"
         )
     )
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="还行吧", message_id="implicit-model"
         ),
@@ -544,9 +612,10 @@ async def test_model_validated_implicit_withdrawal_is_committed_after_first_repl
     assert store.recent_turn_traces("geoff")[-1]["appraisal"] == "ordinary_message"
     affect = engine.world_kernel.snapshot(engine.world_id)["user_affect"]["user:geoff"]
     assert affect["kind"] == "disappointment"
-    assert affect["source_message_id"] == "implicit-model"
+    assert affect["source_message_id"] == _source_message_id("implicit-model")
     assert affect["unresolved"] is True
-    await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="继续说", message_id="after-implicit"
         )
@@ -555,4 +624,4 @@ async def test_model_validated_implicit_withdrawal_is_committed_after_first_repl
     # the next primary prompt rather than restating it as a user fact.
     prompt = engine.model.calls[-1][1]["content"]
     assert '"kind":"repair"' in prompt
-    assert '"implicit-model"' in prompt
+    assert f'"{_source_message_id("implicit-model")}"' in prompt

@@ -4,10 +4,17 @@ import pytest
 
 from companion_daemon.db import CompanionStore
 from companion_daemon.attachment_cache import AttachmentCache
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    ResponseBudget,
+    TurnEnvelope,
+    TurnOptions,
+)
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import IncomingMessage, MessageAttachment
 from companion_daemon.multimodal_analysis import AttachmentInsight
+from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.world import WorldKernel
 
 
@@ -23,6 +30,32 @@ class FakeAnalyzer:
 class FailingAnalyzer:
     async def analyze(self, attachment: MessageAttachment) -> AttachmentInsight:
         raise RuntimeError("provider unavailable")
+
+
+async def _respond_world_turn(engine: CompanionEngine, message: IncomingMessage) -> str:
+    """Use the public World delivery seam, including Action settlement."""
+
+    context = engine.freeze_turn_context(message)
+    transport = CaptureTurnTransport(receipt_namespace="engine-multimodal")
+    envelope = TurnEnvelope.from_message(
+        message,
+        idempotency_key=(
+            f"{message.platform}:{message.platform_user_id}:{message.message_id}"
+        ),
+        world_id=engine.world_id,
+        canonical_user_id=engine.store.resolve_user(
+            message.platform, message.platform_user_id
+        ),
+        frozen_cadence=context.cadence.heat,
+    )
+    turn = CompanionTurn(engine, transport, cadence_delay_seconds=0)
+    await turn.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+    await turn.wait_for_delivery_continuations()
+    return transport.text
 
 
 @pytest.mark.asyncio
@@ -104,7 +137,7 @@ async def test_world_attachment_analysis_is_audited_cached_and_source_grounded(t
         url="https://cdn.example/cat.png",
     )
 
-    await engine.handle_message(IncomingMessage(
+    await _respond_world_turn(engine, IncomingMessage(
         platform="qq", platform_user_id="geoff", message_id="with-cat",
         text="看看这个", attachments=[attachment],
     ))
@@ -115,7 +148,7 @@ async def test_world_attachment_analysis_is_audited_cached_and_source_grounded(t
     )
     assert action["status"] == "delivered"
     assert action["result"]["summary"] == "看起来是一张猫的照片。"
-    assert action["result"]["source_message_id"] == "with-cat"
+    assert action["result"]["source_message_id"] == "qq:geoff:with-cat"
     assert action["result"]["attachment_index"] == 0
     assert action["result"]["cache"]["retention_days"] == 30
     assert fetched == ["https://cdn.example/cat.png"]
@@ -126,7 +159,7 @@ async def test_world_attachment_analysis_is_audited_cached_and_source_grounded(t
         "source_id": action["action_id"],
         "source_type": "attachment_analysis",
         "reference_state": "delivered",
-        "source_message_id": "with-cat",
+        "source_message_id": "qq:geoff:with-cat",
         "attachment_index": 0,
         "kind": "image",
         "summary": "看起来是一张猫的照片。",
@@ -139,7 +172,7 @@ async def test_world_attachment_analysis_is_audited_cached_and_source_grounded(t
     assert "看起来是一张猫的照片。" in prompt
     assert action["action_id"] in prompt
 
-    await engine.handle_message(IncomingMessage(
+    await _respond_world_turn(engine, IncomingMessage(
         platform="qq", platform_user_id="geoff", message_id="with-cat-again",
         text="还是这张", attachments=[attachment],
     ))
@@ -153,7 +186,7 @@ async def test_world_attachment_analysis_is_audited_cached_and_source_grounded(t
     assert fetched == ["https://cdn.example/cat.png"]
     repeated_result = next(
         item["result"] for item in repeated
-        if item["result"]["source_message_id"] == "with-cat-again"
+        if item["result"]["source_message_id"] == "qq:geoff:with-cat-again"
     )
     assert repeated_result["cache"]["analysis_hit"] is True
 
@@ -169,7 +202,7 @@ async def test_world_attachment_analysis_failure_is_audited_without_blocking_rep
         multimodal_analyzer=FailingAnalyzer(), world_kernel=world, world_id=world_id,
     )
 
-    reply = await engine.handle_message(IncomingMessage(
+    reply = await _respond_world_turn(engine, IncomingMessage(
         platform="qq", platform_user_id="geoff", message_id="bad-audio",
         text="听听", attachments=[MessageAttachment(kind="audio", filename="voice.mp3")],
     ))

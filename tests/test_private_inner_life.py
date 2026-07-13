@@ -5,11 +5,44 @@ from pathlib import Path
 import pytest
 
 from companion_daemon.db import CompanionStore
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    ResponseBudget,
+    TurnEnvelope,
+    TurnOptions,
+)
 from companion_daemon.engine import CompanionEngine
 from companion_daemon.models import IncomingMessage
+from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.world import WorldError, WorldKernel
 
 from test_world_kernel import NOW, world_seed
+
+
+async def _respond_world_turn(engine: CompanionEngine, message: IncomingMessage) -> str:
+    """Exercise World generation and receipt settlement through the public seam."""
+
+    context = engine.freeze_turn_context(message)
+    transport = CaptureTurnTransport(receipt_namespace="private-inner-life")
+    envelope = TurnEnvelope.from_message(
+        message,
+        idempotency_key=(
+            f"{message.platform}:{message.platform_user_id}:{message.message_id}"
+        ),
+        world_id=engine.world_id,
+        canonical_user_id=engine.store.resolve_user(
+            message.platform, message.platform_user_id
+        ),
+        frozen_cadence=context.cadence.heat,
+    )
+    turn = CompanionTurn(engine, transport, cadence_delay_seconds=0)
+    await turn.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+    await turn.wait_for_delivery_continuations()
+    return transport.text
 
 
 def _started_kernel(tmp_path: Path) -> tuple[WorldKernel, str]:
@@ -235,7 +268,7 @@ async def test_rebuilt_world_reinjects_a_related_private_impression_into_next_re
         world_id=world_id,
     )
 
-    reply = await engine.handle_message(
+    reply = await _respond_world_turn(engine,
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -431,7 +464,7 @@ async def test_world_turn_selectively_commits_inner_impression_and_question_comm
         world_id=world_id,
     )
 
-    await engine.handle_message(
+    await _respond_world_turn(engine,
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -440,7 +473,7 @@ async def test_world_turn_selectively_commits_inner_impression_and_question_comm
             sent_at=NOW,
         )
     )
-    reply = await engine.handle_message(
+    reply = await _respond_world_turn(engine,
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -554,7 +587,7 @@ async def test_model_private_impression_is_committed_atomically_with_reply_actio
         world_kernel=kernel,
         world_id=world_id,
     )
-    await engine.handle_message(
+    await _respond_world_turn(engine,
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -563,7 +596,7 @@ async def test_model_private_impression_is_committed_atomically_with_reply_actio
             sent_at=NOW,
         )
     )
-    reply = await engine.handle_message(
+    reply = await _respond_world_turn(engine,
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -571,13 +604,21 @@ async def test_model_private_impression_is_committed_atomically_with_reply_actio
             text="你刚才有点敷衍，我有点失望。",
             sent_at=NOW,
         ),
-        defer_delivery=True,
     )
 
     assert reply is not None
     state = kernel.snapshot(world_id)
-    impression = state["private_impressions"]["impression:m:model-disappointment"]
-    action = state["actions"][str(reply.world_action_id)]
+    impression = next(
+        item
+        for item in state["private_impressions"].values()
+        if item["summary"] == "我感觉他被刚才没接住的回应伤到了。"
+    )
+    action = next(
+        item
+        for item in state["actions"].values()
+        if item.get("trace", {}).get("private_impression", {}).get("impression_id")
+        == impression["impression_id"]
+    )
     assert impression["summary"] == "我感觉他被刚才没接住的回应伤到了。"
     assert action["trace"]["private_impression"]["impression_id"] == impression["impression_id"]
     assert impression["status"] == "active"
