@@ -107,6 +107,15 @@ class SlowReplyModel:
         return await StaticReplyModel().complete(messages, temperature=temperature)
 
 
+def test_first_visible_budget_reserves_time_for_timeout_fallback() -> None:
+    assert CompanionTurn._generation_timeout_seconds(
+        ResponseBudget(first_visible_by_ms=5_000, complete_by_ms=8_000)
+    ) == 4.5
+    assert CompanionTurn._generation_timeout_seconds(
+        ResponseBudget(first_visible_by_ms=5, complete_by_ms=100)
+    ) == 0.004
+
+
 class SlowTransport:
     def __init__(self) -> None:
         self.beats: list[TurnBeat] = []
@@ -890,21 +899,23 @@ async def test_async_first_receipt_resumes_the_next_planned_expression_beat(
 
 
 @pytest.mark.asyncio
-async def test_generation_timeout_returns_a_structured_failure(tmp_path: Path) -> None:
+async def test_generation_timeout_still_delivers_a_ledgered_minimal_first_beat(tmp_path: Path) -> None:
     transport = RecordingTransport(
         DispatchAcceptance(status="delivered", external_receipt="unused")
     )
-    runtime, _, _ = _turn_runtime(tmp_path, transport, model=SlowReplyModel())
+    runtime, world, world_id = _turn_runtime(tmp_path, transport, model=SlowReplyModel())
 
     outcome = await runtime.respond(
         _envelope("turn-generation-timeout"),
         budget=ResponseBudget(first_visible_by_ms=5, complete_by_ms=100),
     )
 
-    assert outcome.visible_status == "failed"
+    assert outcome.visible_status == "delivered"
     assert outcome.degraded is True
     assert outcome.degradation_reason == "first_visible_timeout"
-    assert transport.beats == []
+    assert [beat.text for beat in transport.beats] == ["接着说就好。"]
+    action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
+    assert action["status"] == "delivered"
 
 
 @pytest.mark.asyncio

@@ -157,7 +157,7 @@ class TurnModelCallBudget:
         # Reserve roughly one second of the five-second user-visible hot-turn
         # budget for Guard, Action staging and transport dispatch.  A slower
         # provider result is less valuable than a prompt local convergence.
-        timeout = {"hot": 4.0, "warm": 10.0, "cold": 15.0}.get(
+        timeout = {"hot": 3.5, "warm": 10.0, "cold": 15.0}.get(
             turn.cadence.heat, 15.0
         )
         max_calls = min(

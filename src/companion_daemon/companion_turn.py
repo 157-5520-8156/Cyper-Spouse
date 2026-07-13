@@ -230,7 +230,7 @@ class CompanionTurn:
                 turn, budget=budget, options=options or TurnOptions()
             )
         except TimeoutError:
-            return self._converge_timeout(turn)
+            return await self._converge_timeout(turn)
 
     async def _respond_with_timeout(
         self,
@@ -244,7 +244,7 @@ class CompanionTurn:
             return existing
         await self._cancel_interrupted_actions(turn)
         complete_by_at = utc_now() + timedelta(milliseconds=budget.complete_by_ms)
-        timeout_seconds = budget.first_visible_by_ms / 1000.0
+        timeout_seconds = self._generation_timeout_seconds(budget)
         async with asyncio.timeout(timeout_seconds):
             reply = await self.engine.handle_message(
                 turn.message,
@@ -313,17 +313,11 @@ class CompanionTurn:
                 ),
             )
 
-    def _converge_timeout(self, turn: TurnEnvelope) -> TurnOutcome:
+    async def _converge_timeout(self, turn: TurnEnvelope) -> TurnOutcome:
         """Close any staged Action after cancellation instead of leaving it open."""
         action_match = self._matching_action(turn)
         if action_match is None:
-            return self._outcome(
-                turn,
-                action_ids=(),
-                status="failed",
-                degraded=True,
-                reason="first_visible_timeout",
-            )
+            return await self._dispatch_timeout_fallback(turn)
         action_id, action = action_match
         delivery_id = int(action.get("delivery_id") or 0)
         segment_state = action.get("segment_state", {})
@@ -360,6 +354,76 @@ class CompanionTurn:
             degraded=True,
             reason="first_visible_timeout",
         )
+
+    async def _dispatch_timeout_fallback(self, turn: TurnEnvelope) -> TurnOutcome:
+        """Send one fact-free beat when generation timed out before staging.
+
+        The original model task has already been cancelled by the first-visible
+        deadline.  This is deliberately not a second model call or an adapter
+        side channel: it creates and settles the same authoritative outgoing
+        Action as a normal turn.
+        """
+        try:
+            reply = self.engine.prepare_adapter_failure_reply(
+                turn.message,
+                "接着说就好。",
+                failure_reason="first_visible_timeout_before_action_staged",
+            )
+            if reply.delivery_id is None or not reply.world_action_id:
+                raise WorldError("timeout fallback did not stage an outgoing Action")
+            presentation = TurnPresentation(
+                action_id=reply.world_action_id,
+                incoming=turn.message,
+                canonical_user_id=reply.canonical_user_id,
+                suggested_reaction=None,
+                sticker_path=None,
+                image_path=None,
+                media_action_id=None,
+                sticker_action_id=None,
+            )
+            self._presentations[reply.world_action_id] = presentation
+            await self._present_before_text(presentation)
+            async with self._action_locks.setdefault(reply.world_action_id, asyncio.Lock()):
+                settled = await self._dispatch_next(
+                    action_id=reply.world_action_id,
+                    delivery_id=reply.delivery_id,
+                    observed_at=turn.observed_at,
+                    idempotency_prefix=f"{turn.idempotency_key}:timeout-fallback",
+                    advance=False,
+                )
+            status: VisibleStatus = settled.terminal_state or self._visible_action_status(
+                reply.world_action_id
+            )
+            if status in {"delivered", "failed", "unknown"}:
+                await self._present_after_text(reply.world_action_id, status)
+            return self._outcome(
+                turn,
+                action_ids=(reply.world_action_id,),
+                status=status,
+                degraded=True,
+                reason="first_visible_timeout",
+            )
+
+        except Exception:
+            return self._outcome(
+                turn,
+                action_ids=(),
+                status="failed",
+                degraded=True,
+                reason="first_visible_timeout",
+            )
+
+    @staticmethod
+    def _generation_timeout_seconds(budget: ResponseBudget) -> float:
+        """Reserve part of the visible budget for the no-model convergence.
+
+        Letting generation consume the whole deadline made a successful local
+        fallback visibly late.  The reserve is bounded so tiny test budgets
+        still exercise timeout behavior while a five-second hot turn retains
+        half a second for Action staging and transport dispatch.
+        """
+        reserve_ms = min(500, max(1, budget.first_visible_by_ms // 10))
+        return max(0.001, (budget.first_visible_by_ms - reserve_ms) / 1000.0)
 
     async def settle(self, observation: ExternalObservation) -> SettlementOutcome:
         self._recover_receipt_watchdogs()

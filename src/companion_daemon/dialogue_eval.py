@@ -1023,7 +1023,11 @@ async def run_baseline_scenarios(
                                     )
                                 else:
                                     reply_text, status, first_visible, elapsed, turn_id = (
-                                        await _run_full_baseline_turn(engine, message=message)
+                                        await _run_full_baseline_turn(
+                                            engine,
+                                            message=message,
+                                            cadence="cold" if turn_index == 1 else "hot",
+                                        )
                                     )
                                 evaluated = (
                                     evaluate_reply(
@@ -1098,7 +1102,7 @@ async def _run_bare_baseline_turn(
 
 
 async def _run_full_baseline_turn(
-    engine, *, message: IncomingMessage
+    engine, *, message: IncomingMessage, cadence: str
 ) -> tuple[str, str, int | None, int, str]:
     transport = CaptureTurnTransport(receipt_namespace="baseline")
     turn = CompanionTurn(engine, transport)
@@ -1108,7 +1112,10 @@ async def _run_full_baseline_turn(
             message,
             idempotency_key=f"{message.platform}:{message.platform_user_id}:{message.message_id}",
         ),
-        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        budget=ResponseBudget(
+            first_visible_by_ms=5_000 if cadence == "hot" else 8_000,
+            complete_by_ms=8_000 if cadence == "hot" else 12_000,
+        ),
     )
     await turn.wait_for_delivery_continuations()
     elapsed = max(0, int((monotonic() - started) * 1000))
