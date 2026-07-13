@@ -177,7 +177,7 @@ async def test_incomplete_world_runtime_fails_closed_before_legacy_generation() 
 
     class FakeEngine:
         world_kernel = object()
-        world_id = "world"
+        world_id = ""
 
         def mark_phone_read_for_message(self, _incoming: IncomingMessage) -> None:
             order.append("read")
@@ -646,6 +646,14 @@ def test_world_turn_detection_accepts_a_delegating_runtime() -> None:
         world_id = "world-proxy"
 
     assert _requires_world_turn_runtime(DelegatingRuntime()) is True
+
+
+def test_missing_world_id_still_fails_closed_instead_of_enabling_legacy_qq() -> None:
+    class IncompleteRuntime:
+        world_kernel = object()
+        world_id = ""
+
+    assert _requires_world_turn_runtime(IncompleteRuntime()) is True
 
 
 @pytest.mark.asyncio

@@ -89,10 +89,9 @@ def _requires_world_turn_runtime(engine: object) -> bool:
     :class:`WorldKernel`.  Treating a malformed World capability as World here
     is deliberate: failing closed is safer than reviving the legacy sender.
     """
-    return (
-        getattr(engine, "world_kernel", None) is not None
-        and bool(getattr(engine, "world_id", None))
-    )
+    # A missing id is a malformed World runtime, not permission to revive the
+    # legacy sender.  ``_generate_and_send`` will reject it before dispatch.
+    return getattr(engine, "world_kernel", None) is not None
 
 
 def _world_afterthought_suppression_reason(
