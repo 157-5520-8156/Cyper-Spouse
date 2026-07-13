@@ -9,6 +9,12 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from companion_daemon.config import get_settings
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    DispatchAcceptance,
+    ResponseBudget,
+    TurnEnvelope,
+)
 from companion_daemon.dashboard_ui import DASHBOARD_HTML
 from companion_daemon.world_console_ui import WORLD_CONSOLE_HTML
 from companion_daemon.models import CompanionReply, IncomingMessage, ProactiveDecision
@@ -22,6 +28,8 @@ from companion_daemon.qq_official import (
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel
 from companion_daemon.qq_delivery import QQDelivery
+from companion_daemon.qq_websocket import QQTurnPresenter
+from companion_daemon.turn_transports import CaptureTurnTransport
 
 
 @asynccontextmanager
@@ -103,15 +111,64 @@ def world_console() -> str:
 async def post_message(message: IncomingMessage) -> CompanionReply | JSONResponse:
     if not message.text.strip():
         raise HTTPException(status_code=400, detail="text is required")
-    reply = await engine.handle_message(message)
-    if reply is None:
+    if not message.message_id:
+        raise HTTPException(status_code=400, detail="message_id is required for idempotent delivery")
+    # HTTP is a simulator/debug transport, not an Engine escape hatch.  Its
+    # in-process capture receipt makes the response observable without
+    # pretending a QQ/OneBot adapter sent it.  All World Action creation and
+    # settlement still pass through CompanionTurn.
+    transport = CaptureTurnTransport(receipt_namespace="http-capture")
+
+    async def capture_media(_incoming: IncomingMessage, reply: CompanionReply) -> dict[str, str]:
+        action_id = reply.sticker_action_id or reply.media_action_id or "untracked"
+        return {"id": f"http-capture:media:{action_id}"}
+
+    async def capture_reaction(
+        _incoming: IncomingMessage, reply: CompanionReply
+    ) -> DispatchAcceptance:
+        return DispatchAcceptance(
+            status="delivered",
+            external_receipt=f"http-capture:reaction:{reply.suggested_reaction or 'none'}",
+        )
+
+    presenter = QQTurnPresenter(
+        engine,
+        on_reply=None,
+        on_sticker=capture_media,
+        on_image=capture_media,
+        on_reaction=capture_reaction,
+        after_delivered=None,
+        after_terminal=lambda: None,
+    )
+    turn = CompanionTurn(engine, transport, presenter=presenter)
+    presenter.settle_external = turn.settle
+    outcome = await turn.respond(
+        TurnEnvelope.from_message(
+            message,
+            idempotency_key=f"{message.platform}:{message.platform_user_id}:{message.message_id}",
+        ),
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+    )
+    await turn.wait_for_delivery_continuations()
+    if not transport.text:
         return JSONResponse(
             status_code=202,
             content={"status": "no_immediate_reply", "message_id": message.message_id},
         )
-    engine.confirm_media_delivery(reply)
-    engine.confirm_sticker_delivery(reply)
-    return reply
+    action_id = outcome.action_ids[0] if outcome.action_ids else None
+    action: dict[str, object] = {}
+    if action_id and engine.world_kernel and engine.world_id:
+        raw = engine.world_kernel.snapshot(engine.world_id).get("actions", {}).get(action_id)
+        if isinstance(raw, dict):
+            action = raw
+    return CompanionReply(
+        canonical_user_id=engine.store.resolve_user(message.platform, message.platform_user_id),
+        mood="calm",
+        text=transport.text,
+        text_parts=[beat.text for beat in transport.beats],
+        delivery_id=(int(action["delivery_id"]) if action.get("delivery_id") else None),
+        world_action_id=action_id,
+    )
 
 
 @app.post("/proactive/{canonical_user_id}", response_model=ProactiveDecision)

@@ -398,7 +398,7 @@ def test_world_console_reports_disabled_runtime(monkeypatch, tmp_path: Path) -> 
     assert response.json() == {"enabled": False}
 
 
-def test_http_message_endpoint_represents_world_defer_without_server_error(tmp_path: Path, monkeypatch) -> None:
+def test_http_message_endpoint_uses_capture_turn_instead_of_hard_defer(tmp_path: Path, monkeypatch) -> None:
     store = CompanionStore(tmp_path / "deferred-world.sqlite")
     seed_user(store)
     kernel = WorldKernel(store)
@@ -420,11 +420,16 @@ def test_http_message_endpoint_represents_world_defer_without_server_error(tmp_p
         ).model_dump(mode="json"),
     )
 
-    assert response.status_code == 202
-    assert response.json() == {"status": "no_immediate_reply", "message_id": "http-defer"}
+    assert response.status_code == 200
+    action_id = response.json()["world_action_id"]
+    action = kernel.snapshot(started.world_id)["actions"][action_id]
+    assert action["status"] == "delivered"
+    assert action["segment_state"]["segments"][0]["external_receipt"].startswith(
+        "http-capture:"
+    )
 
 
-def test_http_message_endpoint_settles_returned_sticker_action(tmp_path: Path, monkeypatch) -> None:
+def test_http_message_endpoint_settles_text_via_turn_not_engine_confirmation(tmp_path: Path, monkeypatch) -> None:
     store = CompanionStore(tmp_path / "sticker-world.sqlite")
     seed_user(store)
     kernel = WorldKernel(store)
@@ -450,6 +455,12 @@ def test_http_message_endpoint_settles_returned_sticker_action(tmp_path: Path, m
     )
     monkeypatch.setattr(app_module, "engine", engine)
 
+    def should_not_be_called(*_args, **_kwargs) -> None:
+        raise AssertionError("HTTP endpoint must settle through CompanionTurn")
+
+    monkeypatch.setattr(engine, "confirm_media_delivery", should_not_be_called)
+    monkeypatch.setattr(engine, "confirm_sticker_delivery", should_not_be_called)
+
     response = TestClient(app_module.app).post(
         "/messages",
         json=IncomingMessage(
@@ -461,9 +472,11 @@ def test_http_message_endpoint_settles_returned_sticker_action(tmp_path: Path, m
     )
 
     assert response.status_code == 200
-    action = kernel.snapshot(started.world_id)["actions"]["sticker-delivery:http-sticker"]
+    action = kernel.snapshot(started.world_id)["actions"][response.json()["world_action_id"]]
     assert action["status"] == "delivered"
-    assert kernel.snapshot(started.world_id)["stickers"]["sticker-delivery:http-sticker"]["status"] == "shared"
+    assert action["segment_state"]["segments"][0]["external_receipt"].startswith(
+        "http-capture:"
+    )
 
 
 def test_world_console_keeps_unresolved_activity_visible_after_long_history(tmp_path: Path) -> None:
