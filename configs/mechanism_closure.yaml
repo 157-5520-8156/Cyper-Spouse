@@ -120,7 +120,7 @@ mechanisms:
     actions: [reply-later]
     terminal_states: [delivered, failed, cancelled, expired, unknown]
     adapters: [qq-official, napcat, onebot, http]
-    tests: [tests/test_world_conversation_experience.py::test_non_interruptible_high_attention_activity_defers_an_ordinary_message, tests/test_world_input_merge.py::test_pending_input_merge_is_auditable_and_recovers_after_engine_restart]
+    tests: [tests/test_world_conversation_experience.py::test_non_interruptible_activity_is_an_advisory_not_a_pre_model_veto, tests/test_world_input_merge.py::test_pending_input_merge_is_auditable_and_recovers_after_engine_restart]
 
   - id: segmented-outbound-actions
     status: closed
