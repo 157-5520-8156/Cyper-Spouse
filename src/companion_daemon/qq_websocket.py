@@ -996,10 +996,10 @@ class QQMessageCoalescer:
                     logger.exception("failed to settle cancelled world turn for %s", key)
             return
         finally:
-            self._frozen_turn_contexts.pop(key, None)
-            self._turn_cadences.pop(key, None)
             task = self._tasks.get(key)
             if task is asyncio.current_task():
+                self._frozen_turn_contexts.pop(key, None)
+                self._turn_cadences.pop(key, None)
                 self._tasks.pop(key, None)
 
     def _observe_turn(self, observation: TurnRuntimeObservation) -> None:

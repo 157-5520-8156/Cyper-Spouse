@@ -640,7 +640,7 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
 
 | 阶段 | 已验证 | 仍需完成/证明 |
 | --- | --- | --- |
-| Phase 0 | 已有 bare/full 基线工具；一次真实模型样本的 hot full P50 约 2.5s、P95 约 3.6s | 真实模型每变体至少 20 个 hot 样本、QQ 合并等待计入的端到端基线、人工盲评 |
+| Phase 0 | 已有 bare/full 基线工具；一次真实模型样本的 hot full P50 约 2.5s、P95 约 3.6s；QQ 基线从首条进入合并队列计时，并按 cold/warm/hot 分组 | 真实模型每变体至少 20 个 hot 样本、带真实 QQ 网络的端到端样本、人工盲评 |
 | Phase 1 | QQ/NapCat 文本和 simulator 经过 `CompanionTurn.respond`；平台、tool、media 与 timeout 可经 `settle` 幂等结算；后台媒体、以及 World-mode 的重启后定时补发也通过同一 Turn seam | HTTP 调试入口与非 World 的遗留兼容路径仍需完全收口到同一 seam |
 | Phase 2–5 | 有界 TurnFrame、Advisory、单一 hard guard、PrivateImpression/Commitment 与 Expression Beat 已在主路径使用 | 长对话校准与各字段的体验效度尚未由外部用户数据证明 |
 | Phase 6 | 多段文本 receipt、用户插话取消、QQ 图片/贴纸/反应、后台图片、正常及重启后的 afterthought 的真实回执语义已覆盖；无 durable receipt 记为 `unknown` | 需补 NapCat 适配器级回归矩阵，并逐步淘汰非 World 遗留兼容路径 |
