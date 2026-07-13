@@ -1184,7 +1184,7 @@ def format_baseline_report(report: BaselineReport) -> str:
     for turn in report.turns:
         lines.append(
             "[{}:{}:{}] visible={} first_visible_delivery_ms={} end_to_end_complete_ms={} "
-            "calls={} total_tokens={} issues={}".format(
+            "calls={} failed_calls={} total_tokens={} routes={} issues={}".format(
                 turn.variant,
                 turn.scenario,
                 f"run={turn.run_index}:turn={turn.turn_index}:{turn.cadence}",
@@ -1192,7 +1192,13 @@ def format_baseline_report(report: BaselineReport) -> str:
                 turn.first_visible_delivery_ms,
                 turn.end_to_end_complete_ms,
                 turn.model_usage.get("calls", 0),
+                turn.model_usage.get("failed_calls", 0),
                 turn.model_usage.get("total_tokens", 0),
+                json.dumps(
+                    turn.model_usage.get("routes", {}),
+                    ensure_ascii=False,
+                    sort_keys=True,
+                ),
                 ",".join(turn.issues) or "ok",
             )
         )

@@ -351,7 +351,9 @@ class DeepSeekChatModel:
                         call_meta.get("budget_reservation_id") or ""
                     ),
                     thinking_enabled=self.thinking_enabled,
-                    reasoning_effort=self.reasoning_effort,
+                    reasoning_effort=(
+                        self.reasoning_effort if self.thinking_enabled else ""
+                    ),
                     billing_state="unknown",
                 )
             )
@@ -394,7 +396,9 @@ class DeepSeekChatModel:
                         call_meta.get("budget_reservation_id") or ""
                     ),
                     thinking_enabled=self.thinking_enabled,
-                    reasoning_effort=self.reasoning_effort,
+                    reasoning_effort=(
+                        self.reasoning_effort if self.thinking_enabled else ""
+                    ),
                     billing_state=billing_state,
                 )
             )
@@ -424,7 +428,9 @@ class DeepSeekChatModel:
                 attempt=max(1, int(call_meta.get("attempt") or 1)),
                 budget_reservation_id=str(call_meta.get("budget_reservation_id") or ""),
                 thinking_enabled=self.thinking_enabled,
-                reasoning_effort=self.reasoning_effort,
+                reasoning_effort=(
+                    self.reasoning_effort if self.thinking_enabled else ""
+                ),
                 billing_state="known",
             )
         )

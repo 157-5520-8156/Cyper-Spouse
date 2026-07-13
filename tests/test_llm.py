@@ -100,7 +100,7 @@ async def test_deepseek_completion_reports_real_usage_with_call_purpose() -> Non
     assert usage.cache_miss_tokens == 40
     assert usage.total_tokens == 138
     assert usage.thinking_enabled is False
-    assert usage.reasoning_effort == "high"
+    assert usage.reasoning_effort == ""
     assert usage.latency_ms >= 0
 
 
@@ -136,6 +136,8 @@ async def test_model_usage_is_correlated_to_the_frozen_world_turn() -> None:
     assert usage.cadence == "hot"
     assert usage.attempt == 2
     assert usage.budget_reservation_id == "reservation-1"
+    assert usage.thinking_enabled is True
+    assert usage.reasoning_effort == "high"
 
 
 @pytest.mark.asyncio

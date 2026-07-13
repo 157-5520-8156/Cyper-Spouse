@@ -7,13 +7,17 @@ import httpx
 import pytest
 
 from companion_daemon.dialogue_eval import (
+    BaselineComparison,
+    BaselineReport,
     BaselineSummary,
+    MeasuredTurn,
     PRAGMATIC_ADVERSARIAL_CASES,
     PragmaticAdversarialCase,
     PragmaticPrediction,
     ReplyEval,
     assess_baseline,
     evaluate_reply,
+    format_baseline_report,
     format_results,
     pragmatic_classification_metrics,
     run_baseline_scenarios,
@@ -89,6 +93,51 @@ async def test_bare_baseline_records_a_provider_transport_failure_without_crashi
     assert first_visible is None
     assert elapsed >= 0
     assert turn_id == "baseline:bare:bare-failure"
+
+
+def test_formatted_baseline_discloses_effective_model_route_and_failures() -> None:
+    report = BaselineReport(
+        model_profile={"live": False},
+        turns=(
+            MeasuredTurn(
+                variant="full",
+                scenario="ordinary_chat",
+                run_index=1,
+                turn_index=2,
+                cadence="hot",
+                user_text="嗯嗯",
+                reply_text="我在。",
+                visible_status="delivered",
+                first_visible_delivery_ms=120,
+                end_to_end_complete_ms=160,
+                model_usage={
+                    "calls": 1,
+                    "failed_calls": 0,
+                    "total_tokens": 42,
+                    "routes": {
+                        "deepseek-v4-flash|thinking=0|default": {"calls": 1}
+                    },
+                },
+                issues=(),
+            ),
+        ),
+        definition={},
+        summaries=(),
+        comparison=BaselineComparison(
+            status="insufficient_evidence",
+            hot_samples_per_variant=0,
+            full_hot_p50_ms=None,
+            full_hot_p95_ms=None,
+            bare_hot_p95_ms=None,
+            permitted_full_hot_p95_ms=None,
+            reasons=("synthetic",),
+        ),
+    )
+
+    formatted = format_baseline_report(report)
+
+    assert "failed_calls=0" in formatted
+    assert "deepseek-v4-flash|thinking=0|default" in formatted
 
 
 def test_live_baseline_gate_requires_samples_then_checks_absolute_and_relative_slo() -> None:
