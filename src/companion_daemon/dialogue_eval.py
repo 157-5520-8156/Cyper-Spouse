@@ -3,11 +3,14 @@ from __future__ import annotations
 import argparse
 import asyncio
 from dataclasses import dataclass, field
+from hashlib import sha256
 import json
+from math import ceil
 from pathlib import Path
 import re
 import tempfile
 from time import monotonic
+from typing import Iterable
 
 from companion_daemon.config import get_settings
 from companion_daemon.companion_turn import CompanionTurn, ResponseBudget, TurnEnvelope
@@ -21,6 +24,7 @@ from companion_daemon.runtime import build_companion_engine
 from companion_daemon.sanitize import sanitize_chat_text
 from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.time import utc_now
+from companion_daemon.usage_metrics import nearest_rank
 from companion_daemon.world import WorldKernel
 
 
@@ -138,7 +142,9 @@ class MeasuredTurn:
 
     variant: str
     scenario: str
+    run_index: int
     turn_index: int
+    cadence: str
     user_text: str
     reply_text: str
     visible_status: str
@@ -150,19 +156,28 @@ class MeasuredTurn:
 
 @dataclass(frozen=True)
 class BaselineReport:
-    """A local, reproducible comparison; not a claim about live TTFT."""
+    """A reproducible comparison; a live verdict needs enough independent samples."""
 
     model_profile: dict[str, object]
     turns: tuple[MeasuredTurn, ...]
+    definition: dict[str, object]
+    summaries: tuple["BaselineSummary", ...]
+    comparison: "BaselineComparison"
 
     def as_dict(self) -> dict[str, object]:
         return {
+            "schema_version": 2,
             "model_profile": self.model_profile,
+            "definition": self.definition,
+            "summaries": [summary.as_dict() for summary in self.summaries],
+            "comparison": self.comparison.as_dict(),
             "turns": [
                 {
                     "variant": turn.variant,
                     "scenario": turn.scenario,
+                    "run_index": turn.run_index,
                     "turn_index": turn.turn_index,
+                    "cadence": turn.cadence,
                     "user_text": turn.user_text,
                     "reply_text": turn.reply_text,
                     "visible_status": turn.visible_status,
@@ -173,6 +188,68 @@ class BaselineReport:
                 }
                 for turn in self.turns
             ],
+        }
+
+
+@dataclass(frozen=True)
+class BaselineSummary:
+    """A compact aggregate for one variant/cadence slice of a baseline run."""
+
+    variant: str
+    cadence: str
+    sample_count: int
+    delivered_count: int
+    visible_count: int
+    p50_first_visible_delivery_ms: int | None
+    p95_first_visible_delivery_ms: int | None
+    p50_end_to_end_complete_ms: int
+    p95_end_to_end_complete_ms: int
+    model_calls: int
+    total_tokens: int
+    reasoning_tokens: int
+    issue_count: int
+    hard_issue_count: int
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "variant": self.variant,
+            "cadence": self.cadence,
+            "sample_count": self.sample_count,
+            "delivered_count": self.delivered_count,
+            "visible_count": self.visible_count,
+            "p50_first_visible_delivery_ms": self.p50_first_visible_delivery_ms,
+            "p95_first_visible_delivery_ms": self.p95_first_visible_delivery_ms,
+            "p50_end_to_end_complete_ms": self.p50_end_to_end_complete_ms,
+            "p95_end_to_end_complete_ms": self.p95_end_to_end_complete_ms,
+            "model_calls": self.model_calls,
+            "total_tokens": self.total_tokens,
+            "reasoning_tokens": self.reasoning_tokens,
+            "issue_count": self.issue_count,
+            "hard_issue_count": self.hard_issue_count,
+        }
+
+
+@dataclass(frozen=True)
+class BaselineComparison:
+    """Explicit evidence status for the architecture's normal-chat latency gate."""
+
+    status: str
+    hot_samples_per_variant: int
+    full_hot_p50_ms: int | None
+    full_hot_p95_ms: int | None
+    bare_hot_p95_ms: int | None
+    permitted_full_hot_p95_ms: int | None
+    reasons: tuple[str, ...]
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "hot_samples_per_variant": self.hot_samples_per_variant,
+            "full_hot_p50_ms": self.full_hot_p50_ms,
+            "full_hot_p95_ms": self.full_hot_p95_ms,
+            "bare_hot_p95_ms": self.bare_hot_p95_ms,
+            "permitted_full_hot_p95_ms": self.permitted_full_hot_p95_ms,
+            "reasons": list(self.reasons),
         }
 
 
@@ -404,6 +481,159 @@ SCENARIOS = [
         ["我明天考试，毛概", "你等下还想继续背吗", "先不说那个，我今天心里有点闷"],
     ),
 ]
+
+
+# These are acceptance thresholds for a sufficiently sampled *live* normal-chat
+# run, not promises made by a synthetic model or a one-off provider request.
+_BASELINE_MIN_HOT_SAMPLES = 20
+_BASELINE_HOT_P50_TARGET_MS = 3_000
+_BASELINE_HOT_P95_TARGET_MS = 5_000
+_BASELINE_RELATIVE_P95_MULTIPLIER = 1.5
+_BASELINE_RELATIVE_P95_ALLOWANCE_MS = 1_000
+
+
+def baseline_definition() -> dict[str, object]:
+    """Return the immutable input contract recorded alongside every report."""
+    scenario_rows = [
+        {"name": scenario.name, "turns": list(scenario.turns)} for scenario in SCENARIOS
+    ]
+    encoded = json.dumps(scenario_rows, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    return {
+        "scenario_set_sha256": sha256(encoded.encode("utf-8")).hexdigest(),
+        "scenario_count": len(scenario_rows),
+        "normal_chat_hot_sample_minimum": _BASELINE_MIN_HOT_SAMPLES,
+        "hot_p50_target_ms": _BASELINE_HOT_P50_TARGET_MS,
+        "hot_p95_target_ms": _BASELINE_HOT_P95_TARGET_MS,
+        "relative_p95_multiplier": _BASELINE_RELATIVE_P95_MULTIPLIER,
+        "relative_p95_allowance_ms": _BASELINE_RELATIVE_P95_ALLOWANCE_MS,
+        "first_visible_metric": "first successful transport dispatch; provider TTFT unavailable",
+    }
+
+
+def summarize_baseline_turns(turns: Iterable[MeasuredTurn]) -> tuple[BaselineSummary, ...]:
+    """Aggregate all and hot/cold slices without hiding failed or missing delivery."""
+    rows = tuple(turns)
+    summaries: list[BaselineSummary] = []
+    for variant in ("bare", "full"):
+        variant_rows = [turn for turn in rows if turn.variant == variant]
+        for cadence in ("all", "cold", "hot"):
+            selected = (
+                variant_rows
+                if cadence == "all"
+                else [turn for turn in variant_rows if turn.cadence == cadence]
+            )
+            visible = [
+                int(turn.first_visible_delivery_ms)
+                for turn in selected
+                if turn.first_visible_delivery_ms is not None
+            ]
+            e2e = [int(turn.end_to_end_complete_ms) for turn in selected]
+            summaries.append(
+                BaselineSummary(
+                    variant=variant,
+                    cadence=cadence,
+                    sample_count=len(selected),
+                    delivered_count=sum(turn.visible_status == "delivered" for turn in selected),
+                    visible_count=len(visible),
+                    p50_first_visible_delivery_ms=nearest_rank(visible, 0.50) if visible else None,
+                    p95_first_visible_delivery_ms=nearest_rank(visible, 0.95) if visible else None,
+                    p50_end_to_end_complete_ms=nearest_rank(e2e, 0.50),
+                    p95_end_to_end_complete_ms=nearest_rank(e2e, 0.95),
+                    model_calls=sum(_usage_int(turn.model_usage, "calls") for turn in selected),
+                    total_tokens=sum(_usage_int(turn.model_usage, "total_tokens") for turn in selected),
+                    reasoning_tokens=sum(
+                        _usage_int(turn.model_usage, "reasoning_tokens") for turn in selected
+                    ),
+                    issue_count=sum(len(turn.issues) for turn in selected),
+                    hard_issue_count=sum(
+                        sum(issue in _HARD_ISSUE_CODES for issue in turn.issues) for turn in selected
+                    ),
+                )
+            )
+    return tuple(summaries)
+
+
+def assess_baseline(
+    summaries: Iterable[BaselineSummary], *, live: bool
+) -> BaselineComparison:
+    """Assess only the measurable latency gate and name unproven experience claims.
+
+    A model-generated reply cannot prove the required human blind evaluation.
+    The report intentionally returns ``insufficient_evidence`` until it is a
+    live run with enough hot samples; callers must not turn one fast request
+    into a P95 claim.
+    """
+    index = {(item.variant, item.cadence): item for item in summaries}
+    full_hot = index.get(("full", "hot"))
+    bare_hot = index.get(("bare", "hot"))
+    hot_samples = min(
+        full_hot.sample_count if full_hot else 0,
+        bare_hot.sample_count if bare_hot else 0,
+    )
+    full_p50 = full_hot.p50_first_visible_delivery_ms if full_hot else None
+    full_p95 = full_hot.p95_first_visible_delivery_ms if full_hot else None
+    bare_p95 = bare_hot.p95_first_visible_delivery_ms if bare_hot else None
+    permitted = (
+        max(
+            _BASELINE_HOT_P95_TARGET_MS,
+            bare_p95 + _BASELINE_RELATIVE_P95_ALLOWANCE_MS,
+            ceil(bare_p95 * _BASELINE_RELATIVE_P95_MULTIPLIER),
+        )
+        if bare_p95 is not None
+        else None
+    )
+    reasons: list[str] = [
+        "Human blind evaluation remains required for naturalness; heuristic issue counts are diagnostic."
+    ]
+    if not live:
+        reasons.append("Synthetic/fake runs verify instrumentation, not provider latency.")
+    if hot_samples < _BASELINE_MIN_HOT_SAMPLES:
+        reasons.append(
+            f"Need at least {_BASELINE_MIN_HOT_SAMPLES} hot samples per variant; observed {hot_samples}."
+        )
+    missing_visible_latency = (
+        full_hot is None
+        or bare_hot is None
+        or full_p50 is None
+        or full_p95 is None
+        or bare_p95 is None
+    )
+    if missing_visible_latency:
+        reasons.append("Both variants need visible hot deliveries before latency can be assessed.")
+    if not live or hot_samples < _BASELINE_MIN_HOT_SAMPLES or missing_visible_latency:
+        return BaselineComparison(
+            "insufficient_evidence", hot_samples, full_p50, full_p95, bare_p95, permitted, tuple(reasons)
+        )
+    failures: list[str] = []
+    if full_p50 > _BASELINE_HOT_P50_TARGET_MS:
+        failures.append(
+            f"Full hot P50 {full_p50}ms exceeds {_BASELINE_HOT_P50_TARGET_MS}ms target."
+        )
+    if full_p95 > _BASELINE_HOT_P95_TARGET_MS:
+        failures.append(
+            f"Full hot P95 {full_p95}ms exceeds {_BASELINE_HOT_P95_TARGET_MS}ms target."
+        )
+    if permitted is not None and full_p95 > permitted:
+        failures.append(
+            f"Full hot P95 {full_p95}ms exceeds bare-relative allowance {permitted}ms."
+        )
+    return BaselineComparison(
+        "fail" if failures else "pass",
+        hot_samples,
+        full_p50,
+        full_p95,
+        bare_p95,
+        permitted,
+        tuple(reasons + failures),
+    )
+
+
+def _usage_int(usage: dict[str, object], key: str) -> int:
+    value = usage.get(key, 0)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 CONTEXT_SCENARIOS = [
@@ -700,7 +930,7 @@ async def run_scenarios(
 
 
 async def run_baseline_scenarios(
-    *, live: bool = False, max_cases: int | None = None
+    *, live: bool = False, max_cases: int | None = None, repetitions: int = 1
 ) -> BaselineReport:
     """Measure a deliberately thin model chat against the complete turn path.
 
@@ -711,85 +941,103 @@ async def run_baseline_scenarios(
     The non-streaming provider cannot supply TTFT, so the visible metric is
     first successful transport dispatch rather than a claimed token timestamp.
     """
+    if repetitions < 1:
+        raise ValueError("repetitions must be positive")
     settings = get_settings()
+    if live and not (settings.deepseek_api_key or "").strip():
+        raise RuntimeError("--live baseline requires DEEPSEEK_API_KEY; refusing to label a fake run as live")
     original_db = settings.database_path
     measured: list[MeasuredTurn] = []
     profile: dict[str, object] = {
         "live": live,
+        "model_transport": "provider" if live else "fake",
         "configured_model": settings.deepseek_model,
         "thinking_enabled": settings.deepseek_thinking_enabled,
         "temperature": 0.75,
+        "repetitions": repetitions,
         "bare_contract": "one model completion; character prompt plus delivered local transcript",
     }
     try:
         with tempfile.TemporaryDirectory() as tmp:
             scenarios = SCENARIOS[: max_cases or len(SCENARIOS)]
             for variant in ("bare", "full"):
-                for scenario in scenarios:
-                    temp_db = Path(tmp) / f"baseline-{variant}-{scenario.name}.sqlite"
-                    settings.database_path = temp_db
-                    engine = build_companion_engine(use_fake_model=not live)
-                    history: list[dict[str, str]] = []
-                    recent_questions = 0
-                    try:
-                        for turn_index, text in enumerate(scenario.turns, start=1):
-                            message = IncomingMessage(
-                                platform="qq",
-                                platform_user_id=f"baseline-{variant}-{scenario.name}",
-                                message_id=f"{scenario.name}:{turn_index}",
-                                text=text,
-                            )
-                            if variant == "bare":
-                                reply_text, status, first_visible, elapsed, turn_id = (
-                                    await _run_bare_baseline_turn(
-                                        engine, message=message, history=history
+                for run_index in range(1, repetitions + 1):
+                    for scenario in scenarios:
+                        temp_db = Path(
+                            tmp, f"baseline-{variant}-{scenario.name}-run-{run_index}.sqlite"
+                        )
+                        settings.database_path = temp_db
+                        engine = build_companion_engine(use_fake_model=not live)
+                        history: list[dict[str, str]] = []
+                        recent_questions = 0
+                        try:
+                            for turn_index, text in enumerate(scenario.turns, start=1):
+                                message = IncomingMessage(
+                                    platform="qq",
+                                    platform_user_id=f"baseline-{variant}-{scenario.name}",
+                                    message_id=f"{scenario.name}:{turn_index}",
+                                    text=text,
+                                )
+                                if variant == "bare":
+                                    reply_text, status, first_visible, elapsed, turn_id = (
+                                        await _run_bare_baseline_turn(
+                                            engine, message=message, history=history
+                                        )
+                                    )
+                                else:
+                                    reply_text, status, first_visible, elapsed, turn_id = (
+                                        await _run_full_baseline_turn(engine, message=message)
+                                    )
+                                evaluated = (
+                                    evaluate_reply(
+                                        reply_text,
+                                        user_text=text,
+                                        recent_assistant_questions=recent_questions,
+                                    )
+                                    if reply_text
+                                    else _evaluate_no_reply(text, is_deferred=status == "deferred")
+                                )
+                                measured.append(
+                                    MeasuredTurn(
+                                        variant=variant,
+                                        scenario=scenario.name,
+                                        run_index=run_index,
+                                        turn_index=turn_index,
+                                        cadence="cold" if turn_index == 1 else "hot",
+                                        user_text=text,
+                                        reply_text=reply_text,
+                                        visible_status=status,
+                                        first_visible_delivery_ms=first_visible,
+                                        end_to_end_complete_ms=elapsed,
+                                        model_usage=_usage_for_turn(engine, turn_id),
+                                        issues=tuple(issue.code for issue in evaluated.issues),
                                     )
                                 )
-                            else:
-                                reply_text, status, first_visible, elapsed, turn_id = (
-                                    await _run_full_baseline_turn(engine, message=message)
-                                )
-                            evaluated = (
-                                evaluate_reply(
-                                    reply_text,
-                                    user_text=text,
-                                    recent_assistant_questions=recent_questions,
-                                )
-                                if reply_text
-                                else _evaluate_no_reply(text, is_deferred=status == "deferred")
-                            )
-                            measured.append(
-                                MeasuredTurn(
-                                    variant=variant,
-                                    scenario=scenario.name,
-                                    turn_index=turn_index,
-                                    user_text=text,
-                                    reply_text=reply_text,
-                                    visible_status=status,
-                                    first_visible_delivery_ms=first_visible,
-                                    end_to_end_complete_ms=elapsed,
-                                    model_usage=_usage_for_turn(engine, turn_id),
-                                    issues=tuple(issue.code for issue in evaluated.issues),
-                                )
-                            )
-                            if reply_text:
-                                history.extend(
-                                    [
-                                        {"role": "user", "content": text},
-                                        {"role": "assistant", "content": reply_text},
-                                    ]
-                                )
-                                history[:] = history[-16:]
-                                recent_questions = reply_text.count("？") + reply_text.count("?")
-                            else:
-                                recent_questions = 0
-                    finally:
-                        close = getattr(engine, "aclose", None)
-                        if callable(close):
-                            await close()
+                                if reply_text:
+                                    history.extend(
+                                        [
+                                            {"role": "user", "content": text},
+                                            {"role": "assistant", "content": reply_text},
+                                        ]
+                                    )
+                                    history[:] = history[-16:]
+                                    recent_questions = reply_text.count("？") + reply_text.count("?")
+                                else:
+                                    recent_questions = 0
+                        finally:
+                            close = getattr(engine, "aclose", None)
+                            if callable(close):
+                                await close()
     finally:
         settings.database_path = original_db
-    return BaselineReport(profile, tuple(measured))
+    summaries = summarize_baseline_turns(measured)
+    return BaselineReport(
+        profile,
+        tuple(measured),
+        baseline_definition(),
+        summaries,
+        assess_baseline(summaries, live=live),
+    )
 
 
 async def _run_bare_baseline_turn(
@@ -885,7 +1133,7 @@ def format_baseline_report(report: BaselineReport) -> str:
             "calls={} total_tokens={} issues={}".format(
                 turn.variant,
                 turn.scenario,
-                turn.turn_index,
+                f"run={turn.run_index}:turn={turn.turn_index}:{turn.cadence}",
                 turn.visible_status,
                 turn.first_visible_delivery_ms,
                 turn.end_to_end_complete_ms,
@@ -894,6 +1142,29 @@ def format_baseline_report(report: BaselineReport) -> str:
                 ",".join(turn.issues) or "ok",
             )
         )
+    lines.append("baseline summaries:")
+    for summary in report.summaries:
+        lines.append(
+            "[summary:{variant}:{cadence}] samples={sample_count} delivered={delivered_count} "
+            "visible={visible_count} p50_visible_ms={p50_first_visible_delivery_ms} "
+            "p95_visible_ms={p95_first_visible_delivery_ms} p95_complete_ms="
+            "{p95_end_to_end_complete_ms} calls={model_calls} tokens={total_tokens} "
+            "reasoning_tokens={reasoning_tokens} issues={issue_count} hard_issues="
+            "{hard_issue_count}".format(**summary.as_dict())
+        )
+    comparison = report.comparison
+    lines.append(
+        "baseline verdict={} hot_samples={} full_hot_p50_ms={} full_hot_p95_ms={} "
+        "bare_hot_p95_ms={} permitted_full_hot_p95_ms={}".format(
+            comparison.status,
+            comparison.hot_samples_per_variant,
+            comparison.full_hot_p50_ms,
+            comparison.full_hot_p95_ms,
+            comparison.bare_hot_p95_ms,
+            comparison.permitted_full_hot_p95_ms,
+        )
+    )
+    lines.extend(f"baseline evidence: {reason}" for reason in comparison.reasons)
     return "\n".join(lines)
 
 
@@ -929,6 +1200,17 @@ def main(argv: list[str] | None = None) -> int:
         "--report", type=Path, default=None, help="Optional JSON file for a baseline run."
     )
     parser.add_argument(
+        "--repetitions",
+        type=int,
+        default=1,
+        help="Independent isolated repetitions per bare/full scenario (baseline only).",
+    )
+    parser.add_argument(
+        "--assert-live-slo",
+        action="store_true",
+        help="Fail unless a live baseline has enough samples and meets the hot latency SLO.",
+    )
+    parser.add_argument(
         "--context", action="store_true", help="Run deterministic context-selection regressions."
     )
     parser.add_argument(
@@ -947,14 +1229,20 @@ def main(argv: list[str] | None = None) -> int:
         return int(metrics.precision < 0.80 or metrics.recall < 0.90 or metrics.f1 < 0.85)
     if args.baseline:
         report = asyncio.run(
-            run_baseline_scenarios(live=args.live, max_cases=args.max_cases)
+            run_baseline_scenarios(
+                live=args.live,
+                max_cases=args.max_cases,
+                repetitions=args.repetitions,
+            )
         )
         if args.report:
             args.report.write_text(
                 json.dumps(report.as_dict(), ensure_ascii=False, indent=2), encoding="utf-8"
             )
         print(format_baseline_report(report))
-        return 0
+        return int(args.assert_live_slo and report.comparison.status != "pass")
+    if args.repetitions != 1 or args.assert_live_slo:
+        parser.error("--repetitions and --assert-live-slo require --baseline")
     summary = asyncio.run(run_scenario_suite(live=args.live, max_cases=args.max_cases))
     print(format_results(summary.results))
     return summary.exit_code

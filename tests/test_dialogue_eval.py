@@ -1,13 +1,16 @@
+import json
 import subprocess
 import sys
 
 import pytest
 
 from companion_daemon.dialogue_eval import (
+    BaselineSummary,
     PRAGMATIC_ADVERSARIAL_CASES,
     PragmaticAdversarialCase,
     PragmaticPrediction,
     ReplyEval,
+    assess_baseline,
     evaluate_reply,
     format_results,
     pragmatic_classification_metrics,
@@ -47,6 +50,52 @@ async def test_baseline_runner_keeps_bare_and_full_variants_isolated() -> None:
     assert all(turn.end_to_end_complete_ms >= 0 for turn in report.turns)
     assert all(turn.first_visible_delivery_ms is None or turn.first_visible_delivery_ms >= 0 for turn in report.turns)
     assert all("legacy" not in turn.variant for turn in report.turns)
+    assert all(turn.run_index == 1 for turn in report.turns)
+    assert {turn.cadence for turn in report.turns} == {"cold", "hot"}
+    assert report.as_dict()["schema_version"] == 2
+    assert report.definition["scenario_set_sha256"]
+    assert report.comparison.status == "insufficient_evidence"
+    full_hot = next(
+        summary
+        for summary in report.summaries
+        if summary.variant == "full" and summary.cadence == "hot"
+    )
+    assert full_hot.sample_count == 2
+
+
+def test_live_baseline_gate_requires_samples_then_checks_absolute_and_relative_slo() -> None:
+    def summary(variant: str, *, p50: int, p95: int) -> BaselineSummary:
+        return BaselineSummary(
+            variant=variant,
+            cadence="hot",
+            sample_count=20,
+            delivered_count=20,
+            visible_count=20,
+            p50_first_visible_delivery_ms=p50,
+            p95_first_visible_delivery_ms=p95,
+            p50_end_to_end_complete_ms=p50,
+            p95_end_to_end_complete_ms=p95,
+            model_calls=20,
+            total_tokens=2_000,
+            reasoning_tokens=0,
+            issue_count=0,
+            hard_issue_count=0,
+        )
+
+    passed = assess_baseline(
+        [summary("bare", p50=1_000, p95=1_400), summary("full", p50=1_900, p95=2_000)],
+        live=True,
+    )
+    failed = assess_baseline(
+        [summary("bare", p50=1_000, p95=1_400), summary("full", p50=3_200, p95=5_100)],
+        live=True,
+    )
+
+    assert passed.status == "pass"
+    assert passed.permitted_full_hot_p95_ms == 5_000
+    assert failed.status == "fail"
+    assert any("P50" in reason for reason in failed.reasons)
+    assert any("P95" in reason for reason in failed.reasons)
 
 
 def test_context_regression_suite_passes() -> None:
@@ -253,9 +302,19 @@ def test_scenario_summary_separates_hard_failures_from_style_diagnostics() -> No
     assert summary.exit_code == 1
 
 
-def test_dialogue_eval_cli_fake_model_smoke_does_not_touch_production_db() -> None:
+def test_dialogue_eval_cli_fake_model_smoke_does_not_touch_production_db(tmp_path) -> None:
+    report_path = tmp_path / "baseline.json"
     completed = subprocess.run(
-        [sys.executable, "-m", "companion_daemon.dialogue_eval", "--max-cases", "1"],
+        [
+            sys.executable,
+            "-m",
+            "companion_daemon.dialogue_eval",
+            "--baseline",
+            "--max-cases",
+            "1",
+            "--report",
+            str(report_path),
+        ],
         check=False,
         capture_output=True,
         text=True,
@@ -263,8 +322,11 @@ def test_dialogue_eval_cli_fake_model_smoke_does_not_touch_production_db() -> No
     )
 
     assert completed.returncode in {0, 1}
-    assert "ack_should_not_trigger_interview" in completed.stdout
+    assert "baseline verdict=insufficient_evidence" in completed.stdout
     assert "world mode forbids legacy behaviour write" not in completed.stderr
+    persisted = json.loads(report_path.read_text(encoding="utf-8"))
+    assert persisted["schema_version"] == 2
+    assert persisted["comparison"]["status"] == "insufficient_evidence"
 
 
 def test_dialogue_eval_context_cli_smoke() -> None:
