@@ -113,6 +113,7 @@ class BudgetGate:
         estimated_cny: float,
         automatic: bool,
         now: datetime | None = None,
+        lease_seconds: int = 300,
     ) -> ModelBudgetReservation:
         """Reserve a priced provider call before it reaches the network."""
         allowed, reason = self.store.reserve_model_budget(
@@ -123,8 +124,37 @@ class BudgetGate:
             daily_budget_cny=self.daily_budget_cny,
             soft_daily_budget_cny=self.soft_daily_budget_cny,
             now=now or datetime.now(UTC),
+            lease_seconds=lease_seconds,
         )
         return ModelBudgetReservation(allowed, reason, reservation_id)
+
+    def start_model_call(
+        self,
+        reservation_id: str,
+        *,
+        now: datetime | None = None,
+        lease_seconds: int = 300,
+    ) -> bool:
+        """Durably mark a preflight reservation immediately before provider I/O."""
+        return self.store.start_model_budget_reservation(
+            reservation_id,
+            now=now or datetime.now(UTC),
+            lease_seconds=lease_seconds,
+        )
+
+    def finalize_model_call(
+        self,
+        reservation_id: str,
+        *,
+        request_emitted: bool,
+        usage_persisted: bool,
+    ) -> None:
+        """Release only calls proven not to have reached the provider."""
+        self.store.finalize_model_budget_reservation(
+            reservation_id,
+            request_emitted=request_emitted,
+            usage_persisted=usage_persisted,
+        )
 
     def release_model_call(self, reservation_id: str) -> None:
         self.store.release_model_budget_reservation(reservation_id)

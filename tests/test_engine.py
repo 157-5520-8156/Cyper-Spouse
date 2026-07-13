@@ -2467,6 +2467,113 @@ async def test_memory_maintenance_respects_budget_gate(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_legacy_side_calls_carry_and_settle_atomic_model_reservations(
+    tmp_path: Path,
+) -> None:
+    """Legacy side paths must not bypass the shared atomic model budget ledger."""
+    import json as json_module
+
+    import httpx as httpx_module
+
+    from companion_daemon.llm import (
+        DeepSeekChatModel as DeepSeekModel,
+        ModelCallUsage as ModelUsage,
+    )
+    from companion_daemon.memory_consolidation import should_consolidate as should_consolidate_memories
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store, initial_state=MoodState(mood="miss_you", initiative=60))
+    usages: list[ModelUsage] = []
+
+    def observe(usage: ModelUsage) -> None:
+        usages.append(usage)
+        store.record_model_usage(
+            purpose=usage.purpose,
+            model=usage.model,
+            status=usage.status,
+            latency_ms=usage.latency_ms,
+            prompt_tokens=usage.prompt_tokens,
+            completion_tokens=usage.completion_tokens,
+            reasoning_tokens=usage.reasoning_tokens,
+            cache_hit_tokens=usage.cache_hit_tokens,
+            cache_miss_tokens=usage.cache_miss_tokens,
+            total_tokens=usage.total_tokens,
+            budget_reservation_id=usage.budget_reservation_id,
+    )
+
+    def handler(request: httpx_module.Request) -> httpx_module.Response:
+        prompt = str(json_module.loads(request.content)["messages"][-1]["content"])
+        if "整理自己的记忆" in prompt:
+            content = '[{"kind":"consolidated","content":"用户喜欢散步"}]'
+        elif "自我认知" in prompt:
+            content = "稳定身份。\n---\n用户喜欢散步。\n---\n刚认识。\n---\n不确定。\n---\n"
+        elif "Return strict JSON" in prompt:
+            content = (
+                '{"private_thought":"想主动问候",'
+                '"should_send":true,"platform":"qq","message_type":"text",'
+                '"message":"刚刚想起你。","sticker_category":null,"cooldown_minutes":45}'
+            )
+        else:
+            content = "再补一句。"
+        return httpx_module.Response(
+            200,
+            json={
+                "choices": [{"message": {"content": content}}],
+                "usage": {
+                    "prompt_tokens": 120,
+                    "completion_tokens": 20,
+                    "total_tokens": 140,
+                    "prompt_cache_miss_tokens": 120,
+                },
+            },
+        )
+
+    budget = BudgetGate(
+        store,
+        monthly_budget_cny=80,
+        daily_budget_cny=3,
+        soft_daily_budget_cny=1,
+        monthly_image_limit=20,
+        monthly_vision_limit=120,
+        monthly_audio_limit=60,
+    )
+    model = DeepSeekModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        thinking_enabled=False,
+        transport=httpx_module.MockTransport(handler),
+        usage_observer=observe,
+    )
+    engine = CompanionEngine(store, model, TEST_PROMPT, budget_gate=budget)
+
+    store.save_incoming(
+        "geoff", IncomingMessage(platform="qq", platform_user_id="geoff", text="我先忙一会儿")
+    )
+    store.save_outgoing("geoff", "qq", "好，我在。")
+    assert await engine.generate_afterthought("geoff", utc_now()) == "再补一句。"
+    await engine.proactive_tick("geoff")
+    for index in range(22):
+        store.save_incoming(
+            "geoff",
+            IncomingMessage(platform="qq", platform_user_id="geoff", text=f"整理消息{index}"),
+        )
+    for index, kind in enumerate(
+        ("life_fact", "favorite_thing", "hobby", "recent_event", "person")
+    ):
+        store.upsert_memory(
+            "geoff", kind=kind, content=f"独立记忆{index}", source="test", confidence=0.7
+        )
+    assert should_consolidate(store, "geoff")
+    await engine._maybe_consolidate("geoff", MoodState())
+
+    purposes = {usage.purpose for usage in usages}
+    assert {"afterthought", "proactive", "memory_consolidation", "self_core_generation"} <= purposes
+    assert all(usage.budget_reservation_id for usage in usages)
+    assert store.pending_model_budget_reservation_total("day", datetime.now(UTC)) == 0
+
+
+@pytest.mark.asyncio
 async def test_handle_message_records_tool_request_without_executing(tmp_path: Path) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)

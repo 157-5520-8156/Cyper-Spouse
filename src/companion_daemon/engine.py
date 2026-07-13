@@ -451,6 +451,70 @@ class CompanionEngine:
         if self.budget_gate is not None and reservation_id:
             self.budget_gate.release_model_call(reservation_id)
 
+    def _start_model_call_budget(self, reservation_id: str) -> bool:
+        if not reservation_id:
+            return True
+        if self.budget_gate is None:
+            return False
+        return self.budget_gate.start_model_call(reservation_id)
+
+    def _finalize_model_call_budget(
+        self,
+        reservation_id: str,
+        *,
+        request_emitted: bool,
+        usage_persisted: bool,
+    ) -> None:
+        if self.budget_gate is not None and reservation_id:
+            self.budget_gate.finalize_model_call(
+                reservation_id,
+                request_emitted=request_emitted,
+                usage_persisted=usage_persisted,
+            )
+
+    async def _reserved_legacy_model_complete(
+        self,
+        model: ChatModel,
+        messages: list[dict[str, str]],
+        *,
+        purpose: str,
+        temperature: float,
+        action_id: str,
+        cadence: str = "warm",
+    ) -> str:
+        """Run one legacy side call through the same atomic spend boundary.
+
+        Legacy background paths retain their own product decisions and failure
+        behavior.  This narrow wrapper only makes their provider I/O visible
+        to the shared reservation/usage ledger, so concurrent side work cannot
+        spend capacity that an in-flight CompanionTurn has already reserved.
+        """
+        reservation_id = self._reserve_model_call_budget(
+            action_id=action_id,
+            estimated_cny=self._estimate_model_call_reserve_cny(
+                model=model,
+                purpose=purpose,
+                cadence=cadence,
+                prompt_characters=sum(len(item.get("content", "")) for item in messages),
+            ),
+        )
+        scope = None
+        try:
+            if not self._start_model_call_budget(reservation_id):
+                raise ConnectionError("model_reservation_not_startable")
+            with model_call_scope(
+                purpose,
+                action_id=action_id,
+                budget_reservation_id=reservation_id,
+            ) as scope:
+                return await model.complete(messages, temperature=temperature)
+        finally:
+            self._finalize_model_call_budget(
+                reservation_id,
+                request_emitted=bool(scope and scope.request_emitted),
+                usage_persisted=bool(scope and scope.usage_persisted),
+            )
+
     def _secondary_model_call_decision(
         self,
         purpose: str,
@@ -506,8 +570,9 @@ class CompanionEngine:
         )
         if not decision.allowed:
             raise ConnectionError(decision.reason)
+        resolved_action_id = action_id or f"secondary:{purpose}:{uuid4().hex}"
         reservation_id = self._reserve_model_call_budget(
-            action_id=action_id or f"secondary:{purpose}:{uuid4().hex}",
+            action_id=resolved_action_id,
             estimated_cny=self._estimate_model_call_reserve_cny(
                 model=model,
                 purpose=purpose,
@@ -515,18 +580,25 @@ class CompanionEngine:
                 prompt_characters=sum(len(item.get("content", "")) for item in messages),
             ),
         )
+        scope = None
         try:
+            if not self._start_model_call_budget(reservation_id):
+                raise ConnectionError("model_reservation_not_startable")
             with model_call_scope(
                 purpose,
-                action_id=action_id,
+                action_id=resolved_action_id,
                 budget_reservation_id=reservation_id,
-            ):
+            ) as scope:
                 return await complete_with_timeout(
                     _complete_structured_model(model, messages, temperature=temperature),
                     timeout_seconds=decision.soft_timeout_seconds,
                 )
         finally:
-            self._release_model_call_budget(reservation_id)
+            self._finalize_model_call_budget(
+                reservation_id,
+                request_emitted=bool(scope and scope.request_emitted),
+                usage_persisted=bool(scope and scope.usage_persisted),
+            )
 
     async def aclose(self) -> None:
         """Close runtime-owned asynchronous resources exactly once per object."""
@@ -1069,6 +1141,7 @@ class CompanionEngine:
                 purpose="interaction_appraisal", causation=causation
             )
             reservation_id = ""
+            scope = None
             try:
                 reservation_id = self._reserve_model_call_budget(
                     action_id=action_id,
@@ -1085,11 +1158,13 @@ class CompanionEngine:
                         ),
                     ),
                 )
+                if not self._start_model_call_budget(reservation_id):
+                    raise ConnectionError("model_reservation_not_startable")
                 with model_call_scope(
                     "interaction_appraisal",
                     action_id=action_id,
                     budget_reservation_id=reservation_id,
-                ):
+                ) as scope:
                     result = await complete_with_timeout(
                         InteractionAppraiser(appraisal_model).assess(appraisal_input),
                         timeout_seconds=decision.soft_timeout_seconds,
@@ -1105,7 +1180,11 @@ class CompanionEngine:
                 )
                 return
             finally:
-                self._release_model_call_budget(reservation_id)
+                self._finalize_model_call_budget(
+                    reservation_id,
+                    request_emitted=bool(scope and scope.request_emitted),
+                    usage_persisted=bool(scope and scope.usage_persisted),
+                )
             if result.raw_proposal is None:
                 self._fail_world_model_call(
                     action_id, result.rejection_reason or "proposal_rejected"
@@ -2509,6 +2588,7 @@ class CompanionEngine:
         )
         model_action_id = self._begin_world_model_call(purpose="reply", causation=intent_id)
         reservation_id = ""
+        scope = None
         try:
             if not reply_call_decision.allowed:
                 raise ConnectionError(reply_call_decision.reason)
@@ -2532,11 +2612,13 @@ class CompanionEngine:
                     ),
                 ),
             )
+            if not self._start_model_call_budget(reservation_id):
+                raise ConnectionError("model_reservation_not_startable")
             with model_call_scope(
                 "reply",
                 action_id=model_action_id,
                 budget_reservation_id=reservation_id,
-            ):
+            ) as scope:
                 raw = await complete_with_timeout(
                     _complete_structured_model(reply_model, [
                         {"role": "system", "content": self.companion_system_prompt},
@@ -2584,7 +2666,11 @@ class CompanionEngine:
             self._fail_world_model_call(model_action_id, str(exc))
             raise
         finally:
-            self._release_model_call_budget(reservation_id)
+            self._finalize_model_call_budget(
+                reservation_id,
+                request_emitted=bool(scope and scope.request_emitted),
+                usage_persisted=bool(scope and scope.usage_persisted),
+            )
         if not provider_fallback:
             self._record_world_model_output(
                 purpose="reply", causation=intent_id, content=raw, action_id=model_action_id
@@ -3863,10 +3949,77 @@ class CompanionEngine:
                     )
                     return
             logger.info("triggering memory consolidation for %s", canonical_user_id)
-            await consolidate_memories(self.store, self.model, canonical_user_id)
-            await build_self_core(self.store, self.model, canonical_user_id, state)
-            if self.budget_gate:
-                self.budget_gate.record(estimate, note="memory_consolidation:self_core")
+            memory_action_id = f"legacy-memory:{canonical_user_id}:{uuid4().hex}"
+            memory_reservation_id = self._reserve_model_call_budget(
+                action_id=memory_action_id,
+                estimated_cny=self._estimate_model_call_reserve_cny(
+                    model=self.model,
+                    purpose="memory_consolidation",
+                    cadence="warm",
+                    prompt_characters=sum(
+                        len(str(row["kind"])) + len(str(row["content"])) + 8
+                        for row in self.store.memories(canonical_user_id, limit=40)
+                    ),
+                ),
+            )
+            memory_scope = None
+            try:
+                if not self._start_model_call_budget(memory_reservation_id):
+                    raise ConnectionError("model_reservation_not_startable")
+                with model_call_scope(
+                    "memory_consolidation",
+                    action_id=memory_action_id,
+                    budget_reservation_id=memory_reservation_id,
+                ) as memory_scope:
+                    await consolidate_memories(
+                        self.store,
+                        self.model,
+                        canonical_user_id,
+                        action_id=memory_action_id,
+                        budget_reservation_id=memory_reservation_id,
+                    )
+            finally:
+                self._finalize_model_call_budget(
+                    memory_reservation_id,
+                    request_emitted=bool(memory_scope and memory_scope.request_emitted),
+                    usage_persisted=bool(memory_scope and memory_scope.usage_persisted),
+                )
+            self_core_action_id = f"legacy-self-core:{canonical_user_id}:{uuid4().hex}"
+            self_core_reservation_id = self._reserve_model_call_budget(
+                action_id=self_core_action_id,
+                estimated_cny=self._estimate_model_call_reserve_cny(
+                    model=self.model,
+                    purpose="self_core_generation",
+                    cadence="warm",
+                    prompt_characters=sum(
+                        len(str(row["kind"])) + len(str(row["content"])) + 8
+                        for row in self.store.memories(canonical_user_id, limit=40)
+                    ),
+                ),
+            )
+            self_core_scope = None
+            try:
+                if not self._start_model_call_budget(self_core_reservation_id):
+                    raise ConnectionError("model_reservation_not_startable")
+                with model_call_scope(
+                    "self_core_generation",
+                    action_id=self_core_action_id,
+                    budget_reservation_id=self_core_reservation_id,
+                ) as self_core_scope:
+                    await build_self_core(
+                        self.store,
+                        self.model,
+                        canonical_user_id,
+                        state,
+                        action_id=self_core_action_id,
+                        budget_reservation_id=self_core_reservation_id,
+                    )
+            finally:
+                self._finalize_model_call_budget(
+                    self_core_reservation_id,
+                    request_emitted=bool(self_core_scope and self_core_scope.request_emitted),
+                    usage_persisted=bool(self_core_scope and self_core_scope.usage_persisted),
+                )
         except Exception:
             logger.exception("background consolidation failed")
 
@@ -4017,19 +4170,22 @@ class CompanionEngine:
         recent_lines = self._recent_lines(canonical_user_id)
         prompt = afterthought_prompt(mode, recent_lines[-8:])
         try:
-            with model_call_scope("afterthought"):
-                raw = await self.model.complete(
-                    [{"role": "user", "content": prompt}],
-                    temperature=0.7,
-                )
+            raw = await self._reserved_legacy_model_complete(
+                self.model,
+                [{"role": "user", "content": prompt}],
+                purpose="afterthought",
+                temperature=0.7,
+                action_id=(
+                    f"legacy-afterthought:{canonical_user_id}:"
+                    f"{reply_sent_at.isoformat()}:{uuid4().hex}"
+                ),
+            )
         except Exception:
             logger.exception("afterthought generation failed")
             return None
         text = sanitize_chat_text(raw)
         if not text or len(text) > 60 or _afterthought_repeats_recent(text, recent_lines):
             return None
-        if self.budget_gate:
-            self.budget_gate.record(estimate, note=f"qq_afterthought:{mode}")
         return text
 
     def queue_afterthought_delivery(self, canonical_user_id: str, platform: str, text: str) -> int:
@@ -4383,19 +4539,19 @@ class CompanionEngine:
                 if social_task:
                     self.store.defer_social_task(int(social_task["id"]), due_at=now + timedelta(minutes=45))
                 return decision
-        with model_call_scope("proactive"):
-            raw = await self.model.complete(
-                proactive_prompt(
-                    state,
-                    recent_lines,
-                    self.companion_system_prompt,
-                    trigger,
-                    life_runtime_context=runtime_prompt_line(runtime),
-                ),
-                temperature=0.7,
-            )
-        if self.budget_gate:
-            self.budget_gate.record(estimate, note=f"proactive_decision:{trigger.type if trigger else 'none'}")
+        raw = await self._reserved_legacy_model_complete(
+            self.model,
+            proactive_prompt(
+                state,
+                recent_lines,
+                self.companion_system_prompt,
+                trigger,
+                life_runtime_context=runtime_prompt_line(runtime),
+            ),
+            purpose="proactive",
+            temperature=0.7,
+            action_id=f"legacy-proactive:{canonical_user_id}:{uuid4().hex}",
+        )
         decision = self._parse_decision(canonical_user_id, raw, state)
         allowed, activity_reason = proactive_outreach_allowed(runtime)
         if decision.should_send and not allowed:

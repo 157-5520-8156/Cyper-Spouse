@@ -47,6 +47,9 @@ async def consolidate_memories(
     store: CompanionStore,
     model: ChatModel,
     canonical_user_id: str,
+    *,
+    action_id: str = "",
+    budget_reservation_id: str = "",
 ) -> int:
     """Consolidate recent memories using LLM. Returns number of consolidated entries."""
     rows = store.memories(canonical_user_id, limit=40)
@@ -66,7 +69,11 @@ async def consolidate_memories(
         memory_lines.append(f"[{r['kind']}] {r['content']}")
     prompt = CONSOLIDATION_PROMPT.format(memories="\n".join(memory_lines))
     try:
-        with model_call_scope("memory_consolidation"):
+        with model_call_scope(
+            "memory_consolidation",
+            action_id=action_id,
+            budget_reservation_id=budget_reservation_id,
+        ):
             raw = await model.complete(
                 [{"role": "user", "content": prompt}],
                 temperature=0.3,
@@ -102,6 +109,9 @@ async def build_self_core(
     model: ChatModel,
     canonical_user_id: str,
     state: MoodState,
+    *,
+    action_id: str = "",
+    budget_reservation_id: str = "",
 ) -> SelfCore | None:
     """Generate a self-core from consolidated memories and character state."""
     rows = store.memories(canonical_user_id, limit=40)
@@ -126,7 +136,11 @@ async def build_self_core(
         state.mood,
     )
     try:
-        with model_call_scope("self_core_generation"):
+        with model_call_scope(
+            "self_core_generation",
+            action_id=action_id,
+            budget_reservation_id=budget_reservation_id,
+        ):
             raw = await model.complete(
                 [{"role": "user", "content": prompt}],
                 temperature=0.3,
