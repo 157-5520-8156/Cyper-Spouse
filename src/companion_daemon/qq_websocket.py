@@ -75,16 +75,62 @@ def _requires_world_turn_runtime(engine: object) -> bool:
     """Whether a production engine has entered World-backed operation.
 
     The old QQ coalescer is retained solely for pre-World compatibility test
-    doubles and old installations.  A real ``CompanionEngine`` with a World
-    identity must never quietly fall through to that path: it would send a
-    reply and call legacy ``confirm_*`` helpers outside the Action/receipt
-    settlement seam.
+    doubles and old installations.  Any runtime carrying a World identity,
+    including a delegating wrapper around ``CompanionEngine``, must never
+    quietly fall through to that path: it would send a reply and call legacy
+    ``confirm_*`` helpers outside the Action/receipt settlement seam.
+
+    ``_generate_and_send`` separately validates that the kernel is an actual
+    :class:`WorldKernel`.  Treating a malformed World capability as World here
+    is deliberate: failing closed is safer than reviving the legacy sender.
     """
     return (
-        isinstance(engine, CompanionEngine)
-        and bool(getattr(engine, "world_kernel", None))
+        getattr(engine, "world_kernel", None) is not None
         and bool(getattr(engine, "world_id", None))
     )
+
+
+def _world_afterthought_suppression_reason(
+    engine: object, _canonical_user_id: str
+) -> str | None:
+    """Return a World-led reason to withhold an unsolicited continuation.
+
+    A continuation is a new outward act, even when it follows a successfully
+    delivered reply.  Its automatic scheduling must therefore depend only on
+    replayable World state, never the retired mood table.  This is intentionally
+    narrower than proactive outreach: it mirrors the former ``hurt``/boundary
+    hold while keeping ordinary, already-open conversations able to breathe.
+    """
+    kernel = getattr(engine, "world_kernel", None)
+    world_id = getattr(engine, "world_id", None)
+    if not isinstance(kernel, WorldKernel) or not world_id:
+        return "world_projection_unavailable"
+    try:
+        snapshot = kernel.snapshot(world_id)
+    except Exception:
+        # This is an optional continuation, never a reason to create a new
+        # external send when the authoritative projection is unavailable.
+        return "world_projection_unavailable"
+    modulation = snapshot.get("emotion_modulation")
+    modulation = modulation if isinstance(modulation, dict) else {}
+    vector = modulation.get("vector")
+    vector = vector if isinstance(vector, dict) else {}
+    needs = snapshot.get("needs")
+    needs = needs if isinstance(needs, dict) else {}
+    behavior_tendency = str(modulation.get("behavior_tendency") or "")
+    mode = str(modulation.get("mode") or "")
+    unresolved = bool(modulation.get("unresolved"))
+    hurt = int(vector.get("hurt") or 0)
+    anger = int(vector.get("anger") or 0)
+    resentment = int(vector.get("resentment") or 0)
+
+    if behavior_tendency in {"withdraw", "guarded"} or mode == "guarded":
+        return "world_affect_withdraw"
+    if unresolved and (hurt >= 20 or anger >= 20 or resentment >= 16):
+        return "world_unresolved_negative_affect"
+    if int(needs.get("boundary") or 0) >= 20:
+        return "world_boundary_reserve"
+    return None
 
 
 class QQTurnTransport(TurnTransport):
@@ -1571,20 +1617,36 @@ class QQMessageCoalescer:
     ) -> None:
         if not self.human_timing:
             return
-        try:
-            canonical_user_id = self.engine.store.resolve_user(
-                merged.platform, merged.platform_user_id
+        canonical_user_id = self.engine.store.resolve_user(
+            merged.platform, merged.platform_user_id
+        )
+        if _requires_world_turn_runtime(self.engine):
+            suppression_reason = _world_afterthought_suppression_reason(
+                self.engine, canonical_user_id
             )
-            state = self.engine.store.get_mood_state(canonical_user_id)
-            if state.mood in {"hurt", "guarded"} or state.boundary_level >= 20:
+            if suppression_reason:
                 logger.info(
-                    "did not schedule afterthought for %s because she is keeping a boundary", key
+                    "did not schedule World afterthought for %s (%s)",
+                    key,
+                    suppression_reason,
                 )
                 return
-        except (AttributeError, KeyError):
-            # Lightweight test doubles and adapters without a mood store do not
-            # participate in the optional afterthought feature.
-            pass
+        else:
+            try:
+                # The compatibility runtime has no authoritative World affect
+                # projection.  Keep its old mood behavior entirely outside
+                # World mode rather than letting stale legacy state influence
+                # a World continuation.
+                state = self.engine.store.get_mood_state(canonical_user_id)
+                if state.mood in {"hurt", "guarded"} or state.boundary_level >= 20:
+                    logger.info(
+                        "did not schedule afterthought for %s because she is keeping a boundary", key
+                    )
+                    return
+            except (AttributeError, KeyError):
+                # Lightweight test doubles and adapters without a mood store do not
+                # participate in the optional afterthought feature.
+                pass
         plans = _afterthought_plans(merged.text, self.rng)
         selected: list[AfterthoughtPlan] = []
         for plan in plans:

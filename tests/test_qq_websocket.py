@@ -20,6 +20,7 @@ from companion_daemon.qq_websocket import (
     _attachments_from_botpy,
     _clean_content,
     _afterthought_plans,
+    _requires_world_turn_runtime,
     classify_mid_reply_interruption,
     _send_reply_parts,
 )
@@ -171,7 +172,7 @@ async def test_response_deadline_delivers_visible_fallback_instead_of_serial_wai
 
 
 @pytest.mark.asyncio
-async def test_world_typing_starts_before_reply_generation() -> None:
+async def test_incomplete_world_runtime_fails_closed_before_legacy_generation() -> None:
     order: list[str] = []
 
     class FakeEngine:
@@ -201,14 +202,14 @@ async def test_world_typing_starts_before_reply_generation() -> None:
             order.append("delivered")
 
     coalescer = QQMessageCoalescer(FakeEngine(), delay_seconds=0.01, human_timing=False)
-    sent = await coalescer._generate_and_send(
-        IncomingMessage(platform="qq", platform_user_id="user", text="在吗"),
-        FakeTarget(),
-        key="c2c:user",
-    )
+    with pytest.raises(WorldError, match="requires a WorldKernel"):
+        await coalescer._generate_and_send(
+            IncomingMessage(platform="qq", platform_user_id="user", text="在吗"),
+            FakeTarget(),
+            key="c2c:user",
+        )
 
-    assert sent is True
-    assert order[:3] == ["read", "typing", "model"]
+    assert order == []
 
 
 def test_attachments_from_botpy() -> None:
@@ -480,6 +481,171 @@ async def test_world_afterthought_without_a_durable_receipt_stays_unknown(tmp_pa
     ]
     assert len(afterthoughts) == 1
     assert afterthoughts[0]["status"] == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_world_afterthought_uses_world_affect_not_legacy_mood(tmp_path: Path) -> None:
+    """A stale pre-World mood row cannot veto a World continuation."""
+
+    store = CompanionStore(tmp_path / "afterthought-world-affect.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+    )
+    store.save_mood_state("geoff", MoodState(mood="hurt", boundary_level=80))
+
+    async def generated(*_args: object, **_kwargs: object) -> str:
+        return "哦对，补一句。"
+
+    engine.generate_afterthought = generated  # type: ignore[method-assign]
+
+    class Target:
+        def __init__(self) -> None:
+            self.replies: list[str] = []
+
+        async def reply(self, *, content: str, **_kwargs: object) -> dict[str, str]:
+            self.replies.append(content)
+            return {"message_id": "afterthought-world-affect"}
+
+    class AlwaysSendRandom:
+        def uniform(self, low: float, _high: float) -> float:
+            return low
+
+        def random(self) -> float:
+            return 0.0
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    target = Target()
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        human_timing=True,
+        sleep=no_wait,
+        rng=AlwaysSendRandom(),
+    )
+    coalescer._schedule_afterthought(
+        "c2c:geoff",
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="afterthought-world-affect-source",
+            text="我今天遇到一件挺奇怪的事，后来越想越不对劲，到现在还不知道要不要当回事。",
+        ),
+        target,
+        datetime.now(timezone.utc),
+    )
+    await asyncio.gather(*coalescer._afterthought_tasks["c2c:geoff"])
+
+    assert target.replies == ["哦对，补一句。"]
+
+
+@pytest.mark.asyncio
+async def test_world_afterthought_suppresses_from_world_negative_affect(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "afterthought-world-negative.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    world.submit(
+        {
+            "type": "register_user",
+            "world_id": world_id,
+            "user_id": "user:geoff",
+            "name": "geoff",
+            "idempotency_key": "register:afterthought-world-negative",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    world.submit(
+        {
+            "type": "appraise_turn",
+            "world_id": world_id,
+            "appraisal": "boundary_violation",
+            "intent_id": "afterthought-world-negative",
+            "message_id": "afterthought-world-negative-source",
+            "user_id": "user:geoff",
+            "idempotency_key": "appraise:afterthought-world-negative",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+    )
+
+    class Target:
+        async def reply(self, **_kwargs: object) -> dict[str, str]:
+            raise AssertionError("negative World affect must suppress the afterthought")
+
+    class AlwaysSendRandom:
+        def random(self) -> float:
+            return 0.0
+
+    coalescer = QQMessageCoalescer(engine, delay_seconds=0.01, rng=AlwaysSendRandom())
+    coalescer._schedule_afterthought(
+        "c2c:geoff",
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="afterthought-world-negative-input",
+            text="我今天遇到一件挺奇怪的事，后来越想越不对劲，到现在还不知道要不要当回事。",
+        ),
+        Target(),
+        datetime.now(timezone.utc),
+    )
+
+    assert coalescer._afterthought_tasks == {}
+
+
+def test_world_afterthought_projection_failure_suppresses_scheduling(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "afterthought-world-projection-failure.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+    )
+
+    def unavailable_snapshot(_world_id: str) -> dict[str, object]:
+        raise RuntimeError("world temporarily unavailable")
+
+    world.snapshot = unavailable_snapshot  # type: ignore[method-assign]
+    coalescer = QQMessageCoalescer(engine, delay_seconds=0.01)
+    coalescer._schedule_afterthought(
+        "c2c:geoff",
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="afterthought-world-projection-failure-input",
+            text="我今天遇到一件挺奇怪的事，后来越想越不对劲，到现在还不知道要不要当回事。",
+        ),
+        object(),  # type: ignore[arg-type]
+        datetime.now(timezone.utc),
+    )
+
+    assert coalescer._afterthought_tasks == {}
+
+
+def test_world_turn_detection_accepts_a_delegating_runtime() -> None:
+    class DelegatingRuntime:
+        world_kernel = object()
+        world_id = "world-proxy"
+
+    assert _requires_world_turn_runtime(DelegatingRuntime()) is True
 
 
 @pytest.mark.asyncio
