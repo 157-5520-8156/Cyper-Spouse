@@ -8,9 +8,9 @@ replace the generation implementation without changing platform callers.
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from typing import Awaitable, Callable, Literal, Protocol, runtime_checkable
+from typing import Awaitable, Callable, Literal, Mapping, Protocol, runtime_checkable
 
 from companion_daemon.engine import CompanionEngine
 from companion_daemon.models import IncomingMessage
@@ -144,12 +144,25 @@ class TurnOutcome:
 
 @dataclass(frozen=True)
 class ExternalObservation:
+    """One idempotent result from the platform, a tool, media, or a timeout.
+
+    The legacy segment fields remain optional so deployed platform adapters can
+    keep reporting receipts without a flag day.  New non-text results use the
+    canonical ``kind`` + ``payload`` envelope and are settled by the same turn
+    seam into the authoritative World ledger.
+    """
+
     action_id: str
-    delivery_id: int
-    segment_id: str
-    status: TerminalState
     observed_at: datetime
     idempotency_key: str
+    delivery_id: int | None = None
+    segment_id: str | None = None
+    status: TerminalState | None = None
+    kind: Literal["platform_receipt", "tool_result", "media_result", "timeout"] = (
+        "platform_receipt"
+    )
+    payload: Mapping[str, object] = field(default_factory=dict)
+    world_id: str | None = None
     external_receipt: str | None = None
     reason: str | None = None
 
@@ -423,17 +436,82 @@ class CompanionTurn:
 
     async def settle(self, observation: ExternalObservation) -> SettlementOutcome:
         self._recover_receipt_watchdogs()
+        self._validate_observation_world(observation)
         async with self._action_locks.setdefault(observation.action_id, asyncio.Lock()):
+            if observation.kind != "platform_receipt":
+                return self._settle_external_observation(observation)
             settled = await self._settle(observation, advance=False)
         if observation.status == "delivered" and settled.terminal_state is None:
             return await self._advance_after_cadence(
                 action_id=observation.action_id,
-                delivery_id=observation.delivery_id,
+                delivery_id=int(observation.delivery_id or 0),
                 observed_at=observation.observed_at,
                 idempotency_prefix=observation.idempotency_key,
                 advance=True,
             )
         return settled
+
+    def _settle_external_observation(
+        self, observation: ExternalObservation
+    ) -> SettlementOutcome:
+        """Settle a non-text External Result without inventing a receipt."""
+        world = self.engine.world_kernel
+        world_id = self.engine.world_id
+        assert world is not None and world_id is not None
+        action = self._action(observation.action_id)
+        action_kind = str(action.get("kind") or "")
+
+        if observation.kind == "timeout":
+            reason = str(
+                observation.payload.get("reason")
+                or observation.reason
+                or "external action timed out"
+            ).strip()
+            if not reason:
+                raise ValueError("timeout observation requires a reason")
+            world.submit(
+                {
+                    "type": "mark_external_action_unknown",
+                    "world_id": world_id,
+                    "action_id": observation.action_id,
+                    "reason": reason[:300],
+                    "idempotency_key": observation.idempotency_key,
+                },
+                expected_revision=world.revision(world_id),
+            )
+            return SettlementOutcome(
+                action_id=observation.action_id,
+                terminal_state="unknown",
+                committed_revision=world.revision(world_id),
+            )
+
+        allowed_kinds = {
+            "tool_result": {"tool_execution"},
+            "media_result": {"media_generation", "media_delivery"},
+        }
+        if action_kind not in allowed_kinds[observation.kind]:
+            raise WorldError(
+                f"{observation.kind} does not match action kind {action_kind!r}"
+            )
+        result = dict(observation.payload)
+        if observation.status is not None:
+            result.setdefault("status", observation.status)
+        status = str(result.get("status") or "")
+        if status not in {"delivered", "failed", "cancelled"}:
+            raise ValueError("external result observation requires a terminal status")
+        result.setdefault("kind", action_kind)
+        decision = world.record_external_result(
+            observation.action_id,
+            result,
+            world_id=world_id,
+            expected_revision=world.revision(world_id),
+            idempotency_key=observation.idempotency_key,
+        )
+        return SettlementOutcome(
+            action_id=observation.action_id,
+            terminal_state=status,  # type: ignore[arg-type]
+            committed_revision=decision.revision,
+        )
 
     async def interrupt(
         self, turn: TurnEnvelope, *, kind: Literal["backchannel", "substantive"]
@@ -1041,7 +1119,7 @@ class CompanionTurn:
             action = self._action(observation.action_id)
         except WorldError as exc:
             raise WorldError("action does not belong to this CompanionTurn") from exc
-        if int(action.get("delivery_id") or -1) != observation.delivery_id:
+        if observation.delivery_id is None or int(action.get("delivery_id") or -1) != observation.delivery_id:
             raise WorldError("delivery does not belong to the observed Action")
         segment_state = action.get("segment_state", {})
         segments = segment_state.get("segments", []) if isinstance(segment_state, dict) else []
@@ -1051,6 +1129,11 @@ class CompanionTurn:
         ):
             raise WorldError("segment does not belong to the observed Action")
         return action
+
+    def _validate_observation_world(self, observation: ExternalObservation) -> None:
+        world_id = self.engine.world_id
+        if observation.world_id is not None and observation.world_id != world_id:
+            raise WorldError("external observation belongs to a different World")
 
     def _action(self, action_id: str) -> dict[str, object]:
         world = self.engine.world_kernel

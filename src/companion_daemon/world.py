@@ -1920,6 +1920,7 @@ class WorldKernel:
         *,
         expected_revision: int,
         world_id: str | None = None,
+        idempotency_key: str | None = None,
     ) -> WorldDecision:
         if world_id is None:
             world_id = self._world_for_action(action_id)
@@ -1930,7 +1931,7 @@ class WorldKernel:
                 "world_id": world_id,
                 "action_id": action_id,
                 "result": result,
-                "idempotency_key": f"external:{action_id}:{_hash(canonical)}",
+                "idempotency_key": idempotency_key or f"external:{action_id}:{_hash(canonical)}",
             },
             expected_revision=expected_revision,
         )
@@ -5073,9 +5074,23 @@ class WorldKernel:
                 and status in {"delivered", "failed"}
                 and bool(str(result.get("external_receipt") or "").strip())
             )
-            if action["status"] not in {"scheduled", "sending"} and not late_reaction_receipt:
+            late_external_result = (
+                action.get("status") == "unknown"
+                and action.get("kind") in {
+                    "tool_execution",
+                    "media_generation",
+                    "media_delivery",
+                }
+                and status in {"delivered", "failed"}
+                and str(result.get("kind") or "") == str(action.get("kind") or "")
+            )
+            if (
+                action["status"] not in {"scheduled", "sending"}
+                and not late_reaction_receipt
+                and not late_external_result
+            ):
                 raise WorldError(
-                    "only an unresolved action, or an unknown reaction with a receipt, can settle"
+                    "only an unresolved action, or a reconcilable unknown action, can settle"
                 )
             if action.get("kind") == "attachment_analysis" and status == "delivered":
                 payload = _as_dict(action.get("payload", {}), "attachment analysis payload")

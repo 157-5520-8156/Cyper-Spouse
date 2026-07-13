@@ -290,6 +290,224 @@ async def test_simulator_inbound_turn_responds_then_settles_to_world_delivery(
 
 
 @pytest.mark.asyncio
+async def test_settle_records_media_generation_through_the_same_turn_seam(
+    tmp_path: Path,
+) -> None:
+    transport = RecordingTransport(
+        DispatchAcceptance(status="delivered", external_receipt="unused")
+    )
+    runtime, world, world_id = _turn_runtime(tmp_path, transport)
+    registered = world.submit(
+        {
+            "type": "register_user",
+            "world_id": world_id,
+            "user_id": "user:geoff",
+            "name": "geoff",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    requested = world.submit(
+        {
+            "type": "request_media",
+            "world_id": world_id,
+            "request_id": "turn-seam:media",
+            "user_id": "user:geoff",
+            "media_kind": "creative_image",
+            "topic": "一张插画",
+            "reason": "user_requested_creative_image",
+        },
+        expected_revision=registered.revision,
+    )
+
+    settled = await runtime.settle(
+        ExternalObservation(
+            world_id=world_id,
+            action_id="media-generation:turn-seam:media",
+            kind="media_result",
+            payload={
+                "status": "delivered",
+                "artifact_path": "assets/life/turn-seam.png",
+                "artifact_hash": "abc123",
+            },
+            observed_at=_envelope("unused-media-observation").observed_at,
+            idempotency_key="media-result:turn-seam:1",
+        )
+    )
+
+    assert settled.terminal_state == "delivered"
+    assert settled.committed_revision > requested.revision
+    media = world.snapshot(world_id)["media"]["turn-seam:media"]
+    assert media["status"] == "generated"
+    assert media["artifact_path"] == "assets/life/turn-seam.png"
+
+    duplicate = await runtime.settle(
+        ExternalObservation(
+            world_id=world_id,
+            action_id="media-generation:turn-seam:media",
+            kind="media_result",
+            payload={
+                "status": "delivered",
+                "artifact_path": "assets/life/turn-seam.png",
+                "artifact_hash": "abc123",
+            },
+            observed_at=_envelope("unused-media-observation").observed_at,
+            idempotency_key="media-result:turn-seam:1",
+        )
+    )
+    assert duplicate.committed_revision == settled.committed_revision
+
+
+@pytest.mark.asyncio
+async def test_settle_records_a_confirmed_tool_result_through_the_same_turn_seam(
+    tmp_path: Path,
+) -> None:
+    transport = RecordingTransport(
+        DispatchAcceptance(status="delivered", external_receipt="unused")
+    )
+    runtime, world, world_id = _turn_runtime(tmp_path, transport)
+    registered = world.submit(
+        {
+            "type": "register_user",
+            "world_id": world_id,
+            "user_id": "user:geoff",
+            "name": "geoff",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    proposed = world.propose_tool_action(
+        world_id=world_id,
+        proposal_id="turn-seam:tool",
+        user_id="user:geoff",
+        tool_name="calendar.create",
+        arguments={"title": "复习"},
+        summary="在日历中创建复习日程",
+        risk="confirmation_required",
+        expected_revision=registered.revision,
+    )
+    observed = world.submit(
+        {
+            "type": "observe_user_message",
+            "world_id": world_id,
+            "message_id": "turn-seam:tool-confirm",
+            "user_id": "user:geoff",
+            "text": "确认执行",
+            "sent_at": _envelope("unused-tool-observation").observed_at.isoformat(),
+        },
+        expected_revision=proposed.revision,
+    )
+    authorized = world.authorize_tool_action(
+        world_id=world_id,
+        proposal_id="turn-seam:tool",
+        confirmation_message_id="turn-seam:tool-confirm",
+        expected_revision=observed.revision,
+    )
+
+    settled = await runtime.settle(
+        ExternalObservation(
+            world_id=world_id,
+            action_id="tool:turn-seam:tool",
+            kind="tool_result",
+            payload={
+                "status": "delivered",
+                "execution_mode": "fake",
+                "effect_scope": "none",
+                "detail": "模拟日程已创建",
+                "output": {"event_id": "turn-seam:1"},
+            },
+            observed_at=_envelope("unused-tool-result").observed_at,
+            idempotency_key="tool-result:turn-seam:1",
+        )
+    )
+
+    assert settled.terminal_state == "delivered"
+    assert settled.committed_revision > authorized.revision
+    tool = world.snapshot(world_id)["tool_actions"]["turn-seam:tool"]
+    assert tool["status"] == "simulated"
+    assert tool["result_summary"] == "模拟完成（未执行真实操作）：模拟日程已创建"
+
+
+@pytest.mark.asyncio
+async def test_late_tool_result_reconciles_a_timeout_through_the_same_turn_seam(
+    tmp_path: Path,
+) -> None:
+    transport = RecordingTransport(
+        DispatchAcceptance(status="delivered", external_receipt="unused")
+    )
+    runtime, world, world_id = _turn_runtime(tmp_path, transport)
+    registered = world.submit(
+        {
+            "type": "register_user",
+            "world_id": world_id,
+            "user_id": "user:geoff",
+            "name": "geoff",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    proposed = world.propose_tool_action(
+        world_id=world_id,
+        proposal_id="turn-seam:late-tool",
+        user_id="user:geoff",
+        tool_name="calendar.create",
+        arguments={"title": "复习"},
+        summary="在日历中创建复习日程",
+        risk="confirmation_required",
+        expected_revision=registered.revision,
+    )
+    observed = world.submit(
+        {
+            "type": "observe_user_message",
+            "world_id": world_id,
+            "message_id": "turn-seam:late-tool-confirm",
+            "user_id": "user:geoff",
+            "text": "确认执行",
+            "sent_at": _envelope("unused-late-tool-observation").observed_at.isoformat(),
+        },
+        expected_revision=proposed.revision,
+    )
+    authorized = world.authorize_tool_action(
+        world_id=world_id,
+        proposal_id="turn-seam:late-tool",
+        confirmation_message_id="turn-seam:late-tool-confirm",
+        expected_revision=observed.revision,
+    )
+    action_id = "tool:turn-seam:late-tool"
+
+    timed_out = await runtime.settle(
+        ExternalObservation(
+            world_id=world_id,
+            action_id=action_id,
+            kind="timeout",
+            payload={"reason": "adapter callback deadline elapsed"},
+            observed_at=_envelope("unused-late-tool-timeout").observed_at,
+            idempotency_key="tool-timeout:turn-seam:1",
+        )
+    )
+    assert timed_out.terminal_state == "unknown"
+    assert world.snapshot(world_id)["actions"][action_id]["status"] == "unknown"
+
+    reconciled = await runtime.settle(
+        ExternalObservation(
+            world_id=world_id,
+            action_id=action_id,
+            kind="tool_result",
+            payload={
+                "status": "delivered",
+                "execution_mode": "fake",
+                "effect_scope": "none",
+                "detail": "模拟日程已创建",
+                "output": {"event_id": "turn-seam:late"},
+            },
+            observed_at=_envelope("unused-late-tool-result").observed_at,
+            idempotency_key="tool-result:turn-seam:late",
+        )
+    )
+
+    assert reconciled.terminal_state == "delivered"
+    assert reconciled.committed_revision > authorized.revision
+    assert world.snapshot(world_id)["actions"][action_id]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
 async def test_async_platform_acceptance_is_not_delivered_until_settle_observes_receipt(
     tmp_path: Path,
 ) -> None:
