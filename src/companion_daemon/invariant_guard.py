@@ -17,6 +17,26 @@ GuardDisposition = Literal[
 ]
 
 
+# A teacher being late does not establish that the user was late.  This is a
+# deliberately narrow factual guard rather than a general "tone" heuristic:
+# it only applies when the reply promotes the two people into the same late
+# outcome and the turn evidence names the teacher as late without ever saying
+# that the user was late too.
+_TEACHER_LATE_CONTEXT_RE = re.compile(
+    r"老师[^。！？!?]{0,8}(?:也|居然|竟然|都)?[^。！？!?]{0,8}"
+    r"(?:迟到了|迟到|来晚了|晚到)"
+)
+_SHARED_LATENESS_ASSERTION_RE = re.compile(
+    r"(?:你们|咱们|你(?:和|跟)(?:老师|她)|你和老师)[^。！？!?]{0,20}"
+    r"(?:一起|都)?[^。！？!?]{0,6}(?:迟到了|迟到|来晚了|晚到)"
+    r"|一起(?:都)?(?:迟到了|迟到)"
+)
+_EXPLICIT_USER_LATENESS_RE = re.compile(
+    r"(?:我(?:自己)?|我们|咱们|大家)[^。！？!?]{0,8}"
+    r"(?:也|都|确实|其实)?[^。！？!?]{0,6}(?:迟到了|迟到|来晚了|晚到)"
+)
+
+
 @dataclass(frozen=True)
 class GuardResolution:
     """A bounded hard-invariant verdict; it never scores conversational style."""
@@ -210,6 +230,8 @@ def _hard_semantic_claim_error(
         return "uncommitted_accumulated_personal_experience"
     if evidence is None:
         return None
+    if _unsupported_shared_lateness_assumption(reply, evidence):
+        return "unsupported_user_outcome_assumption"
     if evidence.epistemic_honesty_requested and not re.search(
         r"(?:没|没有)[^。！？]{0,8}(?:依据|把握|记录|能确认)"
         r"|不知道|不确定|不(?:再|继续|会)?猜|不乱说",
@@ -246,6 +268,26 @@ def _hard_semantic_claim_error(
     ):
         return "unsupported_user_history_or_ability_inference"
     return None
+
+
+def _unsupported_shared_lateness_assumption(
+    reply: str, evidence: HardEvidenceContext
+) -> bool:
+    """Detect one unsupported outcome inference in the active user story.
+
+    ``老师也迟到了`` is evidence about the teacher only.  It remains perfectly
+    natural to react to that irony; the boundary only rejects a reply that
+    upgrades it to ``你们一起迟到`` unless the current or immediately preceding
+    user evidence independently says the user was late.  Keeping this
+    contextual avoids treating ordinary phrases such as ``一起迟到`` as a
+    blanket style ban.
+    """
+    context = "\n".join((evidence.user_text, *evidence.recent_user_texts))
+    return bool(
+        _TEACHER_LATE_CONTEXT_RE.search(context)
+        and _SHARED_LATENESS_ASSERTION_RE.search(reply)
+        and not _EXPLICIT_USER_LATENESS_RE.search(context)
+    )
 
 
 def _uncommitted_companion_affect_claim(candidate: dict[str, object]) -> bool:

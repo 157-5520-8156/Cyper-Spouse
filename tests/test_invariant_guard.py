@@ -2,7 +2,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from companion_daemon.db import CompanionStore
-from companion_daemon.invariant_guard import InvariantGuard
+from companion_daemon.invariant_guard import HardEvidenceContext, InvariantGuard
 from companion_daemon.world import WorldKernel
 
 from test_world_kernel import world_seed
@@ -76,6 +76,53 @@ def test_guard_hard_rejects_uncommitted_fact_reference(tmp_path: Path) -> None:
     assert result.disposition == "hard_reject"
     assert result.candidate is None
     assert result.reason
+
+
+def test_guard_rejects_teacher_lateness_as_an_unsupported_shared_outcome(
+    tmp_path: Path,
+) -> None:
+    kernel, world_id = _world(tmp_path)
+
+    result = InvariantGuard().resolve(
+        kernel,
+        world_id,
+        {
+            "reply_text": "那你们还挺默契的，一起迟到。",
+            "mentioned_event_ids": [],
+            "proposed_action_ids": [],
+            "claims": [],
+        },
+        user_id="user:geoff",
+        evidence=HardEvidenceContext(
+            user_text="结果赶到教室发现老师也迟到了。",
+        ),
+    )
+
+    assert result.disposition == "hard_reject"
+    assert result.reason == "unsupported_user_outcome_assumption"
+
+
+def test_guard_allows_shared_lateness_when_user_explicitly_supplies_it(
+    tmp_path: Path,
+) -> None:
+    kernel, world_id = _world(tmp_path)
+
+    result = InvariantGuard().resolve(
+        kernel,
+        world_id,
+        {
+            "reply_text": "那你们还挺默契的，一起迟到。",
+            "mentioned_event_ids": [],
+            "proposed_action_ids": [],
+            "claims": [],
+        },
+        user_id="user:geoff",
+        evidence=HardEvidenceContext(
+            user_text="我也迟到了，赶到教室才发现老师也迟到了。",
+        ),
+    )
+
+    assert result.disposition == "accept"
 
 
 def test_disabled_guard_allows_a_deliberately_ungrounded_fact_for_falsification(

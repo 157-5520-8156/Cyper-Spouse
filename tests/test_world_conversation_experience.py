@@ -2578,6 +2578,53 @@ async def test_bounded_reply_repair_uses_the_configured_task_model(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_outcome_assumption_is_repaired_without_erasing_a_natural_reaction(
+    tmp_path: Path,
+) -> None:
+    class PrimaryModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"那你们还挺默契的，一起迟到。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    class RepairModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"老师居然也迟到了，这一下确实有点荒唐。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    primary = PrimaryModel()
+    repair = RepairModel()
+    _, _, engine = _world_engine(tmp_path, primary)
+    engine.reply_repair_model = repair
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="teacher-late-without-user-late",
+            text="结果赶到教室发现老师也迟到了。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "老师居然也迟到了，这一下确实有点荒唐。"
+    assert "一起迟到" not in reply.text
+    assert primary.calls == 1
+    assert repair.calls == 1
+
+
+@pytest.mark.asyncio
 async def test_deterministic_fact_free_fallback_never_calls_llm_audit(
     tmp_path: Path,
 ) -> None:
