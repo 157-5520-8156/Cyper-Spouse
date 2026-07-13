@@ -607,7 +607,9 @@ class QQMessageCoalescer:
                 logger.info("superseded un-dispatched QQ v2 turn for %s", key)
                 return True
             if decision == "backchannel":
-                await self._record_without_reply(incoming, mark_unread=False)
+                await active_turn.observe_only(
+                    self._inbound_turn_envelope(incoming), mark_unread=False
+                )
                 logger.info("kept sending after QQ v2 backchannel interruption for %s", key)
                 return True
             if decision == "takeover":
@@ -675,6 +677,21 @@ class QQMessageCoalescer:
             await self.engine.handle_message(incoming, skip_reply=True, mark_unread=mark_unread)
         except TypeError:
             await self.engine.handle_message(incoming)
+
+    def _inbound_turn_envelope(self, incoming: IncomingMessage) -> TurnEnvelope:
+        """Freeze one QQ observation before it crosses the World turn seam."""
+        context = self.engine.freeze_turn_context(incoming)
+        return TurnEnvelope.from_message(
+            incoming,
+            idempotency_key=(
+                f"{incoming.platform}:{incoming.platform_user_id}:{incoming.message_id}"
+            ),
+            world_id=self.engine.world_id,
+            canonical_user_id=self.engine.store.resolve_user(
+                incoming.platform, incoming.platform_user_id
+            ),
+            frozen_cadence=context.cadence.heat,
+        )
 
     def _decision_for(self, key: str):
         queued = self._pending[key]

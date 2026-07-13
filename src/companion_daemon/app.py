@@ -594,11 +594,28 @@ async def qq_webhook(
 
     incoming = incoming_message_from_payload(payload)
     if incoming:
-        # This webhook has no outbound transport, so generating a reply here
-        # would only leave an undeliverable outbox row and waste a model call.
-        # Record the message and update her state; a transport adapter
-        # (WebSocket/OneBot) owns actual reply generation and delivery.
-        await engine.handle_message(incoming, skip_reply=True, mark_unread=True)
+        # This webhook has no outbound owner, so it must only observe.  Keep
+        # the inbound event inside the same bounded seam as a replying turn:
+        # the World receives a frozen platform/user/cadence envelope, while
+        # the WebSocket/OneBot owner remains solely responsible for replies.
+        turn_context = engine.freeze_turn_context(incoming)
+        await CompanionTurn(
+            engine,
+            CaptureTurnTransport(receipt_namespace="qq-webhook-observe"),
+        ).observe_only(
+            TurnEnvelope.from_message(
+                incoming,
+                idempotency_key=(
+                    f"{incoming.platform}:{incoming.platform_user_id}:{incoming.message_id}"
+                ),
+                world_id=engine.world_id,
+                canonical_user_id=engine.store.resolve_user(
+                    incoming.platform, incoming.platform_user_id
+                ),
+                frozen_cadence=turn_context.cadence.heat,
+            ),
+            mark_unread=True,
+        )
 
     return JSONResponse(ack_response())
 

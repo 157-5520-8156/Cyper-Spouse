@@ -11,9 +11,11 @@ from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import CompanionReply, IncomingMessage, MessageAttachment, MoodState
 from companion_daemon.qq_websocket import (
+    ActiveSend,
     AfterthoughtPlan,
     CompanionQQClient,
     QQMessageCoalescer,
+    QQTurnTransport,
     QQTurnPresenter,
     _attachments_from_botpy,
     _clean_content,
@@ -21,7 +23,12 @@ from companion_daemon.qq_websocket import (
     classify_mid_reply_interruption,
     _send_reply_parts,
 )
-from companion_daemon.companion_turn import DispatchAcceptance, ExternalObservation, TurnPresentation
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    DispatchAcceptance,
+    ExternalObservation,
+    TurnPresentation,
+)
 from companion_daemon.turn_taking import TurnTakingPolicy
 from companion_daemon.world import WorldKernel
 from companion_daemon.world import WorldError
@@ -842,6 +849,48 @@ async def test_backchannel_during_split_reply_does_not_interrupt() -> None:
 
     assert target.replies == ["第一句。", "第二句。"]
     assert engine.recorded_without_reply == ["嗯嗯"]
+
+
+@pytest.mark.asyncio
+async def test_world_backchannel_uses_observe_only_turn_seam(tmp_path: Path) -> None:
+    class FakeTarget:
+        async def reply(self, **_kwargs: object) -> dict[str, str]:
+            return {"message_id": "should-not-send"}
+
+    store = CompanionStore(tmp_path / "world-backchannel.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+    )
+    coalescer = QQMessageCoalescer(engine, delay_seconds=0.01, human_timing=False)
+    target = FakeTarget()
+    key = "c2c:geoff"
+    original = IncomingMessage(
+        platform="qq", platform_user_id="geoff", message_id="original-send", text="继续说"
+    )
+    coalescer._active_sends[key] = ActiveSend(
+        incoming=original,
+        reply_target=target,
+        text_dispatch_started=True,
+    )
+    coalescer._active_turns[key] = CompanionTurn(engine, QQTurnTransport(target))
+
+    handled = await coalescer._handle_mid_reply_interruption(
+        key,
+        IncomingMessage(
+            platform="qq", platform_user_id="geoff", message_id="backchannel-1", text="嗯嗯"
+        ),
+        target,
+    )
+
+    assert handled is True
+    assert world.snapshot(world_id)["turns"]["qq:geoff:backchannel-1"]["status"] == "deferred"
 
 
 @pytest.mark.asyncio

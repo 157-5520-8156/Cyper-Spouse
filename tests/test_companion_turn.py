@@ -1488,3 +1488,29 @@ async def test_expired_observation_skips_attachment_analysis_and_model_work(
         world.snapshot(world_id)["turns"]["qq:geoff:expired-with-attachment"]["status"]
         == "deferred"
     )
+
+
+@pytest.mark.asyncio
+async def test_observe_only_records_a_normal_inbound_turn_without_staging_a_reply(
+    tmp_path: Path,
+) -> None:
+    transport = RecordingTransport(
+        DispatchAcceptance(status="delivered", external_receipt="unused")
+    )
+    runtime, world, world_id = _turn_runtime(tmp_path, transport)
+    envelope = _envelope("observe-only")
+
+    outcome = await runtime.observe_only(envelope, mark_unread=False)
+    replay = await runtime.observe_only(envelope, mark_unread=False)
+
+    assert outcome.visible_status == "observed"
+    assert outcome.action_ids == ()
+    assert replay.visible_status == "observed"
+    assert transport.beats == []
+    snapshot = world.snapshot(world_id)
+    assert snapshot["turns"]["qq:geoff:observe-only"]["status"] == "deferred"
+    assert not any(
+        action.get("trace", {}).get("input_message_id") == "qq:geoff:observe-only"
+        for action in snapshot["actions"].values()
+        if isinstance(action, dict)
+    )

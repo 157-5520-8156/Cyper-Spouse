@@ -19,7 +19,7 @@ from companion_daemon.time import utc_now
 from companion_daemon.world import WorldError
 
 
-VisibleStatus = Literal["delivered", "accepted", "failed", "unknown"]
+VisibleStatus = Literal["delivered", "accepted", "failed", "unknown", "observed"]
 TerminalState = Literal["delivered", "failed", "cancelled", "unknown"]
 
 
@@ -295,6 +295,7 @@ class CompanionTurn:
 
     async def observe_expired(self, turn: TurnEnvelope) -> TurnOutcome:
         """Commit an inbound message after its response budget is already exhausted."""
+        self._validate_turn_envelope(turn)
         existing = self._existing_outcome(turn)
         if existing is not None:
             return existing
@@ -309,6 +310,33 @@ class CompanionTurn:
             status="failed",
             degraded=True,
             reason="response_budget_exhausted",
+        )
+
+    async def observe_only(
+        self, turn: TurnEnvelope, *, mark_unread: bool = True
+    ) -> TurnOutcome:
+        """Commit a real inbound observation without starting a reply Action.
+
+        This is intentionally distinct from :meth:`observe_expired`: an
+        observe-only adapter has chosen not to reply (for example a signed QQ
+        webhook without an outbound owner, or a live backchannel while a
+        multi-part reply continues).  The message still receives the normal
+        World appraisal and ledger treatment; it is neither a timeout nor a
+        synthetic delivery failure.
+        """
+        self._validate_turn_envelope(turn)
+        existing = self._existing_outcome(turn)
+        if existing is not None:
+            return existing
+        await self.engine.handle_message(
+            turn.message,
+            skip_reply=True,
+            mark_unread=mark_unread,
+        )
+        return self._outcome(
+            turn,
+            action_ids=(),
+            status="observed",
         )
 
     async def respond(

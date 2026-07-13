@@ -627,3 +627,49 @@ def test_world_console_keeps_unresolved_activity_visible_after_long_history(tmp_
 
     current_item = next(item for item in agenda if item["activity_id"] == "current")
     assert current_item["status"] in {"active", "planned"}
+
+
+def test_qq_webhook_observes_through_turn_seam_without_staging_reply(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = CompanionStore(tmp_path / "qq-webhook-observe.sqlite")
+    seed_user(store)
+    kernel = WorldKernel(store)
+    started = kernel.start_from_seed_file(Path("configs/world_seed.yaml"))
+    runtime = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        "你是知栀。",
+        world_kernel=kernel,
+        world_id=started.world_id,
+    )
+    monkeypatch.setattr(app_module, "engine", runtime)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings",
+        lambda: Settings(QQ_VERIFY_SIGNATURES=False),
+    )
+
+    response = TestClient(app_module.app).post(
+        "/qq/webhook",
+        json={
+            "op": 0,
+            "t": "C2C_MESSAGE_CREATE",
+            "d": {
+                "id": "qq-webhook-observe-1",
+                "content": "我先嗯一声。",
+                "author": {"user_openid": "geoff"},
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {"op": 12}
+    snapshot = kernel.snapshot(started.world_id)
+    assert snapshot["turns"]["qq:geoff:qq-webhook-observe-1"]["status"] == "deferred"
+    assert not any(
+        action.get("trace", {}).get("input_message_id")
+        == "qq:geoff:qq-webhook-observe-1"
+        for action in snapshot["actions"].values()
+        if isinstance(action, dict)
+    )
