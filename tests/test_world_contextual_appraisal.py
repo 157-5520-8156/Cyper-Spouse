@@ -6,6 +6,12 @@ from time import monotonic
 
 import pytest
 
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    ResponseBudget,
+    TurnEnvelope,
+    TurnOptions,
+)
 from companion_daemon.db import CompanionStore
 from companion_daemon.contextual_appraisal import validate_contextual_appraisal
 from companion_daemon.conversation_cadence import ConversationCadence, FrozenTurnContext
@@ -15,6 +21,7 @@ from companion_daemon.engine import (
     seed_user,
 )
 from companion_daemon.models import IncomingMessage
+from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.llm import ProviderCircuitBreaker
 from companion_daemon.world import WorldKernel
 
@@ -61,6 +68,49 @@ class AppraisalModel:
             },
             ensure_ascii=False,
         )
+
+
+class CapturedTurnReply:
+    """Reply facts exposed by the public World delivery seam for these tests."""
+
+    def __init__(self, *, text: str, world_action_id: str) -> None:
+        self.text = text
+        self.world_action_id = world_action_id
+
+
+async def _respond_through_turn(
+    engine: CompanionEngine,
+    message: IncomingMessage,
+    *,
+    turn_context: FrozenTurnContext | None = None,
+) -> CapturedTurnReply:
+    """Run a normal World reply through captured dispatch and receipt settlement."""
+
+    context = turn_context or engine.freeze_turn_context(message)
+    transport = CaptureTurnTransport(receipt_namespace="contextual-appraisal")
+    turn = CompanionTurn(engine, transport, cadence_delay_seconds=0)
+    envelope = TurnEnvelope.from_message(
+        message,
+        idempotency_key=(
+            f"{message.platform}:{message.platform_user_id}:{message.message_id}"
+        ),
+        world_id=engine.world_id,
+        canonical_user_id=engine.store.resolve_user(
+            message.platform, message.platform_user_id
+        ),
+        frozen_cadence=context.cadence.heat,
+    )
+    outcome = await turn.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+    await turn.wait_for_delivery_continuations()
+    assert outcome.action_ids
+    return CapturedTurnReply(
+        text=transport.text,
+        world_action_id=outcome.action_ids[0],
+    )
 
 
 def test_contextual_harm_requires_user_agency_and_companion_target() -> None:
@@ -133,7 +183,8 @@ async def test_contextual_sarcasm_leaves_future_facing_companion_affect_only(
 ) -> None:
     world, world_id, engine = _engine(tmp_path, appraisal_confidence=0.91)
 
-    reply = await engine.handle_message(
+    reply = await _respond_through_turn(
+        engine,
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -197,7 +248,8 @@ async def test_low_confidence_sarcasm_does_not_accumulate_relationship_harm(
     world, world_id, engine = _engine(tmp_path, appraisal_confidence=0.54)
     before = world.snapshot(world_id)["relationships"].get("user:geoff", {})
 
-    await engine.handle_message(
+    await _respond_through_turn(
+        engine,
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -235,7 +287,8 @@ async def test_explicit_harm_uses_local_rule_without_spending_semantic_model_cal
         interaction_appraisal_model=MustNotRun(),
     )
 
-    reply = await engine.handle_message(
+    reply = await _respond_through_turn(
+        engine,
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -273,7 +326,8 @@ async def test_open_real_provider_circuit_skips_appraisal_and_reply_models(
         interaction_appraisal_model=MustNotRun(),
     )
 
-    reply = await engine.handle_message(
+    reply = await _respond_through_turn(
+        engine,
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -326,7 +380,8 @@ async def test_hot_turn_omits_slow_contextual_appraisal_before_reply_generation(
     )
 
     started = monotonic()
-    reply = await engine.handle_message(
+    reply = await _respond_through_turn(
+        engine,
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -385,7 +440,8 @@ async def test_warm_contextual_advisory_does_not_delay_or_duplicate_primary_gene
     )
 
     started = monotonic()
-    reply = await engine.handle_message(
+    reply = await _respond_through_turn(
+        engine,
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
