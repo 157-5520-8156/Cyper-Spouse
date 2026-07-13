@@ -1,0 +1,21 @@
+{
+  "schema": "actor-actions-v1",
+  "canonical_body_world_height": 1.2656,
+  "actions": {
+    "idle.down_right": {"texture": "res://assets/characters/zhizhi-iso-walk-v4.png", "region": [0, 0, 128, 128], "canonical_scale": 1.0, "world_extent": 1.2656, "extent_axis": "height", "body_reference_height": 128, "foot_pivot": [0.5, 0.96]},
+    "idle.down_left": {"texture": "res://assets/characters/zhizhi-iso-walk-v4.png", "region": [128, 0, 128, 128], "canonical_scale": 1.0, "world_extent": 1.2656, "extent_axis": "height", "body_reference_height": 128, "foot_pivot": [0.5, 0.96]},
+    "idle.up_left": {"texture": "res://assets/characters/zhizhi-iso-walk-v4.png", "region": [256, 0, 128, 128], "canonical_scale": 1.0, "world_extent": 1.2656, "extent_axis": "height", "body_reference_height": 128, "foot_pivot": [0.5, 0.96]},
+    "idle.up_right": {"texture": "res://assets/characters/zhizhi-iso-walk-v4.png", "region": [384, 0, 128, 128], "canonical_scale": 1.0, "world_extent": 1.2656, "extent_axis": "height", "body_reference_height": 128, "foot_pivot": [0.5, 0.96]},
+    "walk.down_right": {"texture": "res://assets/characters/zhizhi-iso-walk-v4.png", "region": [0, 0, 128, 128], "canonical_scale": 1.0, "world_extent": 1.2656, "extent_axis": "height", "body_reference_height": 128, "foot_pivot": [0.5, 0.96]},
+    "walk.down_left": {"texture": "res://assets/characters/zhizhi-iso-walk-v4.png", "region": [128, 0, 128, 128], "canonical_scale": 1.0, "world_extent": 1.2656, "extent_axis": "height", "body_reference_height": 128, "foot_pivot": [0.5, 0.96]},
+    "walk.up_left": {"texture": "res://assets/characters/zhizhi-iso-walk-v4.png", "region": [256, 0, 128, 128], "canonical_scale": 1.0, "world_extent": 1.2656, "extent_axis": "height", "body_reference_height": 128, "foot_pivot": [0.5, 0.96]},
+    "walk.up_right": {"texture": "res://assets/characters/zhizhi-iso-walk-v4.png", "region": [384, 0, 128, 128], "canonical_scale": 1.0, "world_extent": 1.2656, "extent_axis": "height", "body_reference_height": 128, "foot_pivot": [0.5, 0.96]},
+    "study.up_right": {"texture": "res://assets/characters/zhizhi-iso-poses-v1.png", "region": [282, 162, 299, 545], "canonical_scale": 1.0, "world_extent": 0.9635, "extent_axis": "height", "body_reference_height": 600, "seat_pivot": [0.5, 0.72], "effect": "typing"},
+    "eat.up_right": {"texture": "res://assets/characters/zhizhi-iso-poses-v1.png", "region": [282, 162, 299, 545], "canonical_scale": 1.0, "world_extent": 0.9635, "extent_axis": "height", "body_reference_height": 600, "seat_pivot": [0.5, 0.72], "effect": "meal"},
+    "relax.up_right": {"texture": "res://assets/characters/zhizhi-iso-poses-v1.png", "region": [282, 162, 299, 545], "canonical_scale": 1.0, "world_extent": 0.9635, "extent_axis": "height", "body_reference_height": 600, "seat_pivot": [0.5, 0.72], "effect": "breathing"},
+    "phone.up_right": {"texture": "res://assets/characters/zhizhi-iso-poses-v1.png", "region": [282, 162, 299, 545], "canonical_scale": 1.0, "world_extent": 0.9635, "extent_axis": "height", "body_reference_height": 600, "seat_pivot": [0.5, 0.72], "effect": "phone_glow"},
+    "sleep.up_left": {"texture": "res://assets/characters/zhizhi-iso-poses-v1.png", "region": [915, 270, 660, 341], "canonical_scale": 1.0, "world_extent": 2.35, "extent_axis": "width", "body_reference_height": 341, "surface_pivot": [0.5, 0.62], "effect": "sleep_breathing"},
+    "wash.up_left": {"texture": "res://assets/characters/zhizhi-iso-walk-v4.png", "region": [256, 0, 128, 128], "canonical_scale": 1.0, "world_extent": 1.2656, "extent_axis": "height", "body_reference_height": 128, "foot_pivot": [0.5, 0.96], "effect": "water"},
+    "tidy.up_right": {"texture": "res://assets/characters/zhizhi-iso-walk-v4.png", "region": [384, 0, 128, 128], "canonical_scale": 1.0, "world_extent": 1.2656, "extent_axis": "height", "body_reference_height": 128, "foot_pivot": [0.5, 0.96], "effect": "tidy_sparkle"}
+  }
+}

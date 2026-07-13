@@ -1,0 +1,89 @@
+{
+  "schema": "godot-room-v1",
+  "id": "zhizhi-home",
+  "projection": {"tile_width": 128, "tile_height": 64, "height_unit": 0.816496, "camera_azimuth": 45, "camera_elevation": 30},
+  "render": {"internal_width": 696, "internal_height": 543, "upscale": 2, "filter": "nearest"},
+  "grid": {"width": 14, "depth": 12},
+  "materials": {
+    "oak": "#815039", "cream": "#d9c0a0", "teal": "#4f7771", "sage": "#71866c",
+    "pink": "#c88785", "linen": "#d5c9ae", "glass": "#5b8790", "tile": "#b9977e",
+    "navy": "#25444d", "brass": "#d0a15f", "coral": "#b86f68", "paper": "#e5d8bb",
+    "rug_blue": "#385866", "rug_sage": "#718678", "curtain_teal": "#294f55", "dark_oak": "#573522"
+  },
+  "floor": {"material": "oak"},
+  "walls": [
+    {"id": "north", "from": [0, 0], "to": [14, 0], "height": 3.6, "material": "cream"},
+    {"id": "west", "from": [0, 0], "to": [0, 12], "height": 3.6, "material": "cream"}
+  ],
+  "objects": [
+    {"id": "desk", "kind": "desk", "material": "oak", "transform": {"x": 0.7, "y": 6.5, "z": 0, "width": 3, "depth": 1.25, "height": 0.92}, "footprint": [[0,6],[1,6],[2,6],[3,6],[0,7],[1,7],[2,7],[3,7]]},
+    {"id": "office-chair", "kind": "chair", "material": "sage", "transform": {"x": 1.7, "y": 8, "z": 0, "width": 1, "depth": 1, "height": 0.85}, "footprint": [[1,8],[2,8]]},
+    {"id": "bookcase", "kind": "bookcase", "material": "oak", "transform": {"x": 0.3, "y": 2.0, "z": 0, "width": 1.35, "depth": 1.0, "height": 2.65}, "footprint": [[0,2],[1,2]]},
+    {"id": "kitchen-counter", "kind": "counter", "material": "cream", "transform": {"x": 2, "y": 0, "z": 0, "width": 4, "depth": 1, "height": 0.92}, "footprint": [[2,0],[3,0],[4,0],[5,0]]},
+    {"id": "wall-cabinets", "kind": "cabinet", "material": "teal", "occupancy": "mounted", "transform": {"x": 2, "y": 0.08, "z": 1.65, "width": 4, "depth": 0.45, "height": 1.1}, "footprint": []},
+    {"id": "fridge", "kind": "fridge", "material": "teal", "transform": {"x": 6, "y": 0, "z": 0, "width": 1.1, "depth": 1, "height": 2.5}, "footprint": [[6,0],[7,0]]},
+    {"id": "dining", "kind": "table", "material": "oak", "transform": {"x": 5, "y": 3, "z": 0, "width": 2.4, "depth": 2, "height": 0.95}, "footprint": [[5,3],[6,3],[7,3],[5,4],[6,4],[7,4]]},
+    {"id": "sofa", "kind": "sofa", "material": "linen", "transform": {"x": 3.8, "y": 8.65, "z": 0, "width": 3.4, "depth": 1.2, "height": 1.15}, "footprint": [[3,8],[4,8],[5,8],[6,8],[7,8],[3,9],[4,9],[5,9],[6,9],[7,9]]},
+    {"id": "coffee-table", "kind": "table", "material": "oak", "transform": {"x": 6.5, "y": 10.2, "z": 0, "width": 2, "depth": 1.1, "height": 0.62}, "footprint": [[6,10],[7,10],[8,10],[6,11],[7,11],[8,11]]},
+    {"id": "bed", "kind": "bed", "material": "pink", "transform": {"x": 9, "y": 4, "z": 0, "width": 3.5, "depth": 2.3, "height": 0.82}, "footprint": [[9,4],[10,4],[11,4],[12,4],[9,5],[10,5],[11,5],[12,5],[9,6],[10,6],[11,6],[12,6]]},
+    {"id": "bedside", "kind": "table", "material": "oak", "transform": {"x": 12.2, "y": 6, "z": 0, "width": 0.7, "depth": 0.8, "height": 0.72}, "footprint": [[12,6]]},
+    {"id": "divider", "kind": "divider", "material": "dark_oak", "transform": {"x": 8.2, "y": 6.6, "z": 0, "width": 3.2, "depth": 0.35, "height": 1.15}, "footprint": [[8,6],[9,6],[10,6],[11,6]]},
+    {"id": "vanity", "kind": "vanity", "material": "glass", "transform": {"x": 7.3, "y": 1.3, "z": 0, "width": 1.2, "depth": 1, "height": 0.92}, "footprint": [[7,1],[8,1],[7,2],[8,2]]},
+    {"id": "window", "kind": "window", "material": "glass", "occupancy": "mounted", "transform": {"x": 9, "y": 0.05, "z": 1.15, "width": 3, "depth": 0.08, "height": 1.4}, "footprint": []},
+    {"id": "plant", "kind": "plant", "material": "sage", "transform": {"x": 10, "y": 9.2, "z": 0, "width": 1, "depth": 1, "height": 1.5}, "footprint": [[10,9],[10,10]]},
+
+    {"id": "work-rug", "kind": "rug", "material": "rug_blue", "occupancy": "decor", "transform": {"x": 0.25, "y": 6.1, "z": 0.01, "width": 4.4, "depth": 3.5, "height": 0.03}, "footprint": []},
+    {"id": "living-rug", "kind": "rug", "material": "rug_sage", "occupancy": "decor", "transform": {"x": 3.15, "y": 8.1, "z": 0.012, "width": 5.7, "depth": 3.65, "height": 0.03}, "footprint": []},
+    {"id": "dining-rug", "kind": "rug", "material": "navy", "occupancy": "decor", "transform": {"x": 4.35, "y": 2.55, "z": 0.012, "width": 3.7, "depth": 3.1, "height": 0.03}, "footprint": []},
+    {"id": "bed-rug", "kind": "rug", "material": "coral", "occupancy": "decor", "transform": {"x": 9.0, "y": 6.25, "z": 0.012, "width": 4.15, "depth": 2.0, "height": 0.03}, "footprint": []},
+    {"id": "kitchen-tile", "kind": "rug", "material": "tile", "occupancy": "decor", "transform": {"x": 1.7, "y": 0.2, "z": 0.012, "width": 6.1, "depth": 4.9, "height": 0.03}, "footprint": []},
+
+    {"id": "desk-drawers", "kind": "cabinet", "material": "dark_oak", "transform": {"x": 0.75, "y": 6.55, "z": 0, "width": 0.72, "depth": 1.12, "height": 0.82}, "footprint": [[0,6],[1,6],[0,7],[1,7]]},
+    {"id": "desk-laptop", "kind": "laptop", "material": "navy", "occupancy": "decor", "transform": {"x": 1.95, "y": 6.78, "z": 0.93, "width": 0.9, "depth": 0.55, "height": 0.62}, "footprint": []},
+    {"id": "desk-books", "kind": "books", "material": "coral", "occupancy": "decor", "transform": {"x": 0.95, "y": 6.75, "z": 0.93, "width": 0.62, "depth": 0.42, "height": 0.34}, "footprint": []},
+    {"id": "desk-lamp", "kind": "lamp", "material": "brass", "occupancy": "decor", "transform": {"x": 2.95, "y": 6.72, "z": 0.93, "width": 0.48, "depth": 0.48, "height": 0.85}, "footprint": []},
+    {"id": "work-wall-shelf", "kind": "shelf", "material": "dark_oak", "occupancy": "decor", "transform": {"x": 0.12, "y": 3.65, "z": 1.65, "width": 0.35, "depth": 2.0, "height": 0.13}, "footprint": []},
+    {"id": "work-art", "kind": "wall_art", "material": "paper", "occupancy": "decor", "transform": {"x": 0.1, "y": 6.2, "z": 1.38, "width": 0.08, "depth": 1.05, "height": 0.9}, "footprint": []},
+
+    {"id": "kitchen-sink", "kind": "counter", "material": "teal", "occupancy": "decor", "transform": {"x": 2.35, "y": 0.42, "z": 0.93, "width": 1.15, "depth": 0.52, "height": 0.14}, "footprint": []},
+    {"id": "kitchen-stove", "kind": "counter", "material": "navy", "occupancy": "decor", "transform": {"x": 4.2, "y": 0.42, "z": 0.93, "width": 1.35, "depth": 0.55, "height": 0.1}, "footprint": []},
+    {"id": "kitchen-oven", "kind": "cabinet", "material": "navy", "occupancy": "decor", "transform": {"x": 4.25, "y": 0.48, "z": 0.15, "width": 1.15, "depth": 0.08, "height": 0.75}, "footprint": []},
+    {"id": "kitchen-shelf-books", "kind": "books", "material": "brass", "occupancy": "decor", "transform": {"x": 2.35, "y": 0.2, "z": 2.83, "width": 1.2, "depth": 0.28, "height": 0.32}, "footprint": []},
+    {"id": "kitchen-plant", "kind": "plant", "material": "sage", "occupancy": "decor", "transform": {"x": 5.4, "y": 0.25, "z": 2.78, "width": 0.62, "depth": 0.5, "height": 0.72}, "footprint": []},
+    {"id": "pendant", "kind": "lamp", "material": "brass", "occupancy": "decor", "transform": {"x": 7.0, "y": 2.4, "z": 2.2, "width": 0.7, "depth": 0.7, "height": 0.8}, "footprint": []},
+
+    {"id": "dining-chair-a", "kind": "chair", "material": "dark_oak", "transform": {"x": 4.1, "y": 3.45, "z": 0, "width": 0.72, "depth": 0.8, "height": 1.0}, "footprint": [[4,3],[4,4]]},
+    {"id": "dining-chair-b", "kind": "chair", "material": "dark_oak", "transform": {"x": 7.15, "y": 5.15, "z": 0, "width": 0.72, "depth": 0.72, "height": 1.0}, "footprint": [[7,5]]},
+    {"id": "dining-books", "kind": "books", "material": "paper", "occupancy": "decor", "transform": {"x": 5.55, "y": 3.65, "z": 0.96, "width": 0.82, "depth": 0.55, "height": 0.16}, "footprint": []},
+    {"id": "dining-vase", "kind": "plant", "material": "paper", "occupancy": "decor", "transform": {"x": 6.45, "y": 3.55, "z": 0.96, "width": 0.48, "depth": 0.48, "height": 0.78}, "footprint": []},
+
+    {"id": "sofa-cushion-sage", "kind": "cushion", "material": "sage", "occupancy": "decor", "transform": {"x": 5.65, "y": 8.83, "z": 0.72, "width": 0.7, "depth": 0.22, "height": 0.55}, "footprint": []},
+    {"id": "sofa-cushion-coral", "kind": "cushion", "material": "coral", "occupancy": "decor", "transform": {"x": 4.55, "y": 8.83, "z": 0.72, "width": 0.62, "depth": 0.22, "height": 0.5}, "footprint": []},
+    {"id": "coffee-tea", "kind": "tea_set", "material": "paper", "occupancy": "decor", "transform": {"x": 7.15, "y": 10.45, "z": 0.64, "width": 0.75, "depth": 0.55, "height": 0.38}, "footprint": []},
+    {"id": "foreground-console", "kind": "console", "material": "dark_oak", "transform": {"x": 1.0, "y": 10.9, "z": 0, "width": 3.2, "depth": 0.65, "height": 0.82}, "footprint": [[1,10],[2,10],[3,10],[4,10],[1,11],[2,11],[3,11],[4,11]]},
+    {"id": "console-lamp", "kind": "lamp", "material": "brass", "occupancy": "decor", "transform": {"x": 3.38, "y": 10.98, "z": 0.83, "width": 0.5, "depth": 0.5, "height": 0.78}, "footprint": []},
+
+    {"id": "bed-pillow-a", "kind": "cushion", "material": "paper", "occupancy": "decor", "transform": {"x": 9.35, "y": 4.22, "z": 0.72, "width": 1.15, "depth": 0.62, "height": 0.22}, "footprint": []},
+    {"id": "bed-pillow-b", "kind": "cushion", "material": "coral", "occupancy": "decor", "transform": {"x": 10.55, "y": 4.22, "z": 0.73, "width": 0.82, "depth": 0.58, "height": 0.25}, "footprint": []},
+    {"id": "bedside-lamp", "kind": "lamp", "material": "brass", "occupancy": "decor", "transform": {"x": 12.35, "y": 6.08, "z": 0.73, "width": 0.5, "depth": 0.5, "height": 0.82}, "footprint": []},
+
+    {"id": "living-floor-lamp", "kind": "lamp", "material": "brass", "occupancy": "decor", "transform": {"x": 7.65, "y": 8.35, "z": 0, "width": 0.62, "depth": 0.62, "height": 1.72}, "footprint": []},
+    {"id": "window-hanging-plant", "kind": "plant", "material": "sage", "occupancy": "mounted", "transform": {"x": 13.0, "y": 0.28, "z": 1.65, "width": 0.72, "depth": 0.55, "height": 1.0}, "footprint": []},
+    {"id": "living-wall-art", "kind": "wall_art", "material": "rug_sage", "occupancy": "mounted", "transform": {"x": 13.25, "y": 3.0, "z": 1.25, "width": 0.08, "depth": 0.9, "height": 1.0}, "footprint": []},
+
+    {"id": "curtain-left", "kind": "curtain", "material": "curtain_teal", "occupancy": "decor", "transform": {"x": 8.55, "y": 0.22, "z": 0.75, "width": 0.5, "depth": 0.18, "height": 2.05}, "footprint": []},
+    {"id": "curtain-right", "kind": "curtain", "material": "curtain_teal", "occupancy": "decor", "transform": {"x": 12.05, "y": 0.22, "z": 0.75, "width": 0.5, "depth": 0.18, "height": 2.05}, "footprint": []},
+    {"id": "window-planter", "kind": "plant", "material": "sage", "occupancy": "decor", "transform": {"x": 10.2, "y": 0.45, "z": 0.72, "width": 0.8, "depth": 0.55, "height": 0.9}, "footprint": []},
+    {"id": "window-art", "kind": "wall_art", "material": "coral", "occupancy": "decor", "transform": {"x": 12.85, "y": 0.13, "z": 1.35, "width": 0.65, "depth": 0.08, "height": 0.9}, "footprint": []}
+  ],
+  "interactions": {
+    "study": {"object": "desk", "location": "desk", "actions": ["study"], "approach": [4,7], "pose_anchor": [3.45,7.75,0.48], "pose": "sit", "facing": "up_right"},
+    "eat": {"object": "dining", "location": "kitchen", "actions": ["eat"], "approach": [6,5], "pose_anchor": [6.0,4.7,0.45], "pose": "sit", "facing": "up_right"},
+    "relax": {"object": "sofa", "location": "sofa", "actions": ["relax", "social"], "approach": [9,10], "pose_anchor": [5.55,9.3,0.55], "pose": "sit", "facing": "up_right"},
+    "phone": {"object": "sofa", "location": "sofa", "actions": ["read_phone", "type_phone", "notice_phone", "glance_phone"], "approach": [9,10], "pose_anchor": [5.55,9.3,0.55], "pose": "sit", "facing": "up_right"},
+    "sleep": {"object": "bed", "location": "bed", "actions": ["sleep"], "approach": [9,7], "pose_anchor": [10.7,5.1,0.92], "pose": "sleep", "facing": "up_left"},
+    "wash": {"object": "vanity", "location": "vanity", "actions": ["wash"], "approach": [8,3], "pose_anchor": [7.85,2.45,0.15], "pose": "idle", "facing": "up_left"},
+    "tidy": {"object": "desk", "location": "desk", "actions": ["tidy"], "approach": [4,7], "pose_anchor": [3.45,7.75,0.15], "pose": "idle", "facing": "up_right"}
+  },
+  "anchors": {"entry": [10,11], "rug": [9,10], "window": [10,1], "desk": [4,7], "kitchen": [6,5], "sofa": [9,10], "bed": [9,7], "vanity": [8,3]}
+}

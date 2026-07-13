@@ -5,6 +5,7 @@ __pycache__/
 .ruff_cache/
 .uv-cache/
 .workbuddy/
+.artifacts/
 
 data/
 logs/
@@ -15,6 +16,7 @@ training/datasets/
 
 .DS_Store
 .idea/
+.godot/
 
 external/SillyTavern/
 external/SillyTavern/node_modules/

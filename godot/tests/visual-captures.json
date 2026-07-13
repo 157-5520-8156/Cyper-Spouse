@@ -1,0 +1,10 @@
+{
+  "schema": "godot-visual-captures-v1",
+  "internal_size": [696, 543],
+  "reference": "assets/dashboard/zhizhi-room-isometric-v2.png",
+  "captures": [
+    "full-room", "zone-work", "zone-kitchen", "zone-living", "zone-bedroom", "zone-window",
+    "study", "eat", "relax", "phone", "sleep", "wash", "tidy",
+    "desk-front", "desk-back", "sofa-front", "sofa-back", "bed-front", "bed-back", "shelf-front", "shelf-back"
+  ]
+}

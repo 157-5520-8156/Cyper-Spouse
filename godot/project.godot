@@ -1,0 +1,33 @@
+; Godot 4.7 desktop room renderer. Dashboard is only a read-only state source.
+config_version=5
+
+[application]
+config/name="Zhizhi Home"
+run/main_scene="res://scenes/main.tscn"
+config/features=PackedStringArray("4.7", "GL Compatibility")
+
+[display]
+window/size/viewport_width=696
+window/size/viewport_height=543
+window/size/window_width_override=1392
+window/size/window_height_override=1086
+window/stretch/mode="viewport"
+
+[rendering]
+renderer/rendering_method="gl_compatibility"
+renderer/rendering_method.mobile="gl_compatibility"
+textures/default_filters/use_nearest_mipmap_filter=false
+textures/canvas_textures/default_texture_filter=0
+anti_aliasing/quality/msaa_3d=0
+anti_aliasing/quality/screen_space_aa=0
+
+[zhizhi]
+daemon_context_url="http://127.0.0.1:8767/debug/geoff/context"
+manifest_path="res://scenes/zhizhi-home.json"
+capture_mode=false
+
+[input]
+refresh_scene={
+"deadzone": 0.5,
+"events": [Object(InputEventKey,"physical_keycode":4194305)]
+}
