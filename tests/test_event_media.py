@@ -310,6 +310,32 @@ async def test_generated_character_plan_requires_legal_subject_variant() -> None
 
 
 @pytest.mark.asyncio
+async def test_front_camera_rejects_no_selfie_arm_constraint() -> None:
+    proposal = _proposal(constraints=["不出现自拍臂", "手部结构自然"])
+
+    result = await MediaPlanner(FakeModel(proposal)).plan(_opportunity())
+
+    assert isinstance(result, NotRenderable)
+    assert result.reason == "unsupported_model_constraint"
+
+
+@pytest.mark.asyncio
+async def test_non_selfie_capture_derives_no_selfie_arm_constraint() -> None:
+    result = await MediaPlanner(
+        FakeModel(
+            _proposal(
+                capture_mode="timer_fixed",
+                constraints=["手部结构自然"],
+                subject_variant_id="timer_environment_pose",
+            )
+        )
+    ).plan(_opportunity())
+
+    assert isinstance(result, PlannedMedia)
+    assert "不出现自拍臂" in result.plan.constraints
+
+
+@pytest.mark.asyncio
 async def test_missing_subject_catalog_fails_closed_before_model_call(tmp_path: Path) -> None:
     model = FakeModel(_proposal())
 

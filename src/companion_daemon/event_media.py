@@ -275,13 +275,19 @@ _MODEL_CONSTRAINTS = frozenset(
         "不生成可读文字",
         "手部结构自然",
         "不增加未登记人物",
-        "不出现自拍臂",
         "无关人物保持匿名",
         "不把随手照拍成时尚大片",
         "不使用偷拍或狗仔视角",
         "身体与镜面反射符合物理关系",
     }
 )
+_CAPTURE_DERIVED_CONSTRAINTS: dict[str, tuple[str, ...]] = {
+    "character_rear_camera": ("不出现自拍臂",),
+    "timer_fixed": ("不出现自拍臂",),
+    "requested_helper": ("不出现自拍臂",),
+    "known_companion": ("不出现自拍臂",),
+    "external_sender": ("不出现自拍臂",),
+}
 _WORLD_EXPRESSION_CONSTRAINTS = frozenset(
     {
         "整体表现更活泼但不过度表演",
@@ -296,7 +302,10 @@ _INTERNAL_GROUNDING_CONSTRAINT = (
     "Creative photographic directions cannot add facts beyond the selected evidence."
 )
 _FROZEN_CONSTRAINTS = (
-    _MODEL_CONSTRAINTS | _WORLD_EXPRESSION_CONSTRAINTS | {_INTERNAL_GROUNDING_CONSTRAINT}
+    _MODEL_CONSTRAINTS
+    | _WORLD_EXPRESSION_CONSTRAINTS
+    | {item for values in _CAPTURE_DERIVED_CONSTRAINTS.values() for item in values}
+    | {_INTERNAL_GROUNDING_CONSTRAINT}
 )
 _CAPTURE_CAMERA_DIRECTIONS: dict[str, frozenset[str]] = {
     "character_front_camera": frozenset(
@@ -1110,6 +1119,7 @@ def _freeze_proposal(
                         for item in opportunity.expression_requirements
                         if item.strip()
                     ),
+                    *_CAPTURE_DERIVED_CONSTRAINTS.get(values["capture_mode"], ()),
                     _INTERNAL_GROUNDING_CONSTRAINT,
                 )
             )
@@ -1688,7 +1698,8 @@ def _direction_guidance() -> str:
         f"action={sorted(_ACTION_DIRECTIONS)}\n"
         f"camera_direction={sorted(_CAMERA_DIRECTIONS)}\n"
         f"sharing_motive={sorted(_MOTIVE_DIRECTIONS)}\n"
-        f"constraints may contain only={sorted(_MODEL_CONSTRAINTS)}"
+        f"constraints may contain only={sorted(_MODEL_CONSTRAINTS)}. Capture-source invariants such "
+        "as no selfie arm are added by the compiler; never return them yourself."
     )
 
 
@@ -1715,8 +1726,8 @@ def _validate_direction_catalog(
         return "intimate_motive_conflict"
     if values["share_intent"] != "intimate_signal" and motive == intimate_motive:
         return "intimate_motive_conflict"
+    constraints = proposal.get("constraints", [])
     if check_constraints:
-        constraints = proposal.get("constraints", [])
         if isinstance(constraints, list) and any(
             item not in _MODEL_CONSTRAINTS for item in constraints
         ):
