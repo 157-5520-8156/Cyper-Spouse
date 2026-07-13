@@ -38,7 +38,7 @@ def test_hot_fact_free_reply_has_one_fast_model_call_without_independent_audit()
 
     assert decision.allowed is True
     assert decision.max_calls == 1
-    assert decision.soft_timeout_seconds == 6.0
+    assert decision.soft_timeout_seconds == 4.0
     assert decision.requires_independent_audit is False
     assert decision.hard_invariants_required is True
     assert decision.reason == "hot_fact_free_reply"
@@ -189,7 +189,7 @@ def test_frozen_hot_warm_and_cold_cadence_choose_distinct_soft_timeouts() -> Non
         for heat in ("hot", "warm", "cold")
     ]
 
-    assert [item.soft_timeout_seconds for item in decisions] == [6.0, 10.0, 15.0]
+    assert [item.soft_timeout_seconds for item in decisions] == [4.0, 10.0, 15.0]
     assert [item.max_calls for item in decisions] == [1, 1, 1]
 
 
