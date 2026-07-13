@@ -314,7 +314,11 @@ async def test_legacy_deferred_recovery_does_not_confirm_without_platform_receip
     assert store.social_task_is_active(task_id) is False
     with store.connect() as conn:
         status = conn.execute("select status from outbox_messages").fetchone()["status"]
-    assert status == "failed"
+    # A returned coroutine with no durable platform id is neither a confirmed
+    # delivery nor proof that QQ rejected it.  The legacy outbox must preserve
+    # that ambiguity instead of inventing a failure result.
+    assert status == "unknown"
+    assert store.recent_turn_traces("geoff")[-1]["status"] == "unknown"
 
 
 @pytest.mark.asyncio
@@ -443,4 +447,5 @@ async def test_legacy_pulse_recovery_does_not_confirm_without_platform_receipt(
     assert store.social_task_is_active(task_id) is False
     with store.connect() as conn:
         status = conn.execute("select status from outbox_messages").fetchone()["status"]
-    assert status == "failed"
+    assert status == "unknown"
+    assert store.recent_turn_traces("geoff")[-1]["status"] == "unknown"

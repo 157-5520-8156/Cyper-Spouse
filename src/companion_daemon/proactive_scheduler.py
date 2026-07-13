@@ -106,6 +106,29 @@ async def _dispatch_legacy_parts(
             )
 
 
+def _mark_legacy_delivery_unknown(
+    engine,
+    *,
+    delivery_id: int | None,
+    trace_id: int | None,
+    reason: str,
+) -> None:
+    """Record ambiguity at the legacy compatibility boundary.
+
+    Only World Actions can settle a platform observation in ``CompanionTurn``.
+    For the remaining pre-World outbox, never downgrade a missing receipt to
+    a made-up failure or upgrade it to delivery: close the attempt as unknown
+    so it cannot be replayed as if nothing was ever sent.
+    """
+    if delivery_id is None:
+        return
+    engine.store.mark_outgoing_and_turn_trace_unknown(
+        delivery_id,
+        trace_id,
+        reason=reason,
+    )
+
+
 def _minutes_since(iso_timestamp: str | None) -> float | None:
     if not iso_timestamp:
         return None
@@ -188,8 +211,9 @@ async def recover_overdue_deferred_replies(
 
     The two-minute grace period leaves the live coalescer's precise timer as the
     normal path. Recovery only handles work that demonstrably outlived that timer.
-    A failed recovery is closed after its failed outbox record is retained: replaying
-    the same incoming turn would otherwise create duplicate conversation history.
+    A failed or receipt-ambiguous recovery is closed after its outbox result is
+    retained: replaying the same incoming turn would otherwise create duplicate
+    conversation history.
     """
     if not send or not hasattr(engine.store, "claim_due_social_tasks"):
         return 0
@@ -222,6 +246,21 @@ async def recover_overdue_deferred_replies(
             engine.complete_deferred_reply_task(task_id)
             recovered += 1
             logger.info("recovered overdue deferred reply task %s", task_id)
+        except _LegacyReceiptUnavailable as exc:
+            logger.warning(
+                "legacy deferred reply %s has no durable QQ receipt; preserving unknown delivery",
+                task_id,
+            )
+            if reply is not None:
+                _mark_legacy_delivery_unknown(
+                    engine,
+                    delivery_id=reply.delivery_id,
+                    trace_id=reply.turn_trace_id,
+                    reason=str(exc),
+                )
+            # The adapter may have emitted a visible bubble.  Do not replay it
+            # on the next pass merely because its receipt was lost.
+            engine.complete_deferred_reply_task(task_id)
         except Exception:
             logger.exception("failed to recover deferred reply task %s", task_id)
             if reply is not None:
@@ -369,6 +408,22 @@ async def recover_overdue_conversation_pulses(
                 )
             recovered += 1
             logger.info("recovered conversation pulse %s", task_id)
+        except _LegacyReceiptUnavailable as exc:
+            logger.warning(
+                "legacy conversation pulse %s has no durable QQ receipt; preserving unknown delivery",
+                task_id,
+            )
+            _mark_legacy_delivery_unknown(
+                engine,
+                delivery_id=delivery_id,
+                trace_id=(
+                    engine.store.turn_trace_id_for_delivery(delivery_id)
+                    if delivery_id is not None
+                    else None
+                ),
+                reason=str(exc),
+            )
+            engine.cancel_conversation_pulse(task_id)
         except Exception:
             logger.exception("failed to recover conversation pulse %s", task_id)
             if delivery_id is not None:

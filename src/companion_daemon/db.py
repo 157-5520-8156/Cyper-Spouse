@@ -851,6 +851,48 @@ class CompanionStore:
                 )
             return row
 
+    def mark_outgoing_and_turn_trace_unknown(
+        self,
+        delivery_id: int,
+        trace_id: int | None,
+        *,
+        reason: str,
+    ) -> sqlite3.Row | None:
+        """Close a legacy outbound attempt whose platform result is unknowable.
+
+        The pre-World outbox has no segment or external-observation ledger, but
+        it can still distinguish a missing durable QQ receipt from a definite
+        delivery failure.  Keeping that distinction prevents recovery code
+        from either fabricating delivery or overwriting an ambiguous send as a
+        failed one.
+        """
+        self._assert_legacy_behavior_write_allowed("mark_outgoing_and_turn_trace_unknown")
+        now = utc_now().isoformat()
+        with self.connect() as conn:
+            row = conn.execute(
+                "select canonical_user_id, platform, text, kind, status from outbox_messages where id = ?",
+                (delivery_id,),
+            ).fetchone()
+            if not row or row["status"] != "planned":
+                return row
+            conn.execute(
+                """
+                update outbox_messages
+                set status = 'unknown', failed_at = ?, failure_reason = ?
+                where id = ? and status = 'planned'
+                """,
+                (now, reason[:500], delivery_id),
+            )
+            if trace_id is not None:
+                conn.execute(
+                    """
+                    update turn_traces set status = 'unknown', failure_reason = ?, updated_at = ?
+                    where id = ? and delivery_id = ? and status = 'planned'
+                    """,
+                    (reason[:500], now, trace_id, delivery_id),
+                )
+            return row
+
     def outbox_message(self, delivery_id: int) -> sqlite3.Row | None:
         with self.connect() as conn:
             return conn.execute(
