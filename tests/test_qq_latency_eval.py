@@ -1,10 +1,12 @@
 import asyncio
+import json
 
 import pytest
 
 from companion_daemon.models import CompanionReply, IncomingMessage
 from companion_daemon.conversation_cadence import ConversationCadence
 from companion_daemon.qq_latency_eval import (
+    qq_latency_report,
     run_synthetic_qq_latency_smoke,
     summarize_qq_latency,
 )
@@ -33,6 +35,9 @@ async def test_qq_latency_smoke_records_coalescing_and_visible_receipt_by_cadenc
         assert summary[cadence].sample_count == 1
         assert summary[cadence].visible_count == 1
         assert summary[cadence].p50_first_visible_ms is not None
+
+    report = qq_latency_report(observations)
+    assert json.loads(json.dumps(report))["observations"][0]["observed_at"]
 
 
 @pytest.mark.asyncio

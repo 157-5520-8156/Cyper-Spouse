@@ -80,6 +80,23 @@ def summarize_qq_latency(
     return tuple(summaries)
 
 
+def qq_latency_report(observations: Iterable[TurnRuntimeObservation]) -> dict[str, object]:
+    """Build a JSON-safe synthetic report without losing the observed time."""
+    rows = tuple(observations)
+    return {
+        "live": False,
+        "definition": qq_latency_definition(),
+        "observations": [
+            {
+                **asdict(row),
+                "observed_at": row.observed_at.isoformat(),
+            }
+            for row in rows
+        ],
+        "summaries": [asdict(row) for row in summarize_qq_latency(rows)],
+    }
+
+
 async def run_synthetic_qq_latency_smoke() -> tuple[TurnRuntimeObservation, ...]:
     """Exercise the actual QQ coalescer seam without a provider or QQ account.
 
@@ -134,16 +151,7 @@ def _main() -> int:
         parser.error("pass --synthetic to run the instrumentation smoke test")
     observations = asyncio.run(run_synthetic_qq_latency_smoke())
     print(
-        json.dumps(
-            {
-                "live": False,
-                "definition": qq_latency_definition(),
-                "observations": [asdict(row) for row in observations],
-                "summaries": [asdict(row) for row in summarize_qq_latency(observations)],
-            },
-            ensure_ascii=False,
-            indent=2,
-        )
+        json.dumps(qq_latency_report(observations), ensure_ascii=False, indent=2)
     )
     return 0
 
