@@ -223,6 +223,62 @@ async def test_world_life_event_shares_only_committed_world_experience(tmp_path:
     assert any(item.get("shared") for item in world.snapshot(started.world_id)["experiences"].values())
 
 
+def test_world_life_share_migrates_a_scheduled_pre_segment_action(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.map_account("qq", "openid", "geoff")
+    world = WorldKernel(store)
+    started = world.start_from_seed_file(Path("configs/world_seed.yaml"))
+    world.advance(
+        started.world_id,
+        datetime(2026, 7, 11, 12, 30, tzinfo=datetime.fromisoformat("2026-07-11T09:00:00+08:00").tzinfo),
+        expected_revision=started.revision,
+    )
+    selected = world.schedule_life_share_delivery(
+        world_id=started.world_id,
+        canonical_user_id="geoff",
+        platform="qq",
+        expires_at=datetime(2026, 7, 11, 16, 30, tzinfo=datetime.fromisoformat("2026-07-11T09:00:00+08:00").tzinfo),
+        expected_revision=world.revision(started.world_id),
+    )
+    assert selected is not None
+
+    # Emulate a persisted action created before ActionSegmentsPlanned existed.
+    with store.connect() as conn:
+        revision, state = world._load_state(conn, started.world_id)
+        del state["actions"][selected.action_id]["segment_state"]
+        world._write_projection(conn, started.world_id, revision, state)
+
+    migrated = world.schedule_life_share_delivery(
+        world_id=started.world_id,
+        canonical_user_id="geoff",
+        platform="qq",
+        expires_at=datetime(2026, 7, 11, 16, 30, tzinfo=datetime.fromisoformat("2026-07-11T09:00:00+08:00").tzinfo),
+        expected_revision=selected.revision,
+    )
+
+    assert migrated is not None
+    assert migrated.delivery_id == selected.delivery_id
+    assert migrated.revision > selected.revision
+    action = world.snapshot(started.world_id)["actions"][selected.action_id]
+    assert [segment["text"] for segment in action["segment_state"]["segments"]] == [selected.text]
+    assert [segment["status"] for segment in action["segment_state"]["segments"]] == ["planned"]
+    migrated_events = [
+        event for event in world.events(started.world_id)
+        if event.event_type == "ActionSegmentsPlanned" and event.source == "schema_migration"
+    ]
+    assert len(migrated_events) == 1
+
+    repeated = world.schedule_life_share_delivery(
+        world_id=started.world_id,
+        canonical_user_id="geoff",
+        platform="qq",
+        expires_at=datetime(2026, 7, 11, 16, 30, tzinfo=datetime.fromisoformat("2026-07-11T09:00:00+08:00").tzinfo),
+        expected_revision=migrated.revision,
+    )
+    assert repeated is not None and repeated.revision == migrated.revision
+    assert len([event for event in world.events(started.world_id) if event.source == "schema_migration"]) == 1
+
+
 @pytest.mark.asyncio
 async def test_world_life_event_without_durable_receipt_stays_unknown(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

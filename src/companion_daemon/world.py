@@ -1465,8 +1465,57 @@ class WorldKernel:
             for action_id, action in _as_dict(state["actions"], "actions").items():
                 item = _as_dict(action, "action")
                 trace = _as_dict(item.get("trace", {}), "action trace")
-                if item.get("kind") == "outgoing_message" and trace.get("life_share") and item.get("status") in {"scheduled", "sending"}:
-                    return LifeShareDelivery(str(trace["experience_id"]), int(item["delivery_id"]), int(item["trace_id"]), action_id, str(item["text"]), revision)
+                if (
+                    item.get("kind") == "outgoing_message"
+                    and trace.get("life_share")
+                    and item.get("status") in {"scheduled", "sending"}
+                ):
+                    if item.get("status") == "scheduled" and not _as_dict(
+                        item.get("segment_state", {}), "life share segment state"
+                    ).get("segments"):
+                        # Pre-turn-schema life shares were authorized but had
+                        # not yet called a transport.  Append a deterministic
+                        # single segment instead of recreating the Action or
+                        # its outbox row.  A legacy sending Action is excluded:
+                        # it may already have reached QQ and recovery marks it
+                        # uncertain rather than scheduling a duplicate.
+                        action_id_text = str(action_id)
+                        segmented = self.action_coordinator.plan_action(
+                            action_id=action_id_text,
+                            texts=[str(item["text"])],
+                            delays_before_ms=[0],
+                        )
+                        planned_event = self.action_coordinator.planned_world_event(
+                            segmented
+                        )
+                        decision = self._append_and_project(
+                            conn,
+                            world_id,
+                            revision,
+                            state,
+                            [planned_event],
+                            idempotency_key=f"life-share-segments-v1:{action_id_text}",
+                            correlation_id=str(uuid4()),
+                            source="schema_migration",
+                            actor={"kind": "system"},
+                            causation_id=action_id_text,
+                        )
+                        return LifeShareDelivery(
+                            str(trace["experience_id"]),
+                            int(item["delivery_id"]),
+                            int(item["trace_id"]),
+                            action_id_text,
+                            str(item["text"]),
+                            decision.revision,
+                        )
+                    return LifeShareDelivery(
+                        str(trace["experience_id"]),
+                        int(item["delivery_id"]),
+                        int(item["trace_id"]),
+                        str(action_id),
+                        str(item["text"]),
+                        revision,
+                    )
                 if trace.get("life_share") and item.get("status") == "unknown":
                     uncertain_experiences.add(str(trace.get("experience_id") or ""))
             needs = _as_dict(state["needs"], "needs")
