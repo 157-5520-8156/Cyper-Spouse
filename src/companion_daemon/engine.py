@@ -2553,7 +2553,15 @@ class CompanionEngine:
             # to recall prior sources.  In particular, an invalid candidate
             # must not turn “嗯” into a fact dump just because the ledger has
             # something citable from the previous turn.
-            if classify_message(message.text) == "minimal_response":
+            message_kind = classify_message(message.text)
+            if (
+                message_kind in {"minimal_response", "story", "emotional"}
+                or _is_narrative_continuation(message.text)
+            ) and (
+                not query_scope.asks_current_scene
+                and not query_scope.asks_experience
+                and not asks_for_source_detail(message.text)
+            ):
                 grounded_fallback = None
             elif occurrence_candidate:
                 pass
@@ -5341,6 +5349,8 @@ def _safe_failure_speech_act(
     message_kind = classify_message(message_text)
     if message_kind == "farewell":
         return "brief_goodnight"
+    if message_kind == "story" or _is_narrative_continuation(message_text):
+        return "story_disclosure"
     if message_kind == "urgent" and query_scope.asks_data_recovery:
         return "urgent_data"
     if appraisal.startswith("repair_") or appraisal == "repair_attempt":
@@ -5350,6 +5360,15 @@ def _safe_failure_speech_act(
     if message_kind == "question":
         return "question"
     return "statement"
+
+
+def _is_narrative_continuation(text: str) -> bool:
+    """Recognize short follow-up beats that the generic classifier calls statements."""
+    compact = "".join(str(text or "").split())
+    return bool(
+        compact
+        and any(marker in compact for marker in ("结果", "然后", "后来", "突然", "发现", "赶到"))
+    )
 
 
 _HOT_CONTEXT_PROMPT_LIMITS: dict[str, tuple[int, int]] = {

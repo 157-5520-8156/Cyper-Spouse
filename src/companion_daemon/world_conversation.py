@@ -268,6 +268,7 @@ _SAFE_SPEECH_ACT_SKELETONS = {
     "emotional_permission": "我会按眼下能确认的状态直接说，不替自己补一段感受。",
     "health_disclosure": "听起来你现在确实不舒服。",
     "sleep_disclosure": "听起来你已经很累，脑子还没停下来。",
+    "story_disclosure": "接着说就好。",
     "vulnerable_disclosure": "我听见你在担心，也不会替你把结果说死。",
     "current_disclosure": "我听见你在说眼下的状态，不替你补原因或加重程度。",
     "relationship_probe": "我不想用一句过满的话糊弄你，关系要靠相处留下来。",
@@ -283,6 +284,11 @@ _SAFE_SPEECH_ACT_SKELETONS = {
 }
 
 _SAFE_SPEECH_ACT_VARIANTS = {
+    "story_disclosure": (
+        "接着说就好。",
+        "这段我听着呢，不急着替你下结论。",
+        "顺着这件事慢慢说。",
+    ),
     "boundary_response": (
         "这句话越过我的边界了，我不接受这种互动方式。",
         "先停一下，这种说法我不接受。",
