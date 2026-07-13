@@ -74,10 +74,15 @@ class QQTurnTransport(TurnTransport):
     """Official-QQ text adapter: a receipt is required before delivery is true."""
 
     def __init__(
-        self, reply_target: ReplyTarget, *, on_dispatch_started: Callable[[], None] | None = None
+        self,
+        reply_target: ReplyTarget,
+        *,
+        on_dispatch_started: Callable[[], None] | None = None,
+        on_visible_delivery: Callable[[], None] | None = None,
     ) -> None:
         self.reply_target = reply_target
         self.on_dispatch_started = on_dispatch_started
+        self.on_visible_delivery = on_visible_delivery
 
     async def dispatch(self, beat: TurnBeat) -> DispatchAcceptance:
         if self.on_dispatch_started:
@@ -89,6 +94,8 @@ class QQTurnTransport(TurnTransport):
                 status="unknown",
                 reason="qq_reply_returned_without_durable_receipt",
             )
+        if self.on_visible_delivery:
+            self.on_visible_delivery()
         return DispatchAcceptance(status="delivered", external_receipt=receipt)
 
 
@@ -339,6 +346,7 @@ def _mark_claimed_reply_segment_unknown(
 class QueuedQQMessage:
     incoming: IncomingMessage
     reply_target: ReplyTarget
+    received_monotonic: float
 
 
 @dataclass
@@ -367,11 +375,22 @@ class AfterthoughtPlan:
 
 @dataclass(frozen=True)
 class TurnRuntimeObservation:
+    """One QQ turn measured from the first input in its coalesced burst.
+
+    ``elapsed_seconds`` and ``first_visible_elapsed_seconds`` deliberately
+    include the debounce/coalescing wait.  They are therefore not comparable
+    with a model-only latency number.
+    """
+
     key: str
     outcome: str
     elapsed_seconds: float
     failure_type: str | None = None
     failure_reason: str | None = None
+    cadence: str | None = None
+    input_count: int = 0
+    coalescing_wait_seconds: float | None = None
+    first_visible_elapsed_seconds: float | None = None
 
 
 class QQMessageCoalescer:
@@ -417,6 +436,7 @@ class QQMessageCoalescer:
         self._active_sends: dict[str, ActiveSend] = {}
         self._active_turns: dict[str, CompanionTurn] = {}
         self._frozen_turn_contexts: dict[str, object] = {}
+        self._turn_cadences: dict[str, str] = {}
         set_media_delivery_handler = getattr(self.engine, "set_media_delivery_handler", None)
         if callable(set_media_delivery_handler):
             set_media_delivery_handler(self._deliver_background_media)
@@ -457,7 +477,11 @@ class QQMessageCoalescer:
                 if current_id and str(prior.message_id or "") == current_id:
                     continue
                 self._pending[key].append(
-                    QueuedQQMessage(incoming=prior, reply_target=reply_target)
+                    QueuedQQMessage(
+                        incoming=prior,
+                        reply_target=reply_target,
+                        received_monotonic=self.monotonic(),
+                    )
                 )
         if len(self._pending[key]) >= 6:
             existing = self._tasks.get(key)
@@ -469,11 +493,19 @@ class QQMessageCoalescer:
             deferred = self._deferred.pop(key, None)
             if deferred:
                 self._pending[key].append(
-                    QueuedQQMessage(incoming=deferred.merged, reply_target=deferred.reply_target)
+                    QueuedQQMessage(
+                        incoming=deferred.merged,
+                        reply_target=deferred.reply_target,
+                        received_monotonic=self.monotonic(),
+                    )
                 )
             if self.enable_reply_decision and is_urgent_interrupt(incoming.text):
                 self._pending[key].append(
-                    QueuedQQMessage(incoming=incoming, reply_target=reply_target)
+                    QueuedQQMessage(
+                        incoming=incoming,
+                        reply_target=reply_target,
+                        received_monotonic=self.monotonic(),
+                    )
                 )
                 existing = self._tasks.get(key)
                 if existing and not existing.done():
@@ -481,7 +513,13 @@ class QQMessageCoalescer:
                 self._tasks[key] = asyncio.create_task(self._flush_later(key, 0.2))
                 return
 
-        self._pending[key].append(QueuedQQMessage(incoming=incoming, reply_target=reply_target))
+        self._pending[key].append(
+            QueuedQQMessage(
+                incoming=incoming,
+                reply_target=reply_target,
+                received_monotonic=self.monotonic(),
+            )
+        )
         decision = self._decision_for(key)
         if hasattr(self.engine, "record_input_merge_candidate"):
             self.engine.record_input_merge_candidate(
@@ -515,10 +553,18 @@ class QQMessageCoalescer:
                     logger.exception("failed to cancel pre-dispatch QQ v2 Action for %s", key)
                 if not self._pending[key]:
                     self._pending[key].append(
-                        QueuedQQMessage(incoming=active.incoming, reply_target=active.reply_target)
+                        QueuedQQMessage(
+                            incoming=active.incoming,
+                            reply_target=active.reply_target,
+                            received_monotonic=self.monotonic(),
+                        )
                     )
                 self._pending[key].append(
-                    QueuedQQMessage(incoming=incoming, reply_target=reply_target)
+                    QueuedQQMessage(
+                        incoming=incoming,
+                        reply_target=reply_target,
+                        received_monotonic=self.monotonic(),
+                    )
                 )
                 if hasattr(self.engine, "record_input_merge_candidate"):
                     self.engine.record_input_merge_candidate(
@@ -549,7 +595,11 @@ class QQMessageCoalescer:
                 except Exception:
                     logger.exception("failed to interrupt QQ v2 outgoing Action for %s", key)
                 self._pending[key].append(
-                    QueuedQQMessage(incoming=incoming, reply_target=reply_target)
+                    QueuedQQMessage(
+                        incoming=incoming,
+                        reply_target=reply_target,
+                        received_monotonic=self.monotonic(),
+                    )
                 )
                 existing = self._tasks.get(key)
                 if existing and not existing.done():
@@ -578,7 +628,13 @@ class QQMessageCoalescer:
                     kind="substantive",
                     user_message_id=active.interruption_message_id,
                 )
-            self._pending[key].append(QueuedQQMessage(incoming=incoming, reply_target=reply_target))
+            self._pending[key].append(
+                QueuedQQMessage(
+                    incoming=incoming,
+                    reply_target=reply_target,
+                    received_monotonic=self.monotonic(),
+                )
+            )
             existing = self._tasks.get(key)
             if existing and not existing.done():
                 existing.cancel()
@@ -604,18 +660,29 @@ class QQMessageCoalescer:
             cadence = context.cadence
         elif queued and hasattr(self.engine, "conversation_cadence"):
             cadence = self.engine.conversation_cadence(queued[-1].incoming)
+        self._turn_cadences[key] = str(getattr(cadence, "heat", "cold"))
         return self.turn_policy.decide(
             TurnInput(pending_count=len(queued), latest_text=latest, merged_text=merged),
             cadence=cadence,
         )
 
     async def _flush_later(self, key: str, wait_seconds: float) -> None:
-        started_at = self.monotonic()
         try:
             await self.sleep(wait_seconds)
             queued = self._pending.pop(key, [])
             if not queued:
                 return
+            input_started_at = min(item.received_monotonic for item in queued)
+            flushed_at = self.monotonic()
+            coalescing_wait_seconds = max(0.0, flushed_at - input_started_at)
+            cadence = self._turn_cadences.get(key, "cold")
+            first_visible_at: float | None = None
+
+            def mark_first_visible() -> None:
+                nonlocal first_visible_at
+                if first_visible_at is None:
+                    first_visible_at = self.monotonic()
+
             last = queued[-1]
             merged_text = "\n".join(
                 item.incoming.text for item in queued if item.incoming.text.strip()
@@ -729,7 +796,7 @@ class QQMessageCoalescer:
                 response_budget = {"hot": 5.0, "warm": 8.0, "cold": 12.0}.get(heat, 12.0)
             # The deadline is user-perceived turn time, not a fresh budget
             # granted after coalescing has already consumed several seconds.
-            generation_budget = response_budget - (self.monotonic() - started_at)
+            generation_budget = response_budget - (flushed_at - input_started_at)
             if world_mode and generation_budget <= 0:
                 expired_turn = TurnEnvelope.from_message(
                     merged,
@@ -747,9 +814,12 @@ class QQMessageCoalescer:
                     TurnRuntimeObservation(
                         key=key,
                         outcome="response_budget_expired_before_dispatch",
-                        elapsed_seconds=max(0.0, self.monotonic() - started_at),
+                        elapsed_seconds=max(0.0, self.monotonic() - input_started_at),
                         failure_type="TimeoutError",
                         failure_reason="user_perceived_budget_exhausted",
+                        cadence=cadence,
+                        input_count=len(queued),
+                        coalescing_wait_seconds=coalescing_wait_seconds,
                     )
                 )
                 return
@@ -765,6 +835,7 @@ class QQMessageCoalescer:
                     key=key,
                     turn_context=frozen_context,
                     budget=v2_budget,
+                    on_first_visible=mark_first_visible,
                 )
             else:
                 async with asyncio.timeout(generation_budget):
@@ -773,13 +844,22 @@ class QQMessageCoalescer:
                         last.reply_target,
                         key=key,
                         turn_context=frozen_context,
+                        on_first_visible=mark_first_visible,
                     )
             self._settle_input_merge(key, queued)
             self._observe_turn(
                 TurnRuntimeObservation(
                     key=key,
                     outcome="reply_delivered" if delivered else "no_reply_delivered",
-                    elapsed_seconds=max(0.0, self.monotonic() - started_at),
+                    elapsed_seconds=max(0.0, self.monotonic() - input_started_at),
+                    cadence=cadence,
+                    input_count=len(queued),
+                    coalescing_wait_seconds=coalescing_wait_seconds,
+                    first_visible_elapsed_seconds=(
+                        max(0.0, first_visible_at - input_started_at)
+                        if first_visible_at is not None
+                        else None
+                    ),
                 )
             )
         except (WorldError, TimeoutError) as exc:
@@ -787,13 +867,30 @@ class QQMessageCoalescer:
                 logger.exception("CompanionTurn failed for %s without adapter fallback", key)
                 if "queued" in locals():
                     self._settle_input_merge(key, queued)
+                failure_ended_at = (
+                    first_visible_at
+                    if "first_visible_at" in locals() and first_visible_at is not None
+                    else self.monotonic()
+                )
                 self._observe_turn(
                     TurnRuntimeObservation(
                         key=key,
                         outcome="companion_turn_failed",
-                        elapsed_seconds=max(0.0, self.monotonic() - started_at),
+                        elapsed_seconds=max(0.0, failure_ended_at - input_started_at),
                         failure_type=type(exc).__name__,
                         failure_reason=str(exc)[:240],
+                        cadence=self._turn_cadences.get(key, "cold"),
+                        input_count=len(queued) if "queued" in locals() else 0,
+                        coalescing_wait_seconds=(
+                            coalescing_wait_seconds
+                            if "coalescing_wait_seconds" in locals()
+                            else None
+                        ),
+                        first_visible_elapsed_seconds=(
+                            max(0.0, first_visible_at - input_started_at)
+                            if "first_visible_at" in locals() and first_visible_at is not None
+                            else None
+                        ),
                     )
                 )
                 return
@@ -819,8 +916,10 @@ class QQMessageCoalescer:
                     response = await last.reply_target.reply(
                         content=fallback_text, msg_seq=_reply_msg_seq()
                     )
+                    receipt = QQDelivery.receipt_candidate(response)
+                    if receipt:
+                        mark_first_visible()
                     if segment_id and hasattr(self.engine, "confirm_reply_part_delivery"):
-                        receipt = QQDelivery.receipt_candidate(response)
                         if not receipt:
                             raise MissingDeliveryEvidenceError(
                                 "QQ fallback returned without durable delivery evidence"
@@ -847,6 +946,11 @@ class QQMessageCoalescer:
                         )
                 if "queued" in locals():
                     self._settle_input_merge(key, queued)
+            failure_ended_at = (
+                first_visible_at
+                if "first_visible_at" in locals() and first_visible_at is not None
+                else self.monotonic()
+            )
             self._observe_turn(
                 TurnRuntimeObservation(
                     key=key,
@@ -859,9 +963,21 @@ class QQMessageCoalescer:
                             else "world_error_fallback_failed"
                         )
                     ),
-                    elapsed_seconds=max(0.0, self.monotonic() - started_at),
+                    elapsed_seconds=max(0.0, failure_ended_at - input_started_at),
                     failure_type=type(exc).__name__,
                     failure_reason=str(exc)[:240],
+                    cadence=self._turn_cadences.get(key, "cold"),
+                    input_count=len(queued) if "queued" in locals() else 0,
+                    coalescing_wait_seconds=(
+                        coalescing_wait_seconds
+                        if "coalescing_wait_seconds" in locals()
+                        else None
+                    ),
+                    first_visible_elapsed_seconds=(
+                        max(0.0, first_visible_at - input_started_at)
+                        if "first_visible_at" in locals() and first_visible_at is not None
+                        else None
+                    ),
                 )
             )
         except asyncio.CancelledError:
@@ -881,15 +997,29 @@ class QQMessageCoalescer:
             return
         finally:
             self._frozen_turn_contexts.pop(key, None)
+            self._turn_cadences.pop(key, None)
             task = self._tasks.get(key)
             if task is asyncio.current_task():
                 self._tasks.pop(key, None)
 
     def _observe_turn(self, observation: TurnRuntimeObservation) -> None:
         logger.info(
-            "QQ turn outcome=%s key=%s elapsed_seconds=%.3f failure_type=%s",
+            "QQ turn outcome=%s key=%s cadence=%s inputs=%s coalesce_seconds=%s "
+            "first_visible_seconds=%s elapsed_seconds=%.3f failure_type=%s",
             observation.outcome,
             observation.key,
+            observation.cadence or "unknown",
+            observation.input_count,
+            (
+                f"{observation.coalescing_wait_seconds:.3f}"
+                if observation.coalescing_wait_seconds is not None
+                else "unknown"
+            ),
+            (
+                f"{observation.first_visible_elapsed_seconds:.3f}"
+                if observation.first_visible_elapsed_seconds is not None
+                else "none"
+            ),
             observation.elapsed_seconds,
             observation.failure_type or "none",
         )
@@ -982,6 +1112,7 @@ class QQMessageCoalescer:
         context_hint: str | None,
         turn_context: object | None,
         budget: ResponseBudget | None,
+        on_first_visible: Callable[[], None] | None = None,
     ) -> bool:
         """World-mode text path: CompanionTurn owns every text Action transition."""
         response_seconds = self.response_timeout_seconds or 12.0
@@ -1013,6 +1144,7 @@ class QQMessageCoalescer:
             QQTurnTransport(
                 reply_target,
                 on_dispatch_started=lambda: setattr(active_send, "text_dispatch_started", True),
+                on_visible_delivery=on_first_visible,
             ),
             sleep=self.sleep,
             presenter=presenter,
@@ -1048,6 +1180,7 @@ class QQMessageCoalescer:
         context_hint: str | None = None,
         turn_context: object | None = None,
         budget: ResponseBudget | None = None,
+        on_first_visible: Callable[[], None] | None = None,
     ) -> bool:
         if hasattr(self.engine, "mark_phone_read_for_message"):
             self.engine.mark_phone_read_for_message(merged)
@@ -1066,6 +1199,7 @@ class QQMessageCoalescer:
                 context_hint=context_hint,
                 turn_context=turn_context,
                 budget=budget,
+                on_first_visible=on_first_visible,
             )
         world_mode = has_world_runtime
         typing_started = has_world_runtime
@@ -1152,6 +1286,8 @@ class QQMessageCoalescer:
                         external_receipt=external_receipt,
                     )
                     settled_segments.add(segment_id)
+                if QQDelivery.receipt_candidate(response) and on_first_visible:
+                    on_first_visible()
 
             sent_completely = await _send_reply_parts(
                 reply_target,
