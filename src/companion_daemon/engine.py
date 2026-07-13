@@ -417,9 +417,10 @@ class CompanionEngine:
         )
         if len(samples) < 3:
             samples = self.store.recent_model_usage_samples(model=model_name)
+        # DeepSeek reports reasoning as a breakdown of completion tokens;
+        # adding it again would reserve the same billed output twice.
         observed_output_tokens = tuple(
-            int(sample["completion_tokens"]) + int(sample["reasoning_tokens"])
-            for sample in samples
+            int(sample["completion_tokens"]) for sample in samples
         )
         return estimate_routed_model_reserve_cny(
             model=model_name,
