@@ -15,6 +15,7 @@ from companion_daemon.napcat_cli import (
     _parse_id_list,
     _private_sender_is_allowed,
     onebot_image_dispatch_acceptance,
+    onebot_reaction_dispatch_acceptance,
     send_onebot_image_with_acceptance,
 )
 from companion_daemon.qq_outbound_owner import QQOutboundConfigurationError
@@ -102,6 +103,46 @@ def test_napcat_image_result_without_a_message_receipt_stays_unknown() -> None:
             reason="onebot_image_returned_without_durable_receipt",
         )
     )
+
+
+@pytest.mark.parametrize(
+    "result, expected_receipt",
+    [
+        (
+            {"status": "ok", "retcode": 0, "data": {"message_id": "reaction-42"}},
+            "platform:message_id:reaction-42",
+        ),
+        (
+            {"status": "ok", "retcode": 0, "data": {"id": "reaction-43"}},
+            "platform:id:reaction-43",
+        ),
+    ],
+)
+def test_napcat_reaction_result_uses_only_platform_issued_receipts(
+    result: dict[str, object], expected_receipt: str
+) -> None:
+    assert onebot_reaction_dispatch_acceptance(result) == DispatchAcceptance(
+        status="delivered", external_receipt=expected_receipt
+    )
+
+
+def test_napcat_reaction_success_without_a_durable_receipt_stays_unknown() -> None:
+    """The requested incoming id/emoji must not be forged into a receipt."""
+    assert onebot_reaction_dispatch_acceptance({"status": "ok", "retcode": 0}) == (
+        DispatchAcceptance(
+            status="unknown",
+            reason="onebot_reaction_returned_without_durable_receipt",
+        )
+    )
+
+
+def test_napcat_reaction_explicit_rejection_is_failed() -> None:
+    outcome = onebot_reaction_dispatch_acceptance(
+        {"status": "failed", "retcode": 0, "message": "emoji rejected"}
+    )
+
+    assert outcome.status == "failed"
+    assert outcome.reason == "emoji rejected"
 
 
 @pytest.mark.asyncio

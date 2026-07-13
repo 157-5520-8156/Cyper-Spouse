@@ -260,6 +260,19 @@ class QQTurnPresenter(TurnPresenter):
                 ),
             )
             return
+        # ``DispatchAcceptance`` rejects this combination at construction,
+        # but keep the adapter boundary defensive: an implementation supplied
+        # by a plugin or a loose test double must never turn a bare HTTP 200
+        # into a World-level delivery fact.
+        if acceptance.status == "delivered" and not (
+            acceptance.external_receipt or ""
+        ).strip():
+            await self._settle_expression(
+                action_id,
+                status="unknown",
+                reason=f"qq_{effect}_returned_without_durable_receipt",
+            )
+            return
         await self._settle_expression(
             action_id,
             status=acceptance.status,

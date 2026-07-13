@@ -1627,6 +1627,62 @@ async def test_turn_presenter_requires_a_durable_receipt_for_expression_delivery
 
 
 @pytest.mark.asyncio
+async def test_turn_presenter_settles_unreceipted_reaction_as_unknown() -> None:
+    class Engine:
+        world_id = "world-1"
+
+        @staticmethod
+        def begin_reaction_delivery(
+            _incoming: IncomingMessage, _reply: CompanionReply
+        ) -> str:
+            return "reaction-action"
+
+    observations: list[ExternalObservation] = []
+
+    async def settle(observation: ExternalObservation) -> None:
+        observations.append(observation)
+
+    async def send_reaction(
+        _incoming: IncomingMessage, _reply: CompanionReply
+    ) -> DispatchAcceptance:
+        return DispatchAcceptance(
+            status="unknown",
+            reason="onebot_reaction_returned_without_durable_receipt",
+        )
+
+    presenter = QQTurnPresenter(
+        Engine(),  # type: ignore[arg-type]
+        on_reply=None,
+        on_sticker=None,
+        on_image=None,
+        on_reaction=send_reaction,
+        after_delivered=None,
+        after_terminal=lambda: None,
+        settle_external=settle,
+    )
+    incoming = IncomingMessage(
+        platform="qq", platform_user_id="user", message_id="message-1", text="看看"
+    )
+    presentation = TurnPresentation(
+        action_id="text-action",
+        incoming=incoming,
+        canonical_user_id="user",
+        suggested_reaction="haha",
+        sticker_path=None,
+        image_path=None,
+        media_action_id=None,
+        sticker_action_id=None,
+    )
+
+    await presenter.before_text(presentation)
+
+    assert [(item.action_id, item.kind, item.status) for item in observations] == [
+        ("reaction-action", "timeout", None),
+    ]
+    assert observations[0].payload["reason"] == "onebot_reaction_returned_without_durable_receipt"
+
+
+@pytest.mark.asyncio
 async def test_turn_presenter_settles_onebot_image_rejection_as_failed() -> None:
     class Engine:
         world_id = "world-1"

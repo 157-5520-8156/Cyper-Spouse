@@ -72,6 +72,39 @@ def onebot_image_dispatch_acceptance(result: object | None) -> DispatchAcceptanc
     )
 
 
+def onebot_reaction_dispatch_acceptance(result: object | None) -> DispatchAcceptance:
+    """Classify a OneBot reaction result without treating HTTP success as delivery.
+
+    ``set_msg_emoji_like`` commonly returns only an acknowledgement.  The
+    request's incoming message id and emoji id describe what we *asked* the
+    adapter to do; neither is a platform-issued receipt proving that the
+    reaction was applied.  Only an identifier returned by OneBot itself may
+    close the reaction Action as delivered.
+    """
+    if isinstance(result, Mapping):
+        status = str(result.get("status") or "").strip().lower()
+        retcode = result.get("retcode")
+        try:
+            rejected = retcode is not None and int(str(retcode)) != 0
+        except (TypeError, ValueError):
+            rejected = False
+        if status == "failed" or rejected:
+            reason = str(
+                result.get("message")
+                or result.get("wording")
+                or "onebot_reaction_rejected"
+            )[:300]
+            return DispatchAcceptance(status="failed", reason=reason)
+
+    receipt = QQDelivery.receipt_candidate(result)
+    if receipt:
+        return DispatchAcceptance(status="delivered", external_receipt=receipt)
+    return DispatchAcceptance(
+        status="unknown",
+        reason="onebot_reaction_returned_without_durable_receipt",
+    )
+
+
 async def send_onebot_image_with_acceptance(
     target: OneBotReplyTarget, image_path: Path
 ) -> DispatchAcceptance:
@@ -130,16 +163,7 @@ def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> Fast
                 status="unknown",
                 reason=f"adapter_result_uncertain:{type(exc).__name__}",
             )
-        if result.get("status") == "failed" or int(result.get("retcode") or 0) != 0:
-            return DispatchAcceptance(
-                status="failed",
-                reason=str(result.get("message") or "onebot_reaction_rejected")[:300],
-            )
-        receipt = f"onebot-reaction:{incoming.message_id}:{emoji_id}"
-        return DispatchAcceptance(
-            status="delivered",
-            external_receipt=receipt,
-        )
+        return onebot_reaction_dispatch_acceptance(result)
 
     coalescer = QQMessageCoalescer(
         engine,
