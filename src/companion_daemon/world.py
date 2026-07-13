@@ -1544,7 +1544,14 @@ class WorldKernel:
     def recover_interrupted_outgoing_deliveries(
         self, world_id: str, *, observed_now: datetime | None = None
     ) -> int:
-        """Close expired transport claims as unknown without racing a live sender."""
+        """Close expired unqueryable claims without racing durable receipt recovery.
+
+        A ``sending`` segment with a persisted ``receipt_lookup_token`` is not
+        an abandoned fire-and-forget send: the reconstructed CompanionTurn can
+        still ask its platform whether the accepted request was delivered.
+        Leave that segment intact until the transport has made that query; only
+        sends without a durable recovery handle become ``unknown`` here.
+        """
         snapshot = self.snapshot(world_id)
         observed_now = observed_now or utc_now()
         expired: list[tuple[int, str | None]] = []
@@ -1561,7 +1568,7 @@ class WorldKernel:
                 continue
             sending_segment = next(
                 (
-                    str(_as_dict(item, "segment")["segment_id"])
+                    _as_dict(item, "segment")
                     for item in _as_list(
                         _as_dict(action.get("segment_state", {}), "segment state").get(
                             "segments", []
@@ -1572,7 +1579,14 @@ class WorldKernel:
                 ),
                 None,
             )
-            expired.append((int(action["delivery_id"]), sending_segment))
+            if sending_segment and str(sending_segment.get("receipt_lookup_token") or ""):
+                continue
+            expired.append(
+                (
+                    int(action["delivery_id"]),
+                    str(sending_segment.get("segment_id") or "") if sending_segment else None,
+                )
+            )
         recovered = 0
         for delivery_id, segment_id in expired:
             if segment_id:
@@ -2792,7 +2806,7 @@ class WorldKernel:
             claim = dict(_as_dict(raw_claim, "reply claim"))
             source_id = str(claim.get("source_id") or "")
             text = str(claim.get("text") or "").strip()
-            if source_id and source_id not in known and text:
+            if source_id.startswith("user-conversation:") and source_id not in known and text:
                 exact_sources = [
                     known_id for known_id, source_text in sources.items()
                     if text in source_text

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import asyncio
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -20,6 +21,7 @@ from companion_daemon.companion_turn import (
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.models import IncomingMessage, MessageAttachment
+from companion_daemon.platform_adapter import DeliveryReceipt
 from companion_daemon.world import WorldError, WorldKernel
 
 
@@ -58,6 +60,26 @@ class RecordingTransport:
     async def dispatch(self, beat: TurnBeat) -> DispatchAcceptance:
         self.beats.append(beat)
         return self.acceptance
+
+
+class LookupTransport(RecordingTransport):
+    """An asynchronously accepted transport with durable receipt lookup."""
+
+    def __init__(self, *, lookup_status: str = "delivered") -> None:
+        super().__init__(DispatchAcceptance(status="accepted", lookup_token="lookup:turn"))
+        self.lookup_status = lookup_status
+        self.lookup_tokens: list[str] = []
+        self.lookup_complete = asyncio.Event()
+
+    async def lookup_delivery(self, receipt_query_token: str) -> DeliveryReceipt:
+        self.lookup_tokens.append(receipt_query_token)
+        self.lookup_complete.set()
+        beat = self.beats[0]
+        return DeliveryReceipt(
+            action_id=beat.action_id,
+            status=self.lookup_status,  # type: ignore[arg-type]
+            external_receipt="lookup:confirmed" if self.lookup_status == "delivered" else None,
+        )
 
 
 class DisconnectingTransport:
@@ -209,6 +231,56 @@ async def test_respond_owns_world_action_dispatch_and_synchronous_receipt_settle
 
 
 @pytest.mark.asyncio
+async def test_simulator_inbound_turn_responds_then_settles_to_world_delivery(
+    tmp_path: Path,
+) -> None:
+    """The local simulator exercises the same deep turn seam as adapters."""
+    transport = RecordingTransport(
+        DispatchAcceptance(status="accepted", lookup_token="simulator:receipt:1")
+    )
+    runtime, world, world_id = _turn_runtime(tmp_path, transport)
+    incoming = IncomingMessage(
+        platform="simulator",
+        platform_user_id="geoff",
+        message_id="simulator-world-delivery",
+        text="今天和朋友玩密室，五个人被吓得到处跑",
+    )
+    envelope = TurnEnvelope.from_message(
+        incoming,
+        idempotency_key="simulator:geoff:simulator-world-delivery",
+    )
+
+    outcome = await runtime.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
+    )
+
+    assert outcome.visible_status == "accepted"
+    assert len(transport.beats) == 1
+    action_id = outcome.action_ids[0]
+    action = world.snapshot(world_id)["actions"][action_id]
+    assert action["status"] == "sending"
+    beat = transport.beats[0]
+
+    settled = await runtime.settle(
+        ExternalObservation(
+            action_id=beat.action_id,
+            delivery_id=beat.delivery_id,
+            segment_id=beat.segment_id,
+            status="delivered",
+            observed_at=incoming.sent_at,
+            idempotency_key="simulator:geoff:simulator-world-delivery:receipt:1",
+            external_receipt="simulator:delivery:1",
+        )
+    )
+
+    assert settled.terminal_state == "delivered"
+    delivered_action = world.snapshot(world_id)["actions"][action_id]
+    assert delivered_action["status"] == "delivered"
+    assert delivered_action["segment_state"]["segments"][0]["external_receipt"] == "simulator:delivery:1"
+
+
+@pytest.mark.asyncio
 async def test_async_platform_acceptance_is_not_delivered_until_settle_observes_receipt(
     tmp_path: Path,
 ) -> None:
@@ -246,6 +318,100 @@ async def test_async_platform_acceptance_is_not_delivered_until_settle_observes_
 
 
 @pytest.mark.asyncio
+async def test_accepted_receipt_lookup_settles_before_becoming_unknown(tmp_path: Path) -> None:
+    """The transport's durable lookup completes an accepted Action at its deadline."""
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    transport = LookupTransport()
+    runtime, world, world_id = _turn_runtime(tmp_path, transport, sleep=no_wait)
+
+    outcome = await runtime.respond(
+        _envelope("turn-lookup-delivered"),
+        budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
+    )
+
+    assert outcome.visible_status == "accepted"
+    await asyncio.wait_for(transport.lookup_complete.wait(), timeout=1)
+    action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
+    assert transport.lookup_tokens == ["lookup:turn"]
+    assert action["status"] == "delivered"
+    assert action["segment_state"]["segments"][0]["external_receipt"] == "lookup:confirmed"
+
+
+@pytest.mark.asyncio
+async def test_reconstructed_turn_recovers_persisted_accepted_receipt(tmp_path: Path) -> None:
+    """A restarted process can settle an already accepted receipt using its token."""
+
+    release_initial_watchdog = asyncio.Event()
+
+    async def wait_until_released(_seconds: float) -> None:
+        await release_initial_watchdog.wait()
+
+    transport = LookupTransport()
+    initial, world, world_id = _turn_runtime(
+        tmp_path, transport, sleep=wait_until_released
+    )
+    outcome = await initial.respond(
+        _envelope("turn-restart-lookup"),
+        budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
+    )
+    assert outcome.visible_status == "accepted"
+    assert transport.lookup_tokens == []
+    # This is the production startup hook.  A persisted accepted token must
+    # survive lease recovery so the reconstructed CompanionTurn can query it.
+    assert (
+        world.recover_interrupted_outgoing_deliveries(
+            world_id, observed_now=datetime.now(UTC) + timedelta(hours=1)
+        )
+        == 0
+    )
+    assert world.snapshot(world_id)["actions"][outcome.action_ids[0]]["status"] == "sending"
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    recovered = CompanionTurn(initial.engine, transport, sleep=no_wait)
+    await asyncio.wait_for(transport.lookup_complete.wait(), timeout=1)
+    action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
+    assert transport.lookup_tokens == ["lookup:turn"]
+    assert action["status"] == "delivered"
+
+    # The original in-memory watchdog must be allowed to observe the now-terminal
+    # segment and exit rather than leaving a pending task in the test loop.
+    release_initial_watchdog.set()
+    await asyncio.sleep(0)
+    del recovered
+
+
+@pytest.mark.asyncio
+async def test_reconstructed_turn_reconciles_a_previously_unknown_receipt(tmp_path: Path) -> None:
+    """A later durable receipt can resolve an Action already marked unknown."""
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    transport = LookupTransport(lookup_status="unknown")
+    initial, world, world_id = _turn_runtime(tmp_path, transport, sleep=no_wait)
+    outcome = await initial.respond(
+        _envelope("turn-reconcile-unknown"),
+        budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
+    )
+    await asyncio.wait_for(transport.lookup_complete.wait(), timeout=1)
+    assert world.snapshot(world_id)["actions"][outcome.action_ids[0]]["status"] == "unknown"
+
+    transport.lookup_status = "delivered"
+    transport.lookup_complete.clear()
+    recovered = CompanionTurn(initial.engine, transport, sleep=no_wait)
+    await asyncio.wait_for(transport.lookup_complete.wait(), timeout=1)
+    action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
+    assert action["status"] == "delivered"
+    assert transport.lookup_tokens == ["lookup:turn", "lookup:turn"]
+    del recovered
+
+
+@pytest.mark.asyncio
 async def test_ambiguous_transport_failure_is_unknown_and_never_false_delivered(
     tmp_path: Path,
 ) -> None:
@@ -264,13 +430,22 @@ async def test_ambiguous_transport_failure_is_unknown_and_never_false_delivered(
 
 
 @pytest.mark.asyncio
-async def test_repeated_inbound_idempotency_key_never_dispatches_a_second_action(
+async def test_replayed_idempotency_envelope_never_reruns_model_or_transport(
     tmp_path: Path,
 ) -> None:
+    class CountingModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return await StaticReplyModel().complete(messages, temperature=temperature)
+
     transport = RecordingTransport(
         DispatchAcceptance(status="delivered", external_receipt="qq:receipt:dedupe")
     )
-    runtime, _, _ = _turn_runtime(tmp_path, transport)
+    model = CountingModel()
+    runtime, _, _ = _turn_runtime(tmp_path, transport, model=model)
     envelope = _envelope("turn-deduplicated")
 
     first = await runtime.respond(
@@ -283,6 +458,7 @@ async def test_repeated_inbound_idempotency_key_never_dispatches_a_second_action
     )
 
     assert second == first
+    assert model.calls == 1
     assert len(transport.beats) == 1
 
 

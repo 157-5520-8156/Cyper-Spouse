@@ -10,10 +10,11 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Awaitable, Callable, Literal, Protocol
+from typing import Awaitable, Callable, Literal, Protocol, runtime_checkable
 
 from companion_daemon.engine import CompanionEngine
 from companion_daemon.models import IncomingMessage
+from companion_daemon.platform_adapter import DeliveryReceipt
 from companion_daemon.time import utc_now
 from companion_daemon.world import WorldError
 
@@ -94,6 +95,19 @@ class DispatchAcceptance:
 
 class TurnTransport(Protocol):
     async def dispatch(self, beat: TurnBeat) -> DispatchAcceptance: ...
+
+
+@runtime_checkable
+class ReceiptLookupTransport(Protocol):
+    """Optional durable-receipt recovery capability of a Turn transport.
+
+    Dispatch and receipt lookup intentionally share the transport instance: a
+    persisted lookup token is meaningful only to the platform/account that
+    accepted the beat.  Immediate-receipt transports do not need to implement
+    this protocol.
+    """
+
+    async def lookup_delivery(self, receipt_query_token: str) -> DeliveryReceipt: ...
 
 
 @dataclass(frozen=True)
@@ -630,7 +644,7 @@ class CompanionTurn:
             for segment in segments:
                 if (
                     isinstance(segment, dict)
-                    and segment.get("status") == "sending"
+                    and segment.get("status") in {"sending", "unknown"}
                     and segment.get("receipt_lookup_token")
                 ):
                     self._start_receipt_watchdog(
@@ -655,6 +669,59 @@ class CompanionTurn:
                 (datetime.fromisoformat(deadline_raw) - utc_now()).total_seconds(),
             )
             await self.sleep(remaining)
+            lookup_reason = "platform receipt missing at completion deadline"
+            action = self._action(action_id)
+            segments = action.get("segment_state", {}).get("segments", [])
+            segment = next(
+                (
+                    item
+                    for item in segments
+                    if isinstance(item, dict) and item.get("segment_id") == segment_id
+                ),
+                None,
+            )
+            if not isinstance(segment, dict) or segment.get("status") not in {
+                "sending",
+                "unknown",
+            }:
+                return
+            lookup_token = str(segment.get("receipt_lookup_token") or "")
+            if isinstance(self.transport, ReceiptLookupTransport) and lookup_token:
+                try:
+                    receipt = await self.transport.lookup_delivery(lookup_token)
+                except Exception as exc:
+                    lookup_reason = f"receipt_lookup_exception:{type(exc).__name__}"
+                else:
+                    if receipt.action_id != action_id:
+                        lookup_reason = "receipt_lookup_action_mismatch"
+                    elif receipt.status in {"delivered", "failed"}:
+                        try:
+                            await self.settle(
+                                ExternalObservation(
+                                    action_id=action_id,
+                                    delivery_id=delivery_id,
+                                    segment_id=segment_id,
+                                    status=receipt.status,
+                                    observed_at=utc_now(),
+                                    external_receipt=(
+                                        receipt.external_receipt
+                                        or f"receipt_lookup:{lookup_token}"
+                                    ),
+                                    reason="receipt_lookup_confirmed",
+                                    idempotency_key=(
+                                        f"receipt-lookup:{action_id}:{segment_id}:"
+                                        f"{receipt.status}:{receipt.external_receipt or lookup_token}"
+                                    ),
+                                )
+                            )
+                        except (ValueError, WorldError):
+                            # A concurrent external observation or user
+                            # interruption settled the segment first.  Its
+                            # authoritative terminal state wins.
+                            return
+                        return
+                    else:
+                        lookup_reason = "receipt_lookup_unresolved"
             async with self._action_locks.setdefault(action_id, asyncio.Lock()):
                 action = self._action(action_id)
                 segments = action.get("segment_state", {}).get("segments", [])
@@ -673,13 +740,13 @@ class CompanionTurn:
                 assert world is not None and world_id is not None
                 world.expire_outgoing_remainder(
                     delivery_id,
-                    reason="platform receipt deadline elapsed",
+                    reason=f"platform receipt deadline elapsed: {lookup_reason}",
                     expected_revision=world.revision(world_id),
                 )
                 world.mark_outgoing_segment_unknown(
                     delivery_id,
                     segment_id,
-                    reason="platform receipt missing at completion deadline",
+                    reason=lookup_reason,
                     expected_revision=world.revision(world_id),
                 )
                 await self._present_after_text(action_id, "unknown")

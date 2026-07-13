@@ -61,6 +61,15 @@ class InvariantGuard:
                 world_id, candidate, user_id=user_id
             )
         except WorldError as exc:
+            redacted = _redact_one_unsettleable_sentence(
+                world, world_id, candidate, user_id=user_id, evidence=evidence
+            )
+            if redacted is not None:
+                return GuardResolution(
+                    "accept_with_local_redaction",
+                    candidate=redacted,
+                    reason=f"local_redaction:{str(exc)[:160]}",
+                )
             return GuardResolution("hard_reject", reason=str(exc))
         semantic_error = _hard_semantic_claim_error(accepted, evidence=evidence)
         if semantic_error:
@@ -86,6 +95,60 @@ class InvariantGuard:
                 "requires_action_settlement", candidate=accepted, action_ids=action_ids
             )
         return GuardResolution("accept", candidate=accepted)
+
+
+def _redact_one_unsettleable_sentence(
+    world: WorldKernel,
+    world_id: str,
+    candidate: dict[str, object],
+    *,
+    user_id: str,
+    evidence: HardEvidenceContext | None,
+) -> dict[str, object] | None:
+    """Delete one unsafe prose span only when the remainder proves safe.
+
+    Claims and Action references are causal data, not decoration: changing
+    either locally would hide provenance or receipts.  Consequently redaction
+    is intentionally limited to claim-free, action-free text, and validation
+    is rerun on the exact remainder before it is accepted.
+    """
+    if candidate.get("claims") or candidate.get("mentioned_event_ids") or candidate.get("proposed_action_ids"):
+        return None
+    reply = str(candidate.get("reply_text") or "").strip()
+    sentences = [
+        item.strip()
+        for item in re.split(r"(?<=[。！？!?])", reply)
+        if item.strip()
+    ]
+    if len(sentences) < 2:
+        return None
+    for index in range(len(sentences)):
+        remainder = "".join(
+            sentence for position, sentence in enumerate(sentences) if position != index
+        ).strip()
+        if not remainder:
+            continue
+        redacted = {
+            "reply_text": remainder,
+            "mentioned_event_ids": [],
+            "proposed_action_ids": [],
+            "claims": [],
+        }
+        try:
+            accepted = world.validate_reply_candidate(world_id, redacted, user_id=user_id)
+        except WorldError:
+            continue
+        if _hard_semantic_claim_error(accepted, evidence=evidence):
+            continue
+        if evidence and evidence.known_npc_interaction_required and re.search(
+            r"(?:没听过|没聊过|没有聊过|不认识|没见过|没有互动)",
+            str(accepted.get("reply_text") or ""),
+        ):
+            continue
+        if _uncommitted_companion_affect_claim(accepted):
+            continue
+        return accepted
+    return None
 
 
 def _hard_semantic_claim_error(

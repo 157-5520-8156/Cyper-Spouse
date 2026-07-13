@@ -1,6 +1,7 @@
 import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,7 @@ from companion_daemon.engine import (
     seed_user,
 )
 from companion_daemon.image_generation import GeneratedImage
+from companion_daemon.image_requests import detect_image_request
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import IncomingMessage, MessageAttachment, MoodState
 from companion_daemon.multimodal_analysis import AttachmentInsight
@@ -307,7 +309,7 @@ async def test_concurrent_duplicate_world_message_has_one_turn_owner_and_one_out
 
 
 @pytest.mark.asyncio
-async def test_invalid_world_reply_is_repaired_once_instead_of_collapsing_to_presence_fallback(tmp_path: Path) -> None:
+async def test_invalid_world_reply_locally_redacts_before_using_a_second_model_call(tmp_path: Path) -> None:
     class RepairModel:
         def __init__(self) -> None:
             self.calls = []
@@ -330,8 +332,8 @@ async def test_invalid_world_reply_is_repaired_once_instead_of_collapsing_to_pre
     )
 
     assert reply is not None
-    assert reply.text == "嗯，你说。"
-    assert len(model.calls) == 2
+    assert reply.text == "你呢？"
+    assert len(model.calls) == 1
     assert any(
         action["kind"] == "model_call" and action["status"] == "delivered"
         for action in world.snapshot(world_id)["actions"].values()
@@ -475,6 +477,65 @@ async def test_world_image_can_send_after_text_via_background_adapter(tmp_path: 
     assert len(sent) == 1 and sent[0].exists()
     media = next(iter(world.snapshot(world_id)["media"].values()))
     assert media["status"] == "shared"
+    await engine.aclose()
+
+
+@pytest.mark.asyncio
+async def test_world_media_outbox_is_recovered_after_engine_restart(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    world.submit(
+        {"type": "register_user", "world_id": world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=world.revision(world_id),
+    )
+    for index in range(1, 55):
+        world.submit(
+            {
+                "type": "appraise_turn", "world_id": world_id,
+                "appraisal": "warmth_received", "intent_id": f"restart-warmth:{index}",
+                "message_id": f"restart-warmth:{index}", "user_id": "user:geoff",
+                "idempotency_key": f"restart-warmth:{index}",
+            },
+            expected_revision=world.revision(world_id),
+        )
+        if world.snapshot(world_id)["relationships"]["user:geoff"]["stage"] == "close_friend":
+            break
+    source_text = "能发一张自拍吗"
+    request = detect_image_request(source_text)
+    request_id = "media:" + sha256(
+        f"user:geoff|restart-media|{request.type}|{request.directive}".encode("utf-8")
+    ).hexdigest()[:20]
+    world.submit(
+        {
+            "type": "request_media", "world_id": world_id, "request_id": request_id,
+            "user_id": "user:geoff", "media_kind": "selfie", "topic": "窗边自拍",
+            "reason": "world_relationship_allows_selfie",
+            "delivery_context": {
+                "platform": "qq", "platform_user_id": "geoff", "text": source_text, "message_id": "restart-media",
+            },
+        },
+        expected_revision=world.revision(world_id),
+    )
+    engine = CompanionEngine(
+        store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id,
+        image_generator=FakeImageGenerator(), image_output_dir=tmp_path / "images",
+    )
+    delivered: list[Path] = []
+
+    async def deliver(_incoming: IncomingMessage, path: Path) -> bool:
+        delivered.append(path)
+        return True
+
+    engine.set_media_delivery_handler(deliver)
+    assert engine.recover_pending_media() == 1
+    for _ in range(30):
+        if delivered:
+            break
+        await asyncio.sleep(0.01)
+    assert delivered and delivered[0].exists()
+    assert world.snapshot(world_id)["media"][request_id]["status"] == "shared"
     await engine.aclose()
 
 

@@ -93,6 +93,82 @@ async def test_world_reply_uses_model_selected_expression_beats_as_one_action(
     assert action["trace"]["display_strategy"] == "陪伴后追问"
 
 
+@pytest.mark.asyncio
+async def test_world_reply_survives_turn_frame_advisory_failure_and_keeps_delivery_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class ReplyModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            assert '"advisory_status":"unavailable"' in str(messages)
+            return (
+                '{"reply_text":"我在，慢慢说。","mentioned_event_ids":[],'
+                '"proposed_action_ids":[],"claims":[]}'
+            )
+
+    world, world_id, engine = _world_engine(tmp_path, ReplyModel())
+
+    def broken_turn_frame(**_kwargs: object) -> object:
+        raise ValueError("injected advisory projection failure")
+
+    monkeypatch.setattr(engine.turn_frame_compiler, "compile", broken_turn_frame)
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="turn-frame-fallback",
+            text="我今天有点累。",
+        ),
+        defer_delivery=True,
+    )
+
+    assert reply is not None
+    assert reply.delivery_id is not None
+    assert reply.world_action_id is not None
+    planned = world.snapshot(world_id)["actions"][reply.world_action_id]
+    assert planned["status"] == "scheduled"
+
+    engine.confirm_reply_delivery(reply)
+
+    assert world.snapshot(world_id)["actions"][reply.world_action_id]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_world_reply_survives_projection_failure_through_delivery_ledger(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class UnusedModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            raise AssertionError("projection fallback must not call the model")
+
+    world, world_id, engine = _world_engine(tmp_path, UnusedModel())
+
+    def broken_projection(**_kwargs: object) -> object:
+        raise RuntimeError("injected projection failure")
+
+    monkeypatch.setattr(world, "turn_projection", broken_projection)
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="projection-fallback",
+            text="我今天有点累。",
+        ),
+        defer_delivery=True,
+    )
+
+    assert reply is not None
+    assert reply.world_action_id is not None
+    assert "只按你刚才讲的" in reply.text
+    assert world.snapshot(world_id)["actions"][reply.world_action_id]["status"] == "scheduled"
+
+    engine.confirm_reply_delivery(reply)
+
+    action = world.snapshot(world_id)["actions"][reply.world_action_id]
+    assert action["status"] == "delivered"
+    assert action["trace"]["outbound_trigger"] == "adapter_failure_fallback"
+
+
 def test_production_world_seed_materializes_the_activity_active_at_epoch_start(
     tmp_path: Path,
 ) -> None:
@@ -1693,7 +1769,10 @@ async def test_plain_chat_cannot_expand_user_environment_statement(
 
     assert reply is not None
     assert "路上已经结冰" not in reply.text
-    assert model.calls == 2
+    # A one-sentence ungrounded environment assertion cannot be redacted
+    # safely.  On a hot turn it must converge to the local safe reply rather
+    # than spending a second model call on a scripted repair.
+    assert model.calls == 1
 
 
 def test_world_validator_rejects_unclaimed_companion_location_activity(

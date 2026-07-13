@@ -78,6 +78,52 @@ def test_guard_hard_rejects_uncommitted_fact_reference(tmp_path: Path) -> None:
     assert result.reason
 
 
+def test_guard_locally_redacts_one_unsettleable_sentence(tmp_path: Path) -> None:
+    kernel, world_id = _world(tmp_path)
+
+    result = InvariantGuard().resolve(
+        kernel,
+        world_id,
+        {
+            "reply_text": "我在西湖边喝咖啡。你今天还好吗？",
+            "mentioned_event_ids": [],
+            "proposed_action_ids": [],
+            "claims": [],
+        },
+        user_id="user:geoff",
+    )
+
+    assert result.disposition == "accept_with_local_redaction"
+    assert result.candidate is not None
+    assert result.candidate["reply_text"] == "你今天还好吗？"
+
+
+def test_guard_does_not_redact_candidates_with_provenance_or_actions(
+    tmp_path: Path,
+) -> None:
+    kernel, world_id = _world(tmp_path)
+
+    result = InvariantGuard().resolve(
+        kernel,
+        world_id,
+        {
+            "reply_text": "我在西湖边喝咖啡。你今天还好吗？",
+            "mentioned_event_ids": ["message:m:1"],
+            "proposed_action_ids": [],
+            "claims": [
+                {
+                    "source_id": "message:m:1",
+                    "text": "我有点失望。",
+                    "assertion": "你有点失望。",
+                }
+            ],
+        },
+        user_id="user:geoff",
+    )
+
+    assert result.disposition == "hard_reject"
+
+
 def test_guard_rejects_ungrounded_identity_and_external_capability_claims(
     tmp_path: Path,
 ) -> None:

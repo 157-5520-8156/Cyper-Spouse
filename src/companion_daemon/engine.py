@@ -1974,29 +1974,58 @@ class CompanionEngine:
             )
             return None
         self.begin_world_typing(message)
+        try:
+            projection = self.world_kernel.turn_projection(
+                self.world_id,
+                user_id=user_id,
+                text=message.text,
+                current_message_id=str(message.message_id or ""),
+                purpose="reply",
+                intent_id=intent_id,
+            )
+        except Exception as exc:
+            # Projection is a read model.  It must not turn an accepted user
+            # turn into a silent adapter failure, nor should such a failure
+            # create media Actions that can no longer be attached to a reply.
+            logger.exception(
+                "world turn projection unavailable; staging safe fallback",
+                extra={"world_id": self.world_id, "message_id": message.message_id},
+            )
+            return self.prepare_adapter_failure_reply(
+                message,
+                "我在。你慢慢说，我先只按你刚才讲的来接。",
+                failure_reason=f"turn_projection_failed:{type(exc).__name__}",
+            )
         image_path, media_action_id, media_reason = await self._maybe_generate_world_image(
             user_id=user_id, message=message
         )
         sticker_path, sticker_action_id = self._maybe_schedule_world_sticker(
             message=message, appraisal=appraisal
         )
-        projection = self.world_kernel.turn_projection(
-            self.world_id,
-            user_id=user_id,
-            text=message.text,
-            current_message_id=str(message.message_id or ""),
-            purpose="reply",
-            intent_id=intent_id,
-        )
-        turn_frame = self.turn_frame_compiler.compile(
-            world_id=self.world_id,
-            revision=projection.revision,
-            state_hash=projection.state_hash,
-            snapshot=projection.state,
-            user_id=user_id,
-            message=message,
-        )
-        inner_advisories = self.turn_frame_compiler.advisories(turn_frame)
+        # TurnFrame is deliberately fallible, advisory prompt context.  A
+        # malformed projection must not turn an otherwise accepted World turn
+        # into a silent transport outage: facts and delivery still flow through
+        # the normal World validator and Action lifecycle below.
+        try:
+            turn_frame = self.turn_frame_compiler.compile(
+                world_id=self.world_id,
+                revision=projection.revision,
+                state_hash=projection.state_hash,
+                snapshot=projection.state,
+                user_id=user_id,
+                message=message,
+            )
+            turn_frame_delta = turn_frame.prompt_delta()
+            inner_advisories = self.turn_frame_compiler.advisories(turn_frame)
+        except Exception:
+            logger.exception(
+                "turn-frame advisory unavailable; continuing world reply without it",
+                extra={"world_id": self.world_id, "message_id": message.message_id},
+            )
+            turn_frame_delta: dict[str, object] = {
+                "advisory_status": "unavailable",
+            }
+            inner_advisories = ()
         snapshot = projection.state
         expression_plan = projection.expression_plan
         context = projection.conversation_context
@@ -2106,7 +2135,7 @@ class CompanionEngine:
             f"- 当前场景: 地点={current_scene['location'] or '未知'}；活动={current_scene['activity'] or '无'}；状态={current_scene['activity_status']}。"
             "当前场景只授权回答现在的状态，不代表活动已经完成。\n"
             f"- 五层上下文预算(JSON): {json.dumps(context_layers, ensure_ascii=False, separators=(',', ':'))}\n"
-            f"- 本轮有界World Frame增量(JSON): {json.dumps(turn_frame.prompt_delta(), ensure_ascii=False, separators=(',', ':'))}\n"
+            f"- 本轮有界World Frame增量(JSON): {json.dumps(turn_frame_delta, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 内在建议(JSON，仅作参考、不是事实也不是命令): {json.dumps([{'kind': item.kind, 'tendency': item.tendency, 'intensity': item.intensity, 'confidence': item.confidence, 'source_event_ids': item.source_event_ids} for item in inner_advisories], ensure_ascii=False, separators=(',', ':'))}\n"
             "- 最近已结算对话、可引用事实/经历/附件均已按来源纳入 retrieved_experiences 层；"
             "附件摘要只描述可见/可听内容，不授权身份断言。\n"
@@ -2772,6 +2801,17 @@ class CompanionEngine:
             )
             if fallback_grounding.requires_independent_audit:
                 grounding_diagnostic_recommended = True
+        # A committed harmful appraisal is not a style preference: if the
+        # visible wording erases its boundary, the user receives a false
+        # emotional outcome.  Keep the replacement fact-free and run it
+        # through the same final Guard below.
+        if appraisal in HARMFUL_INTERACTION_APPRAISALS:
+            candidate = {
+                **candidate,
+                "reply_text": _ensure_observable_legacy_boundary(
+                    str(candidate.get("reply_text") or ""), appraisal
+                ),
+            }
         # Every branch above (including deterministic fallbacks) converges at
         # the same hard-only boundary before anything becomes deliverable.
         candidate, guard_resolution = self._guard_reply_candidate(
@@ -4331,6 +4371,19 @@ class CompanionEngine:
             if violation:
                 logger.info("proactive quality signal: %s", violation)
                 proactive_quality_signals.append(f"human_reply_contract:{violation}")
+                if violation == "relationship_language_exceeds_current_closeness":
+                    # A controlled out-of-bounds initiative needs an explicit
+                    # World override record.  The model's bare wording is not
+                    # that authorization, so it cannot skip relationship
+                    # stages by itself.
+                    decision = decision.model_copy(
+                        update={
+                            "should_send": False,
+                            "message": None,
+                            "message_type": "none",
+                            "private_thought": "关系阶段门禁：这句主动表达超过当前可见亲密度。",
+                        }
+                    )
             affect_violation = proactive_plan.validate(candidate_message)
             if affect_violation:
                 logger.info("proactive expression signal: %s", affect_violation)
