@@ -113,7 +113,7 @@ def test_late_reaction_receipt_reconciles_unknown_without_inventing_earlier_succ
 
 
 @pytest.mark.asyncio
-async def test_official_qq_records_unsupported_reaction_as_failed_world_action(
+async def test_official_qq_reports_unsupported_reaction_without_direct_world_write(
     tmp_path: Path,
 ) -> None:
     engine, world, world_id, incoming, reply = engine_with_observed_message(
@@ -122,16 +122,11 @@ async def test_official_qq_records_unsupported_reaction_as_failed_world_action(
     client = object.__new__(CompanionQQClient)
     client.engine = engine
 
-    await client._reject_unsupported_reply_reaction(incoming, reply)
+    acceptance = await client._reject_unsupported_reply_reaction(incoming, reply)
 
-    action_id = "reaction:qq:reaction-official-unsupported:haha"
     snapshot = world.snapshot(world_id)
-    assert snapshot["actions"][action_id]["status"] == "failed"
-    assert snapshot["reactions"][action_id]["status"] == "delivery_failed"
+    assert acceptance.status == "failed"
+    assert acceptance.reason == "official_qq_reaction_unsupported"
+    assert not snapshot["actions"]
     assert not any(event.event_type == "ReactionShared" for event in world.events(world_id))
-    assert [
-        event.event_type
-        for event in world.events(world_id)
-        if event.event_type in {"ReactionSelected", "ActionScheduled", "ActionSettled"}
-    ][-3:] == ["ReactionSelected", "ActionScheduled", "ActionSettled"]
     assert world.rebuild_projection(world_id, "world_current_state").matches_live is True
