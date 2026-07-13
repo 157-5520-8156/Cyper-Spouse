@@ -1089,6 +1089,18 @@ class WorldKernel:
                             ),
                         )
                     )
+                if _as_dict(action.get("trace", {}), "action trace").get("life_share"):
+                    specifications.append(
+                        (
+                            "ExperienceShared",
+                            {
+                                "experience_id": _as_dict(
+                                    action.get("trace", {}), "action trace"
+                                ).get("experience_id"),
+                                "action_id": action_id,
+                            },
+                        )
+                    )
             elif cancelled_ids:
                 specifications.extend(
                     self._release_trace_private_commitment(
@@ -1509,10 +1521,18 @@ class WorldKernel:
             }
             trace_row = conn.execute("""insert into turn_traces (canonical_user_id, direction, appraisal, expression_policy, allowed_facts_json, short_lived_constraint, observable_reason, output_text, delivery_id, status, created_at, updated_at) values (?, ?, ?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)""", (canonical_user_id, trace["direction"], trace["appraisal"], trace["expression_policy"], _stable_json(trace["allowed_facts"]), None, trace["observable_reason"], text, delivery_id, now, now))
             action_id = f"outgoing:{delivery_id}"
+            segmented = self.action_coordinator.plan_action(
+                action_id=action_id,
+                texts=[text],
+                delays_before_ms=[0],
+            )
+            segment_projection = self.action_coordinator.to_projection(segmented)
+            planned_event = self.action_coordinator.planned_world_event(segmented)
             decision = self._append_and_project(conn, world_id, revision, state, [
                 ("OutboundActionAllowed", policy_payload),
                 ("LifeShareSelected", {"experience_id": experience_id, "selection_id": trace["selection_id"], "score": share_score, "reason": "freshness_and_initiative"}),
-                ("ActionScheduled", {"action_id": action_id, "kind": "outgoing_message", "message_kind": "life_event", "outbound_trigger": "life_share", "topic_key": experience_id, "expires_at": expires_at.isoformat(), "canonical_user_id": canonical_user_id, "platform": platform, "text": text, "trace": trace, "delivery_id": delivery_id, "trace_id": int(trace_row.lastrowid)}),
+                ("ActionScheduled", {"action_id": action_id, "kind": "outgoing_message", "message_kind": "life_event", "outbound_trigger": "life_share", "topic_key": experience_id, "expires_at": expires_at.isoformat(), "canonical_user_id": canonical_user_id, "platform": platform, "text": text, "segment_state": segment_projection, "trace": trace, "delivery_id": delivery_id, "trace_id": int(trace_row.lastrowid)}),
+                planned_event,
             ], idempotency_key=f"life-share-delivery:{delivery_id}", correlation_id=str(uuid4()), source="life_share", actor={"kind": "companion"}, causation_id=None)
             return LifeShareDelivery(experience_id, delivery_id, int(trace_row.lastrowid), action_id, text, decision.revision)
 
