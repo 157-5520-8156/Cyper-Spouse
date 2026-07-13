@@ -5,9 +5,16 @@ from pathlib import Path
 import pytest
 
 from companion_daemon.db import CompanionStore
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    ResponseBudget,
+    TurnEnvelope,
+    TurnOptions,
+)
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import IncomingMessage
+from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.world import WorldKernel
 
 
@@ -30,6 +37,37 @@ def world_engine(tmp_path: Path) -> tuple[WorldKernel, str, CompanionEngine]:
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
     return world, world_id, CompanionEngine(store, FakeCompanionModel(), "你是知栀。", world_kernel=world, world_id=world_id)
+
+
+async def respond_world_turn(
+    engine: CompanionEngine,
+    incoming: IncomingMessage,
+) -> str | None:
+    """Exercise an ordinary World reply through its adapter-owned turn seam."""
+    context = engine.freeze_turn_context(incoming)
+    envelope = TurnEnvelope.from_message(
+        incoming,
+        idempotency_key=(
+            f"{incoming.platform}:{incoming.platform_user_id}:{incoming.message_id}"
+        ),
+        world_id=engine.world_id,
+        canonical_user_id=engine.store.resolve_user(
+            incoming.platform, incoming.platform_user_id
+        ),
+        frozen_cadence=context.cadence.heat,
+    )
+    turn = CompanionTurn(
+        engine,
+        CaptureTurnTransport(receipt_namespace="world-replay"),
+        cadence_delay_seconds=0,
+    )
+    outcome = await turn.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+    await turn.wait_for_delivery_continuations()
+    return outcome.action_ids[0] if outcome.action_ids else None
 
 
 @pytest.mark.asyncio
@@ -68,10 +106,10 @@ async def test_world_replay_preserves_appraisal_and_settled_action(
 ) -> None:
     world, world_id, engine = world_engine(tmp_path)
 
-    first_reply = await engine.handle_message(message(first, 0))
-    second_reply = await engine.handle_message(message(second, 1))
+    first_action_id = await respond_world_turn(engine, message(first, 0))
+    second_action_id = await respond_world_turn(engine, message(second, 1))
 
-    assert first_reply and second_reply
+    assert first_action_id and second_action_id
     appraisals = [
         event.payload["appraisal"]
         for event in world.events(world_id)
@@ -79,8 +117,8 @@ async def test_world_replay_preserves_appraisal_and_settled_action(
     ]
     assert tuple(appraisals[-2:]) == expected
     actions = world.snapshot(world_id)["actions"]
-    assert actions[first_reply.world_action_id]["status"] == "delivered"
-    assert actions[second_reply.world_action_id]["status"] == "delivered"
+    assert actions[first_action_id]["status"] == "delivered"
+    assert actions[second_action_id]["status"] == "delivered"
 
 
 @pytest.mark.asyncio
@@ -88,9 +126,9 @@ async def test_world_appraisal_changes_behavioral_needs_and_repair_is_partial(tm
     world, world_id, engine = world_engine(tmp_path)
     initial = dict(world.snapshot(world_id)["needs"])
 
-    await engine.handle_message(message("滚，别烦我", 0))
+    await respond_world_turn(engine, message("滚，别烦我", 0))
     hurt = dict(world.snapshot(world_id)["needs"])
-    await engine.handle_message(message("对不起，刚刚那样说不对", 1))
+    await respond_world_turn(engine, message("对不起，刚刚那样说不对", 1))
     repaired = world.snapshot(world_id)["needs"]
 
     assert hurt["security"] < initial["security"]

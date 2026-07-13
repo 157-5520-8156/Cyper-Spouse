@@ -4,8 +4,15 @@ from pathlib import Path
 import pytest
 
 from companion_daemon.db import CompanionStore
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    ResponseBudget,
+    TurnEnvelope,
+    TurnOptions,
+)
 from companion_daemon.engine import CompanionEngine
 from companion_daemon.models import IncomingMessage
+from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.world import WorldKernel
 from companion_daemon.world_behavior import WorldBehaviorPolicy
 from companion_daemon.world_conversation import (
@@ -28,6 +35,35 @@ def _world(tmp_path: Path) -> tuple[WorldKernel, str]:
         expected_revision=started.revision,
     )
     return kernel, started.world_id
+
+
+async def _respond_world_turn(
+    engine: CompanionEngine,
+    message: IncomingMessage,
+) -> str:
+    """Exercise World generation and authoritative receipt settlement together."""
+
+    context = engine.freeze_turn_context(message)
+    transport = CaptureTurnTransport(receipt_namespace="human-feel-emotion")
+    envelope = TurnEnvelope.from_message(
+        message,
+        idempotency_key=(
+            f"{message.platform}:{message.platform_user_id}:{message.message_id}"
+        ),
+        world_id=engine.world_id,
+        canonical_user_id=engine.store.resolve_user(
+            message.platform, message.platform_user_id
+        ),
+        frozen_cadence=context.cadence.heat,
+    )
+    turn = CompanionTurn(engine, transport, cadence_delay_seconds=0)
+    await turn.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+    await turn.wait_for_delivery_continuations()
+    return transport.text
 
 
 def test_calm_projection_rejects_a_new_unsourced_companion_hurt_claim() -> None:
@@ -401,17 +437,19 @@ async def test_calm_world_does_not_let_model_invent_being_hurt(tmp_path: Path) -
         store, model, "你是沈知栀。", world_kernel=world, world_id=started.world_id
     )
 
-    reply = await engine.handle_message(
+    reply_text = await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="calm-emotion-claim", text="刚才那句如果让你不舒服，你可以直接说。",
-        )
+        ),
     )
 
-    assert reply is not None
-    assert "不舒服" not in reply.text
-    assert "直接说" in reply.text
-    assert model.calls >= 2
+    assert "不舒服" not in reply_text
+    assert "直接说" in reply_text
+    # The one hard guard rejects the unsupported feeling locally; a World
+    # turn must not add a serial repair-model wait just to reach this fallback.
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -446,13 +484,13 @@ async def test_injected_guarded_state_survives_model_denial(tmp_path: Path) -> N
         store, DenialModel(), "你是沈知栀。", world_kernel=world, world_id=started.world_id
     )
 
-    reply = await engine.handle_message(
+    reply_text = await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="guarded-chat", text="你今天还好吗？",
-        )
+        ),
     )
 
-    assert reply is not None
-    assert "完全不介意" not in reply.text
-    assert "还在消化" in reply.text or "没完全缓过来" in reply.text
+    assert "完全不介意" not in reply_text
+    assert "还在消化" in reply_text or "没完全缓过来" in reply_text
