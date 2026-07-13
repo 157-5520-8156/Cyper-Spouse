@@ -1666,13 +1666,59 @@ async def test_hot_turn_hard_reject_uses_local_fallback_without_repair(
             observed_at=observed_at,
             cadence=ConversationCadence("hot", 1.0, 4, "test_hot_repair"),
         ),
+        defer_delivery=True,
     )
 
     assert reply is not None
     assert "已经替你点好了" not in reply.text
     assert model.calls == 1
     trace = world.snapshot(world_id)["actions"][reply.world_action_id]["trace"]
-    assert "hot_turn_repair_local_fallback" in trace["quality_signals"]
+    assert "reply_validation_local_fallback" in trace["quality_signals"]
+
+
+@pytest.mark.asyncio
+async def test_warm_turn_invalid_candidate_uses_one_call_and_local_fallback(
+    tmp_path: Path,
+) -> None:
+    class UnsupportedActionModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"reply_text":"我已经替你点好了。","mentioned_event_ids":[],'
+                '"proposed_action_ids":[],"claims":[]}'
+            )
+
+    model = UnsupportedActionModel()
+    world, world_id, engine = _world_engine(tmp_path, model)
+    observed_at = datetime.now().astimezone()
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="warm-invalid-candidate-local-fallback",
+            sent_at=observed_at,
+            text="我这会儿真的有点累。",
+        ),
+        turn_context=FrozenTurnContext(
+            turn_id="warm-invalid-candidate-local-fallback",
+            world_id=world_id,
+            user_id="user:geoff",
+            observed_at=observed_at,
+            cadence=ConversationCadence("warm", 0.6, 2, "test_warm_no_repair"),
+        ),
+        defer_delivery=True,
+    )
+
+    assert reply is not None
+    assert "已经替你点好了" not in reply.text
+    assert reply.text
+    assert model.calls == 1
+    trace = world.snapshot(world_id)["actions"][reply.world_action_id]["trace"]
+    assert "reply_validation_local_fallback" in trace["quality_signals"]
 
 
 @pytest.mark.asyncio
@@ -2488,10 +2534,10 @@ async def test_fact_free_reply_skips_independent_grounding_audit(
 
 
 @pytest.mark.asyncio
-async def test_fact_free_repair_recovers_fenced_json_without_a_third_audit_call(
+async def test_cold_invalid_candidate_uses_one_call_and_fact_free_local_fallback(
     tmp_path: Path,
 ) -> None:
-    class FencedRepairModel:
+    class InvalidCandidateModel:
         def __init__(self) -> None:
             self.calls = 0
 
@@ -2502,39 +2548,29 @@ async def test_fact_free_repair_recovers_fenced_json_without_a_third_audit_call(
                     '{"reply_text":"我刚从商场回来。","mentioned_event_ids":[],'
                     '"proposed_action_ids":[],"claims":[]}'
                 )
-            if "事实审计器" in messages[0]["content"]:
-                if self.calls == 2:
-                    return (
-                        '{"supported":false,"unsupported_spans":["我刚从商场回来"],'
-                        '"reason":"没有世界来源"}'
-                    )
-                raise AssertionError("fact-free repaired reply must not need another LLM audit")
-            return (
-                "```json\n"
-                '{"reply_text":"我觉得先修最影响体验的那一处。",'
-                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
-                "\n```"
-            )
+            raise AssertionError("invalid candidate must not trigger a repair or audit call")
 
-    model = FencedRepairModel()
+    model = InvalidCandidateModel()
     _, _, engine = _world_engine(tmp_path, model)
 
     reply = await engine.handle_message(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
-            message_id="fenced-fact-free-repair",
+            message_id="cold-invalid-candidate-local-fallback",
             text="你觉得我最该先修什么？",
-        )
+        ),
+        defer_delivery=True,
     )
 
     assert reply is not None
-    assert reply.text == "我觉得先修最影响体验的那一处。"
-    assert model.calls == 2
+    assert "证据不够" in reply.text or "依据" in reply.text
+    assert "我刚从商场回来" not in reply.text
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
-async def test_bounded_reply_repair_uses_the_configured_task_model(tmp_path: Path) -> None:
+async def test_cold_invalid_candidate_skips_configured_repair_model(tmp_path: Path) -> None:
     class PrimaryModel:
         def __init__(self) -> None:
             self.calls = 0
@@ -2560,25 +2596,27 @@ async def test_bounded_reply_repair_uses_the_configured_task_model(tmp_path: Pat
     primary = PrimaryModel()
     repair = RepairModel()
     _, _, engine = _world_engine(tmp_path, primary)
-    engine.reply_repair_model = repair  # public task-level routing seam
+    engine.reply_repair_model = repair
 
     reply = await engine.handle_message(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
-            message_id="configured-repair-model",
+            message_id="configured-repair-model-skipped",
             text="你觉得我最该先处理什么？",
-        )
+        ),
+        defer_delivery=True,
     )
 
     assert reply is not None
-    assert reply.text == "我觉得先处理最影响体感的响应问题。"
+    assert "证据不够" in reply.text or "依据" in reply.text or "还不够" in reply.text
+    assert "我刚从商场回来" not in reply.text
     assert primary.calls == 1
-    assert repair.calls == 1
+    assert repair.calls == 0
 
 
 @pytest.mark.asyncio
-async def test_outcome_assumption_is_repaired_without_erasing_a_natural_reaction(
+async def test_outcome_assumption_uses_local_fallback_without_inventing_user_outcome(
     tmp_path: Path,
 ) -> None:
     class PrimaryModel:
@@ -2614,14 +2652,15 @@ async def test_outcome_assumption_is_repaired_without_erasing_a_natural_reaction
             platform_user_id="geoff",
             message_id="teacher-late-without-user-late",
             text="结果赶到教室发现老师也迟到了。",
-        )
+        ),
+        defer_delivery=True,
     )
 
     assert reply is not None
-    assert reply.text == "老师居然也迟到了，这一下确实有点荒唐。"
     assert "一起迟到" not in reply.text
+    assert reply.text
     assert primary.calls == 1
-    assert repair.calls == 1
+    assert repair.calls == 0
 
 
 @pytest.mark.asyncio
