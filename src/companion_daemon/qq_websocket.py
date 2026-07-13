@@ -1173,6 +1173,13 @@ class QQMessageCoalescer:
                     idempotency_key=(
                         f"{merged.platform}:{merged.platform_user_id}:{merged.message_id}"
                     ),
+                    world_id=getattr(self.engine, "world_id", None),
+                    canonical_user_id=self.engine.store.resolve_user(
+                        merged.platform, merged.platform_user_id
+                    ),
+                    frozen_cadence=str(
+                        getattr(getattr(turn_context, "cadence", None), "heat", "unknown")
+                    ),
                 ),
                 budget=resolved_budget,
                 options=TurnOptions(context_hint=context_hint, turn_context=turn_context),

@@ -213,6 +213,33 @@ def _envelope(message_id: str) -> TurnEnvelope:
     )
 
 
+def test_turn_envelope_freezes_adapter_boundary_metadata() -> None:
+    envelope = TurnEnvelope.from_message(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="latest",
+            source_message_ids=["first", "latest", "second"],
+            text="前两句合并成这一轮。",
+            attachments=[
+                MessageAttachment(url="https://example.test/photo.jpg", filename="photo.jpg")
+            ],
+        ),
+        idempotency_key="qq:geoff:latest",
+        world_id="world:test",
+        canonical_user_id="geoff",
+        frozen_cadence="hot",
+    )
+
+    assert envelope.message.message_id == "qq:geoff:latest"
+    assert envelope.platform == "qq"
+    assert envelope.platform_message_ids == ("latest", "first", "second")
+    assert envelope.attachment_refs == ("https://example.test/photo.jpg", "photo.jpg")
+    assert envelope.world_id == "world:test"
+    assert envelope.canonical_user_id == "geoff"
+    assert envelope.frozen_cadence == "hot"
+
+
 @pytest.mark.asyncio
 async def test_respond_owns_world_action_dispatch_and_synchronous_receipt_settlement(
     tmp_path: Path,

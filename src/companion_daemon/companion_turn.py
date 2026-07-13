@@ -25,13 +25,32 @@ TerminalState = Literal["delivered", "failed", "cancelled", "unknown"]
 
 @dataclass(frozen=True)
 class TurnEnvelope:
-    """One normalized, immutable platform observation."""
+    """One normalized, immutable platform observation.
+
+    ``message`` remains the compatibility payload consumed by the Engine, but
+    the adapter-facing boundary also freezes the identifiers and cadence that
+    must not be rediscovered from mutable state midway through a turn.
+    """
 
     message: IncomingMessage
     idempotency_key: str
+    world_id: str | None = None
+    canonical_user_id: str | None = None
+    platform: str = ""
+    platform_message_ids: tuple[str, ...] = ()
+    attachment_refs: tuple[str, ...] = ()
+    frozen_cadence: Literal["hot", "warm", "cold", "unknown"] = "unknown"
 
     @classmethod
-    def from_message(cls, message: IncomingMessage, *, idempotency_key: str) -> TurnEnvelope:
+    def from_message(
+        cls,
+        message: IncomingMessage,
+        *,
+        idempotency_key: str,
+        world_id: str | None = None,
+        canonical_user_id: str | None = None,
+        frozen_cadence: Literal["hot", "warm", "cold", "unknown"] = "unknown",
+    ) -> TurnEnvelope:
         raw_message_id = str(message.message_id or "").strip()
         if not raw_message_id:
             raise ValueError("TurnEnvelope requires a platform message_id")
@@ -40,7 +59,26 @@ class TurnEnvelope:
             raise ValueError("idempotency_key must bind platform, account, and platform message_id")
         normalized = message.model_copy(deep=True)
         normalized.message_id = canonical_key
-        return cls(message=normalized, idempotency_key=canonical_key)
+        raw_ids = [raw_message_id, *(str(item).strip() for item in message.source_message_ids)]
+        platform_message_ids = tuple(dict.fromkeys(item for item in raw_ids if item))
+        attachment_refs = tuple(
+            dict.fromkeys(
+                ref
+                for attachment in message.attachments
+                for ref in (str(attachment.url or "").strip(), str(attachment.filename or "").strip())
+                if ref
+            )
+        )
+        return cls(
+            message=normalized,
+            idempotency_key=canonical_key,
+            world_id=world_id,
+            canonical_user_id=canonical_user_id,
+            platform=message.platform,
+            platform_message_ids=platform_message_ids,
+            attachment_refs=attachment_refs,
+            frozen_cadence=frozen_cadence,
+        )
 
     @property
     def observed_at(self) -> datetime:
@@ -259,6 +297,7 @@ class CompanionTurn:
         budget: ResponseBudget,
         options: TurnOptions,
     ) -> TurnOutcome:
+        self._validate_turn_envelope(turn)
         existing = self._existing_outcome(turn)
         if existing is not None:
             return existing
@@ -332,6 +371,17 @@ class CompanionTurn:
                     else None
                 ),
             )
+
+    def _validate_turn_envelope(self, turn: TurnEnvelope) -> None:
+        if turn.world_id is not None and turn.world_id != self.engine.world_id:
+            raise WorldError("TurnEnvelope belongs to a different World")
+        if turn.platform and turn.platform != turn.message.platform:
+            raise WorldError("TurnEnvelope platform does not match its message")
+        expected_user = self.engine.store.resolve_user(
+            turn.message.platform, turn.message.platform_user_id
+        )
+        if turn.canonical_user_id is not None and turn.canonical_user_id != expected_user:
+            raise WorldError("TurnEnvelope user does not match its platform account")
 
     async def _converge_timeout(self, turn: TurnEnvelope) -> TurnOutcome:
         """Close any staged Action after cancellation instead of leaving it open."""
