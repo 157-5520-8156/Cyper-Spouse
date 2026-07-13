@@ -211,6 +211,7 @@ async def test_world_life_event_shares_only_committed_world_experience(tmp_path:
 
         async def send_text(self, recipient_id, text):
             assert recipient_id == "openid"
+            return {"message_id": "life-share-1"}
 
     monkeypatch.setattr(life_event_module, "build_companion_engine", FakeEngine)
     monkeypatch.setattr(life_event_module, "QQDelivery", FakeDelivery)
@@ -220,6 +221,100 @@ async def test_world_life_event_shares_only_committed_world_experience(tmp_path:
 
     assert sent is True
     assert any(item.get("shared") for item in world.snapshot(started.world_id)["experiences"].values())
+
+
+@pytest.mark.asyncio
+async def test_world_life_event_without_durable_receipt_stays_unknown(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.map_account("qq", "openid", "geoff")
+    world = WorldKernel(store)
+    started = world.start_from_seed_file(Path("configs/world_seed.yaml"))
+    world.advance(
+        started.world_id,
+        datetime(2026, 7, 11, 12, 30, tzinfo=datetime.fromisoformat("2026-07-11T09:00:00+08:00").tzinfo),
+        expected_revision=started.revision,
+    )
+
+    class FakeEngine:
+        def __init__(self):
+            self.world_kernel = world
+            self.world_id = started.world_id
+            self.store = store
+
+    class FakeDelivery:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def proactive_recipient_id(self):
+            return None
+
+        async def send_text(self, recipient_id, text):
+            assert recipient_id == "openid"
+            return {"status": "ok"}
+
+    monkeypatch.setattr(life_event_module, "build_companion_engine", FakeEngine)
+    monkeypatch.setattr(life_event_module, "QQDelivery", FakeDelivery)
+    monkeypatch.setattr(life_event_module, "get_settings", lambda: SimpleNamespace())
+
+    sent = await run(user_id="geoff", send=True, sandbox=True, generate_image=False, image_kind="life")
+
+    assert sent is False
+    snapshot = world.snapshot(started.world_id)
+    life_share = next(
+        action for action in snapshot["actions"].values()
+        if action.get("trace", {}).get("life_share")
+    )
+    assert life_share["status"] == "unknown"
+    assert not any(item.get("shared") for item in snapshot["experiences"].values())
+
+
+@pytest.mark.asyncio
+async def test_world_life_event_explicit_adapter_failure_is_failed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = CompanionStore(tmp_path / "world.sqlite")
+    store.map_account("qq", "openid", "geoff")
+    world = WorldKernel(store)
+    started = world.start_from_seed_file(Path("configs/world_seed.yaml"))
+    world.advance(
+        started.world_id,
+        datetime(2026, 7, 11, 12, 30, tzinfo=datetime.fromisoformat("2026-07-11T09:00:00+08:00").tzinfo),
+        expected_revision=started.revision,
+    )
+
+    class FakeEngine:
+        def __init__(self):
+            self.world_kernel = world
+            self.world_id = started.world_id
+            self.store = store
+
+    class FakeDelivery:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def proactive_recipient_id(self):
+            return None
+
+        async def send_text(self, recipient_id, text):
+            assert recipient_id == "openid"
+            return {"status": "failed", "retcode": 100}
+
+    monkeypatch.setattr(life_event_module, "build_companion_engine", FakeEngine)
+    monkeypatch.setattr(life_event_module, "QQDelivery", FakeDelivery)
+    monkeypatch.setattr(life_event_module, "get_settings", lambda: SimpleNamespace())
+
+    sent = await run(user_id="geoff", send=True, sandbox=True, generate_image=False, image_kind="life")
+
+    assert sent is False
+    snapshot = world.snapshot(started.world_id)
+    life_share = next(
+        action for action in snapshot["actions"].values()
+        if action.get("trace", {}).get("life_share")
+    )
+    assert life_share["status"] == "failed"
+    assert not any(item.get("shared") for item in snapshot["experiences"].values())
 
 
 @pytest.mark.asyncio
