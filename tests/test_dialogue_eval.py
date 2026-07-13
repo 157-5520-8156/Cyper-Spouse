@@ -1,7 +1,9 @@
 import json
 import subprocess
 import sys
+from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from companion_daemon.dialogue_eval import (
@@ -19,6 +21,7 @@ from companion_daemon.dialogue_eval import (
     run_pragmatic_adversarial_eval,
     summarize_results,
 )
+from companion_daemon.models import IncomingMessage
 
 
 @pytest.mark.asyncio
@@ -61,6 +64,31 @@ async def test_baseline_runner_keeps_bare_and_full_variants_isolated() -> None:
         if summary.variant == "full" and summary.cadence == "hot"
     )
     assert full_hot.sample_count == 2
+
+
+@pytest.mark.asyncio
+async def test_bare_baseline_records_a_provider_transport_failure_without_crashing() -> None:
+    from companion_daemon.dialogue_eval import _run_bare_baseline_turn
+
+    class FailingModel:
+        async def complete(self, _messages, *, temperature: float) -> str:
+            raise httpx.TransportError("provider TLS failed")
+
+    engine = SimpleNamespace(model=FailingModel(), companion_system_prompt="你是沈知栀。")
+
+    text, status, first_visible, elapsed, turn_id = await _run_bare_baseline_turn(
+        engine,
+        message=IncomingMessage(
+            platform="qq", platform_user_id="eval", message_id="bare-failure", text="在吗"
+        ),
+        history=[],
+    )
+
+    assert text == ""
+    assert status == "failed"
+    assert first_visible is None
+    assert elapsed >= 0
+    assert turn_id == "baseline:bare:bare-failure"
 
 
 def test_live_baseline_gate_requires_samples_then_checks_absolute_and_relative_slo() -> None:

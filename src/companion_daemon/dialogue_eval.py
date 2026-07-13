@@ -1086,16 +1086,20 @@ async def _run_bare_baseline_turn(
 ) -> tuple[str, str, int | None, int, str]:
     turn_id = f"baseline:bare:{message.message_id}"
     started = monotonic()
-    with model_turn_scope(turn_id=turn_id, cadence="baseline"):
-        with model_call_scope("bare_reply"):
-            text = await engine.model.complete(
-                [
-                    {"role": "system", "content": engine.companion_system_prompt},
-                    *history[-16:],
-                    {"role": "user", "content": message.text},
-                ],
-                temperature=0.75,
-            )
+    try:
+        with model_turn_scope(turn_id=turn_id, cadence="baseline"):
+            with model_call_scope("bare_reply"):
+                text = await engine.model.complete(
+                    [
+                        {"role": "system", "content": engine.companion_system_prompt},
+                        *history[-16:],
+                        {"role": "user", "content": message.text},
+                    ],
+                    temperature=0.75,
+                )
+    except Exception:
+        elapsed = max(0, int((monotonic() - started) * 1000))
+        return "", "failed", None, elapsed, turn_id
     elapsed = max(0, int((monotonic() - started) * 1000))
     reply_text = sanitize_chat_text(text)
     return reply_text, "delivered" if reply_text else "failed", elapsed, elapsed, turn_id
