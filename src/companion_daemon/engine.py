@@ -16,6 +16,7 @@ import httpx
 
 from companion_daemon.attachment_cache import AttachmentCache
 from companion_daemon.budget import ESTIMATES, BudgetGate
+from companion_daemon.usage_metrics import estimate_routed_model_reserve_cny
 from companion_daemon.character import CharacterProfile
 from companion_daemon.context_assembler import ContextAssembler
 from companion_daemon.conversation import ConversationCore, PromptedConversationCore
@@ -395,7 +396,44 @@ class CompanionEngine:
             return snapshot()
         return ProviderCircuitState.closed()
 
-    def _secondary_model_call_decision(self, purpose: str):
+    def _estimate_model_call_reserve_cny(
+        self,
+        *,
+        model: ChatModel,
+        purpose: str,
+        cadence: str,
+        prompt_characters: int,
+    ) -> float:
+        """Preflight against the selected provider route, not a fixed CNY guess."""
+        if self.budget_gate is None:
+            return 0.0
+        model_name = str(getattr(model, "model", "")).strip()
+        # Local deterministic models do not create provider charges and have
+        # no provider usage rows to reserve against.
+        if not model_name:
+            return 0.0
+        samples = self.store.recent_model_usage_samples(
+            model=model_name, purpose=purpose, cadence=cadence
+        )
+        if len(samples) < 3:
+            samples = self.store.recent_model_usage_samples(model=model_name)
+        observed_output_tokens = tuple(
+            int(sample["completion_tokens"]) + int(sample["reasoning_tokens"])
+            for sample in samples
+        )
+        return estimate_routed_model_reserve_cny(
+            model=model_name,
+            prompt_characters=prompt_characters,
+            observed_output_tokens=observed_output_tokens,
+        )
+
+    def _secondary_model_call_decision(
+        self,
+        purpose: str,
+        *,
+        model: ChatModel,
+        messages: list[dict[str, str]],
+    ):
         """Apply the shared circuit, real-spend and timeout policy to side paths."""
         now = self._world_logical_now() if self.world_kernel and self.world_id else utc_now()
         turn = FrozenTurnContext(
@@ -419,7 +457,12 @@ class CompanionEngine:
                 calls_used=0,
                 recovery_probe=circuit.status == "half_open",
                 remaining_budget_cny=remaining,
-                estimated_call_cost_cny=0.02,
+                estimated_call_cost_cny=self._estimate_model_call_reserve_cny(
+                    model=model,
+                    purpose=purpose,
+                    cadence="warm",
+                    prompt_characters=sum(len(item.get("content", "")) for item in messages),
+                ),
             ),
             grounding=grounding,
             circuit=circuit,
@@ -433,7 +476,9 @@ class CompanionEngine:
         purpose: str,
         temperature: float,
     ) -> str:
-        decision = self._secondary_model_call_decision(purpose)
+        decision = self._secondary_model_call_decision(
+            purpose, model=model, messages=messages
+        )
         if not decision.allowed:
             raise ConnectionError(decision.reason)
         return await complete_with_timeout(
@@ -934,6 +979,13 @@ class CompanionEngine:
             if self.budget_gate is not None
             else None
         )
+        appraisal_model = (
+            self.interaction_deep_appraisal_model
+            if bool(getattr(appraisal_risk, "request_deeper_reasoning", False))
+            and self.interaction_deep_appraisal_model is not None
+            else self.interaction_appraisal_model
+        )
+        assert appraisal_model is not None
         decision = TurnModelCallBudget().decide(
             turn=turn,
             request=ModelCallRequest(
@@ -947,10 +999,17 @@ class CompanionEngine:
                 ),
                 recovery_probe=circuit.status == "half_open",
                 remaining_budget_cny=remaining,
-                estimated_call_cost_cny=(
-                    0.04
-                    if bool(getattr(appraisal_risk, "request_deeper_reasoning", False))
-                    else 0.02
+                estimated_call_cost_cny=self._estimate_model_call_reserve_cny(
+                    model=appraisal_model,
+                    purpose="interaction_appraisal",
+                    cadence=turn.cadence.heat,
+                    prompt_characters=(
+                        len(message.text)
+                        + sum(
+                            len(str(item.get("text") or ""))
+                            for item in appraisal_input.recent_messages
+                        )
+                    ),
                 ),
             ),
             grounding=GroundingAuditRisk().assess(CandidateGroundingSignals(reply_text="")),
@@ -965,16 +1024,9 @@ class CompanionEngine:
                 purpose="interaction_appraisal", causation=causation
             )
             try:
-                model = (
-                    self.interaction_deep_appraisal_model
-                    if bool(getattr(appraisal_risk, "request_deeper_reasoning", False))
-                    and self.interaction_deep_appraisal_model is not None
-                    else self.interaction_appraisal_model
-                )
-                assert model is not None
                 with model_call_scope("interaction_appraisal", action_id=action_id):
                     result = await complete_with_timeout(
-                        InteractionAppraiser(model).assess(appraisal_input),
+                        InteractionAppraiser(appraisal_model).assess(appraisal_input),
                         timeout_seconds=decision.soft_timeout_seconds,
                     )
             except asyncio.CancelledError:
@@ -1980,11 +2032,6 @@ class CompanionEngine:
             else None
         )
 
-        def remaining_after_calls(call_count: int) -> float | None:
-            if remaining_model_budget_cny is None:
-                return None
-            return max(0.0, remaining_model_budget_cny - call_count * 0.02)
-
         appraisal_input = TurnAppraisalInput(
             evidence=evidence,
             fallback=event,
@@ -2347,23 +2394,41 @@ class CompanionEngine:
             CandidateGroundingSignals(reply_text="")
         )
         circuit_state = self.provider_circuit_state()
+        reply_complexity = (
+            "cross_turn_relation_repair"
+            if user_affect is not None
+            and user_affect.kind in {"disappointment", "confusion"}
+            else "high_pragmatic_ambiguity"
+            if appraisal_risk.request_deeper_reasoning
+            else "routine"
+        )
+        estimated_reply_model = (
+            self.expressive_model
+            if reply_complexity != "routine"
+            and frozen_turn.cadence.heat != "hot"
+            and self.expressive_model is not None
+            else self.model
+        )
         reply_call_decision = call_budget.decide(
             turn=frozen_turn,
             request=ModelCallRequest(
                 purpose="reply",
                 calls_used=calls_used,
                 ambiguous=appraisal_risk.request_model_proposal,
-                complexity=(
-                    "cross_turn_relation_repair"
-                    if user_affect is not None
-                    and user_affect.kind in {"disappointment", "confusion"}
-                    else "high_pragmatic_ambiguity"
-                    if appraisal_risk.request_deeper_reasoning
-                    else "routine"
-                ),
+                complexity=reply_complexity,
                 recovery_probe=circuit_state.status == "half_open",
-                remaining_budget_cny=remaining_after_calls(calls_used),
-                estimated_call_cost_cny=0.02,
+                remaining_budget_cny=remaining_model_budget_cny,
+                estimated_call_cost_cny=self._estimate_model_call_reserve_cny(
+                    model=estimated_reply_model,
+                    purpose="reply",
+                    cadence=frozen_turn.cadence.heat,
+                    prompt_characters=(
+                        len(self.companion_system_prompt)
+                        + len(context_block)
+                        + len(message.text)
+                        + 800
+                    ),
+                ),
             ),
             grounding=pre_generation_grounding,
             circuit=circuit_state,

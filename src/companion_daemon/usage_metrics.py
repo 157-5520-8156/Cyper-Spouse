@@ -53,6 +53,38 @@ MODEL_PRICES: Mapping[str, ModelPrice] = {
 }
 
 
+def estimate_routed_model_reserve_cny(
+    *,
+    model: str,
+    prompt_characters: int,
+    observed_output_tokens: Iterable[int] = (),
+    cny_per_usd: float = 7.2,
+) -> float:
+    """Reserve one call from its actual route, prompt scale, and local history.
+
+    Provider usage is still authoritative after a request completes.  This
+    function is only the preflight envelope: it deliberately uses the current
+    prompt's size and the p95 of comparable completed calls rather than a
+    single project-wide CNY constant.  When there is no history yet, the
+    explicit 256-token output floor prevents a new route from looking free.
+    """
+    # This is a conservative approximation for mixed Chinese/English prompt
+    # text.  The provider's returned tokens supersede it in the usage ledger.
+    prompt_tokens = max(1, math.ceil(max(0, prompt_characters) * 0.75))
+    observed = tuple(
+        max(0, int(tokens)) for tokens in observed_output_tokens if int(tokens) > 0
+    )
+    output_tokens = nearest_rank(observed, 0.95) if observed else 256
+    usd, _pricing_version = estimate_model_cost_usd(
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=output_tokens,
+        cache_hit_tokens=0,
+        cache_miss_tokens=prompt_tokens,
+    )
+    return round(usd * max(0.0, cny_per_usd), 6)
+
+
 def estimate_model_cost_usd(
     *,
     model: str,

@@ -2592,6 +2592,47 @@ class CompanionStore:
                 ),
             )
 
+    def recent_model_usage_samples(
+        self,
+        *,
+        model: str,
+        purpose: str | None = None,
+        cadence: str | None = None,
+        limit: int = 64,
+    ) -> list[dict[str, int]]:
+        """Return successful recent calls for a route-specific preflight reserve.
+
+        The values are deliberately small and content-free: callers need only
+        observed token envelopes, never prompt or reply text.
+        """
+        clauses = ["status = 'succeeded'", "model = ?"]
+        args: list[object] = [model]
+        if purpose is not None:
+            clauses.append("purpose = ?")
+            args.append(purpose)
+        if cadence is not None:
+            clauses.append("cadence = ?")
+            args.append(cadence)
+        args.append(max(1, int(limit)))
+        with self.connect() as conn:
+            rows = conn.execute(
+                f"""
+                select completion_tokens, reasoning_tokens
+                from model_usage_events
+                where {' and '.join(clauses)}
+                order by id desc
+                limit ?
+                """,
+                args,
+            ).fetchall()
+        return [
+            {
+                "completion_tokens": int(row["completion_tokens"] or 0),
+                "reasoning_tokens": int(row["reasoning_tokens"] or 0),
+            }
+            for row in rows
+        ]
+
     def model_usage_summary(self, window: str, now: datetime) -> dict[str, dict[str, int]]:
         if window == "day":
             prefix = now.date().isoformat()

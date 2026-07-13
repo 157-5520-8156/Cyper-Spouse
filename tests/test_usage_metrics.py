@@ -5,7 +5,10 @@ import sqlite3
 import pytest
 
 from companion_daemon.db import CompanionStore
-from companion_daemon.usage_metrics import estimate_model_cost_usd
+from companion_daemon.usage_metrics import (
+    estimate_model_cost_usd,
+    estimate_routed_model_reserve_cny,
+)
 
 
 def test_v4_pro_usage_is_priced_instead_of_being_recorded_as_free() -> None:
@@ -32,6 +35,57 @@ def test_unpriced_model_uses_a_conservative_cost_until_a_verified_price_is_added
 
     assert version == "unpriced-conservative-2026-07-13"
     assert cost > 0
+
+
+def test_model_reserve_uses_selected_route_prompt_size_and_observed_output() -> None:
+    flash = estimate_routed_model_reserve_cny(
+        model="deepseek-v4-flash",
+        prompt_characters=6_000,
+        observed_output_tokens=(80, 120, 160),
+    )
+    pro = estimate_routed_model_reserve_cny(
+        model="deepseek-v4-pro",
+        prompt_characters=6_000,
+        observed_output_tokens=(80, 120, 160),
+    )
+    longer_history = estimate_routed_model_reserve_cny(
+        model="deepseek-v4-flash",
+        prompt_characters=12_000,
+        observed_output_tokens=(80, 120, 160),
+    )
+    higher_observed_output = estimate_routed_model_reserve_cny(
+        model="deepseek-v4-flash",
+        prompt_characters=6_000,
+        observed_output_tokens=(80, 120, 800),
+    )
+
+    assert pro > flash
+    assert longer_history > flash
+    assert higher_observed_output > flash
+
+
+def test_usage_samples_prefer_the_same_route_before_model_wide_history(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "usage.sqlite")
+    for purpose, cadence, output in (
+        ("reply", "warm", 90),
+        ("reply", "warm", 240),
+        ("afterthought", "warm", 900),
+    ):
+        store.record_model_usage(
+            purpose=purpose,
+            model="deepseek-v4-flash",
+            status="succeeded",
+            latency_ms=20,
+            completion_tokens=output,
+            total_tokens=output,
+            cadence=cadence,
+        )
+
+    same_route = store.recent_model_usage_samples(
+        model="deepseek-v4-flash", purpose="reply", cadence="warm"
+    )
+
+    assert [sample["completion_tokens"] for sample in same_route] == [240, 90]
 
 
 def test_usage_report_links_calls_to_turn_and_reports_percentiles_and_cost(tmp_path: Path) -> None:
