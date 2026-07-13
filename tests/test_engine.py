@@ -797,7 +797,14 @@ async def test_world_mode_proactive_uses_only_world_action(tmp_path: Path, monke
     assert decision.should_send is True
     assert decision.world_action_id is not None
     assert world.snapshot(world_id)["last_deliberation"]["stance"] == "initiate"
-    engine.confirm_proactive_delivery(decision)
+    assert decision.delivery_id is not None
+    settled = await CompanionTurn(engine, CaptureTurnTransport(receipt_namespace="engine-test")).dispatch_scheduled(
+        action_id=decision.world_action_id,
+        delivery_id=decision.delivery_id,
+        observed_at=utc_now(),
+        idempotency_key="engine-test:proactive:receipt",
+    )
+    assert settled.terminal_state == "delivered"
     assert world.snapshot(world_id)["actions"][decision.world_action_id]["status"] == "delivered"
 
 
@@ -1213,7 +1220,10 @@ def test_world_mode_delayed_reply_is_a_cancellable_world_action(tmp_path: Path, 
     assert world.snapshot(world_id)["actions"][action_id]["status"] == "cancelled"
 
 
-def test_world_afterthought_confirmation_does_not_write_legacy_mood(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.asyncio
+async def test_world_afterthought_delivery_uses_turn_seam_without_legacy_mood(
+    tmp_path: Path, monkeypatch
+) -> None:
     store = CompanionStore(tmp_path / "test.sqlite")
     seed_user(store)
     world = WorldKernel(store)
@@ -1222,10 +1232,16 @@ def test_world_afterthought_confirmation_does_not_write_legacy_mood(tmp_path: Pa
 
     monkeypatch.setattr(store, "save_mood_state", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy mood")))
     delivery_id = engine.queue_afterthought_delivery("geoff", "qq", "哦对，补一句。")
-    engine.confirm_afterthought_delivery("geoff", "qq", "哦对，补一句。", delivery_id=delivery_id)
 
     action_id = world.action_id_for_delivery(world_id, delivery_id)
     assert action_id is not None
+    settled = await CompanionTurn(engine, CaptureTurnTransport(receipt_namespace="engine-test")).dispatch_scheduled(
+        action_id=action_id,
+        delivery_id=delivery_id,
+        observed_at=utc_now(),
+        idempotency_key="engine-test:afterthought:receipt",
+    )
+    assert settled.terminal_state == "delivered"
     assert world.snapshot(world_id)["actions"][action_id]["status"] == "delivered"
 
 
