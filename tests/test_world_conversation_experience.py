@@ -94,6 +94,49 @@ def test_hot_prompt_context_keeps_citable_content_without_projection_metadata() 
 
 
 @pytest.mark.asyncio
+async def test_hot_minimal_ack_fallback_never_turns_into_old_source_recall(
+    tmp_path: Path,
+) -> None:
+    class Model:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return (
+                    '{"reply_text":"毛概确实难背。","mentioned_event_ids":[],'
+                    '"proposed_action_ids":[],"claims":[]}'
+                )
+            return (
+                '{"reply_text":"我在西湖边喝咖啡。","mentioned_event_ids":[],'
+                '"proposed_action_ids":[],"claims":[]}'
+            )
+
+    _, _, engine = _world_engine(tmp_path, Model())
+    await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="minimal-source-first",
+            text="毛概真的好难背。",
+        )
+    )
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="minimal-source-ack",
+            text="嗯。",
+        )
+    )
+
+    assert reply is not None
+    assert "西湖" not in reply.text
+    assert "我记得你之前" not in reply.text
+
+
+@pytest.mark.asyncio
 async def test_world_reply_uses_model_selected_expression_beats_as_one_action(
     tmp_path: Path,
 ) -> None:

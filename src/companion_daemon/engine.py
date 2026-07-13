@@ -2549,7 +2549,13 @@ class CompanionEngine:
                 )
         except WorldError as validation_error:
             grounded_fallback = occurrence_candidate
-            if occurrence_candidate:
+            # A minimal acknowledgement is a discourse signal, not a request
+            # to recall prior sources.  In particular, an invalid candidate
+            # must not turn “嗯” into a fact dump just because the ledger has
+            # something citable from the previous turn.
+            if classify_message(message.text) == "minimal_response":
+                grounded_fallback = None
+            elif occurrence_candidate:
                 pass
             elif query_scope.asks_current_scene:
                 if query_scope.asks_availability:
