@@ -113,6 +113,29 @@ def test_expression_guidance_is_derived_from_world_state_without_private_memory(
     assert "不讨好" in guidance.prompt_line
 
 
+def test_expression_guidance_ignores_stale_display_audit_record() -> None:
+    guidance = WorldBehaviorPolicy().expression_guidance(
+        {
+            "needs": {"boundary": 0, "energy": 70},
+            "emotion_modulation": {
+                "mode": "calm",
+                "core_affect": {"mixed": False},
+                "active_episodes": [],
+            },
+            # This describes a past Action and must not decide a new reply.
+            "last_affect_display": {
+                "mixed": True,
+                "regulation_strategy": "contain_spillover",
+                "prompt_line": "过期的策略",
+            },
+        },
+        user_id="user:geoff",
+    )
+
+    assert guidance.label == "slow_warm"
+    assert "过期" not in guidance.prompt_line
+
+
 def test_relationship_stage_changes_expression_and_outreach_constraints() -> None:
     policy = WorldBehaviorPolicy()
 
@@ -159,7 +182,7 @@ def test_world_media_policy_uses_world_relation_and_boundary_not_moodstate() -> 
     assert denied.allowed is False
     assert denied.reason == "boundary_high_under_pressure"
     assert allowed.allowed is True
-    assert allowed.kind == "selfie"
+    assert allowed.kind == "character_media"
 
 
 def test_world_media_policy_marks_explicit_intimate_request_as_relationship_private() -> None:
@@ -173,6 +196,87 @@ def test_world_media_policy_marks_explicit_intimate_request_as_relationship_priv
 
     assert decision.allowed is True
     assert decision.kind == "relationship_private"
+
+
+def test_world_media_policy_keeps_bedtime_selfie_non_private_without_explicit_intimacy() -> None:
+    policy = WorldMediaPolicy()
+    request = detect_image_request("睡前能发一张自拍吗")
+
+    decision = policy.image_decision(
+        {"needs": {"boundary": 0, "security": 70}, "relationships": {"user:geoff": {"stage": "close_friend", "closeness": 15, "respect": 12}}},
+        user_id="user:geoff", request=request, user_text="睡前能发一张自拍吗",
+    )
+
+    assert decision.allowed is True
+    assert decision.kind == "character_media"
+
+
+def test_world_media_policy_classifies_check_in_and_unfiltered_personal_media() -> None:
+    policy = WorldMediaPolicy()
+    state = {
+        "needs": {"boundary": 0, "security": 70},
+        "relationships": {"user:geoff": {"stage": "close_friend", "closeness": 15, "respect": 12}},
+    }
+
+    check_in = policy.image_decision(
+        state,
+        user_id="user:geoff",
+        request=detect_image_request("到展览门口了，发张打卡照看看"),
+        user_text="到展览门口了，发张打卡照看看",
+    )
+    unfiltered = policy.image_decision(
+        state,
+        user_id="user:geoff",
+        request=detect_image_request("发张你刚跑完步的狼狈丑照"),
+        user_text="发张你刚跑完步的狼狈丑照",
+    )
+
+    assert check_in.kind == "character_media"
+    assert check_in.capture_mode == "check_in_timer"
+    assert unfiltered.kind == "character_media"
+    assert unfiltered.capture_mode == "unfiltered"
+
+
+def test_unfiltered_media_request_can_use_a_plain_awkward_photo_phrase() -> None:
+    request = detect_image_request("发张刚跑完步的狼狈照")
+
+    assert request.triggered is True
+
+
+def test_world_media_policy_falls_back_from_unsupported_third_party_capture() -> None:
+    policy = WorldMediaPolicy()
+    decision = policy.image_decision(
+        {
+            "needs": {"boundary": 0, "security": 70},
+            "relationships": {"user:geoff": {"stage": "close_friend", "closeness": 15, "respect": 12}},
+        },
+        user_id="user:geoff",
+        request=detect_image_request("给我来一张室友他拍的打卡照"),
+        user_text="给我来一张室友他拍的打卡照",
+    )
+
+    assert decision.capture_mode == "check_in_timer"
+
+
+def test_world_media_policy_allows_candid_only_with_active_companion_evidence() -> None:
+    policy = WorldMediaPolicy()
+    decision = policy.image_decision(
+        {
+            "needs": {"boundary": 0, "security": 70},
+            "relationships": {"user:geoff": {"stage": "close_friend", "closeness": 15, "respect": 12}},
+            "agenda": {"coffee": {"status": "active", "companions": ["roommate-lin"]}},
+        },
+        user_id="user:geoff",
+        request=detect_image_request("给我来一张室友他拍的打卡照"),
+        user_text="给我来一张室友他拍的打卡照",
+    )
+
+    assert decision.capture_mode == "candid_life"
+
+
+def test_world_media_policy_only_suggests_proactive_unfiltered_for_life_events() -> None:
+    assert WorldMediaPolicy.proactive_capture_mode("刚跑完步，在操场边歇会儿") == "unfiltered"
+    assert WorldMediaPolicy.proactive_capture_mode("图书馆窗边的下午") == "handheld_selfie"
 
 
 def test_world_media_policy_requires_stronger_world_state_for_bold_relationship_media() -> None:

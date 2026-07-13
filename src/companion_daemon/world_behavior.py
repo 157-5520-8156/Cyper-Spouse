@@ -233,7 +233,6 @@ class WorldBehaviorPolicy:
         """Derive a short-lived expression guide without writing private prose."""
         needs = _mapping(state.get("needs"))
         modulation = _mapping(state.get("emotion_modulation"))
-        display = _mapping(state.get("last_affect_display"))
         relationship = _mapping(_mapping(state.get("relationships")).get(user_id))
         relationship_stage = str(relationship.get("stage") or "stranger")
         if relationship_stage not in STAGES:
@@ -245,12 +244,30 @@ class WorldBehaviorPolicy:
                 f"affect_{behavior_tendency}",
                 affect_guidance(modulation),
             )
-        if bool(display.get("mixed")) or display.get("regulation_strategy") == "contain_spillover":
+        core_affect = _mapping(modulation.get("core_affect"))
+        active_episodes = modulation.get("active_episodes")
+        episode_targets = {
+            str(item.get("target") or "")
+            for item in active_episodes
+            if isinstance(item, dict)
+        } if isinstance(active_episodes, list) else set()
+        # A display plan is an audit record for one past Action.  Derive any
+        # current mixed/spillover posture from this revision's affect instead
+        # of letting a previous recipient or revision leak into a new reply.
+        if bool(core_affect.get("mixed")):
             return ExpressionGuidance(
-                "affect_mixed"
-                if bool(display.get("mixed"))
-                else "affect_spillover",
-                str(display.get("prompt_line") or affect_guidance(modulation)),
+                "affect_mixed",
+                "有混合情绪的余韵；自然表达当前这一刻，不把矛盾简化成单一态度。",
+            )
+        if (
+            bool(modulation.get("unresolved"))
+            and episode_targets
+            and user_id not in episode_targets
+            and any(target.startswith(("npc:", "goal:")) for target in episode_targets)
+        ):
+            return ExpressionGuidance(
+                "affect_spillover",
+                "把世界里的情绪留在分寸内，不迁怒眼前的用户，也不假装毫无余韵。",
             )
         if behavior_tendency in {"withdraw", "patient"}:
             return ExpressionGuidance(
