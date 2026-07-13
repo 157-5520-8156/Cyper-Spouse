@@ -241,6 +241,31 @@ def test_turn_envelope_freezes_adapter_boundary_metadata() -> None:
 
 
 @pytest.mark.asyncio
+async def test_world_engine_rejects_direct_reply_without_turn_delivery_seam(
+    tmp_path: Path,
+) -> None:
+    runtime, world, world_id = _turn_runtime(
+        tmp_path,
+        RecordingTransport(
+            DispatchAcceptance(status="delivered", external_receipt="qq:receipt:direct")
+        ),
+    )
+    incoming = IncomingMessage(
+        platform="qq",
+        platform_user_id="geoff",
+        message_id="direct-engine-reply",
+        text="我今天有点累。",
+    )
+
+    with pytest.raises(WorldError, match="CompanionTurn"):
+        await runtime.engine.handle_message(incoming, defer_delivery=False)
+
+    snapshot = world.snapshot(world_id)
+    assert snapshot["actions"] == {}
+    assert snapshot["turns"] == {}
+
+
+@pytest.mark.asyncio
 async def test_respond_owns_world_action_dispatch_and_synchronous_receipt_settlement(
     tmp_path: Path,
 ) -> None:

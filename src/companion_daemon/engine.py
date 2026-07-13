@@ -1356,6 +1356,22 @@ class CompanionEngine:
         complete_by_observed_at: datetime | None = None,
         fast_observe: bool = False,
     ) -> CompanionReply | None:
+        # A World reply is an externally observable Action, so Engine is not
+        # allowed to treat generation itself as delivery.  The delivery owner
+        # must be CompanionTurn, which stages first and settles only from a
+        # platform receipt.  Observation-only paths remain valid because they
+        # create no outgoing Action to confirm.
+        if (
+            self.world_kernel
+            and self.world_id
+            and not defer_delivery
+            and not skip_reply
+            and not fast_observe
+        ):
+            raise WorldError(
+                "World replies require CompanionTurn; pass defer_delivery=True "
+                "only from its delivery seam"
+            )
         canonical_user_id = self.store.resolve_user(message.platform, message.platform_user_id)
         if self.world_kernel and self.world_id:
             cadence = (
