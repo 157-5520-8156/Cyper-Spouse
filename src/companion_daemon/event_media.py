@@ -22,11 +22,20 @@ from companion_daemon.budget import BudgetGate, image_render_estimate
 from companion_daemon.image_generation import GeneratedImage, ImageGenerator, visual_reference_paths
 from companion_daemon.llm import ChatModel, model_call_scope
 from companion_daemon.media_shot import MediaShotPlan
+from companion_daemon.media_subject import (
+    DEFAULT_SUBJECT_CONFIG,
+    SubjectPresentationPlan,
+    build_subject_candidates,
+    presentation_prompt_block,
+    select_identity_references,
+)
 from companion_daemon.visual_identity import load_visual_identity
 
 
-PLAN_VERSION = "event-media-plan-v1"
-INSPECTION_VERSION = "media-inspection-v1"
+PLAN_VERSION_V1 = "event-media-plan-v1"
+PLAN_VERSION = "event-media-plan-v2"
+SUPPORTED_PLAN_VERSIONS = {PLAN_VERSION_V1, PLAN_VERSION}
+INSPECTION_VERSION = "media-inspection-v2"
 
 FAMILIES = {"life_share", "character_media"}
 CONTENT_DOMAINS = {
@@ -369,11 +378,15 @@ class MediaPlan:
     planned_summary: str
     intimate_intensity: str | None = None
     existing_artifact_path: str | None = None
+    subject_presentation: SubjectPresentationPlan | None = None
 
     def to_payload(self) -> dict[str, object]:
         payload = asdict(self)
         payload["supporting_evidence_refs"] = list(self.supporting_evidence_refs)
         payload["constraints"] = list(self.constraints)
+        payload["subject_presentation"] = (
+            self.subject_presentation.to_payload() if self.subject_presentation else None
+        )
         return payload
 
     @classmethod
@@ -423,6 +436,11 @@ class MediaPlan:
                     if payload.get("existing_artifact_path")
                     else None
                 ),
+                subject_presentation=(
+                    SubjectPresentationPlan.from_payload(payload["subject_presentation"])
+                    if payload.get("subject_presentation") is not None
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("invalid media plan payload") from exc
@@ -456,6 +474,8 @@ class MediaInspection:
     deviations: tuple[str, ...]
     inspector_model: str
     rule_version: str = INSPECTION_VERSION
+    observed_subject_presentation: dict[str, object] | None = None
+    reference_pose_copy: bool = False
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -501,9 +521,16 @@ class MediaInspector(Protocol):
 class MediaPlanner:
     """Classify one frozen opportunity with one bounded LLM call."""
 
-    def __init__(self, model: ChatModel, *, enabled: bool | None = None):
+    def __init__(
+        self,
+        model: ChatModel,
+        *,
+        enabled: bool | None = None,
+        subject_config_path: Path = DEFAULT_SUBJECT_CONFIG,
+    ):
         self.model = model
         self.enabled = _env_flag("COMPANION_EVENT_MEDIA_ENABLED") if enabled is None else enabled
+        self.subject_config_path = subject_config_path
 
     async def plan(
         self,
@@ -516,19 +543,36 @@ class MediaPlanner:
         if preflight:
             return NotRenderable(opportunity.opportunity_id, preflight)
         recent = tuple(_history_fingerprint(item) for item in recent_media[-12:])
+        recent_subjects = tuple(_history_subject_signature(item) for item in recent_media[-12:])
+        try:
+            subject_candidates = _planner_subject_candidates(
+                opportunity,
+                recent_subjects=recent_subjects,
+                config_path=self.subject_config_path,
+            )
+        except (OSError, ValueError, TypeError) as exc:
+            return NotRenderable(
+                opportunity.opportunity_id, "subject_catalog_unavailable", str(exc)[:240]
+            )
         try:
             with model_call_scope(
                 "media_planning", action_id=f"media-planning:{opportunity.opportunity_id}"
             ):
                 raw = await self.model.complete(
-                    _planning_messages(opportunity, recent), temperature=0.65
+                    _planning_messages(opportunity, recent, subject_candidates), temperature=0.65
                 )
             proposal = json.loads(raw)
         except Exception as exc:
             return NotRenderable(opportunity.opportunity_id, "invalid_model_output", str(exc)[:240])
         if not isinstance(proposal, dict):
             return NotRenderable(opportunity.opportunity_id, "invalid_model_output")
-        return _freeze_proposal(opportunity, proposal, recent)
+        return _freeze_proposal(
+            opportunity,
+            proposal,
+            recent,
+            recent_subjects=recent_subjects,
+            subject_config_path=self.subject_config_path,
+        )
 
 
 class MediaRenderer:
@@ -541,6 +585,7 @@ class MediaRenderer:
         inspector: MediaInspector,
         output_dir: Path,
         visual_identity_path: Path | None = Path("configs/visual_identity.yaml"),
+        subject_config_path: Path = DEFAULT_SUBJECT_CONFIG,
         budget_gate: BudgetGate | None = None,
         size: str = "1024x1536",
         quality: str = "medium",
@@ -549,6 +594,7 @@ class MediaRenderer:
         self.inspector = inspector
         self.output_dir = output_dir
         self.visual_identity_path = visual_identity_path
+        self.subject_config_path = subject_config_path
         self.budget_gate = budget_gate
         self.size = size
         self.quality = quality
@@ -596,7 +642,9 @@ class MediaRenderer:
                     plan.plan_id, f"render_or_inspection_failed:{exc}", attempt
                 )
             inspection = _enforce_inspection_contract(
-                inspection, automatic=plan.delivery_mode == "automatic"
+                inspection,
+                automatic=plan.delivery_mode == "automatic",
+                subject_required=plan.subject_presentation is not None,
             )
             last_inspection = inspection
             if inspection.passed:
@@ -641,7 +689,9 @@ class MediaRenderer:
         except Exception as exc:
             return MediaRenderFailure(plan.plan_id, f"inspection_failed:{exc}", 0)
         inspection = _enforce_inspection_contract(
-            inspection, automatic=plan.delivery_mode == "automatic"
+            inspection,
+            automatic=plan.delivery_mode == "automatic",
+            subject_required=plan.subject_presentation is not None,
         )
         if not inspection.passed:
             return MediaRenderFailure(plan.plan_id, inspection.reason, 0, inspection)
@@ -658,6 +708,23 @@ class MediaRenderer:
     def _references(self, plan: MediaPlan) -> tuple[Path, ...]:
         if plan.character_visibility not in {"identifiable", "body_detail"}:
             return ()
+        if (
+            plan.version == PLAN_VERSION
+            and plan.subject_presentation
+            and self.visual_identity_path
+            and self.visual_identity_path.is_file()
+            and self.subject_config_path.is_file()
+        ):
+            profile = (
+                "relationship_private" if plan.privacy == "intimate" else "everyday_selfie"
+            )
+            return select_identity_references(
+                identity_path=self.visual_identity_path,
+                presentation=plan.subject_presentation,
+                subject_config_path=self.subject_config_path,
+                profile=profile,
+                relationship_tier=(plan.intimate_intensity if plan.privacy == "intimate" else None),
+            )
         return visual_reference_paths(
             self.visual_identity_path,
             profile="relationship_private" if plan.privacy == "intimate" else "everyday_selfie",
@@ -755,6 +822,12 @@ class OpenAIMediaInspector:
             observed_facts=tuple(str(item) for item in payload.get("observed_facts", [])[:12]),
             deviations=tuple(str(item) for item in payload.get("deviations", [])[:12]),
             inspector_model=self.model,
+            observed_subject_presentation=(
+                dict(payload["observed_subject_presentation"])
+                if isinstance(payload.get("observed_subject_presentation"), dict)
+                else None
+            ),
+            reference_pose_copy=bool(payload.get("reference_pose_copy", False)),
         )
 
 
@@ -800,7 +873,7 @@ class LegacyMediaShotAdapter:
             )
         )
         return MediaPlan(
-            version=PLAN_VERSION,
+            version=PLAN_VERSION_V1,
             plan_id=f"event-plan:{opportunity_id}",
             opportunity_id=opportunity_id,
             event_id=event_id,
@@ -873,6 +946,11 @@ def compile_media_prompt(plan: MediaPlan, visual_identity_path: Path | None) -> 
         if plan.privacy == "intimate"
         else "No sexualized or intimate escalation."
     )
+    subject = (
+        "\n" + presentation_prompt_block(plan.subject_presentation)
+        if plan.subject_presentation
+        else ""
+    )
     return (
         "Create one believable fictional personal-media photograph. No text or watermark.\n"
         f"Frozen plan={plan.plan_id}; event={plan.event_id}; family={plan.family}.\n"
@@ -884,6 +962,7 @@ def compile_media_prompt(plan: MediaPlan, visual_identity_path: Path | None) -> 
         f"Selected event evidence only:\n{evidence}\n"
         f"People rule: {people}\nPrivacy rule: {privacy}\n"
         f"Non-negotiable constraints: {'; '.join(plan.constraints) or 'stay faithful to selected evidence'}."
+        f"{subject}"
         f"{identity}"
     )
 
@@ -892,6 +971,9 @@ def _freeze_proposal(
     opportunity: MediaOpportunity,
     proposal: dict[str, object],
     recent: tuple[str, ...],
+    *,
+    recent_subjects: tuple[str, ...] = (),
+    subject_config_path: Path = DEFAULT_SUBJECT_CONFIG,
 ) -> PlanningResult:
     fields = {
         "content_domain": CONTENT_DOMAINS,
@@ -974,6 +1056,26 @@ def _freeze_proposal(
         return NotRenderable(opportunity.opportunity_id, "duplicate_recent_fingerprint")
 
     existing_path = _selected_existing_path(opportunity.event_snapshot, evidence)
+    subject_presentation: SubjectPresentationPlan | None = None
+    if (
+        opportunity.family == "character_media"
+        and values["route"] == "generate"
+    ):
+        variant_id = proposal.get("subject_variant_id")
+        if not isinstance(variant_id, str) or not variant_id:
+            return NotRenderable(opportunity.opportunity_id, "missing_subject_variant")
+        legal_candidates = build_subject_candidates(
+            snapshot=opportunity.event_snapshot,
+            opportunity_id=opportunity.opportunity_id,
+            capture_mode=values["capture_mode"],
+            character_visibility=values["character_visibility"],
+            recent_subject_signatures=recent_subjects,
+            config_path=subject_config_path,
+        )
+        selected = next((item for item in legal_candidates if item.variant_id == variant_id), None)
+        if selected is None:
+            return NotRenderable(opportunity.opportunity_id, "illegal_subject_variant")
+        subject_presentation = selected.presentation
     event = _mapping(opportunity.event_snapshot.get("event"))
     plan = MediaPlan(
         version=PLAN_VERSION,
@@ -1020,6 +1122,7 @@ def _freeze_proposal(
         )[:600],
         intimate_intensity=str(intensity) if intensity else None,
         existing_artifact_path=existing_path if values["route"] == "reuse_existing" else None,
+        subject_presentation=subject_presentation,
     )
     frozen_error = _validate_frozen_plan(plan)
     if frozen_error:
@@ -1148,7 +1251,7 @@ def _validate_combination(
 
 
 def _validate_frozen_plan(plan: MediaPlan) -> str | None:
-    if plan.version != PLAN_VERSION:
+    if plan.version not in SUPPORTED_PLAN_VERSIONS:
         return "unsupported_version"
     enums = (
         (plan.family, FAMILIES),
@@ -1261,11 +1364,29 @@ def _validate_frozen_plan(plan: MediaPlan) -> str | None:
         or plan.intimate_intensity not in INTIMATE_INTENSITIES
     ):
         return "invalid_intimate_intensity"
+    if plan.version == PLAN_VERSION_V1:
+        if plan.subject_presentation is not None:
+            return "v1_subject_presentation_conflict"
+    elif plan.family == "life_share" and plan.subject_presentation is not None:
+        return "life_share_subject_presentation_conflict"
+    elif (
+        plan.family == "character_media"
+        and plan.route == "generate"
+        and plan.subject_presentation is None
+    ):
+        return "missing_subject_presentation"
+    elif plan.subject_presentation is not None:
+        try:
+            SubjectPresentationPlan.from_payload(plan.subject_presentation.to_payload())
+        except ValueError:
+            return "invalid_subject_presentation"
     return None
 
 
 def _planning_messages(
-    opportunity: MediaOpportunity, recent: tuple[str, ...]
+    opportunity: MediaOpportunity,
+    recent: tuple[str, ...],
+    subject_candidates: tuple[dict[str, object], ...] = (),
 ) -> list[dict[str, str]]:
     recent_three = recent[-3:]
     return [
@@ -1277,9 +1398,14 @@ def _planning_messages(
                 "a place, participant, possession, body condition, readable text, or completed event. "
                 "The World already froze family and privacy ceiling; do not return family. Pick exactly "
                 "one value for every requested dimension and exactly one primary evidence JSON Pointer. "
+                "Every JSON Pointer must use RFC 6901 plain form beginning with '/', for example "
+                "'/objects/0/description'; never use URI-fragment form beginning with '#/'. "
                 "Supporting evidence is optional. Prefer controlled variety, but facts and capture-source "
                 "legality always win. A character photo may be posed, atmospheric, funny, polished or raw; "
-                "avoid both lifeless standing and paparazzi-like framing unless evidence specifically supports it."
+                "avoid both lifeless standing and paparazzi-like framing unless evidence specifically supports it. "
+                "For generated character media, choose exactly one supplied subject_variant_id. The variant is a "
+                "coherent frozen performance: never rewrite or independently combine its appearance, gaze, pose, "
+                "expression, gesture, or photo awareness."
             ),
         },
         {
@@ -1291,6 +1417,7 @@ def _planning_messages(
                 f"event_snapshot={_stable_json(opportunity.event_snapshot)}\n"
                 f"hard_banned_fingerprints_last_12={_stable_json(recent)}\n"
                 f"soft_penalty_last_3={_stable_json(recent_three)}\n"
+                f"legal_subject_presentation_candidates={_stable_json(subject_candidates)}\n"
                 "Enums:\n"
                 f"content_domain={sorted(CONTENT_DOMAINS)}\nvisual_form={sorted(VISUAL_FORMS)}\n"
                 f"share_intent={sorted(SHARE_INTENTS)}\ncapture_mode={sorted(CAPTURE_MODES)}\n"
@@ -1304,19 +1431,30 @@ def _planning_messages(
                 "character_visibility, other_people_visibility, polish, tone, privacy, "
                 "primary_evidence_ref, supporting_evidence_refs, composition, action, "
                 "camera_direction, sharing_motive, constraints, route, and optional intimate_intensity."
+                " Also return subject_variant_id for generated character_media; omit it otherwise."
             ),
         },
     ]
 
 
 def _inspection_prompt(plan: MediaPlan) -> str:
+    subject_fields = (
+        " Also return observed_subject_presentation as an object with visible hair_arrangement, "
+        "head_yaw, head_pitch, head_roll, gaze_target, expression, shoulder_orientation, posture, "
+        "gesture and photo_awareness; return reference_pose_copy as a boolean. Reject when the output "
+        "visibly contradicts the frozen subject presentation or copies the identity reference's pose, "
+        "gaze, expression, hairstyle, gesture and framing instead of following the plan. "
+        f"Planned subject presentation: {_stable_json(plan.subject_presentation.to_payload())}."
+        if plan.subject_presentation
+        else ""
+    )
     return (
         "Inspect this fictional personal-media image. Return JSON only with passed (boolean), reason "
         "(string), observed_summary (one factual Chinese sentence), observed_facts (string array), "
         "and deviations (string array). Reject malformed face/hands/body, unwanted text/watermark, "
         "identity mismatch when a reference is supplied, privacy escalation, or a visible contradiction "
         "of capture source, character visibility, people visibility, composition, action, or selected "
-        f"evidence. Frozen plan: {_stable_json(plan.to_payload())[:5000]}"
+        f"evidence.{subject_fields} Frozen plan: {_stable_json(plan.to_payload())[:5000]}"
     )
 
 
@@ -1330,17 +1468,36 @@ def _repair_prompt(prompt: str, inspection: MediaInspection) -> str:
 
 
 def _enforce_inspection_contract(
-    inspection: MediaInspection, *, automatic: bool
+    inspection: MediaInspection, *, automatic: bool, subject_required: bool = False
 ) -> MediaInspection:
-    if inspection.passed and automatic and not inspection.observed_summary.strip():
+    if inspection.passed and inspection.reference_pose_copy:
         return MediaInspection(
             passed=False,
-            reason="inspection_summary_missing",
-            observed_summary="",
+            reason="reference_pose_copy",
+            observed_summary=inspection.observed_summary,
             observed_facts=inspection.observed_facts,
-            deviations=(*inspection.deviations, "missing observed summary"),
+            deviations=(*inspection.deviations, "copied nuisance pose from identity reference"),
             inspector_model=inspection.inspector_model,
             rule_version=inspection.rule_version,
+            observed_subject_presentation=inspection.observed_subject_presentation,
+            reference_pose_copy=True,
+        )
+    missing = ""
+    if automatic and not inspection.observed_summary.strip():
+        missing = "inspection_summary_missing"
+    elif automatic and subject_required and not inspection.observed_subject_presentation:
+        missing = "observed_subject_presentation_missing"
+    if inspection.passed and missing:
+        return MediaInspection(
+            passed=False,
+            reason=missing,
+            observed_summary=inspection.observed_summary,
+            observed_facts=inspection.observed_facts,
+            deviations=(*inspection.deviations, missing.replace("_", " ")),
+            inspector_model=inspection.inspector_model,
+            rule_version=inspection.rule_version,
+            observed_subject_presentation=inspection.observed_subject_presentation,
+            reference_pose_copy=inspection.reference_pose_copy,
         )
     return inspection
 
@@ -1351,6 +1508,46 @@ def _history_fingerprint(item: str | MediaPlan | dict[str, object]) -> str:
     if isinstance(item, MediaPlan):
         return item.diversity_fingerprint
     return str(item.get("diversity_fingerprint") or "")
+
+
+def _history_subject_signature(item: str | MediaPlan | dict[str, object]) -> str:
+    if isinstance(item, str):
+        return ""
+    if isinstance(item, MediaPlan):
+        return item.subject_presentation.subject_signature if item.subject_presentation else ""
+    subject = item.get("subject_presentation")
+    return str(subject.get("subject_signature") or "") if isinstance(subject, dict) else ""
+
+
+def _planner_subject_candidates(
+    opportunity: MediaOpportunity,
+    *,
+    recent_subjects: tuple[str, ...],
+    config_path: Path,
+) -> tuple[dict[str, object], ...]:
+    if opportunity.family != "character_media":
+        return ()
+    combined: dict[tuple[str, str], dict[str, object]] = {}
+    for visibility in ("identifiable", "body_detail"):
+        for capture_mode in sorted(_CHARACTER_CAPTURE_MODES - {"existing_artifact"}):
+            for candidate in build_subject_candidates(
+                snapshot=opportunity.event_snapshot,
+                opportunity_id=opportunity.opportunity_id,
+                capture_mode=capture_mode,
+                character_visibility=visibility,
+                recent_subject_signatures=recent_subjects,
+                config_path=config_path,
+            ):
+                key = (candidate.variant_id, visibility)
+                if key not in combined:
+                    payload = candidate.planner_payload()
+                    payload["character_visibility"] = visibility
+                    payload["legal_capture_modes"] = []
+                    combined[key] = payload
+                modes = combined[key]["legal_capture_modes"]
+                if isinstance(modes, list) and capture_mode not in modes:
+                    modes.append(capture_mode)
+    return tuple(combined[key] for key in sorted(combined))
 
 
 def _resolve_pointer(document: object, pointer: str) -> object:

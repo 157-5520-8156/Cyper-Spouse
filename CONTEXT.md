@@ -60,6 +60,14 @@ One evidence-bound, replayable photographic interpretation of a Media Opportunit
 
 A recorded visual assessment of media. It states whether the artifact is deliverable and describes what is actually visible, including deviations from the Media Plan.
 
+## Appearance State
+
+A time-bound World Projection of visible character facts such as current hair arrangement, outfit role, grooming, and accessories. It must be sourced from committed history and is optional in a Media Opportunity snapshot; generated media never writes it back automatically.
+
+## Subject Presentation
+
+The frozen, shot-local way a character appears and performs in one Media Plan: appearance source, head and shoulder orientation, gaze, expression, posture, gesture, and photo awareness. It is not a World fact or a media category, and identity references must not silently override it.
+
 ## Relationship Stage
 
 A slow projection of settled interaction history. It influences likely choices and their cost but does not grant the user control over the companion or act as a context-free vocabulary licence.

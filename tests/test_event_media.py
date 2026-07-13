@@ -15,6 +15,7 @@ from companion_daemon.event_media import (
     OpenAIMediaInspector,
     PlannedMedia,
     RenderedMedia,
+    compile_media_prompt,
 )
 from companion_daemon.image_generation import GeneratedImage
 
@@ -90,6 +91,7 @@ def _proposal(**overrides: object) -> dict[str, object]:
         "sharing_motive": "把这个生活瞬间分享给熟悉的人",
         "constraints": ["不生成可读文字", "手部结构自然"],
         "route": "generate",
+        "subject_variant_id": "aware_three_quarter",
     }
     value.update(overrides)
     if "camera_direction" not in overrides:
@@ -102,6 +104,17 @@ def _proposal(**overrides: object) -> dict[str, object]:
             "known_companion": "同伴手持相机的友好观看距离",
             "external_sender": "他人代拍的自然观看距离",
             "existing_artifact": "保持原始媒体已有的相机视角",
+        }[str(value["capture_mode"])]
+    if "subject_variant_id" not in overrides:
+        value["subject_variant_id"] = "body_detail_showcase" if value["character_visibility"] == "body_detail" else {
+            "character_front_camera": "aware_three_quarter",
+            "character_rear_camera": "aware_three_quarter",
+            "mirror": "mirror_composed",
+            "timer_fixed": "timer_environment_pose",
+            "requested_helper": "helper_checkin_pose",
+            "known_companion": "companion_reaction",
+            "external_sender": "external_candid_glance",
+            "existing_artifact": "aware_three_quarter",
         }[str(value["capture_mode"])]
     primary = value["primary_evidence_ref"]
     value["supporting_evidence_refs"] = [
@@ -261,6 +274,66 @@ async def test_planner_accepts_cross_matrix_prototypes(
     assert result.plan.primary_evidence_ref == str(_proposal(**overrides)["primary_evidence_ref"])
     assert result.plan.evidence_values[result.plan.primary_evidence_ref]
     assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_new_character_plan_freezes_subject_presentation_in_same_call() -> None:
+    model = FakeModel(_proposal(subject_variant_id="screen_check_reaction"))
+
+    result = await MediaPlanner(model).plan(_opportunity())
+
+    assert isinstance(result, PlannedMedia)
+    assert result.plan.version == "event-media-plan-v2"
+    assert result.plan.subject_presentation is not None
+    assert result.plan.subject_presentation.variant_id == "screen_check_reaction"
+    assert "legal_subject_presentation_candidates" in model.messages[1]["content"]
+    restored = MediaPlan.from_payload(result.plan.to_payload())
+    assert restored == result.plan
+    prompt = compile_media_prompt(restored, None)
+    assert "Frozen subject presentation" in prompt
+    assert "Do not copy their head angle" in prompt
+
+
+@pytest.mark.asyncio
+async def test_generated_character_plan_requires_legal_subject_variant() -> None:
+    missing = _proposal()
+    missing.pop("subject_variant_id")
+    missing_result = await MediaPlanner(FakeModel(missing)).plan(_opportunity())
+    illegal_result = await MediaPlanner(
+        FakeModel(_proposal(subject_variant_id="mirror_composed"))
+    ).plan(_opportunity())
+
+    assert isinstance(missing_result, NotRenderable)
+    assert missing_result.reason == "missing_subject_variant"
+    assert isinstance(illegal_result, NotRenderable)
+    assert illegal_result.reason == "illegal_subject_variant"
+
+
+@pytest.mark.asyncio
+async def test_missing_subject_catalog_fails_closed_before_model_call(tmp_path: Path) -> None:
+    model = FakeModel(_proposal())
+
+    result = await MediaPlanner(
+        model, subject_config_path=tmp_path / "missing-subjects.yaml"
+    ).plan(_opportunity())
+
+    assert isinstance(result, NotRenderable)
+    assert result.reason == "subject_catalog_unavailable"
+    assert model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_v1_plan_replays_without_new_subject_interpretation() -> None:
+    current = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity())
+    assert isinstance(current, PlannedMedia)
+    payload = current.plan.to_payload()
+    payload["version"] = "event-media-plan-v1"
+    payload["subject_presentation"] = None
+
+    restored = MediaPlan.from_payload(payload)
+
+    assert restored.subject_presentation is None
+    assert "Frozen subject presentation" not in compile_media_prompt(restored, None)
 
 
 @pytest.mark.asyncio
@@ -597,6 +670,7 @@ async def test_planner_exposes_last_twelve_hard_bans_and_last_three_soft_penalti
     assert "fingerprint:3" in prompt and "fingerprint:14" in prompt
     assert "soft_penalty_last_3" in prompt
     assert "fingerprint:12" in prompt
+    assert "never use URI-fragment form beginning with '#/'" in model.messages[0]["content"]
 
 
 @pytest.mark.asyncio
@@ -774,6 +848,34 @@ async def test_renderer_generates_inspects_and_repairs_same_plan(tmp_path: Path)
     assert result.inspection.observed_summary
     assert "手指畸形" in generator.prompts[1]
     assert planned.plan.event_id in generator.prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_renderer_rejects_reference_pose_copy_and_repairs_once(tmp_path: Path) -> None:
+    planned = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity())
+    assert isinstance(planned, PlannedMedia)
+    copied = MediaInspection(
+        passed=True,
+        reason="ok",
+        observed_summary="角色姿态与身份参考图几乎一致",
+        observed_facts=("角色可识别",),
+        deviations=(),
+        inspector_model="fake",
+        observed_subject_presentation={"gaze_target": "lens"},
+        reference_pose_copy=True,
+    )
+    generator = FakeGenerator()
+
+    result = await MediaRenderer(
+        generator=generator,
+        inspector=FakeInspector([copied, _inspection(True)]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+
+    assert isinstance(result, RenderedMedia)
+    assert result.attempts == 2
+    assert "reference_pose_copy" in generator.prompts[1]
 
 
 @pytest.mark.asyncio

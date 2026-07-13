@@ -1,0 +1,215 @@
+version: 1
+
+# These are coherent photographic performances. MediaPlanner chooses one ID;
+# it does not independently compose pose axes and accidentally create a puppet.
+variants:
+  - id: aware_three_quarter
+    capture_modes: [character_front_camera, character_rear_camera]
+    character_visibilities: [identifiable]
+    appearance: &everyday_appearance
+      hair_arrangements: [hair_down_tucked, half_up, low_ponytail, loose_small_bun, clipped_back, natural_down]
+      grooming: [natural, lightly_put_together]
+      accessory_options: [[], [teal_hair_clip]]
+    performance:
+      head_yaw: toward_frame_right
+      head_pitch: level
+      head_roll: none
+      gaze_target: lens
+      expression: trying_not_to_laugh
+      shoulder_orientation: three_quarter_opposite_head
+      posture: relaxed_engaged
+      gesture: show_primary_evidence
+      photo_awareness: aware_light_pose
+
+  - id: look_at_primary
+    capture_modes: [character_front_camera, character_rear_camera, known_companion]
+    character_visibilities: [identifiable]
+    appearance: *everyday_appearance
+    performance:
+      head_yaw: toward_frame_left
+      head_pitch: slightly_down
+      head_roll: none
+      gaze_target: primary_evidence
+      expression: focused_amused
+      shoulder_orientation: open_three_quarter
+      posture: leaning_slightly_into_activity
+      gesture: interact_with_primary_evidence
+      photo_awareness: aware_of_photo_not_staring
+
+  - id: screen_check_reaction
+    capture_modes: [character_front_camera]
+    character_visibilities: [identifiable]
+    appearance: *everyday_appearance
+    performance:
+      head_yaw: near_front
+      head_pitch: slightly_down
+      head_roll: none
+      gaze_target: phone_screen
+      expression: embarrassed_half_smile
+      shoulder_orientation: slightly_turned
+      posture: compact_casual
+      gesture: hold_or_point_at_primary_evidence
+      photo_awareness: checking_own_frame
+
+  - id: playful_level_pose
+    capture_modes: [character_front_camera, mirror, timer_fixed]
+    character_visibilities: [identifiable]
+    appearance: *everyday_appearance
+    performance:
+      head_yaw: toward_frame_left
+      head_pitch: level
+      head_roll: slight_opposite
+      gaze_target: lens
+      expression: playful_asymmetric_smile
+      shoulder_orientation: dynamic_three_quarter
+      posture: weight_shifted
+      gesture: small_contextual_pose
+      photo_awareness: deliberately_playful
+
+  - id: mirror_composed
+    capture_modes: [mirror]
+    character_visibilities: [identifiable]
+    appearance: *everyday_appearance
+    performance:
+      head_yaw: near_front
+      head_pitch: level
+      head_roll: none
+      gaze_target: mirror_phone_screen
+      expression: calm_self_check
+      shoulder_orientation: three_quarter
+      posture: balanced_weight_shift
+      gesture: adjust_clothing_or_accessory
+      photo_awareness: composed_mirror_pose
+
+  - id: timer_environment_pose
+    capture_modes: [timer_fixed, requested_helper]
+    character_visibilities: [identifiable]
+    appearance: *everyday_appearance
+    performance:
+      head_yaw: toward_frame_right
+      head_pitch: level
+      head_roll: none
+      gaze_target: lens
+      expression: open_warm_smile
+      shoulder_orientation: open_to_environment
+      posture: mid_step_or_weight_shift
+      gesture: contextual_hand_pose
+      photo_awareness: friendly_requested_photo
+
+  - id: helper_checkin_pose
+    capture_modes: [requested_helper, known_companion]
+    character_visibilities: [identifiable]
+    appearance: *everyday_appearance
+    performance:
+      head_yaw: toward_frame_left
+      head_pitch: slightly_up
+      head_roll: none
+      gaze_target: photographer
+      expression: bright_photo_smile
+      shoulder_orientation: three_quarter_to_environment
+      posture: settled_pose_with_energy
+      gesture: acknowledge_place_or_object
+      photo_awareness: clearly_posing_for_friend
+
+  - id: companion_reaction
+    capture_modes: [known_companion, external_sender]
+    character_visibilities: [identifiable]
+    appearance: *everyday_appearance
+    performance:
+      head_yaw: toward_frame_right
+      head_pitch: level
+      head_roll: slight
+      gaze_target: known_companion
+      expression: caught_in_real_laugh
+      shoulder_orientation: turned_toward_companion
+      posture: relaxed_in_interaction
+      gesture: conversational_hand_gesture
+      photo_awareness: noticed_camera_mid_moment
+
+  - id: external_candid_glance
+    capture_modes: [external_sender]
+    character_visibilities: [identifiable]
+    appearance: *everyday_appearance
+    performance:
+      head_yaw: away_then_back
+      head_pitch: level
+      head_roll: none
+      gaze_target: nearby_activity
+      expression: neutral_attentive
+      shoulder_orientation: in_motion_three_quarter
+      posture: active_not_surveillance
+      gesture: continue_event_action
+      photo_awareness: lightly_aware
+
+  - id: body_detail_showcase
+    capture_modes: [character_front_camera, character_rear_camera, mirror, existing_artifact]
+    character_visibilities: [body_detail]
+    appearance: *everyday_appearance
+    performance:
+      head_yaw: not_applicable
+      head_pitch: not_applicable
+      head_roll: not_applicable
+      gaze_target: not_applicable
+      expression: not_applicable
+      shoulder_orientation: not_applicable
+      posture: stable_detail_presentation
+      gesture: present_specific_body_detail
+      photo_awareness: deliberate_detail_showing
+
+reference_pose_metadata:
+  assets/reference/celia-v2-reference-01-canonical.png:
+    head_yaw: near_front
+    head_pitch: level
+    head_roll: slight
+    gaze_target: lens
+    expression: soft_closed_smile
+    hair_arrangement: natural_down
+  assets/reference/celia-v2-reference-03-angle-10deg.png:
+    head_yaw: near_front
+    head_pitch: level
+    head_roll: none
+    gaze_target: lens
+    expression: neutral_soft
+    hair_arrangement: natural_down
+  assets/reference/celia-v2-pose-expansion/celia-v2-pose-01-opposite-left-3q-over-shoulder.png:
+    head_yaw: toward_frame_left
+    head_pitch: level
+    head_roll: none
+    gaze_target: lens
+    expression: soft_closed_smile
+    hair_arrangement: natural_down
+  assets/reference/celia-v2-pose-expansion/celia-v2-pose-02-opposite-left-3q-chin-down.png:
+    head_yaw: toward_frame_left
+    head_pitch: slightly_down
+    head_roll: slight
+    gaze_target: lens
+    expression: soft_closed_smile
+    hair_arrangement: tied_back
+  assets/reference/celia-v2-pose-expansion/celia-v2-left-front-gentle-laugh-selfie.png:
+    head_yaw: toward_frame_right
+    head_pitch: level
+    head_roll: slight
+    gaze_target: lens
+    expression: gentle_laugh
+    hair_arrangement: natural_down
+  assets/reference/celia-v2-pose-expansion/celia-v2-left-front-kitchen-thoughtful.png:
+    head_yaw: toward_frame_right
+    head_pitch: slightly_down
+    head_roll: none
+    gaze_target: primary_evidence
+    expression: thoughtful
+    hair_arrangement: loose_small_bun
+  assets/reference/celia-v2-relationship-private/03-bedroom-selfie.jpg:
+    head_yaw: near_front
+    head_pitch: level
+    head_roll: none
+    gaze_target: lens
+    expression: neutral_soft
+    hair_arrangement: loose_small_bun
+  assets/reference/celia-v2-relationship-private/04-bedroom-fullbody.jpg:
+    head_yaw: toward_frame_right
+    head_pitch: level
+    head_roll: slight
+    gaze_target: lens
+    expression: soft_closed_smile
+    hair_arrangement: loose_small_bun
