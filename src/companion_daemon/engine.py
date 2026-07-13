@@ -451,6 +451,36 @@ class CompanionEngine:
         if self.budget_gate is not None and reservation_id:
             self.budget_gate.release_model_call(reservation_id)
 
+    async def _reserved_legacy_model_complete(
+        self,
+        model: ChatModel,
+        messages: list[dict[str, str]],
+        *,
+        purpose: str,
+        temperature: float,
+        action_id: str,
+        cadence: str = "warm",
+    ) -> str:
+        """Run one legacy side call through the same atomic spend boundary."""
+        reservation_id = self._reserve_model_call_budget(
+            action_id=action_id,
+            estimated_cny=self._estimate_model_call_reserve_cny(
+                model=model,
+                purpose=purpose,
+                cadence=cadence,
+                prompt_characters=sum(len(item.get("content", "")) for item in messages),
+            ),
+        )
+        try:
+            with model_call_scope(
+                purpose,
+                action_id=action_id,
+                budget_reservation_id=reservation_id,
+            ):
+                return await model.complete(messages, temperature=temperature)
+        finally:
+            self._release_model_call_budget(reservation_id)
+
     def _secondary_model_call_decision(
         self,
         purpose: str,
