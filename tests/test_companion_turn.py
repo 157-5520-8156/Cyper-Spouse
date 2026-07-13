@@ -508,6 +508,30 @@ async def test_late_tool_result_reconciles_a_timeout_through_the_same_turn_seam(
 
 
 @pytest.mark.asyncio
+async def test_dispatch_scheduled_afterthought_uses_the_normal_receipt_path(
+    tmp_path: Path,
+) -> None:
+    transport = RecordingTransport(
+        DispatchAcceptance(status="delivered", external_receipt="qq:afterthought:1")
+    )
+    runtime, world, world_id = _turn_runtime(tmp_path, transport)
+    delivery_id = runtime.engine.queue_afterthought_delivery("geoff", "qq", "哦对，补一句。")
+    action_id = world.action_id_for_delivery(world_id, delivery_id)
+    assert action_id is not None
+
+    outcome = await runtime.dispatch_scheduled(
+        action_id=action_id,
+        delivery_id=delivery_id,
+        observed_at=datetime.now(UTC),
+        idempotency_key="afterthought:turn-seam",
+    )
+
+    assert outcome.terminal_state == "delivered"
+    assert transport.beats[0].action_id == action_id
+    assert world.snapshot(world_id)["actions"][action_id]["status"] == "delivered"
+
+
+@pytest.mark.asyncio
 async def test_async_platform_acceptance_is_not_delivered_until_settle_observes_receipt(
     tmp_path: Path,
 ) -> None:

@@ -451,6 +451,40 @@ class CompanionTurn:
             )
         return settled
 
+    async def dispatch_scheduled(
+        self,
+        *,
+        action_id: str,
+        delivery_id: int,
+        observed_at: datetime,
+        idempotency_key: str,
+    ) -> SettlementOutcome:
+        """Deliver a World-authorized continuation through the normal receipt path.
+
+        An afterthought or recovered proactive action has already been
+        generated and authorized, but it still has to claim a segment, obtain
+        a platform receipt, and converge unknown delivery exactly as a normal
+        response does.  Callers therefore never do adapter-local
+        ``reply → confirm`` bookkeeping.
+        """
+        self._recover_receipt_watchdogs()
+        async with self._action_locks.setdefault(action_id, asyncio.Lock()):
+            settled = await self._dispatch_next(
+                action_id=action_id,
+                delivery_id=delivery_id,
+                observed_at=observed_at,
+                idempotency_prefix=idempotency_key,
+                advance=False,
+            )
+        if settled.terminal_state == "delivered" and self._has_planned_beat(action_id):
+            self._start_continuation(
+                action_id=action_id,
+                delivery_id=delivery_id,
+                observed_at=observed_at,
+                idempotency_prefix=idempotency_key,
+            )
+        return settled
+
     def _settle_external_observation(
         self, observation: ExternalObservation
     ) -> SettlementOutcome:

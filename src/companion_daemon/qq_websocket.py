@@ -1421,6 +1421,23 @@ class QQMessageCoalescer:
                     merged.platform,
                     text,
                 )
+            world = getattr(self.engine, "world_kernel", None)
+            world_id = getattr(self.engine, "world_id", None)
+            if world is not None and world_id and delivery_id is not None:
+                action_id = world.action_id_for_delivery(world_id, delivery_id)
+                if not action_id:
+                    raise WorldError("afterthought outbox row has no World Action")
+                outcome = await CompanionTurn(
+                    self.engine,
+                    QQTurnTransport(reply_target),
+                    sleep=self.sleep,
+                ).dispatch_scheduled(
+                    action_id=action_id,
+                    delivery_id=delivery_id,
+                    observed_at=utc_now(),
+                    idempotency_key=f"afterthought:{delivery_id}",
+                )
+                return text if outcome.terminal_state == "delivered" else None
             await reply_target.reply(content=text, msg_seq=_reply_msg_seq())
             if hasattr(self.engine, "confirm_afterthought_delivery"):
                 self.engine.confirm_afterthought_delivery(

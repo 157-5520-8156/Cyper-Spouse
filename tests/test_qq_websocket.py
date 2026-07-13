@@ -8,8 +8,10 @@ import pytest
 
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
+from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import CompanionReply, IncomingMessage, MessageAttachment, MoodState
 from companion_daemon.qq_websocket import (
+    AfterthoughtPlan,
     CompanionQQClient,
     QQMessageCoalescer,
     QQTurnPresenter,
@@ -379,6 +381,57 @@ async def test_afterthought_uses_outbox_delivery_confirmation() -> None:
     assert engine.queued == [("geoff", "qq", "补一句。")]
     assert engine.confirmed == [("geoff", "qq", "补一句。", 42)]
     assert engine.failed == []
+
+
+@pytest.mark.asyncio
+async def test_world_afterthought_without_a_durable_receipt_stays_unknown(tmp_path: Path) -> None:
+    store = CompanionStore(tmp_path / "afterthought-unknown.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+    )
+
+    async def generated(*_args, **_kwargs) -> str:
+        return "哦对，补一句。"
+
+    engine.generate_afterthought = generated  # type: ignore[method-assign]
+
+    class ReceiptlessTarget:
+        async def reply(self, **_kwargs: object) -> dict[str, str]:
+            return {"status": "ok"}
+
+    async def no_wait(_seconds: float) -> None:
+        return None
+
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.01,
+        sleep=no_wait,
+    )
+    result = await coalescer._fire_afterthought(
+        "c2c:user",
+        AfterthoughtPlan("quick_continue", 0.0, 1.0),
+        IncomingMessage(
+            platform="qq", platform_user_id="geoff", message_id="afterthought-source", text="刚才那事"
+        ),
+        ReceiptlessTarget(),
+        datetime.now(timezone.utc),
+    )
+
+    assert result is None
+    actions = world.snapshot(world_id)["actions"]
+    afterthoughts = [
+        action for action in actions.values()
+        if isinstance(action, dict) and action.get("message_kind") == "afterthought"
+    ]
+    assert len(afterthoughts) == 1
+    assert afterthoughts[0]["status"] == "unknown"
 
 
 @pytest.mark.asyncio
