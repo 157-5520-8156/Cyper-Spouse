@@ -68,6 +68,8 @@ from companion_daemon.world_cost_ledger import (
     WorldCostLedger,
     evaluate_social_transgression,
 )
+from companion_daemon.media_shot import is_valid_media_shot_plan, is_world_grounded_media_shot_plan
+from companion_daemon.user_affect import expiry_for_user_affect
 
 
 class WorldError(ValueError):
@@ -3503,6 +3505,39 @@ class WorldKernel:
                         {"commitment_id": commitment_id, "reason": "logical_expiry"},
                         logical_at=expires_at,
                     )
+            # User-affect appraisals are sourced, fallible observations of a
+            # moment, not a permanent user trait. Expire each episode in
+            # logical time so replay and a long simulator jump produce the
+            # same repair posture without consulting wall time.
+            for user_id, raw_affect in sorted(
+                _as_dict(working.get("user_affect", {}), "user affect projection").items()
+            ):
+                affect = _as_dict(raw_affect, "user affect")
+                raw_episodes = _as_list(
+                    affect.get("active_episodes", []), "active user affect episodes"
+                )
+                episodes = [
+                    _as_dict(item, "active user affect episode")
+                    for item in raw_episodes
+                ]
+                if not episodes and bool(affect.get("unresolved")):
+                    episodes = [affect]
+                for episode in sorted(
+                    episodes,
+                    key=lambda item: str(item.get("expires_at") or ""),
+                ):
+                    source_message_id = str(episode.get("source_message_id") or "")
+                    expires_at = str(episode.get("expires_at") or "")
+                    if source_message_id and expires_at and _parse_at(expires_at) <= target_at:
+                        emit(
+                            "UserAffectExpired",
+                            {
+                                "user_id": str(user_id),
+                                "source_message_id": source_message_id,
+                                "reason": "logical_expiry",
+                            },
+                            logical_at=expires_at,
+                        )
             # Weekly plans are intentions materialized from the seed.  Use the
             # pre-advance clock as the planning cutoff so a long replay jump
             # produces the same future plan that incremental ticks would have
@@ -5067,21 +5102,37 @@ class WorldKernel:
             request_id = str(command.get("request_id") or "")
             user_id = str(command.get("user_id") or "")
             media_kind = str(command.get("media_kind") or "")
+            capture_mode = str(command.get("capture_mode") or "handheld_selfie")
             topic = str(command.get("topic") or "").strip()
             reason = str(command.get("reason") or "").strip()
+            shot_plan = command.get("shot_plan")
+            delivery_context = command.get("delivery_context") or {}
             media = _as_dict(state.get("media", {}), "media")
             entities = _as_dict(state["entities"], "entities")
+            if not isinstance(delivery_context, dict):
+                raise WorldError("media delivery context must be an object")
+            if delivery_context and (
+                str(delivery_context.get("platform") or "") not in {"qq", "wechat", "simulator"}
+                or not str(delivery_context.get("platform_user_id") or "")
+                or len(_stable_json(delivery_context)) > 2_000
+            ):
+                raise WorldError("media delivery context requires a supported platform and bounded recipient")
             if (
                 not request_id or request_id in media or not topic or len(topic) > 120 or not reason or len(reason) > 160
-                or media_kind not in {"creative_image", "selfie", "relationship_private"}
+                or media_kind not in {"creative_image", "selfie", "character_media", "relationship_private"}
+                or capture_mode not in {"handheld_selfie", "check_in_timer", "mirror", "candid_life", "unfiltered"}
+                or (media_kind != "creative_image" and not is_valid_media_shot_plan(shot_plan))
+                or (media_kind != "creative_image" and not is_world_grounded_media_shot_plan(shot_plan, state, request_id))
+                or (media_kind != "creative_image" and str(_as_dict(shot_plan, "media shot plan").get("capture_mode") or "") != capture_mode)
+                or (media_kind != "creative_image" and str(_as_dict(shot_plan, "media shot plan").get("media_kind") or "") != media_kind)
                 or _as_dict(entities.get(user_id), "media user").get("kind") != "user"
             ):
                 raise WorldError("media request requires a registered user, new id, supported kind, bounded topic and reason")
             action_id = f"media-generation:{request_id}"
             now = _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
             return [
-                ("MediaRequested", {"request_id": request_id, "user_id": user_id, "media_kind": media_kind, "topic": topic, "reason": reason, "rule_version": str(command.get("rule_version") or "")}),
-                ("ActionScheduled", {"action_id": action_id, "kind": "media_generation", "expires_at": (now + timedelta(hours=2)).isoformat(), "payload": {"request_id": request_id, "media_kind": media_kind, "topic": topic}}),
+                ("MediaRequested", {"request_id": request_id, "user_id": user_id, "media_kind": media_kind, "capture_mode": capture_mode, "topic": topic, "reason": reason, **({"shot_plan": shot_plan} if shot_plan else {}), "rule_version": str(command.get("rule_version") or ""), "delivery_context": delivery_context}),
+                ("ActionScheduled", {"action_id": action_id, "kind": "media_generation", "expires_at": (now + timedelta(hours=2)).isoformat(), "payload": {"request_id": request_id, "media_kind": media_kind, "capture_mode": capture_mode, "topic": topic, **({"shot_plan": shot_plan} if shot_plan else {}), "delivery_context": delivery_context}}),
             ]
         if command_type == "reject_media_request":
             request_id = str(command.get("request_id") or "")
@@ -5100,7 +5151,7 @@ class WorldKernel:
             if action_id in _as_dict(state["actions"], "actions"):
                 raise WorldError("media delivery is already scheduled")
             now = _parse_at(str(_as_dict(state["clock"], "clock")["logical_at"]))
-            return [("ActionScheduled", {"action_id": action_id, "kind": "media_delivery", "expires_at": (now + timedelta(hours=12)).isoformat(), "payload": {"request_id": request_id, "artifact_path": item["artifact_path"], "media_kind": item["media_kind"]}})]
+            return [("ActionScheduled", {"action_id": action_id, "kind": "media_delivery", "expires_at": (now + timedelta(hours=12)).isoformat(), "payload": {"request_id": request_id, "artifact_path": item["artifact_path"], "media_kind": item["media_kind"], "capture_mode": item.get("capture_mode") or "handheld_selfie", "delivery_context": item.get("delivery_context") or {}}})]
         if command_type == "schedule_sticker_delivery":
             sticker_id = str(command.get("sticker_id") or "")
             sticker_path = str(command.get("sticker_path") or "")
@@ -7682,7 +7733,14 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
                     and str(episode.get("cause") or "") == str(payload.get("cause") or "")
                 ):
                     active_episodes.pop(episode_id, None)
-            active_episodes[source_message_id] = dict(payload)
+            episode = dict(payload)
+            appraised_at = event.logical_at
+            episode["appraised_logical_at"] = appraised_at
+            episode["expires_at"] = expiry_for_user_affect(
+                intensity=int(episode.get("intensity") or 2),
+                appraised_at=_parse_at(appraised_at),
+            ).isoformat()
+            active_episodes[source_message_id] = episode
         settles_sources = {
             str(item)
             for item in _as_list(
@@ -7696,13 +7754,41 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
         for settled_id in settles_sources:
             active_episodes.pop(settled_id, None)
         projected = dict(payload)
-        if not bool(payload.get("unresolved")) and active_episodes:
+        if bool(payload.get("unresolved")) and source_message_id:
+            projected = dict(active_episodes[source_message_id])
+        elif not bool(payload.get("unresolved")) and active_episodes:
             projected = dict(next(reversed(active_episodes.values())))
         affect_by_user[user_id] = {
             **projected,
             "active_episodes": list(active_episodes.values()),
             "appraised_at": event.observed_at,
         }
+    elif event.event_type == "UserAffectExpired":
+        user_id = str(payload.get("user_id") or "")
+        source_message_id = str(payload.get("source_message_id") or "")
+        affect_by_user = _as_dict(
+            next_state.setdefault("user_affect", {}), "user affect"
+        )
+        current = affect_by_user.get(user_id)
+        if not isinstance(current, dict) or not source_message_id:
+            return next_state
+        active_episodes = {
+            str(item.get("source_message_id") or ""): dict(item)
+            for item in _as_list(
+                current.get("active_episodes", []), "active user affect episodes"
+            )
+            if isinstance(item, dict) and str(item.get("source_message_id") or "")
+        }
+        active_episodes.pop(source_message_id, None)
+        if not active_episodes:
+            affect_by_user.pop(user_id, None)
+        else:
+            projected = dict(next(reversed(active_episodes.values())))
+            affect_by_user[user_id] = {
+                **projected,
+                "active_episodes": list(active_episodes.values()),
+                "appraised_at": event.observed_at,
+            }
     elif event.event_type == "AffectDisplaySelected":
         next_state["last_affect_display"] = dict(payload)
     elif event.event_type == "AffinityInteractionSettled":
