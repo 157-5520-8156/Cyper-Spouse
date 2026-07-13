@@ -124,6 +124,13 @@ class CompanionTurn:
 - 行动后果对 Affect、Relationship 和 Conversation Thread 的影响；
 - 幂等重试和补偿 World Event。
 
+运维控制台不是另一个 delivery authority。正常的平台回执必须由对应 Adapter 传入
+`settle`；只有进程中断等导致原回执路径永久丢失时，才可在认证后的人工复核中提交
+`operator_reconciliation` evidence。该例外只允许结算 `unknown` 的精确 Action/segment，
+保留 reviewer、证据引用和复核说明，并且不得因迟到回执触发下一个未发 beat。
+若要取消其余未发 beat，必须另附可审计的取消理由；默认不取消。当前配置令牌是共享的
+break-glass 授权，`reviewer_id` 是授权操作者填写的审计声明，而不是独立身份认证声明。
+
 ### 4.3 Interface 类型草案
 
 ```python

@@ -12,6 +12,7 @@ from companion_daemon.config import get_settings
 from companion_daemon.companion_turn import (
     CompanionTurn,
     DispatchAcceptance,
+    ExternalObservation,
     ResponseBudget,
     TurnEnvelope,
     TurnOptions,
@@ -31,6 +32,7 @@ from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel
 from companion_daemon.qq_delivery import QQDelivery
 from companion_daemon.qq_websocket import QQTurnPresenter
 from companion_daemon.turn_transports import CaptureTurnTransport
+from companion_daemon.time import utc_now
 
 
 @asynccontextmanager
@@ -75,11 +77,14 @@ class DeliveryReconciliationRequest(BaseModel):
     status: Literal["delivered", "failed"]
     evidence_kind: Literal["platform_receipt", "operator_verification"]
     external_receipt: str = Field(min_length=1, max_length=500)
+    # This is an operator-declared audit identity.  The configured token is a
+    # shared break-glass credential, not proof of a separate human identity.
     reviewer_id: str = Field(min_length=1, max_length=100)
     review_note: str = Field(min_length=1, max_length=1000)
     failure_reason: str | None = Field(default=None, max_length=500)
     segment_id: str | None = Field(default=None, max_length=200)
-    cancel_remaining: bool = True
+    cancel_remaining: bool = False
+    cancel_remaining_reason: str | None = Field(default=None, max_length=500)
 
 
 # The browser is an operator surface, not a transport adapter.  In particular
@@ -339,13 +344,19 @@ def active_world_overview() -> dict[str, object]:
 
 
 @app.post("/world/{world_id}/deliveries/{delivery_id}/reconcile")
-def reconcile_unknown_delivery(
+async def reconcile_unknown_delivery(
     world_id: str,
     delivery_id: int,
     request: DeliveryReconciliationRequest,
     x_delivery_reconciliation_token: str | None = Header(default=None),
 ) -> dict[str, object]:
-    """Settle one unknown delivery from operator-reviewed external evidence."""
+    """Forensically reconcile one *unknown* delivery after manual review.
+
+    Normal receipts belong to their platform adapter.  This token-gated route
+    is only the crash-recovery exception for a receipt path that was lost; it
+    carries review evidence through ``CompanionTurn.settle`` and cannot
+    dispatch another planned beat as a side effect.
+    """
     configured_token = (get_settings().delivery_reconciliation_token or "").strip()
     if not configured_token:
         raise HTTPException(
@@ -370,8 +381,18 @@ def reconcile_unknown_delivery(
             status_code=400,
             detail="failed reconciliation requires a failure reason",
         )
+    if request.cancel_remaining and not (request.cancel_remaining_reason or "").strip():
+        raise HTTPException(
+            status_code=400,
+            detail="cancelling remaining beats requires an audited reason",
+        )
 
-    kernel = WorldKernel(engine.store)
+    if engine.world_kernel is None or engine.world_id != world_id:
+        raise HTTPException(
+            status_code=409,
+            detail="operator reconciliation is limited to the active CompanionTurn World",
+        )
+    kernel = engine.world_kernel
     try:
         snapshot = kernel.snapshot(world_id)
     except WorldError as exc:
@@ -383,36 +404,68 @@ def reconcile_unknown_delivery(
             detail=f"delivery {delivery_id} is not an outgoing action in world {world_id}",
         )
     action = snapshot["actions"][action_id]
-    if request.segment_id:
-        segments = action.get("segment_state", {}).get("segments", [])
+    segments = action.get("segment_state", {}).get("segments", [])
+    current_status = str(action.get("status") or "")
+    selected_segment_id = request.segment_id
+    if selected_segment_id:
         segment = next(
             (
                 item
                 for item in segments
-                if isinstance(item, dict) and item.get("segment_id") == request.segment_id
+                if isinstance(item, dict) and item.get("segment_id") == selected_segment_id
             ),
             None,
         )
         if not isinstance(segment, dict):
             raise HTTPException(status_code=404, detail="segment is not part of this delivery")
         if segment.get("status") == "delivered":
+            if (
+                request.status != "delivered"
+                or str(segment.get("external_receipt") or "")
+                != request.external_receipt.strip()
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail="delivered segment receipt conflicts with reconciliation evidence",
+                )
             return {
                 "world_id": world_id,
                 "delivery_id": delivery_id,
                 "action_id": action_id,
-                "segment_id": request.segment_id,
+                "segment_id": selected_segment_id,
                 "status": "delivered",
                 "reconciled": False,
                 "revision": kernel.revision(world_id),
             }
-        if request.status not in {"delivered", "failed"} or segment.get("status") != "unknown":
+        unresolved_segments = [
+            item
+            for item in segments
+            if isinstance(item, dict)
+            and item.get("status") in {"planned", "unknown"}
+        ]
+        is_one_unclaimed_unknown_action = (
+            current_status == "unknown"
+            and segment.get("status") == "planned"
+            and len(unresolved_segments) == 1
+        )
+        if segment.get("status") != "unknown" and not is_one_unclaimed_unknown_action:
             raise HTTPException(
                 status_code=409,
-                detail="segment reconciliation requires an unknown segment and evidence",
+                detail="segment reconciliation requires an unknown segment or one unclaimed unknown Action",
             )
-    current_status = str(action.get("status") or "")
     if current_status != "unknown":
         if current_status == request.status:
+            result = action.get("result", {})
+            stored_receipt = (
+                str(result.get("external_receipt") or "")
+                if isinstance(result, dict)
+                else ""
+            )
+            if stored_receipt != request.external_receipt.strip():
+                raise HTTPException(
+                    status_code=409,
+                    detail="terminal delivery receipt conflicts with reconciliation evidence",
+                )
             return {
                 "world_id": world_id,
                 "delivery_id": delivery_id,
@@ -425,59 +478,91 @@ def reconcile_unknown_delivery(
             status_code=409,
             detail=f"delivery is already terminal with status {current_status}",
         )
+    if kernel.revision(world_id) != request.expected_revision:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"expected revision {request.expected_revision}, "
+                f"got {kernel.revision(world_id)}"
+            ),
+        )
+    if not selected_segment_id:
+        unresolved_segments = [
+            item
+            for item in segments
+            if isinstance(item, dict)
+            and item.get("status") in {"planned", "unknown"}
+        ]
+        if len(unresolved_segments) != 1:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "reconciliation requires one exact unresolved segment; "
+                    "specify segment_id for a multi-segment delivery"
+                ),
+            )
+        selected_segment_id = str(unresolved_segments[0]["segment_id"])
 
     evidence = {
         "kind": request.evidence_kind,
+        "source": "operator_reconciliation",
         "reference": request.external_receipt.strip(),
         "reviewer_id": request.reviewer_id.strip(),
         "review_note": request.review_note.strip(),
+        **(
+            {"cancel_remaining_reason": request.cancel_remaining_reason.strip()}
+            if request.cancel_remaining_reason and request.cancel_remaining_reason.strip()
+            else {}
+        ),
     }
     try:
-        if request.segment_id and request.status == "delivered":
-            settlement = kernel.settle_outgoing_segment(
-                delivery_id,
-                request.segment_id,
-                delivered=True,
-                expected_revision=request.expected_revision,
+        settlement = await CompanionTurn(
+            engine,
+            CaptureTurnTransport(receipt_namespace="operator-reconciliation"),
+        ).settle(
+            ExternalObservation(
+                action_id=action_id,
+                delivery_id=delivery_id,
+                segment_id=selected_segment_id,
+                status=request.status,
+                kind="platform_receipt",
+                observed_at=utc_now(),
+                idempotency_key=(
+                    f"operator-reconcile:{world_id}:{delivery_id}:{selected_segment_id}:"
+                    f"{request.status}:{request.external_receipt.strip()}"
+                ),
+                world_id=world_id,
                 external_receipt=request.external_receipt.strip(),
+                reason=(request.failure_reason or "").strip() or None,
                 reconciliation_evidence=evidence,
                 cancel_remaining=request.cancel_remaining,
-            )
-            if settlement is None:
-                raise HTTPException(status_code=404, detail=f"delivery {delivery_id} not found")
-            settled_action = kernel.snapshot(world_id)["actions"][action_id]
-            return {
-                "world_id": world_id,
-                "delivery_id": delivery_id,
-                "action_id": action_id,
-                "segment_id": request.segment_id,
-                "status": "delivered",
-                "action_status": settled_action["status"],
-                "cancelled_segment_ids": list(settlement["cancelled_segment_ids"]),
-                "reconciled": True,
-                "revision": kernel.revision(world_id),
-            }
-        settlement = kernel.settle_outgoing_action(
-            delivery_id,
-            delivered=request.status == "delivered",
-            reason=(request.failure_reason or "").strip() or None,
-            external_receipt=request.external_receipt.strip(),
-            expected_revision=request.expected_revision,
-            reconciliation_evidence=evidence,
+                settlement_origin="operator_reconciliation",
+                expected_revision=request.expected_revision,
+            ),
         )
     except ConcurrencyConflict as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except WorldError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if settlement is None:
-        raise HTTPException(status_code=404, detail=f"delivery {delivery_id} not found")
+    settled_action = kernel.snapshot(world_id)["actions"][action_id]
+    settled_segments = settled_action.get("segment_state", {}).get("segments", [])
+    settled_segment = next(
+        (
+            item
+            for item in settled_segments
+            if isinstance(item, dict) and item.get("segment_id") == selected_segment_id
+        ),
+        {},
+    )
     return {
         "world_id": world_id,
         "delivery_id": delivery_id,
         "action_id": action_id,
-        "status": request.status,
-        "reconciled": str(settlement.get("status") or "") == "unknown",
-        "revision": kernel.revision(world_id),
+        "segment_id": selected_segment_id,
+        "status": settled_segment.get("status", request.status),
+        "action_status": settled_action.get("status"),
+        "reconciled": True,
+        "revision": settlement.committed_revision,
     }
 
 

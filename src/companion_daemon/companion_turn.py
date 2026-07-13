@@ -210,6 +210,15 @@ class ExternalObservation:
     world_id: str | None = None
     external_receipt: str | None = None
     reason: str | None = None
+    # A normal adapter receipt has no reconciliation evidence: its transport
+    # identity is already the authority.  This field exists for the narrow
+    # crash-recovery case where an authenticated operator has checked an
+    # otherwise-unrecoverable unknown dispatch.  It deliberately travels
+    # through the same settlement seam and becomes part of the World event.
+    reconciliation_evidence: Mapping[str, object] | None = None
+    cancel_remaining: bool = False
+    settlement_origin: Literal["adapter", "operator_reconciliation"] = "adapter"
+    expected_revision: int | None = None
 
 
 @dataclass(frozen=True)
@@ -492,13 +501,25 @@ class CompanionTurn:
         return max(0.001, (budget.first_visible_by_ms - reserve_ms) / 1000.0)
 
     async def settle(self, observation: ExternalObservation) -> SettlementOutcome:
+        """Settle one external observation without inventing delivery state.
+
+        A forensic ``operator_reconciliation`` proves one already-attempted
+        segment but cannot cause the console to dispatch a later beat.  The
+        origin and evidence are validated here rather than trusted from an
+        adapter-local caller.
+        """
         self._recover_receipt_watchdogs()
         self._validate_observation_world(observation)
+        self._validate_reconciliation_observation(observation)
         async with self._action_locks.setdefault(observation.action_id, asyncio.Lock()):
             if observation.kind != "platform_receipt":
                 return self._settle_external_observation(observation)
             settled = await self._settle(observation, advance=False)
-        if observation.status == "delivered" and settled.terminal_state is None:
+        if (
+            observation.settlement_origin != "operator_reconciliation"
+            and observation.status == "delivered"
+            and settled.terminal_state is None
+        ):
             return await self._advance_after_cadence(
                 action_id=observation.action_id,
                 delivery_id=int(observation.delivery_id or 0),
@@ -627,18 +648,59 @@ class CompanionTurn:
         world = self.engine.world_kernel
         world_id = self.engine.world_id
         assert world is not None and world_id is not None
-        self._validate_observation_reference(observation)
+        action = self._validate_observation_reference(observation)
+        segments = action.get("segment_state", {}).get("segments", [])
+        segment = next(
+            (
+                item
+                for item in segments
+                if isinstance(item, dict) and item.get("segment_id") == observation.segment_id
+            ),
+            {},
+        )
+        # A process may die after claiming the whole delivery but before the
+        # claim projection reaches the individual segment.  The delivery is
+        # correctly ``unknown`` while its sole segment remains ``planned``.
+        # A forensic receipt can settle that single exact segment, but must
+        # use the action-level primitive to preserve its original state.
+        unresolved_segments = [
+            item
+            for item in segments
+            if isinstance(item, dict)
+            and item.get("status") in {"planned", "sending", "unknown"}
+        ]
+        reconcile_unclaimed_unknown_action = (
+            action.get("status") == "unknown"
+            and segment.get("status") == "planned"
+            and len(unresolved_segments) == 1
+        )
 
         if observation.status == "delivered":
             if not (observation.external_receipt or "").strip():
                 raise ValueError("delivered observation requires an external_receipt")
-            world.settle_outgoing_segment(
-                observation.delivery_id,
-                observation.segment_id,
-                delivered=True,
-                external_receipt=observation.external_receipt,
-                expected_revision=world.revision(world_id),
+            reconciliation_evidence = (
+                dict(observation.reconciliation_evidence)
+                if observation.reconciliation_evidence
+                else None
             )
+            if reconcile_unclaimed_unknown_action:
+                world.settle_outgoing_action(
+                    observation.delivery_id,
+                    delivered=True,
+                    external_receipt=observation.external_receipt,
+                    expected_revision=self._expected_revision(observation),
+                    reconciliation_evidence=reconciliation_evidence,
+                )
+            else:
+                world.settle_outgoing_segment(
+                    observation.delivery_id,
+                    observation.segment_id,
+                    delivered=True,
+                    external_receipt=observation.external_receipt,
+                    expected_revision=self._expected_revision(observation),
+                    reconciliation_evidence=reconciliation_evidence,
+                    cancel_remaining=observation.cancel_remaining,
+                )
             action = self._action(observation.action_id)
             segments = action.get("segment_state", {}).get("segments", [])
             if (
@@ -653,18 +715,37 @@ class CompanionTurn:
             else:
                 terminal = None
         elif observation.status == "failed":
-            world.settle_outgoing_segment(
-                observation.delivery_id,
-                observation.segment_id,
-                delivered=False,
-                reason=observation.reason or "transport_failed",
-                expected_revision=world.revision(world_id),
+            reconciliation_evidence = (
+                dict(observation.reconciliation_evidence)
+                if observation.reconciliation_evidence
+                else None
             )
-            world.settle_outgoing_action(
-                observation.delivery_id,
-                delivered=False,
-                reason=observation.reason or "transport_failed",
-            )
+            if reconcile_unclaimed_unknown_action:
+                world.settle_outgoing_action(
+                    observation.delivery_id,
+                    delivered=False,
+                    reason=observation.reason or "transport_failed",
+                    external_receipt=observation.external_receipt,
+                    expected_revision=self._expected_revision(observation),
+                    reconciliation_evidence=reconciliation_evidence,
+                )
+            else:
+                world.settle_outgoing_segment(
+                    observation.delivery_id,
+                    observation.segment_id,
+                    delivered=False,
+                    reason=observation.reason or "transport_failed",
+                    expected_revision=self._expected_revision(observation),
+                    external_receipt=observation.external_receipt,
+                    reconciliation_evidence=reconciliation_evidence,
+                )
+                world.settle_outgoing_action(
+                    observation.delivery_id,
+                    delivered=False,
+                    reason=observation.reason or "transport_failed",
+                    external_receipt=observation.external_receipt,
+                    reconciliation_evidence=reconciliation_evidence,
+                )
             terminal = "failed"
         elif observation.status == "unknown":
             self._mark_unknown_observation(observation)
@@ -1232,6 +1313,67 @@ class CompanionTurn:
         world_id = self.engine.world_id
         if observation.world_id is not None and observation.world_id != world_id:
             raise WorldError("external observation belongs to a different World")
+
+    def _validate_reconciliation_observation(
+        self, observation: ExternalObservation
+    ) -> None:
+        evidence = observation.reconciliation_evidence
+        is_operator_reconciliation = (
+            observation.settlement_origin == "operator_reconciliation"
+        )
+        if not is_operator_reconciliation:
+            if evidence or observation.cancel_remaining:
+                raise WorldError(
+                    "only operator reconciliation may attach evidence or cancel remaining beats"
+                )
+            return
+        if observation.status not in {"delivered", "failed"}:
+            raise WorldError("operator reconciliation requires a terminal platform receipt")
+        if not evidence:
+            raise WorldError("operator reconciliation requires auditable evidence")
+        required_evidence = ("reference", "reviewer_id", "review_note")
+        if any(not str(evidence.get(key) or "").strip() for key in required_evidence):
+            raise WorldError("operator reconciliation evidence is incomplete")
+        if observation.cancel_remaining and not str(
+            evidence.get("cancel_remaining_reason") or ""
+        ).strip():
+            raise WorldError("cancelling remaining beats requires an audited reason")
+        action = self._validate_observation_reference(observation)
+        if action.get("status") != "unknown":
+            raise WorldError("operator reconciliation may only settle an unknown Action")
+        segments = action.get("segment_state", {}).get("segments", [])
+        segment = next(
+            (
+                item
+                for item in segments
+                if isinstance(item, dict) and item.get("segment_id") == observation.segment_id
+            ),
+            None,
+        )
+        if not isinstance(segment, dict):
+            raise WorldError("operator reconciliation segment is missing")
+        if segment.get("status") == "unknown":
+            return
+        unresolved = [
+            item
+            for item in segments
+            if isinstance(item, dict)
+            and item.get("status") in {"planned", "sending", "unknown"}
+        ]
+        if not (segment.get("status") == "planned" and len(unresolved) == 1):
+            raise WorldError(
+                "operator reconciliation requires an unknown segment or one unclaimed unknown Action"
+            )
+
+    def _expected_revision(self, observation: ExternalObservation) -> int:
+        world = self.engine.world_kernel
+        world_id = self.engine.world_id
+        assert world is not None and world_id is not None
+        return (
+            observation.expected_revision
+            if observation.expected_revision is not None
+            else world.revision(world_id)
+        )
 
     def _action(self, action_id: str) -> dict[str, object]:
         world = self.engine.world_kernel

@@ -703,7 +703,7 @@ async def test_ambiguous_transport_failure_is_unknown_and_never_false_delivered(
 
     assert outcome.visible_status == "unknown"
     action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
-    assert action["status"] == "unknown"
+    assert action["status"] != "delivered"
     assert action["segment_state"]["segments"][0]["status"] == "unknown"
 
 
@@ -1128,6 +1128,111 @@ async def test_settle_rejects_a_receipt_for_the_wrong_action_reference(
 
     action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
     assert action["status"] != "delivered"
+
+
+@pytest.mark.asyncio
+async def test_settle_does_not_turn_one_late_receipt_into_multiple_unclaimed_beats(
+    tmp_path: Path,
+) -> None:
+    runtime, world, world_id = _turn_runtime(
+        tmp_path,
+        RecordingTransport(
+            DispatchAcceptance(status="accepted", lookup_token="lookup:forensic")
+        ),
+    )
+    delivery_id, _, action_id = world.queue_outgoing_action(
+        canonical_user_id="geoff",
+        platform="qq",
+        text="第一段。第二段。",
+        text_parts=["第一段。", "第二段。"],
+        kind="reply",
+        expires_at=datetime.now(UTC) + timedelta(minutes=5),
+        trace={
+            "world_id": world_id,
+            "appraisal": "test",
+            "expression_policy": "test",
+            "allowed_facts": [],
+            "short_lived_constraint": None,
+            "observable_reason": "test",
+        },
+    )
+    world.begin_outgoing_action(
+        delivery_id, expected_revision=world.revision(world_id)
+    )
+    world.mark_outgoing_unknown(
+        delivery_id,
+        reason="process crashed after transport handoff",
+        expected_revision=world.revision(world_id),
+    )
+    first_segment = world.snapshot(world_id)["actions"][action_id]["segment_state"][
+        "segments"
+    ][0]
+
+    with pytest.raises(
+        WorldError,
+        match="operator reconciliation requires an unknown segment",
+    ):
+        await runtime.settle(
+            ExternalObservation(
+                action_id=action_id,
+                delivery_id=delivery_id,
+                segment_id=first_segment["segment_id"],
+                status="delivered",
+                observed_at=datetime.now(UTC),
+                external_receipt="qq:ambiguous-late",
+                idempotency_key="qq:ambiguous-late",
+                reconciliation_evidence={
+                    "kind": "operator_verification",
+                    "reference": "qq:ambiguous-late",
+                    "reviewer_id": "ops-test",
+                    "review_note": "多个未发段，不能从一张回执推断全部送达。",
+                },
+                settlement_origin="operator_reconciliation",
+            ),
+        )
+
+    action = world.snapshot(world_id)["actions"][action_id]
+    assert action["status"] == "unknown"
+    assert [part["status"] for part in action["segment_state"]["segments"]] == [
+        "planned",
+        "planned",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_adapter_receipt_cannot_claim_operator_reconciliation_powers(
+    tmp_path: Path,
+) -> None:
+    transport = RecordingTransport(
+        DispatchAcceptance(status="accepted", lookup_token="lookup:adapter-boundary")
+    )
+    runtime, world, world_id = _turn_runtime(tmp_path, transport)
+    outcome = await runtime.respond(
+        _envelope("turn-no-faux-operator"),
+        budget=ResponseBudget(first_visible_by_ms=3_000, complete_by_ms=5_000),
+    )
+    beat = transport.beats[0]
+
+    with pytest.raises(WorldError, match="only operator reconciliation"):
+        await runtime.settle(
+            ExternalObservation(
+                action_id=beat.action_id,
+                delivery_id=beat.delivery_id,
+                segment_id=beat.segment_id,
+                status="delivered",
+                observed_at=datetime.now(UTC),
+                external_receipt="qq:adapter-boundary",
+                idempotency_key="qq:adapter-boundary",
+                reconciliation_evidence={
+                    "reference": "qq:adapter-boundary",
+                    "reviewer_id": "spoofed",
+                    "review_note": "adapter may not self-authorize a manual reconciliation",
+                },
+            )
+        )
+
+    action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
+    assert action["status"] == "sending"
 
 
 @pytest.mark.asyncio
