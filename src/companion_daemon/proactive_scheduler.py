@@ -44,6 +44,16 @@ DEFERRED_RECOVERY_CONTEXT_HINT = (
 _QQ_RECEIPT_CANDIDATE = QQDelivery.receipt_candidate
 
 
+class _LegacyReceiptUnavailable(RuntimeError):
+    """A legacy outbox cannot truthfully transition to delivered.
+
+    ``CompanionTurn`` owns World-backed recovery.  The pre-World store has no
+    Action/ExternalObservation representation to settle through that seam, so
+    this exception keeps its compatibility recovery path conservative instead
+    of treating a successful coroutine return as delivery proof.
+    """
+
+
 class _QQScheduledTurnTransport:
     """Adapt scheduler-owned QQ sends to the authoritative turn transport."""
 
@@ -60,6 +70,31 @@ class _QQScheduledTurnTransport:
                 reason="qq_scheduler_send_returned_without_durable_receipt",
             )
         return DispatchAcceptance(status="delivered", external_receipt=receipt)
+
+
+async def _dispatch_legacy_parts(
+    delivery: QQDelivery,
+    *,
+    recipient_id: str,
+    parts: list[str],
+) -> None:
+    """Send legacy outbox parts without fabricating their final delivery.
+
+    Legacy deployments cannot use ``CompanionTurn`` because they have no
+    World Action to receive an external observation.  They still share the
+    production receipt boundary: every visible part needs a platform id before
+    the caller may invoke its legacy delivery confirmation.
+    """
+    for index, part in enumerate(parts):
+        if index:
+            # A recovered deferred reply has no live coalescer, but it still
+            # needs the same interruption-sized gaps as normal QQ delivery.
+            await asyncio.sleep(between_part_delay_seconds(part))
+        response = await delivery.send_text(recipient_id, part)
+        if not _QQ_RECEIPT_CANDIDATE(response):
+            raise _LegacyReceiptUnavailable(
+                "legacy QQ send returned without a durable delivery receipt"
+            )
 
 
 async def _dispatch_world_scheduled_text(
@@ -214,15 +249,11 @@ async def recover_overdue_deferred_replies(
             if reply is None:
                 engine.complete_deferred_reply_task(task_id)
                 continue
-            parts = reply.text_parts or [reply.text]
-            for index, part in enumerate(parts):
-                if index:
-                    # A recovered deferred reply has no live coalescer, but it
-                    # still needs the same interruption-sized gaps as normal QQ
-                    # delivery.  Sending it as a burst made restart recovery
-                    # visibly unlike every other path.
-                    await asyncio.sleep(between_part_delay_seconds(part))
-                await delivery.send_text(str(row["platform_user_id"]), part)
+            await _dispatch_legacy_parts(
+                delivery,
+                recipient_id=str(row["platform_user_id"]),
+                parts=reply.text_parts or [reply.text],
+            )
             engine.confirm_reply_delivery(reply)
             engine.complete_deferred_reply_task(task_id)
             recovered += 1
@@ -360,7 +391,11 @@ async def recover_overdue_conversation_pulses(
             delivery_id = engine.queue_afterthought_delivery(
                 str(row["canonical_user_id"]), str(row["platform"]), text
             )
-            await delivery.send_text(str(row["platform_user_id"]), text)
+            await _dispatch_legacy_parts(
+                delivery,
+                recipient_id=str(row["platform_user_id"]),
+                parts=[text],
+            )
             engine.confirm_afterthought_delivery(
                 str(row["canonical_user_id"]),
                 str(row["platform"]),

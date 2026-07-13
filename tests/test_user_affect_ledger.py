@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 import json
 
@@ -10,6 +10,7 @@ from companion_daemon.conversation_cadence import ConversationCadence, FrozenTur
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import IncomingMessage
+from companion_daemon.turn_frame import TurnFrameCompiler
 from companion_daemon.world import WorldKernel
 from companion_daemon.emotion_state import InteractionEvent
 from companion_daemon.interaction_appraiser import (
@@ -278,6 +279,98 @@ async def test_committed_disappointment_is_closed_by_an_explicit_repair_settleme
         engine.world_kernel.rebuild_projection(engine.world_id, "world_current_state").matches_live
         is True
     )
+
+
+@pytest.mark.asyncio
+async def test_logical_weeks_expire_old_user_disappointment_before_an_unrelated_turn(
+    tmp_path: Path,
+) -> None:
+    engine, _ = _engine(tmp_path)
+    await engine.handle_message(
+        IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="我想分享件事", message_id="expiry-share"
+        )
+    )
+    await engine.handle_message(
+        IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="算了，不说了", message_id="expiry-withdraw"
+        )
+    )
+
+    before = engine.world_kernel.snapshot(engine.world_id)
+    expires_at = before["user_affect"]["user:geoff"]["expires_at"]
+    assert expires_at == (
+        datetime.fromisoformat(before["clock"]["logical_at"]) + timedelta(days=7)
+    ).isoformat()
+    engine.world_kernel.advance(
+        engine.world_id,
+        datetime.fromisoformat(before["clock"]["logical_at"]) + timedelta(days=21),
+        expected_revision=engine.world_kernel.revision(engine.world_id),
+    )
+
+    after = engine.world_kernel.snapshot(engine.world_id)
+    assert "user:geoff" not in after["user_affect"]
+    assert any(
+        event.event_type == "UserAffectExpired"
+        and event.payload["source_message_id"] == "expiry-withdraw"
+        for event in engine.world_kernel.events(engine.world_id)
+    )
+    frame = TurnFrameCompiler().compile(
+        world_id=engine.world_id,
+        revision=engine.world_kernel.revision(engine.world_id),
+        state_hash="expiry-state",
+        snapshot=after,
+        user_id="user:geoff",
+        message=IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="我今天换了份工作", message_id="expiry-now"
+        ),
+    )
+    assert not any(item.kind == "repair" for item in TurnFrameCompiler().advisories(frame))
+
+
+@pytest.mark.asyncio
+async def test_fresh_or_reinforced_user_disappointment_still_guides_the_next_turn(
+    tmp_path: Path,
+) -> None:
+    engine, _ = _engine(tmp_path)
+    await engine.handle_message(
+        IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="我想分享件事", message_id="renew-share"
+        )
+    )
+    await engine.handle_message(
+        IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="算了，不说了", message_id="renew-withdraw"
+        )
+    )
+    first = engine.world_kernel.snapshot(engine.world_id)
+    first_expires_at = first["user_affect"]["user:geoff"]["expires_at"]
+    engine.world_kernel.advance(
+        engine.world_id,
+        datetime.fromisoformat(first["clock"]["logical_at"]) + timedelta(days=6),
+        expected_revision=engine.world_kernel.revision(engine.world_id),
+    )
+    await engine.handle_message(
+        IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="我还是有点失望", message_id="renew-low-energy"
+        )
+    )
+
+    renewed = engine.world_kernel.snapshot(engine.world_id)
+    affect = renewed["user_affect"]["user:geoff"]
+    assert affect["source_message_id"] == "renew-low-energy"
+    assert affect["expires_at"] > first_expires_at
+    frame = TurnFrameCompiler().compile(
+        world_id=engine.world_id,
+        revision=engine.world_kernel.revision(engine.world_id),
+        state_hash="renewed-state",
+        snapshot=renewed,
+        user_id="user:geoff",
+        message=IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="继续说", message_id="renew-now"
+        ),
+    )
+    assert any(item.kind == "repair" for item in TurnFrameCompiler().advisories(frame))
 
 
 def test_only_ambiguous_relational_disappointment_requests_deeper_appraisal() -> None:

@@ -7,6 +7,7 @@ from datetime import datetime
 import re
 
 from companion_daemon.models import IncomingMessage
+from companion_daemon.user_affect import active_user_affect_for_turn
 
 
 @dataclass(frozen=True)
@@ -123,8 +124,10 @@ class TurnFrameCompiler:
         scene = self._scene(snapshot)
         relationship = dict(self._mapping(snapshot.get("relationships")).get(user_id, {}))
         affect = dict(self._mapping(snapshot.get("emotion_modulation")))
-        user_affect = dict(
-            self._mapping(self._mapping(snapshot.get("user_affect")).get(user_id))
+        user_affect = active_user_affect_for_turn(
+            self._mapping(self._mapping(snapshot.get("user_affect")).get(user_id)),
+            logical_at=self._logical_at(snapshot),
+            message_text=message.text,
         )
         private_impressions = tuple(
             self._private_impressions(
@@ -332,6 +335,16 @@ class TurnFrameCompiler:
     @staticmethod
     def _mapping(value: object) -> dict[str, object]:
         return dict(value) if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _logical_at(snapshot: dict[str, object]) -> datetime | None:
+        value = TurnFrameCompiler._mapping(snapshot.get("clock")).get("logical_at")
+        if not isinstance(value, str) or not value:
+            return None
+        try:
+            return datetime.fromisoformat(value)
+        except ValueError:
+            return None
 
     def _recent_messages(
         self,

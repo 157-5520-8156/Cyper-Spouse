@@ -193,9 +193,10 @@ async def test_scheduler_recovers_overdue_deferred_reply_once(tmp_path: Path, mo
         def __init__(self, *args, **kwargs) -> None:
             return None
 
-        async def send_text(self, recipient_id: str, text: str) -> None:
+        async def send_text(self, recipient_id: str, text: str) -> dict[str, str]:
             assert recipient_id == "2759284998"
             self.sent.append(text)
+            return {"message_id": f"deferred-{len(self.sent)}"}
 
     monkeypatch.setattr(scheduler_module, "QQDelivery", FakeDelivery)
     monkeypatch.setattr(scheduler_module, "get_settings", lambda: object())
@@ -234,8 +235,9 @@ async def test_recovered_split_reply_keeps_a_turn_taking_gap(tmp_path: Path, mon
         def __init__(self, *args, **kwargs) -> None:
             return None
 
-        async def send_text(self, recipient_id: str, text: str) -> None:
+        async def send_text(self, recipient_id: str, text: str) -> dict[str, str]:
             self.sent.append(text)
+            return {"message_id": f"split-{len(self.sent)}"}
 
     async def split_reply(message: IncomingMessage, **kwargs) -> CompanionReply:
         return CompanionReply(
@@ -262,6 +264,57 @@ async def test_recovered_split_reply_keeps_a_turn_taking_gap(tmp_path: Path, mon
     assert recovered == 1
     assert FakeDelivery.sent == ["第一句。", "第二句。"]
     assert pauses and pauses[0] >= 1.8
+
+
+@pytest.mark.asyncio
+async def test_legacy_deferred_recovery_does_not_confirm_without_platform_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The compatibility path must not turn a send return into delivery proof."""
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.map_account("qq", "2759284998", "geoff")
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。")
+    now = datetime(2026, 7, 10, 2, 10, tzinfo=UTC)
+    task_id = store.create_social_task(
+        "geoff",
+        kind="reply_later",
+        platform="qq",
+        platform_user_id="2759284998",
+        payload=IncomingMessage(platform="qq", platform_user_id="2759284998", text="还在吗").model_dump(mode="json"),
+        reason="unread_during_study",
+        due_at=now - timedelta(minutes=3),
+        expires_at=now + timedelta(hours=1),
+    )
+
+    class FakeDelivery:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def send_text(self, recipient_id: str, text: str) -> dict[str, str]:
+            assert recipient_id == "2759284998"
+            return {}
+
+    confirmed = False
+
+    def should_not_confirm(reply: CompanionReply) -> None:
+        nonlocal confirmed
+        confirmed = True
+
+    monkeypatch.setattr(engine, "confirm_reply_delivery", should_not_confirm)
+    monkeypatch.setattr(scheduler_module, "QQDelivery", FakeDelivery)
+    monkeypatch.setattr(scheduler_module, "get_settings", lambda: object())
+
+    recovered = await scheduler_module.recover_overdue_deferred_replies(
+        engine, send=True, sandbox=False, now=now
+    )
+
+    assert recovered == 0
+    assert confirmed is False
+    assert store.social_task_is_active(task_id) is False
+    with store.connect() as conn:
+        status = conn.execute("select status from outbox_messages").fetchone()["status"]
+    assert status == "failed"
 
 
 @pytest.mark.asyncio
@@ -320,9 +373,10 @@ async def test_scheduler_recovers_persisted_conversation_pulse_and_keeps_next_st
         def __init__(self, *args, **kwargs) -> None:
             return None
 
-        async def send_text(self, recipient_id: str, text: str) -> None:
+        async def send_text(self, recipient_id: str, text: str) -> dict[str, str]:
             assert recipient_id == "2759284998"
             self.sent.append(text)
+            return {"message_id": "pulse-1"}
 
     monkeypatch.setattr(engine, "generate_afterthought", generated)
     monkeypatch.setattr(scheduler_module, "QQDelivery", FakeDelivery)
@@ -337,3 +391,56 @@ async def test_scheduler_recovers_persisted_conversation_pulse_and_keeps_next_st
     assert store.social_task_is_active(task_id) is False
     pending = [task for task in store.recent_social_tasks("geoff") if task["kind"] == "conversation_pulse"]
     assert any(task["status"] == "pending" for task in pending)
+
+
+@pytest.mark.asyncio
+async def test_legacy_pulse_recovery_does_not_confirm_without_platform_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    store.map_account("qq", "2759284998", "geoff")
+    engine = CompanionEngine(store, FakeCompanionModel(), "你是知栀。")
+    now = datetime.now(UTC)
+    task_id = store.create_social_task(
+        "geoff",
+        kind="conversation_pulse",
+        platform="qq",
+        platform_user_id="2759284998",
+        payload={"reply_sent_at": (now - timedelta(minutes=5)).isoformat(), "mode": "quick_continue"},
+        reason="测试持久余韵",
+        due_at=now - timedelta(minutes=3),
+        expires_at=now + timedelta(hours=1),
+    )
+
+    async def generated(*args, **kwargs) -> str:
+        return "刚刚又想到一点。"
+
+    class FakeDelivery:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def send_text(self, recipient_id: str, text: str) -> dict[str, str]:
+            return {}
+
+    confirmed = False
+
+    def should_not_confirm(*args, **kwargs) -> None:
+        nonlocal confirmed
+        confirmed = True
+
+    monkeypatch.setattr(engine, "generate_afterthought", generated)
+    monkeypatch.setattr(engine, "confirm_afterthought_delivery", should_not_confirm)
+    monkeypatch.setattr(scheduler_module, "QQDelivery", FakeDelivery)
+    monkeypatch.setattr(scheduler_module, "get_settings", lambda: object())
+
+    recovered = await scheduler_module.recover_overdue_conversation_pulses(
+        engine, send=True, sandbox=False, now=now
+    )
+
+    assert recovered == 0
+    assert confirmed is False
+    assert store.social_task_is_active(task_id) is False
+    with store.connect() as conn:
+        status = conn.execute("select status from outbox_messages").fetchone()["status"]
+    assert status == "failed"

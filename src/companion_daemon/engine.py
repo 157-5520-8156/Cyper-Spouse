@@ -132,6 +132,7 @@ from companion_daemon.social_followups import (
 from companion_daemon.stickers import StickerCatalog
 from companion_daemon.tone_inertia import build_tone_inertia, classify_outgoing_tone
 from companion_daemon.turn_frame import TurnFrameCompiler
+from companion_daemon.user_affect import active_user_affect_for_turn
 from companion_daemon.time import utc_now
 from companion_daemon.tool_requests import detect_tool_request, tool_prompt_line
 from companion_daemon.unanswered_question import (
@@ -1903,17 +1904,20 @@ class CompanionEngine:
             user_id,
         )
         user_affect_projection = stage_snapshot.get("user_affect", {})
-        active_user_affect = (
+        stored_user_affect = (
             user_affect_projection.get(user_id, {})
             if isinstance(user_affect_projection, dict)
             else {}
         )
+        active_user_affect = active_user_affect_for_turn(
+            stored_user_affect if isinstance(stored_user_affect, dict) else {},
+            logical_at=self._world_logical_now(),
+            message_text=message.text,
+        )
         user_affect = appraise_user_affect(
             message.text,
             history,
-            active_affect=(
-                active_user_affect if isinstance(active_user_affect, dict) else {}
-            ),
+            active_affect=active_user_affect,
         )
         if user_affect is not None:
             event = user_affect_interaction_event(user_affect)
