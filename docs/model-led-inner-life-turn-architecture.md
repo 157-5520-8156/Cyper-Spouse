@@ -647,7 +647,7 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
 
 | 阶段 | 已验证 | 仍需完成/证明 |
 | --- | --- | --- |
-| Phase 0 | 已有 bare/full 基线工具；一次真实模型样本的 hot full P50 约 2.5s、P95 约 3.6s；QQ 基线从首条进入合并队列计时，并按 cold/warm/hot 分组 | 真实模型每变体至少 20 个 hot 样本、带真实 QQ 网络的端到端样本、人工盲评 |
+| Phase 0 | 已有 bare/full 基线工具；一次真实模型样本的 hot full P50 约 2.5s、P95 约 3.6s；QQ 基线从首条进入合并队列计时，并按 cold/warm/hot 分组。设置 `QQ_TURN_OBSERVATION_PATH` 后，official QQ/NapCat 会追加私有 JSONL 回合证据（时间、cadence、Action/segment、回执状态与可用 recovery 结果），不写消息、用户标识、回执原文或凭据 | 真实模型每变体至少 20 个 hot 样本、带真实 QQ 网络的端到端样本、人工盲评 |
 | Phase 1 | QQ/NapCat 文本、simulator 与 HTTP Capture transport 都经过 `CompanionTurn.respond`；平台、tool、media 与 timeout 可经 `settle` 幂等结算；后台媒体、以及 World-mode 的重启后定时补发也通过同一 Turn seam | 非 World 的遗留兼容路径仍需逐步淘汰或改为同一 seam |
 | Phase 2–5 | 有界 TurnFrame、Advisory、单一 hard guard、PrivateImpression/Commitment 与 Expression Beat 已在主路径使用 | 长对话校准与各字段的体验效度尚未由外部用户数据证明 |
 | Phase 6 | 多段文本 receipt、用户插话取消、QQ 图片/贴纸/反应、NapCat 图片、后台图片、正常及重启后的 afterthought 的真实回执语义已覆盖；无 durable receipt 记为 `unknown`，NapCat 的成功/明确失败/无回执/异常矩阵已回归 | 仍需真实 NapCat/QQ 网络回执样本，并逐步淘汰非 World 遗留兼容路径 |
@@ -659,6 +659,9 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
 
 - 固定普通聊天、关系修复、口是心非、多段 Action、NPC/世界事实五组回放；
 - 同时记录 bare baseline 与当前 full path 的自然度、首段延迟、模型调用数和错误；
+- 真实 QQ/NapCat 运行可设置 `QQ_TURN_OBSERVATION_PATH=data/private/qq-turns.jsonl`；该
+  文件会以 `0600` 权限追加仅含运行事实的 JSONL，供离线按 cadence 汇总。它不是聊天日志，
+  不得用来重建用户文本、用户账号、附件、平台回执值或密钥；
 - 任何迁移阶段都不能只看测试通过而忽略 baseline 变差。
 
 ### Phase 1：抽出 `CompanionTurn` Seam

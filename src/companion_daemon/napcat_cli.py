@@ -28,6 +28,7 @@ from companion_daemon.onebot_adapter import (
 from companion_daemon.companion_turn import DispatchAcceptance
 from companion_daemon.qq_websocket import QQMessageCoalescer
 from companion_daemon.qq_delivery import QQDelivery
+from companion_daemon.qq_runtime_observations import QQTurnObservationJSONLExporter
 from companion_daemon.process_lock import AlreadyRunningError
 from companion_daemon.qq_outbound_owner import (
     QQOutboundOwnerLease,
@@ -174,6 +175,12 @@ def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> Fast
         on_reaction=send_reaction,
         human_timing=True,
         enable_reply_decision=settings.enable_reply_decision,
+        on_turn_observation=(
+            QQTurnObservationJSONLExporter(settings.qq_turn_observation_path)
+            if settings.qq_turn_observation_path is not None
+            else None
+        ),
+        runtime_adapter=adapter,
     )
 
     seen_ids: set[str] = set()

@@ -99,6 +99,9 @@ class Settings(BaseSettings):
     qq_bot_secret: str | None = Field(default=None, alias="QQ_BOT_SECRET")
     qq_verify_signatures: bool = Field(default=True, alias="QQ_VERIFY_SIGNATURES")
     qq_message_batch_seconds: float = Field(default=2.5, alias="QQ_MESSAGE_BATCH_SECONDS")
+    qq_turn_observation_path: Path | None = Field(
+        default=None, alias="QQ_TURN_OBSERVATION_PATH"
+    )
     delivery_reconciliation_token: str | None = Field(
         default=None, alias="DELIVERY_RECONCILIATION_TOKEN"
     )

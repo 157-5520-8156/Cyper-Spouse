@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 
 import httpx
@@ -197,9 +198,11 @@ async def test_napcat_http_event_reaches_companion_turn_and_settles_receipt(
             return {"data": {"message_id": "onebot-r1"}}
 
     target = Target()
+    observation_path = tmp_path / "evidence" / "napcat-turns.jsonl"
     settings = Settings(
         QQ_ADAPTER="napcat",
         QQ_MESSAGE_BATCH_SECONDS="0",
+        QQ_TURN_OBSERVATION_PATH=str(observation_path),
         NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001",
         NAPCAT_ACCEPT_UNAUTHENTICATED_LOCAL_EVENTS="true",
     )
@@ -224,10 +227,18 @@ async def test_napcat_http_event_reaches_companion_turn_and_settles_receipt(
     # The coalescer deliberately owns a task so the HTTP webhook can return
     # promptly.  Yield until its zero-delay merge and CompanionTurn complete.
     for _ in range(20):
-        if target.messages:
+        if target.messages and observation_path.exists():
             break
         await asyncio.sleep(0.01)
     assert target.messages
+    observations = [json.loads(line) for line in observation_path.read_text().splitlines()]
+    assert len(observations) == 1
+    assert observations[0]["adapter"] == "napcat"
+    assert observations[0]["durable_receipt_status"] == "delivered"
+    assert observations[0]["action_ids"]
+    assert observations[0]["segment_ids"]
+    assert "10001" not in observation_path.read_text()
+    assert "今天有点累" not in observation_path.read_text()
     snapshot = world.snapshot(world_id)
     actions = [
         action for action in snapshot["actions"].values()

@@ -2,7 +2,7 @@ import argparse
 import asyncio
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from datetime import datetime
 import logging
 from pathlib import Path
@@ -34,6 +34,7 @@ from companion_daemon.multimodal import attachment_kind
 from companion_daemon.process_lock import AlreadyRunningError
 from companion_daemon.qq_client import QQOfficialClient
 from companion_daemon.qq_delivery import QQDelivery
+from companion_daemon.qq_runtime_observations import QQTurnObservationJSONLExporter
 from companion_daemon.qq_outbound_owner import (
     QQOutboundOwnerLease,
     qq_outbound_owner_lock_path,
@@ -79,24 +80,41 @@ class QQTurnTransport(TurnTransport):
         *,
         on_dispatch_started: Callable[[], None] | None = None,
         on_visible_delivery: Callable[[], None] | None = None,
+        on_dispatch_result: Callable[[TurnBeat, DispatchAcceptance], None] | None = None,
     ) -> None:
         self.reply_target = reply_target
         self.on_dispatch_started = on_dispatch_started
         self.on_visible_delivery = on_visible_delivery
+        self.on_dispatch_result = on_dispatch_result
 
     async def dispatch(self, beat: TurnBeat) -> DispatchAcceptance:
         if self.on_dispatch_started:
             self.on_dispatch_started()
-        response = await self.reply_target.reply(content=beat.text, msg_seq=_reply_msg_seq())
-        receipt = QQDelivery.receipt_candidate(response)
-        if not receipt:
-            return DispatchAcceptance(
-                status="unknown",
-                reason="qq_reply_returned_without_durable_receipt",
+        try:
+            response = await self.reply_target.reply(content=beat.text, msg_seq=_reply_msg_seq())
+            receipt = QQDelivery.receipt_candidate(response)
+            acceptance = (
+                DispatchAcceptance(status="delivered", external_receipt=receipt)
+                if receipt
+                else DispatchAcceptance(
+                    status="unknown",
+                    reason="qq_reply_returned_without_durable_receipt",
+                )
             )
+        except Exception as exc:
+            acceptance = DispatchAcceptance(
+                status="unknown", reason=f"qq_reply_exception:{type(exc).__name__}"
+            )
+            if self.on_dispatch_result:
+                self.on_dispatch_result(beat, acceptance)
+            raise
+        if self.on_dispatch_result:
+            self.on_dispatch_result(beat, acceptance)
+        if acceptance.status != "delivered":
+            return acceptance
         if self.on_visible_delivery:
             self.on_visible_delivery()
-        return DispatchAcceptance(status="delivered", external_receipt=receipt)
+        return acceptance
 
 
 class QQTurnPresenter(TurnPresenter):
@@ -408,6 +426,53 @@ class TurnRuntimeObservation:
     input_count: int = 0
     coalescing_wait_seconds: float | None = None
     first_visible_elapsed_seconds: float | None = None
+    # Wall-clock time is only for joining a private runtime report with an
+    # operator-observed adapter incident.  Monotonic elapsed values remain the
+    # latency authority.
+    observed_at: datetime = field(default_factory=utc_now)
+    adapter: str = "qq"
+    # These identifiers are World/Action provenance, not platform receipts.
+    # The JSONL exporter deliberately excludes conversation keys, user ids,
+    # message text, attachment refs, receipt values and failure details.
+    action_ids: tuple[str, ...] = ()
+    segment_ids: tuple[str, ...] = ()
+    durable_receipt_status: str = "not_attempted"
+    recovery_result: str | None = None
+
+
+@dataclass
+class _TurnDispatchTrace:
+    """Receipt facts captured at the transport boundary for one live turn."""
+
+    action_ids: list[str] = field(default_factory=list)
+    segment_ids: list[str] = field(default_factory=list)
+    acceptance_statuses: list[str] = field(default_factory=list)
+    recovery_result: str | None = None
+
+    def observe_dispatch(self, beat: TurnBeat, acceptance: DispatchAcceptance) -> None:
+        if beat.action_id not in self.action_ids:
+            self.action_ids.append(beat.action_id)
+        if beat.segment_id not in self.segment_ids:
+            self.segment_ids.append(beat.segment_id)
+        self.acceptance_statuses.append(acceptance.status)
+
+    def observe_outcome(self, outcome: object) -> None:
+        action_ids = getattr(outcome, "action_ids", ())
+        for action_id in action_ids:
+            if action_id not in self.action_ids:
+                self.action_ids.append(str(action_id))
+
+    @property
+    def durable_receipt_status(self) -> str:
+        if not self.acceptance_statuses:
+            return "not_attempted"
+        if any(status == "unknown" for status in self.acceptance_statuses):
+            return "unknown"
+        if any(status == "failed" for status in self.acceptance_statuses):
+            return "failed"
+        if all(status == "delivered" for status in self.acceptance_statuses):
+            return "delivered"
+        return "accepted"
 
 
 class QQMessageCoalescer:
@@ -430,6 +495,7 @@ class QQMessageCoalescer:
         on_turn_observation: Callable[[TurnRuntimeObservation], None] | None = None,
         monotonic: Callable[[], float] = time.monotonic,
         response_timeout_seconds: float | None = None,
+        runtime_adapter: str = "qq",
     ):
         self.engine = engine
         self.delay_seconds = delay_seconds
@@ -445,6 +511,7 @@ class QQMessageCoalescer:
         self.on_turn_observation = on_turn_observation
         self.monotonic = monotonic
         self.response_timeout_seconds = response_timeout_seconds
+        self.runtime_adapter = runtime_adapter
         self._pending: dict[str, list[QueuedQQMessage]] = defaultdict(list)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._deferred: dict[str, DeferredReply] = {}
@@ -454,6 +521,7 @@ class QQMessageCoalescer:
         self._active_turns: dict[str, CompanionTurn] = {}
         self._frozen_turn_contexts: dict[str, object] = {}
         self._turn_cadences: dict[str, str] = {}
+        self._turn_dispatch_traces: dict[str, _TurnDispatchTrace] = {}
         set_media_delivery_handler = getattr(self.engine, "set_media_delivery_handler", None)
         if callable(set_media_delivery_handler):
             set_media_delivery_handler(self._deliver_background_media)
@@ -1045,9 +1113,21 @@ class QQMessageCoalescer:
             if task is asyncio.current_task():
                 self._frozen_turn_contexts.pop(key, None)
                 self._turn_cadences.pop(key, None)
+                self._turn_dispatch_traces.pop(key, None)
                 self._tasks.pop(key, None)
 
     def _observe_turn(self, observation: TurnRuntimeObservation) -> None:
+        trace = self._turn_dispatch_traces.get(observation.key)
+        if trace is not None:
+            observation = replace(
+                observation,
+                action_ids=tuple(trace.action_ids),
+                segment_ids=tuple(trace.segment_ids),
+                durable_receipt_status=trace.durable_receipt_status,
+                recovery_result=trace.recovery_result,
+            )
+        if observation.adapter == "qq" and self.runtime_adapter != "qq":
+            observation = replace(observation, adapter=self.runtime_adapter)
         logger.info(
             "QQ turn outcome=%s key=%s cadence=%s inputs=%s coalesce_seconds=%s "
             "first_visible_seconds=%s elapsed_seconds=%.3f failure_type=%s",
@@ -1184,12 +1264,14 @@ class QQMessageCoalescer:
         )
         active_send = ActiveSend(incoming=merged, reply_target=reply_target)
         self._active_sends[key] = active_send
+        trace = self._turn_dispatch_traces.setdefault(key, _TurnDispatchTrace())
         runtime = CompanionTurn(
             self.engine,
             QQTurnTransport(
                 reply_target,
                 on_dispatch_started=lambda: setattr(active_send, "text_dispatch_started", True),
                 on_visible_delivery=on_first_visible,
+                on_dispatch_result=trace.observe_dispatch,
             ),
             sleep=self.sleep,
             presenter=presenter,
@@ -1218,6 +1300,7 @@ class QQMessageCoalescer:
         except Exception:
             terminal()
             raise
+        trace.observe_outcome(outcome)
         if outcome.visible_status in {"failed", "unknown"}:
             terminal()
             return False
@@ -1776,6 +1859,12 @@ class CompanionQQClient(botpy.Client):
             on_reaction=self._reject_unsupported_reply_reaction,
             human_timing=True,
             enable_reply_decision=settings.enable_reply_decision,
+            on_turn_observation=(
+                QQTurnObservationJSONLExporter(settings.qq_turn_observation_path)
+                if settings.qq_turn_observation_path is not None
+                else None
+            ),
+            runtime_adapter="official",
         )
         self._seen_message_ids: set[str] = set()
         self._recent_text_keys: dict[str, float] = {}
