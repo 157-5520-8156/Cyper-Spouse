@@ -189,6 +189,68 @@ def test_private_inner_life_expires_from_logical_clock_without_action_side_effec
     )
 
 
+@pytest.mark.asyncio
+async def test_rebuilt_world_reinjects_a_related_private_impression_into_next_reply(
+    tmp_path: Path,
+) -> None:
+    class RecordingModel:
+        def __init__(self) -> None:
+            self.calls: list[list[dict[str, str]]] = []
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls.append(messages)
+            return json.dumps(
+                {
+                    "reply_text": "好，你先忙。",
+                    "mentioned_event_ids": [],
+                    "proposed_action_ids": [],
+                    "claims": [],
+                },
+                ensure_ascii=False,
+            )
+
+    kernel, world_id = _started_kernel(tmp_path)
+    committed = kernel.commit_private_impression(
+        world_id,
+        impression_id="impression:busy",
+        user_id="user:geoff",
+        kind="possible_disappointment",
+        summary="我感觉他刚才可能没有被接住。",
+        confidence=0.78,
+        source_event_ids=("message:m:disappointed",),
+        expires_at=NOW + timedelta(days=7),
+        expected_revision=kernel.revision(world_id),
+    )
+
+    # Simulate process reconstruction from the authoritative event stream;
+    # no in-memory inner state is carried over to the new engine.
+    rebuilt = WorldKernel(kernel.store)
+    assert rebuilt.rebuild_projection(world_id, "world_current_state").matches_live is True
+    model = RecordingModel()
+    engine = CompanionEngine(
+        kernel.store,
+        model,
+        "你是沈知栀。",
+        world_kernel=rebuilt,
+        world_id=world_id,
+    )
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="m:related-after-restart",
+            text="那我还是先忙着。",
+        )
+    )
+
+    assert reply is not None
+    prompt = "\n".join(item["content"] for item in model.calls[-1])
+    assert "impression:busy" in prompt
+    assert "我感觉他刚才可能没有被接住。" in prompt
+    assert committed.revision < rebuilt.revision(world_id)
+
+
 def _threaded_commitment_trace(world_id: str, *, thread_id: str, commitment_id: str) -> dict[str, object]:
     return {
         "world_id": world_id,
