@@ -19,6 +19,7 @@ class EmotionProgramInput:
     controllability: int
     norm_compatibility: int
     power_delta: int
+    responsibility: int = 100
     self_evaluation: str = "specific_action"
     social_exposure: int = 0
     relationship_value: int = 0
@@ -31,7 +32,7 @@ class EmotionProgramInput:
 
     def __post_init__(self) -> None:
         for name in (
-            "certainty", "controllability", "social_exposure", "relationship_value",
+            "certainty", "controllability", "responsibility", "social_exposure", "relationship_value",
             "comparison_salience", "expression_safety", "attention_capture",
         ):
             value = getattr(self, name)
@@ -57,7 +58,7 @@ class EmotionProgramResult:
     processes: tuple[str, ...]
     process_effects: Mapping[str, float]
     invented_stimulus: bool = False
-    program_version: str = "emotion-programs-v1"
+    program_version: str = "emotion-programs-v2"
 
 
 def evaluate_emotion_program(input: EmotionProgramInput) -> EmotionProgramResult:
@@ -69,12 +70,16 @@ def evaluate_emotion_program(input: EmotionProgramInput) -> EmotionProgramResult
     components: dict[str, int] = {}
 
     if input.agency == "companion" and input.self_evaluation == "global_negative":
-        components["shame"] = _bounded(
-            (loss + norm_breach + input.social_exposure + max(0, -input.power_delta)) / 4
-        )
+        shame_base = (
+            loss + norm_breach + input.social_exposure + max(0, -input.power_delta)
+        ) / 4
+        components["shame"] = _responsibility_weighted(shame_base, input.responsibility)
     elif input.agency == "companion" and norm_breach > 0:
-        components["guilt"] = _bounded(
-            (loss + norm_breach + input.certainty + input.controllability) / 4
+        guilt_base = (
+            loss + norm_breach + input.certainty + input.controllability
+        ) / 4
+        components["guilt"] = _responsibility_weighted(
+            guilt_base, input.responsibility
         )
 
     has_sourced_relationship_threat = (
@@ -141,3 +146,13 @@ def evaluate_emotion_program(input: EmotionProgramInput) -> EmotionProgramResult
 
 def _bounded(value: float) -> int:
     return max(1, min(100, round(value)))
+
+
+def _responsibility_weighted(value: float, responsibility: int) -> int:
+    """Keep self-directed emotion proportional to attributable agency.
+
+    A small residual is intentional: self-evaluation can remain uncomfortable
+    even when responsibility is disputed, but cannot project at the same
+    intensity as a fully owned action.
+    """
+    return _bounded(value * (0.2 + 0.8 * responsibility / 100))

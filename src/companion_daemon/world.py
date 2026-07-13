@@ -941,6 +941,8 @@ class WorldKernel:
                 delivered=False,
                 reason=reason or "segment delivery failed",
                 external_receipt=external_receipt,
+                expected_revision=expected_revision,
+                reconciliation_evidence=reconciliation_evidence,
             )
         with self.store.connect() as conn:
             row = conn.execute(
@@ -1061,6 +1063,11 @@ class WorldKernel:
                                 "status": "delivered",
                                 "external_receipt": external_receipt,
                                 "segmented": True,
+                                **(
+                                    {"reconciliation_evidence": reconciliation_evidence}
+                                    if reconciliation_evidence
+                                    else {}
+                                ),
                             },
                         },
                     )
@@ -5721,6 +5728,12 @@ class WorldKernel:
             certainty = int(interaction.get("certainty", 100))
             goal_congruence = int(interaction.get("goal_congruence", 0))
             controllability = int(interaction.get("controllability", 50))
+            responsibility = int(
+                interaction.get(
+                    "responsibility",
+                    100 if str(interaction.get("agency") or "unknown") == "companion" else 0,
+                )
+            )
             norm_compatibility = int(interaction.get("norm_compatibility", 0))
             power_delta = int(interaction.get("power_delta", 0))
             agency = str(interaction.get("agency") or "unknown")
@@ -5821,6 +5834,7 @@ class WorldKernel:
                 not 0 <= certainty <= 100
                 or not -100 <= goal_congruence <= 100
                 or not 0 <= controllability <= 100
+                or not 0 <= responsibility <= 100
                 or not -100 <= norm_compatibility <= 100
                 or not -100 <= power_delta <= 100
                 or not 0 <= social_exposure <= 100
@@ -5866,6 +5880,7 @@ class WorldKernel:
                         "certainty": certainty,
                         "goal_congruence": goal_congruence,
                         "controllability": controllability,
+                        "responsibility": responsibility,
                         "norm_compatibility": norm_compatibility,
                         "power_delta": power_delta,
                         "confidence": confidence,
@@ -6173,6 +6188,7 @@ class WorldKernel:
                     "certainty": certainty,
                     "goal_congruence": goal_congruence,
                     "controllability": controllability,
+                    "responsibility": responsibility,
                     "norm_compatibility": norm_compatibility,
                     "power_delta": power_delta,
                     "confidence": confidence,

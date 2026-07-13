@@ -723,6 +723,7 @@ def _new_episode(
             controllability=int(dimensions.get("controllability", 50)),
             norm_compatibility=int(dimensions.get("norm_compatibility", 0)),
             power_delta=int(dimensions.get("power_delta", 0)),
+            responsibility=_responsibility(dimensions),
             self_evaluation=str(dimensions.get("self_evaluation") or "specific_action"),
             social_exposure=int(dimensions.get("social_exposure", 0)),
             relationship_value=int(dimensions.get("relationship_value", 0)),
@@ -734,15 +735,26 @@ def _new_episode(
             attention_capture=int(dimensions.get("attention_capture", 0)),
         )
     )
-    for key in ("shame", "guilt", "jealousy"):
-        amount = int(program.components.get(key, 0))
-        if amount:
-            affect_vector[key] = max(affect_vector.get(key, 0), amount)
+    program_component_deltas: dict[str, int] = {}
+    for key, raw_amount in program.components.items():
+        if key not in AFFECT_KEYS:
+            continue
+        amount = int(raw_amount)
+        if amount <= 0:
+            continue
+        previous = int(affect_vector.get(key, 0))
+        # The event taxonomy supplies a stable floor, while its committed
+        # appraisal can raise the component that is actually being felt.  This
+        # keeps one episode bounded and makes its stored projection replayable.
+        projected = max(previous, amount)
+        if projected != previous:
+            affect_vector[key] = projected
+            program_component_deltas[key] = projected - previous
     positive = sum(max(0, effect.get(key, 0)) for key in ("warmth", "joy"))
     negative = sum(
-        max(0, effect.get(key, 0))
+        max(0, affect_vector.get(key, 0))
         for key in ("hurt", "anger", "sadness", "loneliness", "anxiety", "resentment")
-    ) + sum(int(program.components.get(key, 0)) for key in ("shame", "guilt", "jealousy"))
+    ) + sum(max(0, affect_vector.get(key, 0)) for key in ("shame", "guilt", "jealousy"))
     valence = 1 if positive > negative else -1 if negative > positive else 0
     half_life = int(
         profile["negative_half_life_hours" if valence < 0 else "positive_half_life_hours"]
@@ -794,6 +806,7 @@ def _new_episode(
         "status": "active",
         "certainty": int(dimensions.get("certainty", 100)),
         "controllability": int(dimensions.get("controllability", 50)),
+        "responsibility": _responsibility(dimensions),
         "power_delta": int(dimensions.get("power_delta", 0)),
         "confidence": float(dimensions.get("confidence", 1.0)),
         "profile_version": str(profile["version"]),
@@ -803,9 +816,30 @@ def _new_episode(
             "coping": program.coping,
             "processes": list(program.processes),
             "process_effects": dict(program.process_effects),
+            "component_deltas": program_component_deltas,
+            "appraisal_inputs": {
+                "certainty": int(dimensions.get("certainty", 100)),
+                "controllability": int(dimensions.get("controllability", 50)),
+                "responsibility": _responsibility(dimensions),
+            },
             "version": program.program_version,
         },
     }
+
+
+def _responsibility(dimensions: dict[str, object]) -> int:
+    """Use an explicit appraisal when present; otherwise preserve agency facts."""
+    raw = dimensions.get("responsibility")
+    if isinstance(raw, (int, float)) and not isinstance(raw, bool):
+        return max(0, min(100, int(raw)))
+    return {
+        "companion": 100,
+        "user": 0,
+        "npc": 15,
+        "third_party": 10,
+        "situation": 0,
+        "unknown": 0,
+    }.get(str(dimensions.get("agency") or "unknown"), 0)
 
 
 def _decay_episodes(

@@ -34,6 +34,7 @@ def test_committed_appraisal_dimensions_drive_shame_episode_in_world_projection(
                 "certainty": 90,
                 "goal_congruence": -80,
                 "controllability": 35,
+                "responsibility": 75,
                 "norm_compatibility": -70,
                 "power_delta": -20,
                 "self_evaluation": "global_negative",
@@ -52,6 +53,8 @@ def test_committed_appraisal_dimensions_drive_shame_episode_in_world_projection(
     episode = affect["active_episodes"][-1]
     assert episode["emotion_program"]["primary"] == "shame"
     assert episode["emotion_program"]["coping"] == "conceal_or_withdraw"
+    assert episode["responsibility"] == 75
+    assert episode["emotion_program"]["appraisal_inputs"]["responsibility"] == 75
 
 
 def test_suppression_changes_display_not_felt_intensity_and_rumination_slows_decay() -> None:
@@ -107,3 +110,91 @@ def test_suppression_changes_display_not_felt_intensity_and_rumination_slows_dec
         plain.__dict__, 18 * 3600, "2026-07-13T03:00:00+00:00"
     )
     assert regulated_later.vector["anxiety"] > plain_later.vector["anxiety"]
+
+
+def test_appraisal_dimensions_causally_change_episode_component_deltas() -> None:
+    """The durable episode projection must reflect, not merely name, appraisals."""
+    at = "2026-07-12T09:00:00+00:00"
+    base = initial_affect(at)
+    common = {
+        "agency": "user",
+        "goal_congruence": -80,
+        "norm_compatibility": -50,
+        "power_delta": 0,
+    }
+    low_control = apply_appraisal(
+        base,
+        "goal_strain",
+        at,
+        source_reference="outcome:low-control",
+        target="companion",
+        appraisal_dimensions={**common, "certainty": 45, "controllability": 15},
+    )
+    high_control = apply_appraisal(
+        base,
+        "goal_strain",
+        at,
+        source_reference="outcome:high-control",
+        target="companion",
+        appraisal_dimensions={**common, "certainty": 45, "controllability": 80},
+    )
+    low_certainty = apply_appraisal(
+        base,
+        "goal_strain",
+        at,
+        source_reference="outcome:low-certainty",
+        target="companion",
+        appraisal_dimensions={**common, "certainty": 15, "controllability": 15},
+    )
+    high_certainty = apply_appraisal(
+        base,
+        "goal_strain",
+        at,
+        source_reference="outcome:high-certainty",
+        target="companion",
+        appraisal_dimensions={**common, "certainty": 90, "controllability": 15},
+    )
+    low_responsibility = apply_appraisal(
+        base,
+        "goal_strain",
+        at,
+        source_reference="outcome:low-responsibility",
+        target="self",
+        appraisal_dimensions={
+            "agency": "companion",
+            "goal_congruence": -80,
+            "norm_compatibility": -80,
+            "certainty": 90,
+            "controllability": 70,
+            "responsibility": 10,
+        },
+    )
+    high_responsibility = apply_appraisal(
+        base,
+        "goal_strain",
+        at,
+        source_reference="outcome:high-responsibility",
+        target="self",
+        appraisal_dimensions={
+            "agency": "companion",
+            "goal_congruence": -80,
+            "norm_compatibility": -80,
+            "certainty": 90,
+            "controllability": 70,
+            "responsibility": 90,
+        },
+    )
+
+    assert low_control.vector["anxiety"] > high_control.vector["anxiety"]
+    assert high_control.vector["anger"] > low_control.vector["anger"]
+    assert low_certainty.vector["anxiety"] > high_certainty.vector["anxiety"]
+    assert high_responsibility.vector["guilt"] > low_responsibility.vector["guilt"]
+
+    episode = high_responsibility.active_episodes[-1]
+    assert episode["responsibility"] == 90
+    assert episode["emotion_program"]["component_deltas"]["guilt"] > 0
+    assert episode["emotion_program"]["appraisal_inputs"] == {
+        "certainty": 90,
+        "controllability": 70,
+        "responsibility": 90,
+    }
