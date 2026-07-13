@@ -1319,6 +1319,10 @@ async def test_generation_timeout_still_delivers_a_ledgered_minimal_first_beat(t
     ]
     action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
     assert action["status"] == "delivered"
+    trace = action["trace"]
+    assert trace["fallback_reason"] == "first_visible_timeout_before_action_staged"
+    assert len(trace["fallback_plan_hash"]) == 64
+    assert len(trace["fallback_context_hash"]) == 64
 
 
 @pytest.mark.asyncio

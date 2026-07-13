@@ -174,6 +174,44 @@ def _quality_signals(world: WorldKernel, world_id: str, reply) -> list[str]:
     return list(trace.get("quality_signals", [])) if isinstance(trace, dict) else []
 
 
+@pytest.mark.asyncio
+async def test_local_fallback_trace_records_reason_and_content_free_replay_hashes(
+    tmp_path: Path,
+) -> None:
+    class InvalidWorldFactModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"图书馆门口新开了一家花店。",'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            )
+
+    incoming = IncomingMessage(
+        platform="simulator",
+        platform_user_id="geoff",
+        message_id="fallback-audit",
+        text="我今天有点累。",
+    )
+    world_a, world_id_a, engine_a = _world_engine(tmp_path / "a", InvalidWorldFactModel())
+    world_b, world_id_b, engine_b = _world_engine(tmp_path / "b", InvalidWorldFactModel())
+
+    reply_a = await engine_a.handle_message(incoming)
+    reply_b = await engine_b.handle_message(incoming)
+
+    assert reply_a is not None and reply_b is not None
+    trace_a = world_a.snapshot(world_id_a)["actions"][reply_a.world_action_id]["trace"]
+    trace_b = world_b.snapshot(world_id_b)["actions"][reply_b.world_action_id]["trace"]
+    assert trace_a["fallback_reason"] == "reply_validation_failed:WorldError"
+    assert trace_a["fallback_plan_hash"] == trace_b["fallback_plan_hash"]
+    # Context hashes include the authoritative World state; independently
+    # initialized epochs may differ even when the fallback plan is identical.
+    assert trace_a["fallback_context_hash"] != trace_b["fallback_context_hash"]
+    assert len(trace_a["fallback_plan_hash"]) == 64
+    assert len(trace_a["fallback_context_hash"]) == 64
+    assert incoming.text not in trace_a["fallback_reason"]
+    assert incoming.text not in trace_a["fallback_plan_hash"]
+    assert incoming.text not in trace_a["fallback_context_hash"]
+
+
 def test_hot_prompt_context_keeps_citable_content_without_projection_metadata() -> None:
     layers = {
         "retrieved_experiences": {
@@ -473,7 +511,7 @@ async def test_world_reply_survives_projection_failure_through_capture_delivery_
 
     world, world_id, engine = _world_engine(tmp_path, UnusedModel())
 
-    def broken_projection(**_kwargs: object) -> object:
+    def broken_projection(*_args: object, **_kwargs: object) -> object:
         raise RuntimeError("injected projection failure")
 
     monkeypatch.setattr(world, "turn_projection", broken_projection)
@@ -492,6 +530,9 @@ async def test_world_reply_survives_projection_failure_through_capture_delivery_
     action = world.snapshot(world_id)["actions"][reply.world_action_id]
     assert action["status"] == "delivered"
     assert action["trace"]["outbound_trigger"] == "adapter_failure_fallback"
+    assert action["trace"]["fallback_reason"] == "turn_projection_failed:RuntimeError"
+    assert len(action["trace"]["fallback_plan_hash"]) == 64
+    assert len(action["trace"]["fallback_context_hash"]) == 64
 
 
 def test_production_world_seed_materializes_the_activity_active_at_epoch_start(

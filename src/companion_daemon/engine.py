@@ -2342,6 +2342,7 @@ class CompanionEngine:
             message_text=message.text,
         )
         provider_fallback = False
+        fallback_reason: str | None = None
         pre_generation_grounding = GroundingAuditRisk().assess(
             CandidateGroundingSignals(reply_text="")
         )
@@ -2415,6 +2416,7 @@ class CompanionEngine:
         except (TimeoutError, ConnectionError, httpx.HTTPError, ssl.SSLError) as exc:
             self._fail_world_model_call(model_action_id, str(exc))
             provider_fallback = True
+            fallback_reason = f"provider_unavailable:{type(exc).__name__}"
             raw = json.dumps(
                 build_safe_failure_candidate(
                     message.text,
@@ -2540,6 +2542,7 @@ class CompanionEngine:
                         variant_key=str(message.message_id or intent_id),
                     )
                     quality_signals.append("unstructured_reply_local_fallback")
+                    fallback_reason = "unstructured_reply_envelope:WorldError"
                 else:
                     raise
             candidate, guard_resolution = self._guard_reply_candidate(
@@ -2647,7 +2650,8 @@ class CompanionEngine:
                     grounding_diagnostic_recommended
                     or grounding.requires_independent_audit
                 )
-        except WorldError:
+        except WorldError as exc:
+            fallback_reason = f"reply_validation_failed:{type(exc).__name__}"
             grounded_fallback = occurrence_candidate
             # A minimal acknowledgement is a discourse signal, not a request
             # to recall prior sources.  In particular, an invalid candidate
@@ -2906,6 +2910,40 @@ class CompanionEngine:
             trace["grounding_diagnostic"] = "offline_evaluation_recommended"
         if quality_signals:
             trace["quality_signals"] = list(dict.fromkeys(quality_signals))
+        if fallback_reason:
+            fallback_plan = {
+                "schema": "fallback-audit-v1",
+                "reason": fallback_reason,
+                "speech_act": fallback_speech_act,
+                "appraisal": appraisal,
+                "query_target": query_scope.target,
+                "provider_fallback": provider_fallback,
+            }
+            fallback_context = {
+                "schema": "fallback-audit-v1",
+                "world_id": self.world_id,
+                "world_revision": projection.revision,
+                "world_state_hash": projection.state_hash,
+                "user_id": user_id,
+                "platform": message.platform,
+                "message_id": str(message.message_id or ""),
+                "cadence": effective_cadence.heat,
+            }
+            trace.update(
+                {
+                    "fallback_reason": fallback_reason,
+                    "fallback_plan_hash": sha256(
+                        json.dumps(
+                            fallback_plan, sort_keys=True, separators=(",", ":")
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                    "fallback_context_hash": sha256(
+                        json.dumps(
+                            fallback_context, sort_keys=True, separators=(",", ":")
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                }
+            )
         private_impression = self._material_private_impression_proposal(
             message=message,
             user_id=user_id,
@@ -3347,6 +3385,19 @@ class CompanionEngine:
             )
 
         user_id = self._ensure_world_user(canonical_user_id)
+        fallback_plan = {
+            "schema": "fallback-audit-v1",
+            "reason": failure_reason,
+            "kind": "adapter_failure_reply",
+        }
+        fallback_context = {
+            "schema": "fallback-audit-v1",
+            "world_id": self.world_id,
+            "world_revision": self.world_kernel.revision(self.world_id),
+            "user_id": user_id,
+            "platform": message.platform,
+            "message_id": str(message.message_id or ""),
+        }
         self._guard_reply_candidate(
             {
                 "reply_text": text,
@@ -3373,6 +3424,17 @@ class CompanionEngine:
                 "allowed_facts": [message.text],
                 "short_lived_constraint": None,
                 "observable_reason": failure_reason[:240],
+                "fallback_reason": failure_reason[:240],
+                "fallback_plan_hash": sha256(
+                    json.dumps(fallback_plan, sort_keys=True, separators=(",", ":")).encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
+                "fallback_context_hash": sha256(
+                    json.dumps(fallback_context, sort_keys=True, separators=(",", ":")).encode(
+                        "utf-8"
+                    )
+                ).hexdigest(),
             },
         )
         return CompanionReply(
