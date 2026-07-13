@@ -139,3 +139,33 @@ ESTIMATES = {
     "proactive_decision": UsageEstimate("proactive_decision", 0.01),
     "life_event": UsageEstimate("life_event", 0.02),
 }
+        lease_seconds: int = 300,
+            lease_seconds=lease_seconds,
+    def start_model_call(
+        self,
+        reservation_id: str,
+        *,
+        now: datetime | None = None,
+        lease_seconds: int = 300,
+    ) -> bool:
+        """Durably mark a preflight reservation immediately before provider I/O."""
+        return self.store.start_model_budget_reservation(
+            reservation_id,
+            now=now or datetime.now(UTC),
+            lease_seconds=lease_seconds,
+        )
+
+    def finalize_model_call(
+        self,
+        reservation_id: str,
+        *,
+        request_emitted: bool,
+        usage_persisted: bool,
+    ) -> None:
+        """Release only calls proven not to have reached the provider."""
+        self.store.finalize_model_budget_reservation(
+            reservation_id,
+            request_emitted=request_emitted,
+            usage_persisted=usage_persisted,
+        )
+

@@ -137,6 +137,32 @@ async def test_model_usage_is_correlated_to_the_frozen_world_turn() -> None:
 
 
 @pytest.mark.asyncio
+async def test_emitted_request_reports_unpersisted_usage_to_its_call_scope() -> None:
+    """A DB/observer outage cannot make an emitted provider request look free."""
+
+    def unavailable_observer(_usage: object) -> None:
+        raise OSError("usage database unavailable")
+
+    model = DeepSeekChatModel(
+        "key",
+        "https://api.deepseek.com",
+        "deepseek-v4-flash",
+        transport=httpx.MockTransport(
+            lambda _request: httpx.Response(
+                200, json={"choices": [{"message": {"content": "ok"}}]}
+            )
+        ),
+        usage_observer=unavailable_observer,
+    )
+
+    with model_call_scope("reply", budget_reservation_id="reservation-1") as scope:
+        assert await model.complete([{"role": "user", "content": "hi"}]) == "ok"
+
+    assert scope.request_emitted is True
+    assert scope.usage_persisted is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("content", [None, 123, {"text": "hi"}, ""])
 async def test_malformed_success_response_content_is_recorded_as_failed(
     content: object,
