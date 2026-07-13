@@ -184,7 +184,7 @@ def _uncommitted_companion_affect_claim(candidate: dict[str, object]) -> bool:
     reply = str(candidate.get("reply_text") or "")
     return bool(
         re.search(
-            r"(?:^|[。！？])\s*(?:是有一点儿?|我(?:这会儿|刚才)?(?:有一点|有点)?|"
+            r"(?:^|[。！？])\s*(?:是有一点儿?|我(?:现在|这会儿|刚才)?(?:有一点|有点)?|"
             r"你这么说让我有一点)(?:不舒服|介意|生气|难过|委屈|不高兴|烦|压着火|"
             r"闷着|不想理|失落|孤独|心里发紧)",
             reply,

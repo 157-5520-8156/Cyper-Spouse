@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -222,6 +222,110 @@ async def test_world_afterthought_cannot_bypass_calm_affect_projection(tmp_path:
     result = await engine.generate_afterthought("geoff", datetime.now())
 
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_world_afterthought_does_not_detach_a_pending_external_action(
+    tmp_path: Path,
+) -> None:
+    class PendingMediaReferenceModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"reply_text":"图还在生成，等结果回来再说。",'
+                '"mentioned_event_ids":[],'
+                '"proposed_action_ids":["media-generation:media:afterthought-guard"],'
+                '"claims":[]}'
+            )
+
+    world, world_id = _world(tmp_path)
+    world.submit(
+        {
+            "type": "request_media",
+            "world_id": world_id,
+            "request_id": "media:afterthought-guard",
+            "user_id": "user:geoff",
+            "media_kind": "creative_image",
+            "topic": "一张小图",
+            "reason": "用户请求",
+            "idempotency_key": "human-feel:afterthought-pending-media",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    engine = CompanionEngine(
+        world.store, PendingMediaReferenceModel(), "你是沈知栀。",
+        world_kernel=world, world_id=world_id,
+    )
+
+    result = await engine.generate_afterthought("geoff", datetime.now())
+
+    assert result is None
+    action = world.snapshot(world_id)["actions"]["media-generation:media:afterthought-guard"]
+    assert action["status"] == "scheduled"
+
+
+@pytest.mark.asyncio
+async def test_world_afterthought_inherits_last_turn_hard_evidence(tmp_path: Path) -> None:
+    class UnsupportedSincerityModel:
+        calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return '{"reply_text":"我看得出来你很真诚。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    world, world_id = _world(tmp_path)
+    reply_sent_at = datetime.now()
+    world.submit(
+        {
+            "type": "observe_user_message",
+            "world_id": world_id,
+            "message_id": "afterthought-meta-agency",
+            "user_id": "user:geoff",
+            "text": "你说的话是角色卡设定的吗？",
+            "sent_at": (reply_sent_at - timedelta(minutes=1)).isoformat(),
+            "idempotency_key": "human-feel:afterthought-meta-agency",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    model = UnsupportedSincerityModel()
+    engine = CompanionEngine(
+        world.store, model, "你是沈知栀。", world_kernel=world, world_id=world_id
+    )
+
+    result = await engine.generate_afterthought("geoff", reply_sent_at)
+
+    assert result is None
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_world_afterthought_keeps_soft_quality_signal_without_legacy_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    class SimpleAfterthoughtModel:
+        calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return '{"reply_text":"宝宝，我永远爱你；想到你，我心里挺温暖的。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    world, world_id = _world(tmp_path)
+    model = SimpleAfterthoughtModel()
+    engine = CompanionEngine(
+        world.store, model, "你是沈知栀。",
+        world_kernel=world, world_id=world_id,
+    )
+
+    async def legacy_audit_must_not_run(**_kwargs: object) -> bool:
+        raise AssertionError("afterthought must not call the retired serial audit")
+
+    monkeypatch.setattr(engine, "_audit_world_reply", legacy_audit_must_not_run)
+    caplog.set_level("INFO", logger="companion_daemon.engine")
+
+    result = await engine.generate_afterthought("geoff", datetime.now())
+
+    assert result == "宝宝，我永远爱你；想到你，我心里挺温暖的。"
+    assert model.calls == 1
+    assert "afterthought quality signal: relationship_language_exceeds_current_closeness" in caplog.text
 
 
 def test_mechanism_discussion_has_a_shared_reaction_fallback() -> None:

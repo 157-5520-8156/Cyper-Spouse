@@ -635,6 +635,104 @@ async def test_world_mode_proactive_uses_only_world_action(tmp_path: Path, monke
 
 
 @pytest.mark.asyncio
+async def test_world_proactive_keeps_soft_quality_signals_without_serial_audit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class SoftSignalModel:
+        calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return (
+                '{"private_thought":"想轻轻说一句。","should_send":true,'
+                '"platform":"qq","message_type":"text",'
+                '"message":"宝宝，我永远爱你；想到你，我心里挺温暖的。",'
+                '"cooldown_minutes":45}'
+            )
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    world.submit(
+        {"type": "register_user", "world_id": world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=world.revision(world_id),
+    )
+    original_decide = world.character_deliberation.decide
+
+    def choose_initiate(*args, **kwargs):
+        decision = original_decide(*args, **kwargs)
+        return replace(
+            decision,
+            chosen_stance="initiate",
+            selection=replace(decision.selection, chosen_stance="initiate"),
+        )
+
+    monkeypatch.setattr(world.character_deliberation, "decide", choose_initiate)
+    model = SoftSignalModel()
+    engine = CompanionEngine(store, model, TEST_PROMPT, world_kernel=world, world_id=world_id)
+
+    async def legacy_audit_must_not_run(**_kwargs: object) -> bool:
+        raise AssertionError("proactive must not call the retired serial audit")
+
+    monkeypatch.setattr(engine, "_audit_world_reply", legacy_audit_must_not_run)
+
+    decision = await engine.proactive_tick("geoff")
+
+    assert decision.should_send is True
+    assert decision.world_action_id is not None
+    assert model.calls == 1
+    trace = world.snapshot(world_id)["actions"][decision.world_action_id]["trace"]
+    assert "human_reply_contract:relationship_language_exceeds_current_closeness" in trace["quality_signals"]
+
+
+@pytest.mark.asyncio
+async def test_world_proactive_blocks_unsupported_external_capability_claim(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class UnsupportedCapabilityModel:
+        async def complete(self, messages, *, temperature: float) -> str:
+            return (
+                '{"private_thought":"想替他解决。","should_send":true,'
+                '"platform":"qq","message_type":"text",'
+                '"message":"我已经替你点好了。","cooldown_minutes":45}'
+            )
+
+    store = CompanionStore(tmp_path / "test.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    world.submit(
+        {"type": "register_user", "world_id": world_id, "user_id": "user:geoff", "name": "geoff"},
+        expected_revision=world.revision(world_id),
+    )
+    original_decide = world.character_deliberation.decide
+
+    def choose_initiate(*args, **kwargs):
+        decision = original_decide(*args, **kwargs)
+        return replace(
+            decision,
+            chosen_stance="initiate",
+            selection=replace(decision.selection, chosen_stance="initiate"),
+        )
+
+    monkeypatch.setattr(world.character_deliberation, "decide", choose_initiate)
+    engine = CompanionEngine(
+        store, UnsupportedCapabilityModel(), TEST_PROMPT, world_kernel=world, world_id=world_id
+    )
+
+    decision = await engine.proactive_tick("geoff")
+
+    assert decision.should_send is False
+    assert decision.message is None
+    assert "硬约束" in decision.private_thought
+    assert not any(
+        action["kind"] == "outgoing_message"
+        for action in world.snapshot(world_id)["actions"].values()
+    )
+
+
+@pytest.mark.asyncio
 async def test_world_mode_withheld_proactive_is_a_reviewable_world_decision(tmp_path: Path) -> None:
     class WithholdingModel:
         async def complete(self, messages, *, temperature: float) -> str:

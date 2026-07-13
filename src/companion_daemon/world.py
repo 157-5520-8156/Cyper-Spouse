@@ -7705,6 +7705,11 @@ def _reply_claims_real_tool_completion(text: str) -> bool:
     """Detect concrete external-operation claims that require settled reality evidence."""
     objects = r"(?:日程|文件|文档|消息|邮件|转账|订单|账号|设置|命令|付款)"
     operations = r"(?:创建|删除|清空|发送|转账|下单|保存|修改|执行|运行|登录|付款)"
+    recipient_completion = (
+        r"我(?:已经|已|刚刚?)?(?:替你|帮你|给你)[^。！？!?]{0,12}"
+        r"(?:点(?:好|完)|下(?:好|完)(?:单)?|买(?:好|到)|订(?:好|到)|约(?:好|到)|"
+        r"联系(?:好|到)|发(?:好|出)|支付(?:好|完)|处理(?:好|完))(?:了)?"
+    )
     return bool(
         re.search(
             rf"{objects}[^\u3002！？!?]{{0,24}}(?:已经|已)[^\u3002！？!?]{{0,10}}{operations}",
@@ -7714,6 +7719,7 @@ def _reply_claims_real_tool_completion(text: str) -> bool:
             rf"(?:我)?(?:已经|已|刚刚?)?(?:帮你)?[^\u3002！？!?]{{0,12}}{operations}[^\u3002！？!?]{{0,16}}{objects}[^\u3002！？!?]{{0,6}}(?:好|完|成功|了)",
             text,
         )
+        or re.search(recipient_completion, text)
     )
 
 

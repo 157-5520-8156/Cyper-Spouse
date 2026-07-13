@@ -3445,6 +3445,45 @@ class CompanionEngine:
         if self.world_kernel and self.world_id:
             snapshot = self.world_kernel.snapshot(self.world_id)
             afterthought_user_id = self._world_user_id(canonical_user_id)
+            afterthought_inbound = [
+                item
+                for item in snapshot.get("recent_messages", [])
+                if isinstance(item, dict)
+                and item.get("direction") == "in"
+                and str(item.get("text") or "").strip()
+                and str(item.get("user_id") or "") in {"", afterthought_user_id}
+            ]
+            last_user_text = str(
+                afterthought_inbound[-1].get("text") if afterthought_inbound else ""
+            )
+            afterthought_scope = classify_world_query(last_user_text)
+            mentioned_npc_names = {
+                str(entity.get("name") or "")
+                for entity in snapshot.get("entities", {}).values()
+                if isinstance(entity, dict)
+                and entity.get("kind") not in {"companion", "user"}
+                and str(entity.get("name") or "") in last_user_text
+            }
+            related_npc_experiences = [
+                item
+                for item in snapshot.get("experiences", {}).values()
+                if isinstance(item, dict)
+                and any(
+                    name and name in str(item.get("content") or "")
+                    for name in mentioned_npc_names
+                )
+            ]
+            afterthought_hard_evidence = HardEvidenceContext(
+                user_text=last_user_text,
+                recent_user_texts=tuple(
+                    str(item.get("text") or "") for item in afterthought_inbound
+                ),
+                meta_agency_query=afterthought_scope.asks_meta_agency,
+                epistemic_honesty_requested=afterthought_scope.asks_epistemic_honesty,
+                known_npc_interaction_required=bool(
+                    asks_for_source_detail(last_user_text) and related_npc_experiences
+                ),
+            )
             afterthought_plan = self.world_kernel.expression_plan(
                 self.world_id,
                 user_id=afterthought_user_id,
@@ -3488,34 +3527,27 @@ class CompanionEngine:
                 purpose="afterthought", causation=causation, content=raw, action_id=model_action_id
             )
             try:
-                candidate, _ = self._guard_reply_candidate(
+                candidate, guard_resolution = self._guard_reply_candidate(
                     parse_reply_candidate(raw),
                     user_id=self._ensure_world_user(canonical_user_id),
+                    hard_evidence=afterthought_hard_evidence,
                 )
             except WorldError:
+                return None
+            if guard_resolution.disposition == "requires_action_settlement":
+                # This follow-up seam carries only a text Action.  Do not
+                # silently detach a pending external Action reference from its
+                # own receipt lifecycle; a later explicit turn can bind it.
                 return None
             relationship = snapshot.get("relationships", {}).get(self._world_user_id(canonical_user_id), {})
-            if not isinstance(relationship, dict) or human_reply_contract_violation(
-                "", candidate, relationship
-            ):
-                return None
-            if afterthought_plan.validate(str(candidate.get("reply_text") or "")):
-                return None
+            if isinstance(relationship, dict):
+                soft_violation = human_reply_contract_violation("", candidate, relationship)
+                if soft_violation:
+                    logger.info("afterthought quality signal: %s", soft_violation)
+            affect_signal = afterthought_plan.validate(str(candidate.get("reply_text") or ""))
+            if affect_signal:
+                logger.info("afterthought expression signal: %s", affect_signal)
             text = sanitize_chat_text(str(candidate["reply_text"]))
-            try:
-                await self._audit_world_reply(
-                    purpose="afterthought_audit",
-                    causation=causation,
-                    user_text="上一条回复之后的一句可取消聊天余波。",
-                    reply_text=text,
-                    grounding_context={
-                        "facts": self._current_world_facts(snapshot),
-                        "experiences": list(snapshot.get("experiences", {}).values())[-3:],
-                        "emotion_modulation": snapshot.get("emotion_modulation", {}),
-                    },
-                )
-            except WorldError:
-                return None
             return text if text and len(text) <= 60 else None
         state = self.store.get_mood_state(canonical_user_id)
         if state.mood in {"guarded", "hurt"}:
@@ -4193,6 +4225,7 @@ class CompanionEngine:
         relationship = snapshot.get("relationships", {}).get(user_id, {})
         if not isinstance(relationship, dict):
             relationship = {}
+        proactive_quality_signals: list[str] = []
         if decision.should_send and decision.message:
             candidate_message = decision.message
             violation = human_reply_contract_violation(
@@ -4201,45 +4234,29 @@ class CompanionEngine:
                 relationship,
             )
             if violation:
-                decision = decision.model_copy(
-                    update={
-                        "should_send": False,
-                        "message": None,
-                        "message_type": "none",
-                        "private_thought": f"关系阶段门禁要求先收住：{violation}。",
-                    }
-                )
-            if decision.should_send and decision.message:
-                affect_violation = proactive_plan.validate(candidate_message)
-                if affect_violation:
-                    decision = decision.model_copy(
-                        update={
-                            "should_send": False,
-                            "message": None,
-                            "message_type": "none",
-                            "private_thought": f"情感投影不支持该主动表达：{affect_violation}。",
-                        }
-                    )
-        if decision.should_send and decision.message:
+                logger.info("proactive quality signal: %s", violation)
+                proactive_quality_signals.append(f"human_reply_contract:{violation}")
+            affect_violation = proactive_plan.validate(candidate_message)
+            if affect_violation:
+                logger.info("proactive expression signal: %s", affect_violation)
+                proactive_quality_signals.append(f"expression_plan:{affect_violation}")
             try:
-                await self._audit_world_reply(
-                    purpose="proactive_audit",
-                    causation=causation,
-                    user_text="主动联系，不索取用户回应。",
-                    reply_text=decision.message,
-                    grounding_context={
-                        "facts": self._current_world_facts(snapshot),
-                        "experiences": list(snapshot.get("experiences", {}).values())[-4:],
-                        "emotion_modulation": modulation,
+                self._guard_reply_candidate(
+                    {
+                        "reply_text": candidate_message,
+                        "mentioned_event_ids": [],
+                        "proposed_action_ids": [],
+                        "claims": [],
                     },
+                    user_id=user_id,
                 )
-            except WorldError:
+            except WorldError as exc:
                 decision = decision.model_copy(
                     update={
                         "should_send": False,
                         "message": None,
                         "message_type": "none",
-                        "private_thought": "主动消息未通过独立世界审计，先不发。",
+                        "private_thought": f"主动消息触及硬约束：{str(exc)[:120]}",
                     }
                 )
         if not decision.should_send or not decision.message or not decision.platform:
@@ -4282,6 +4299,7 @@ class CompanionEngine:
                     "short_lived_constraint": None,
                     "observable_reason": decision.private_thought[:160],
                     "outbound_override": outbound_override,
+                    "quality_signals": list(dict.fromkeys(proactive_quality_signals)),
                 },
             )
         except WorldError as exc:
