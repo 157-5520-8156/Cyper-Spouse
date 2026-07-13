@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime
 from pathlib import Path
 import json
@@ -336,7 +337,7 @@ async def test_deep_appraisal_can_validate_cross_turn_withdrawal_without_making_
 
 
 @pytest.mark.asyncio
-async def test_model_validated_implicit_withdrawal_is_committed_to_the_world_ledger(
+async def test_model_validated_implicit_withdrawal_is_committed_after_first_reply(
     tmp_path: Path,
 ) -> None:
     class AppraisalModel:
@@ -366,7 +367,7 @@ async def test_model_validated_implicit_withdrawal_is_committed_to_the_world_led
     appraisal_model = AppraisalModel()
     engine.interaction_appraisal_model = appraisal_model
     engine.interaction_deep_appraisal_model = appraisal_model
-    await engine.handle_message(
+    second_reply = await engine.handle_message(
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="我去玩密室了", message_id="share-model"
         )
@@ -386,8 +387,23 @@ async def test_model_validated_implicit_withdrawal_is_committed_to_the_world_led
         ),
     )
 
-    assert store.recent_turn_traces("geoff")[-1]["appraisal"] == "user_withdrawing"
+    assert second_reply is not None
+    # The visible reply is not held for this model-only reading.  Let the
+    # tracked advisory settle, then verify that its only durable effect is the
+    # provenance-bound user-affect ledger for a subsequent turn.
+    await asyncio.gather(*tuple(engine._appraisal_tasks))
+    assert store.recent_turn_traces("geoff")[-1]["appraisal"] == "ordinary_message"
     affect = engine.world_kernel.snapshot(engine.world_id)["user_affect"]["user:geoff"]
     assert affect["kind"] == "disappointment"
     assert affect["source_message_id"] == "implicit-model"
     assert affect["unresolved"] is True
+    await engine.handle_message(
+        IncomingMessage(
+            platform="qq", platform_user_id="geoff", text="继续说", message_id="after-implicit"
+        )
+    )
+    # TurnFrame converts the settled affect into a bounded repair Advisory for
+    # the next primary prompt rather than restating it as a user fact.
+    prompt = engine.model.calls[-1][1]["content"]
+    assert '"kind":"repair"' in prompt
+    assert '"implicit-model"' in prompt

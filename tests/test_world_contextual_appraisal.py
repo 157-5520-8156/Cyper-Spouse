@@ -20,7 +20,11 @@ from companion_daemon.world import WorldKernel
 
 
 class BoundaryReplyModel:
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def complete(self, messages, *, temperature: float) -> str:
+        self.calls += 1
         return json.dumps(
             {
                 "reply_text": "这种说法让我不舒服，我不接受这样贬低我。",
@@ -124,7 +128,7 @@ def _engine(
 
 
 @pytest.mark.asyncio
-async def test_high_confidence_sarcastic_degradation_becomes_sourced_affect(
+async def test_contextual_sarcasm_leaves_future_facing_companion_affect_only(
     tmp_path: Path,
 ) -> None:
     world, world_id, engine = _engine(tmp_path, appraisal_confidence=0.91)
@@ -138,19 +142,46 @@ async def test_high_confidence_sarcastic_degradation_becomes_sourced_affect(
         )
     )
 
+    # The semantic specialist is no longer a pre-reply approval step.
     snapshot = world.snapshot(world_id)
-    appraisal = snapshot["last_appraisal"]
-    assert appraisal["appraisal"] == "boundary_violation"
-    assert appraisal["confidence"] == pytest.approx(0.91)
-    assert appraisal["implied_attitude"] == "用反讽贬低能力"
-    assert appraisal["power_delta"] == -35
-    assert snapshot["emotion_modulation"]["vector"]["hurt"] > 0
-    assert snapshot["last_deliberation"]["stance"] in {
-        "set_boundary",
-        "refuse_to_affirm",
-    }
+    assert snapshot["last_appraisal"]["appraisal"] == "ordinary_message"
+    assert snapshot["emotion_modulation"]["vector"]["hurt"] == 0
     assert reply is not None
     assert "不接受" in reply.text
+    relation_after_reply = dict(snapshot["relationships"]["user:geoff"])
+    outgoing_after_reply = dict(snapshot["actions"][str(reply.world_action_id)])
+    await asyncio.gather(*tuple(engine._appraisal_tasks))
+    settled = world.snapshot(world_id)
+    # It can leave a durable emotional residue for a later turn, but cannot
+    # rewrite this reply's turn appraisal, relation, or outbound Action.
+    assert settled["last_appraisal"]["appraisal"] == "ordinary_message"
+    assert settled["relationships"]["user:geoff"] == relation_after_reply
+    assert settled["actions"][str(reply.world_action_id)] == outgoing_after_reply
+    assert settled["emotion_modulation"]["vector"]["hurt"] > 0
+    assert settled["emotion_modulation"]["source_appraisal"] == "boundary_violation"
+    future = IncomingMessage(
+        platform="simulator",
+        platform_user_id="geoff",
+        message_id="sarcasm-next",
+        text="我刚才语气不好。",
+    )
+    projection = world.turn_projection(
+        world_id,
+        user_id="user:geoff",
+        text=future.text,
+        current_message_id=future.message_id,
+        purpose="reply",
+        intent_id="turn:sarcasm-next",
+    )
+    frame = engine.turn_frame_compiler.compile(
+        world_id=world_id,
+        revision=projection.revision,
+        state_hash=projection.state_hash,
+        snapshot=projection.state,
+        user_id="user:geoff",
+        message=future,
+    )
+    assert any(item.kind == "affect" for item in engine.turn_frame_compiler.advisories(frame))
     assert any(
         event.event_type == "ModelProposalRecorded"
         and event.payload.get("template_id")
@@ -177,8 +208,7 @@ async def test_low_confidence_sarcasm_does_not_accumulate_relationship_harm(
 
     snapshot = world.snapshot(world_id)
     assert snapshot["last_appraisal"]["appraisal"] == "ordinary_message"
-    assert snapshot["last_appraisal"]["confidence"] == pytest.approx(0.54)
-    assert snapshot["last_appraisal"]["alternative_appraisal"]
+    assert snapshot["last_appraisal"]["confidence"] == pytest.approx(1.0)
     after = snapshot["relationships"]["user:geoff"]
     assert int(after.get("respect", 0)) == int(before.get("respect", 0))
     assert snapshot["emotion_modulation"]["violation_count"] == 0
@@ -262,8 +292,10 @@ async def test_hot_turn_omits_slow_contextual_appraisal_before_reply_generation(
 ) -> None:
     class SlowAppraisalModel:
         cancelled = False
+        calls = 0
 
         async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
             try:
                 await asyncio.Event().wait()
             except asyncio.CancelledError:
@@ -275,9 +307,10 @@ async def test_hot_turn_omits_slow_contextual_appraisal_before_reply_generation(
     seed_user(store)
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    primary = BoundaryReplyModel()
     engine = CompanionEngine(
         store,
-        BoundaryReplyModel(),
+        primary,
         "你是沈知栀。",
         world_kernel=world,
         world_id=world_id,
@@ -306,4 +339,75 @@ async def test_hot_turn_omits_slow_contextual_appraisal_before_reply_generation(
 
     assert monotonic() - started < 2
     assert slow.cancelled is False
+    assert slow.calls == 0
+    assert primary.calls == 1
     assert reply is not None
+
+
+@pytest.mark.asyncio
+async def test_warm_contextual_advisory_does_not_delay_or_duplicate_primary_generation(
+    tmp_path: Path,
+) -> None:
+    class BlockingAppraisalModel:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.cancelled = False
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.cancelled = True
+                raise
+
+    slow = BlockingAppraisalModel()
+    primary = BoundaryReplyModel()
+    store = CompanionStore(tmp_path / "warm-background-appraisal.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        primary,
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+        interaction_appraisal_model=slow,
+    )
+    observed_at = datetime.now(timezone.utc)
+    frozen = FrozenTurnContext(
+        turn_id="warm-background-appraisal",
+        world_id=world_id,
+        user_id="user:geoff",
+        observed_at=observed_at,
+        cadence=ConversationCadence("warm", None, 0, "test_warm_turn"),
+    )
+
+    started = monotonic()
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="warm-background-appraisal",
+            sent_at=observed_at,
+            text="你可真聪明，连这都做不好。",
+        ),
+        turn_context=frozen,
+    )
+
+    assert reply is not None
+    assert monotonic() - started < 2
+    assert primary.calls == 1
+    await asyncio.wait_for(slow.started.wait(), timeout=0.5)
+    assert primary.calls == 1
+    await engine.aclose()
+    assert slow.cancelled is True
+    model_calls = [
+        item
+        for item in world.snapshot(world_id)["actions"].values()
+        if item.get("kind") == "model_call"
+        and item.get("payload", {}).get("purpose") == "interaction_appraisal"
+    ]
+    assert len(model_calls) == 1
+    assert model_calls[0]["status"] == "failed"

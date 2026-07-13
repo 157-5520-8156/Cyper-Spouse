@@ -447,6 +447,62 @@ class WorldKernel:
             expected_revision=expected_revision,
         )
 
+    def record_user_affect(
+        self,
+        world_id: str,
+        *,
+        message_id: str,
+        user_id: str,
+        affect: dict[str, object],
+        expected_revision: int,
+    ) -> WorldDecision:
+        """Append a bounded, late-arriving reading of the user's affect.
+
+        This is deliberately narrower than ``accept_turn``.  A semantic
+        advisory can finish after a reply has been planned, but it must never
+        retroactively change the turn's facts, action, companion affect, or
+        relationship accounting.  It only contributes a sourced user-affect
+        episode for future turns.
+        """
+        return self.submit(
+            {
+                "type": "record_user_affect",
+                "world_id": world_id,
+                "message_id": message_id,
+                "user_id": user_id,
+                "affect": dict(affect),
+                "idempotency_key": f"user-affect:{message_id}",
+            },
+            expected_revision=expected_revision,
+        )
+
+    def record_advisory_companion_affect(
+        self,
+        world_id: str,
+        *,
+        message_id: str,
+        user_id: str,
+        appraisal: dict[str, object],
+        expected_revision: int,
+    ) -> WorldDecision:
+        """Record a late, source-bound companion affect consequence only.
+
+        It is intentionally unable to alter a settled turn's relationship,
+        deliberation, delivery Action, or visible text.  The projection can
+        nevertheless carry a verified negative residue into the next turn.
+        """
+        return self.submit(
+            {
+                "type": "record_advisory_companion_affect",
+                "world_id": world_id,
+                "message_id": message_id,
+                "user_id": user_id,
+                "appraisal": dict(appraisal),
+                "idempotency_key": f"advisory-companion-affect:{message_id}",
+            },
+            expected_revision=expected_revision,
+        )
+
     def contradict_private_impression(
         self,
         world_id: str,
@@ -5336,6 +5392,177 @@ class WorldKernel:
                         )
                     )
             return events
+        if command_type == "record_advisory_companion_affect":
+            """Apply a delayed semantic boundary reading to affect only.
+
+            This command deliberately has no ``TurnAppraised`` or relationship
+            side effects.  It is the narrow bridge from a high-confidence
+            advisory to future-facing companion affect after the current reply
+            is already immutable.
+            """
+            message_id = str(command.get("message_id") or "")
+            user_id = str(command.get("user_id") or "")
+            appraisal = _as_dict(
+                command.get("appraisal", {}), "advisory companion affect"
+            )
+            kind = str(appraisal.get("appraisal") or "")
+            confidence = float(appraisal.get("confidence") or 0.0)
+            severity = int(appraisal.get("severity") or 0)
+            evidence_spans = [
+                str(item)[:120]
+                for item in _as_list(
+                    appraisal.get("evidence_spans", []),
+                    "advisory companion affect evidence",
+                )[:6]
+            ]
+            if (
+                not message_id
+                or not user_id
+                or kind != "boundary_violation"
+                or str(appraisal.get("agency") or "") != "user"
+                or str(appraisal.get("target") or "") != "companion"
+                or not 0.75 <= confidence <= 1.0
+                or not 1 <= severity <= 4
+                or not evidence_spans
+            ):
+                raise WorldError("advisory companion affect is outside the bounded schema")
+            observed = next(
+                (
+                    item
+                    for item in _as_list(state.get("recent_messages", []), "recent messages")
+                    if str(_as_dict(item, "recent message").get("message_id") or "")
+                    == message_id
+                    and str(_as_dict(item, "recent message").get("user_id") or "")
+                    == user_id
+                ),
+                None,
+            )
+            if observed is None:
+                raise WorldError("advisory companion affect requires its observed user message")
+            text = str(_as_dict(observed, "observed user message").get("text") or "")
+            if any(not span or span not in text for span in evidence_spans):
+                raise WorldError("advisory companion affect evidence must quote the observed message")
+            logical_at = str(_as_dict(state["clock"], "clock").get("logical_at") or "")
+            affect = apply_appraisal(
+                _as_dict(state["emotion_modulation"], "emotion modulation"),
+                kind,
+                logical_at,
+                source_reference=f"message:{message_id}",
+                intensity=severity,
+                target="companion",
+                appraisal_dimensions={
+                    "certainty": int(appraisal.get("certainty") or 0),
+                    "goal_congruence": int(appraisal.get("goal_congruence") or 0),
+                    "controllability": int(appraisal.get("controllability") or 50),
+                    "norm_compatibility": int(appraisal.get("norm_compatibility") or 0),
+                    "power_delta": int(appraisal.get("power_delta") or 0),
+                    "confidence": confidence,
+                    "agency": "user",
+                    "program_target": "companion",
+                    "self_evaluation": "specific_action",
+                    "social_exposure": 0,
+                },
+            )
+            return [
+                (
+                    "AffectChanged",
+                    affect_outcome_payload(
+                        affect, logical_at=logical_at, event_type="AffectChanged"
+                    ),
+                )
+            ]
+        if command_type == "record_user_affect":
+            """Persist only material affect inferred after the visible turn.
+
+            Delayed semantic work is an Advisory: it cannot re-appraise a
+            delivered user turn or mutate companion-facing state.  The event
+            shape intentionally matches the affect portion of ``appraise_turn``
+            so the projection has one durable ledger representation.
+            """
+            message_id = str(command.get("message_id") or "")
+            user_id = str(command.get("user_id") or "")
+            affect = _as_dict(command.get("affect", {}), "late user affect")
+            kind = str(affect.get("kind") or "")
+            intensity = int(affect.get("intensity") or 0)
+            unresolved = bool(affect.get("unresolved"))
+            confidence = float(affect.get("confidence") or 0.0)
+            evidence_spans = [
+                str(item)[:120]
+                for item in _as_list(
+                    affect.get("evidence_spans", []), "late user affect evidence"
+                )[:6]
+            ]
+            if (
+                not message_id
+                or not user_id
+                or kind not in {"disappointment", "confusion", "repaired"}
+                or not 1 <= intensity <= 4
+                or not 0.0 <= confidence <= 1.0
+                or not evidence_spans
+            ):
+                raise WorldError("late user affect is outside the bounded schema")
+            observed = next(
+                (
+                    item
+                    for item in _as_list(state.get("recent_messages", []), "recent messages")
+                    if str(_as_dict(item, "recent message").get("message_id") or "")
+                    == message_id
+                    and str(_as_dict(item, "recent message").get("user_id") or "")
+                    == user_id
+                ),
+                None,
+            )
+            if observed is None:
+                raise WorldError("late user affect requires its observed user message")
+            text = str(_as_dict(observed, "observed user message").get("text") or "")
+            if any(not span or span not in text for span in evidence_spans):
+                raise WorldError("late user affect evidence must quote the observed message")
+            prior = _as_dict(
+                _as_dict(state.get("user_affect", {}), "user affect projection").get(
+                    user_id, {}
+                ),
+                "active user affect",
+            )
+            prior_episodes = [
+                _as_dict(item, "active user affect episode")
+                for item in _as_list(prior.get("active_episodes", []), "active user affect episodes")
+            ]
+            if bool(prior.get("unresolved")) and str(prior.get("source_message_id") or "") and not prior_episodes:
+                prior_episodes = [prior]
+            should_persist = intensity >= 2 and unresolved
+            closes_episode = kind == "repaired" and bool(prior_episodes)
+            if not should_persist and not closes_episode:
+                return []
+            return [
+                (
+                    "UserAffectAppraised",
+                    {
+                        "user_id": user_id,
+                        "source_message_id": message_id,
+                        "kind": kind,
+                        "intensity": intensity,
+                        "unresolved": unresolved,
+                        "confidence": confidence,
+                        "cause": str(affect.get("cause") or "companion_response")[:80],
+                        "evidence_spans": evidence_spans,
+                        "settles_source_message_id": (
+                            str(prior_episodes[-1].get("source_message_id") or "")
+                            if closes_episode
+                            else ""
+                        ),
+                        "settles_source_message_ids": (
+                            [
+                                str(item.get("source_message_id") or "")
+                                for item in prior_episodes
+                                if str(item.get("source_message_id") or "")
+                            ]
+                            if closes_episode
+                            else []
+                        ),
+                        "rule_version": "user-affect-v1",
+                    },
+                )
+            ]
         if command_type == "appraise_turn":
             appraisal = str(command.get("appraisal") or "ordinary_message")
             interaction = _as_dict(command.get("interaction", {}), "interaction appraisal")

@@ -363,6 +363,11 @@ deadline 在入口冻结，同一轮不重新读取 wall clock 改判热度。
 一个模型完成 Appraisal，再让另一个模型在其结论下写回复。结构化 schema 约束外壳，不
 限制 `expression_beats[].text` 的自然 prose。
 
+对于 warm/cold 的高歧义输入，专用语义 Appraisal 只能在回复 Action 已原子计划后作为后台
+Advisory 运行：它的原文和失败状态需可观测，且最多追加带逐字 evidence 的用户 Affect，或
+高置信冒犯后的 companion Affect residue，供后续轮使用。它不得回写已投递回复、关系、
+Action、当前 TurnAppraised 或 deliberation。热轮不启动这一额外调用。
+
 ### 8.5 单一 InvariantGuard
 
 ```python
@@ -513,6 +518,8 @@ InvariantGuard / 局部修复       <= 0.3s
 2. 普通无 World claim 回复不调用独立 LLM audit；
 3. Projection 按 revision 增量维护，不能每轮全账本 replay；
 4. 相关上下文按 query + revision 有界缓存；
+   热轮仅向模型投递压缩后的 source id/type/content，并缩小每层项数与字符上限；完整
+   provenance projection 继续留在 World，不能因压缩而丢失；
 5. 非关键记忆、摘要、usage 和完整评估发送后处理；
 6. 多段自然间隔不计入首条有效回复延迟，但每段仍需 Action 结算；
 7. full path 在普通聊天上的 P95 不得显著差于 bare baseline。

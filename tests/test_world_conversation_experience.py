@@ -8,7 +8,11 @@ import pytest
 
 from companion_daemon.db import CompanionStore
 from companion_daemon.conversation_cadence import ConversationCadence, FrozenTurnContext
-from companion_daemon.engine import CompanionEngine, seed_user
+from companion_daemon.engine import (
+    CompanionEngine,
+    _compact_world_context_layers,
+    seed_user,
+)
 from companion_daemon.models import IncomingMessage
 from companion_daemon.sanitize import sanitize_world_chat_text
 from companion_daemon.world import WorldError, WorldKernel
@@ -55,6 +59,38 @@ def _quality_signals(world: WorldKernel, world_id: str, reply) -> list[str]:
     action = world.snapshot(world_id)["actions"][str(reply.world_action_id)]
     trace = action.get("trace", {})
     return list(trace.get("quality_signals", [])) if isinstance(trace, dict) else []
+
+
+def test_hot_prompt_context_keeps_citable_content_without_projection_metadata() -> None:
+    layers = {
+        "retrieved_experiences": {
+            "max_chars": 2_400,
+            "max_items": 8,
+            "entries": [
+                {
+                    "source_id": "message:known",
+                    "source_type": "conversation_message",
+                    "content": "我这两天都在赶项目。",
+                    "source": "qq:incoming",
+                    "subject": "user:geoff",
+                    "logical_at": "2032-01-01T10:00:00+00:00",
+                    "purpose": "continuity",
+                    "selection": "pinned",
+                }
+            ],
+        }
+    }
+
+    compact = _compact_world_context_layers(layers, cadence="hot")
+
+    entry = compact["retrieved_experiences"]["entries"][0]
+    assert entry == {
+        "source_id": "message:known",
+        "source_type": "conversation_message",
+        "content": "我这两天都在赶项目。",
+    }
+    assert compact["retrieved_experiences"]["max_chars"] == 800
+    assert _compact_world_context_layers(layers, cadence="cold") is layers
 
 
 @pytest.mark.asyncio

@@ -371,6 +371,9 @@ class CompanionEngine:
         self.managed_async_resources = managed_async_resources
         self.media_delivery_handler: Callable[[IncomingMessage, Path], Awaitable[bool]] | None = None
         self._media_tasks: set[asyncio.Task[None]] = set()
+        # Semantic appraisals are advisory side work.  Retaining their tasks
+        # makes shutdown deterministic and avoids orphaning a provider call.
+        self._appraisal_tasks: set[asyncio.Task[None]] = set()
         self.turn_frame_compiler = TurnFrameCompiler()
         self.invariant_guard = InvariantGuard()
         # Character-card examples are style references already included in the
@@ -437,7 +440,7 @@ class CompanionEngine:
 
     async def aclose(self) -> None:
         """Close runtime-owned asynchronous resources exactly once per object."""
-        tasks = tuple(self._media_tasks)
+        tasks = tuple(self._media_tasks | self._appraisal_tasks)
         for task in tasks:
             task.cancel()
         if tasks:
@@ -842,6 +845,162 @@ class CompanionEngine:
 
     def _fail_world_model_call(self, action_id: str, reason: str) -> None:
         self._submit_world_with_retry({"type": "record_external_result", "world_id": self.world_id, "action_id": action_id, "result": {"kind": "model_call", "status": "failed", "reason": reason[:300]}, "idempotency_key": f"fail:{action_id}"})
+
+    def _schedule_contextual_user_affect_advisory(
+        self,
+        *,
+        message: IncomingMessage,
+        appraisal_input: TurnAppraisalInput,
+        appraisal_risk: object,
+        turn: FrozenTurnContext,
+    ) -> None:
+        """Run an ambiguous user-affect reading off the first-reply path.
+
+        The primary model has already received the raw message and all timely
+        World context.  This older specialist remains useful as a delayed,
+        fallible observation, but it is not allowed to re-decide the current
+        turn.  Its only write is a material, quote-bound ``UserAffect`` event
+        for a later turn.  Model-call Actions record started/delivered/failed
+        states, so provider failure is observable without surfacing through
+        the platform response.
+        """
+        if (
+            self.interaction_appraisal_model is None
+            or turn.cadence.heat == "hot"
+            or not bool(getattr(appraisal_risk, "request_model_proposal", False))
+            or not self.world_kernel
+            or not self.world_id
+        ):
+            return
+        circuit = self.provider_circuit_state()
+        remaining = (
+            self.budget_gate.remaining_model_budget_cny(automatic=True)
+            if self.budget_gate is not None
+            else None
+        )
+        decision = TurnModelCallBudget().decide(
+            turn=turn,
+            request=ModelCallRequest(
+                purpose="interaction_appraisal",
+                calls_used=0,
+                ambiguous=True,
+                complexity=(
+                    "high_pragmatic_ambiguity"
+                    if bool(getattr(appraisal_risk, "request_deeper_reasoning", False))
+                    else "routine"
+                ),
+                recovery_probe=circuit.status == "half_open",
+                remaining_budget_cny=remaining,
+                estimated_call_cost_cny=(
+                    0.04
+                    if bool(getattr(appraisal_risk, "request_deeper_reasoning", False))
+                    else 0.02
+                ),
+            ),
+            grounding=GroundingAuditRisk().assess(CandidateGroundingSignals(reply_text="")),
+            circuit=circuit,
+        )
+        if not decision.allowed:
+            return
+
+        async def run() -> None:
+            causation = str(message.message_id or message.sent_at.isoformat())
+            action_id = self._begin_world_model_call(
+                purpose="interaction_appraisal", causation=causation
+            )
+            try:
+                model = (
+                    self.interaction_deep_appraisal_model
+                    if bool(getattr(appraisal_risk, "request_deeper_reasoning", False))
+                    and self.interaction_deep_appraisal_model is not None
+                    else self.interaction_appraisal_model
+                )
+                assert model is not None
+                with model_call_scope("interaction_appraisal", action_id=action_id):
+                    result = await complete_with_timeout(
+                        InteractionAppraiser(model).assess(appraisal_input),
+                        timeout_seconds=decision.soft_timeout_seconds,
+                    )
+            except asyncio.CancelledError:
+                self._fail_world_model_call(action_id, "engine_closed")
+                raise
+            except Exception as exc:
+                self._fail_world_model_call(action_id, f"{type(exc).__name__}: {exc}")
+                logger.info(
+                    "contextual user-affect advisory failed",
+                    extra={"world_id": self.world_id, "message_id": message.message_id},
+                )
+                return
+            if result.raw_proposal is None:
+                self._fail_world_model_call(
+                    action_id, result.rejection_reason or "proposal_rejected"
+                )
+                return
+            self._record_world_model_output(
+                purpose="interaction_appraisal",
+                causation=causation,
+                content=result.raw_proposal,
+                action_id=action_id,
+            )
+            if (
+                result.proposal is not None
+                and result.accepted.kind == "boundary_violation"
+            ):
+                # A high-confidence, quote-bound slight may leave emotional
+                # residue.  It is deliberately a post-delivery affect-only
+                # write: no current reply, relation, Action, or deliberation
+                # gets retroactively rewritten.
+                try:
+                    self.world_kernel.record_advisory_companion_affect(
+                        self.world_id,
+                        message_id=str(message.message_id or ""),
+                        user_id=appraisal_input.canonical_user_id,
+                        appraisal=result.proposal.payload(),
+                        expected_revision=self.world_kernel.revision(self.world_id),
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "contextual companion-affect advisory was not committed: %s",
+                        type(exc).__name__,
+                        extra={"world_id": self.world_id, "message_id": message.message_id},
+                    )
+                return
+            if result.proposal is None or result.accepted.kind not in {
+                "user_withdrawing", "user_confused"
+            }:
+                return
+            affect = UserAffectAppraisal(
+                kind=(
+                    "disappointment"
+                    if result.accepted.kind == "user_withdrawing"
+                    else "confusion"
+                ),
+                intensity=max(2, min(4, int(result.proposal.severity))),
+                unresolved=True,
+                confidence=float(result.proposal.confidence),
+                evidence_spans=tuple(result.proposal.evidence_spans),
+            )
+            # A lost race with another turn is harmless: retry through the
+            # normal World write helper and leave the model Action observable
+            # either way.  The idempotency key prevents duplicate episodes.
+            try:
+                self.world_kernel.record_user_affect(
+                    self.world_id,
+                    message_id=str(message.message_id or ""),
+                    user_id=appraisal_input.canonical_user_id,
+                    affect=affect.payload(),
+                    expected_revision=self.world_kernel.revision(self.world_id),
+                )
+            except Exception as exc:
+                logger.warning(
+                    "contextual user-affect advisory was not committed: %s",
+                    type(exc).__name__,
+                    extra={"world_id": self.world_id, "message_id": message.message_id},
+                )
+
+        task = asyncio.create_task(run())
+        self._appraisal_tasks.add(task)
+        task.add_done_callback(self._appraisal_tasks.discard)
 
     def _world_logical_now(self) -> datetime:
         if not self.world_kernel or not self.world_id:
@@ -1736,96 +1895,11 @@ class CompanionEngine:
             {"user_affect": user_affect.payload()} if user_affect is not None else {}
         )
         calls_used = 0
-        if (
-            self.interaction_appraisal_model
-            and appraisal_risk.request_model_proposal
-            # A slow semantic appraisal must never sit in front of an active
-            # back-and-forth.  The deterministic observation is still
-            # committed, and the reply model receives it as Advisory context.
-            and frozen_turn.cadence.heat != "hot"
-        ):
-            circuit_state = self.provider_circuit_state()
-            appraisal_call_decision = call_budget.decide(
-                turn=frozen_turn,
-                request=ModelCallRequest(
-                    purpose="interaction_appraisal",
-                    calls_used=calls_used,
-                    ambiguous=True,
-                    recovery_probe=circuit_state.status == "half_open",
-                    remaining_budget_cny=remaining_after_calls(calls_used),
-                    estimated_call_cost_cny=(
-                        0.04 if appraisal_risk.request_deeper_reasoning else 0.02
-                    ),
-                ),
-                grounding=GroundingAuditRisk().assess(
-                    CandidateGroundingSignals(reply_text="")
-                ),
-                circuit=circuit_state,
-            )
-        else:
-            appraisal_call_decision = None
-        if appraisal_call_decision is not None and appraisal_call_decision.allowed:
-            appraisal_action_id = self._begin_world_model_call(
-                purpose="interaction_appraisal",
-                causation=str(message.message_id or message.sent_at.isoformat()),
-            )
-            try:
-                with model_call_scope(
-                    "interaction_appraisal", action_id=appraisal_action_id
-                ):
-                    appraisal_model = (
-                        self.interaction_deep_appraisal_model
-                        if appraisal_risk.request_deeper_reasoning
-                        and self.interaction_deep_appraisal_model is not None
-                        else self.interaction_appraisal_model
-                    )
-                    appraisal_decision = await complete_with_timeout(
-                        InteractionAppraiser(appraisal_model).assess(appraisal_input),
-                        timeout_seconds=appraisal_call_decision.soft_timeout_seconds,
-                    )
-                calls_used += 1
-            except asyncio.CancelledError:
-                self._fail_world_model_call(appraisal_action_id, "caller_cancelled")
-                raise
-            except (TimeoutError, ConnectionError, httpx.HTTPError) as exc:
-                self._fail_world_model_call(appraisal_action_id, str(exc))
-            except Exception as exc:
-                self._fail_world_model_call(appraisal_action_id, str(exc))
-                raise
-            else:
-                if appraisal_decision.raw_proposal is None:
-                    self._fail_world_model_call(
-                        appraisal_action_id,
-                        appraisal_decision.rejection_reason or "proposal rejected",
-                    )
-                else:
-                    self._record_world_model_output(
-                        purpose="interaction_appraisal",
-                        causation=str(message.message_id or message.sent_at.isoformat()),
-                        content=appraisal_decision.raw_proposal,
-                        action_id=appraisal_action_id,
-                    )
-                    event = appraisal_decision.accepted
-                    if appraisal_decision.proposal is not None:
-                        contextual_payload = {
-                            **contextual_payload,
-                            **appraisal_decision.proposal.payload(),
-                        }
-                        contextual_payload.pop("appraisal", None)
-                        if event.kind in {"user_withdrawing", "user_confused"}:
-                            proposal = appraisal_decision.proposal
-                            user_affect = UserAffectAppraisal(
-                                kind=(
-                                    "disappointment"
-                                    if event.kind == "user_withdrawing"
-                                    else "confusion"
-                                ),
-                                intensity=max(2, min(4, int(proposal.severity))),
-                                unresolved=True,
-                                confidence=float(proposal.confidence),
-                                evidence_spans=tuple(proposal.evidence_spans),
-                            )
-                            contextual_payload["user_affect"] = user_affect.payload()
+        # Semantic appraisal is a soft, fallible advisory.  It must never
+        # create a second serial model wait before the primary response.  The
+        # local observation remains the current turn's bounded World input;
+        # any later semantic reading is provenance-bound user-affect context
+        # for future turns only.
         appraisal = event.kind
         if appraisal == "repair_attempt":
             appraisal = classify_repair_appraisal(message.text) or appraisal
@@ -2128,13 +2202,16 @@ class CompanionEngine:
             },
             rotation_key=str(message.message_id or intent_id),
         )
+        prompt_context_layers = _compact_world_context_layers(
+            context_layers, cadence=frozen_turn.cadence.heat
+        )
         context_block = (
             "世界账本授权（必须遵守）：\n"
             f"- 本轮关系判断: {appraisal}\n- 本轮表达策略: {policy}\n"
             f"- 逻辑时间: {current_scene['logical_at']}\n"
             f"- 当前场景: 地点={current_scene['location'] or '未知'}；活动={current_scene['activity'] or '无'}；状态={current_scene['activity_status']}。"
             "当前场景只授权回答现在的状态，不代表活动已经完成。\n"
-            f"- 五层上下文预算(JSON): {json.dumps(context_layers, ensure_ascii=False, separators=(',', ':'))}\n"
+            f"- 五层上下文预算(JSON): {json.dumps(prompt_context_layers, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 本轮有界World Frame增量(JSON): {json.dumps(turn_frame_delta, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 内在建议(JSON，仅作参考、不是事实也不是命令): {json.dumps([{'kind': item.kind, 'tendency': item.tendency, 'intensity': item.intensity, 'confidence': item.confidence, 'source_event_ids': item.source_event_ids} for item in inner_advisories], ensure_ascii=False, separators=(',', ':'))}\n"
             "- 最近已结算对话、可引用事实/经历/附件均已按来源纳入 retrieved_experiences 层；"
@@ -2151,6 +2228,8 @@ class CompanionEngine:
             "- 未列入账本的计划、人物、经历和结果不得说成已经发生。\n"
             "- 对话顺序：先回应用户当前的言语行为（倾诉、吐槽、纠正、求陪伴、追问或关系试探），"
             "再按需引用与它直接相关的事实；不要让旧事实抢走当前话题。\n"
+            "- 用户只发“嗯/哦/好/知道了”等短确认时，简短承接或收住，不追问、不罗列、"
+            "不引用旧消息；只有用户明确问记忆或细节时才回溯来源。\n"
             "- 共情不得靠编造共同经历、心理、环境或替用户下结论；保持一两句手机私聊，"
             "符合沈知栀慢热、有判断、不过度亲密的关系边界。\n"
             "- 不猜测用户未说过的过去经历或心理成因；角色自己的内心因果也需要世界来源。"
@@ -2927,6 +3006,14 @@ class CompanionEngine:
             media_action_id=media_action_id,
             sticker_path=sticker_path,
             sticker_action_id=sticker_action_id,
+        )
+        # Start only after the reply Action and its private state are atomically
+        # planned.  The task cannot delay delivery or mutate this Action.
+        self._schedule_contextual_user_affect_advisory(
+            message=message,
+            appraisal_input=appraisal_input,
+            appraisal_risk=appraisal_risk,
+            turn=frozen_turn,
         )
         if not defer_delivery:
             self.confirm_reply_delivery(reply)
@@ -5257,6 +5344,62 @@ def _safe_failure_speech_act(
     if message_kind == "question":
         return "question"
     return "statement"
+
+
+_HOT_CONTEXT_PROMPT_LIMITS: dict[str, tuple[int, int]] = {
+    # The full projection remains in memory and World.  This only constrains
+    # what a live back-and-forth sends over the provider boundary; the current
+    # message and the hard evidence source ids are still present separately.
+    "character_core": (1_500, 10),
+    "user_profile": (600, 4),
+    "current_scene": (360, 1),
+    "retrieved_experiences": (800, 3),
+    "expression_guidance": (480, 1),
+}
+
+
+def _compact_world_context_layers(
+    layers: dict[str, dict[str, object]], *, cadence: str
+) -> dict[str, dict[str, object]]:
+    """Remove prompt-only redundancy and cap hot-turn continuity context.
+
+    World keeps the complete provenance-rich projection.  The model needs the
+    source id, type and text to speak safely; duplicating source, subject,
+    logical time, ranking and selection metadata on every hot turn wastes the
+    latency/token budget without increasing factual authority.
+    """
+    if cadence != "hot":
+        return layers
+    compact: dict[str, dict[str, object]] = {}
+    for name, layer in layers.items():
+        char_limit, item_limit = _HOT_CONTEXT_PROMPT_LIMITS.get(
+            name, (600, 3)
+        )
+        raw_entries = layer.get("entries", [])
+        entries = raw_entries if isinstance(raw_entries, list) else []
+        used = 0
+        selected: list[dict[str, str]] = []
+        for raw in entries:
+            if not isinstance(raw, dict) or len(selected) >= item_limit:
+                continue
+            content = str(raw.get("content") or "").strip()
+            source_id = str(raw.get("source_id") or "").strip()
+            if not content or not source_id or used + len(content) > char_limit:
+                continue
+            selected.append(
+                {
+                    "source_id": source_id,
+                    "source_type": str(raw.get("source_type") or ""),
+                    "content": content,
+                }
+            )
+            used += len(content)
+        compact[name] = {
+            "max_chars": char_limit,
+            "max_items": item_limit,
+            "entries": selected,
+        }
+    return compact
 
 
 def _ensure_observable_legacy_boundary(text: str, appraisal: str) -> str:
