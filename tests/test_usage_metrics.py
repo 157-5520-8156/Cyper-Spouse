@@ -5,6 +5,33 @@ import sqlite3
 import pytest
 
 from companion_daemon.db import CompanionStore
+from companion_daemon.usage_metrics import estimate_model_cost_usd
+
+
+def test_v4_pro_usage_is_priced_instead_of_being_recorded_as_free() -> None:
+    cost, version = estimate_model_cost_usd(
+        model="deepseek-v4-pro",
+        prompt_tokens=3_000,
+        completion_tokens=500,
+        cache_hit_tokens=1_000,
+        cache_miss_tokens=2_000,
+    )
+
+    assert version == "deepseek-2026-07-13"
+    assert cost == pytest.approx(0.001308625)
+
+
+def test_unpriced_model_uses_a_conservative_cost_until_a_verified_price_is_added() -> None:
+    cost, version = estimate_model_cost_usd(
+        model="future-model",
+        prompt_tokens=100,
+        completion_tokens=10,
+        cache_hit_tokens=0,
+        cache_miss_tokens=0,
+    )
+
+    assert version == "unpriced-conservative-2026-07-13"
+    assert cost > 0
 
 
 def test_usage_report_links_calls_to_turn_and_reports_percentiles_and_cost(tmp_path: Path) -> None:

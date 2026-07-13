@@ -16,15 +16,41 @@ class ModelPrice:
     output_usd_per_million: float
 
 
-# DeepSeek public price table observed 2026-07-12. Historical rows persist the
+# DeepSeek public price table observed 2026-07-13. Historical rows persist the
 # version and computed USD amount so later price changes do not rewrite history.
+# Source: https://api-docs.deepseek.com/quick_start/pricing/
 DEEPSEEK_V4_FLASH_PRICE = ModelPrice(
     model="deepseek-v4-flash",
-    version="deepseek-2026-07-12",
+    version="deepseek-2026-07-13",
     cache_hit_usd_per_million=0.0028,
     cache_miss_usd_per_million=0.14,
     output_usd_per_million=0.28,
 )
+
+DEEPSEEK_V4_PRO_PRICE = ModelPrice(
+    model="deepseek-v4-pro",
+    version="deepseek-2026-07-13",
+    cache_hit_usd_per_million=0.003625,
+    cache_miss_usd_per_million=0.435,
+    output_usd_per_million=0.87,
+)
+
+# A new provider model must never silently become free just because its price
+# table has not reached this release yet.  This is intentionally above the
+# currently supported Pro rate, so routing remains bounded until an exact row
+# is added and verified.
+UNPRICED_MODEL_CONSERVATIVE_PRICE = ModelPrice(
+    model="__unpriced__",
+    version="unpriced-conservative-2026-07-13",
+    cache_hit_usd_per_million=0.01,
+    cache_miss_usd_per_million=1.20,
+    output_usd_per_million=2.40,
+)
+
+MODEL_PRICES: Mapping[str, ModelPrice] = {
+    DEEPSEEK_V4_FLASH_PRICE.model: DEEPSEEK_V4_FLASH_PRICE,
+    DEEPSEEK_V4_PRO_PRICE.model: DEEPSEEK_V4_PRO_PRICE,
+}
 
 
 def estimate_model_cost_usd(
@@ -35,9 +61,7 @@ def estimate_model_cost_usd(
     cache_hit_tokens: int,
     cache_miss_tokens: int,
 ) -> tuple[float, str]:
-    if model != DEEPSEEK_V4_FLASH_PRICE.model:
-        return 0.0, "unknown"
-    price = DEEPSEEK_V4_FLASH_PRICE
+    price = MODEL_PRICES.get(model, UNPRICED_MODEL_CONSERVATIVE_PRICE)
     hit = max(0, cache_hit_tokens)
     miss = max(0, cache_miss_tokens)
     # Older/partial provider payloads may omit cache details. Conservatively
