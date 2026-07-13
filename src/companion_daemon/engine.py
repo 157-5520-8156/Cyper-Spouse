@@ -451,36 +451,6 @@ class CompanionEngine:
         if self.budget_gate is not None and reservation_id:
             self.budget_gate.release_model_call(reservation_id)
 
-    async def _reserved_legacy_model_complete(
-        self,
-        model: ChatModel,
-        messages: list[dict[str, str]],
-        *,
-        purpose: str,
-        temperature: float,
-        action_id: str,
-        cadence: str = "warm",
-    ) -> str:
-        """Run one legacy side call through the same atomic spend boundary."""
-        reservation_id = self._reserve_model_call_budget(
-            action_id=action_id,
-            estimated_cny=self._estimate_model_call_reserve_cny(
-                model=model,
-                purpose=purpose,
-                cadence=cadence,
-                prompt_characters=sum(len(item.get("content", "")) for item in messages),
-            ),
-        )
-        try:
-            with model_call_scope(
-                purpose,
-                action_id=action_id,
-                budget_reservation_id=reservation_id,
-            ):
-                return await model.complete(messages, temperature=temperature)
-        finally:
-            self._release_model_call_budget(reservation_id)
-
     def _secondary_model_call_decision(
         self,
         purpose: str,
@@ -494,63 +464,6 @@ class CompanionEngine:
             turn_id=f"secondary:{purpose}:{now.isoformat()}",
             world_id=self.world_id or "",
             user_id="",
-    def _start_model_call_budget(self, reservation_id: str) -> bool:
-        if not reservation_id:
-            return True
-        if self.budget_gate is None:
-            return False
-        return self.budget_gate.start_model_call(reservation_id)
-
-    def _finalize_model_call_budget(
-        self,
-        reservation_id: str,
-        *,
-        request_emitted: bool,
-        usage_persisted: bool,
-    ) -> None:
-        if self.budget_gate is not None and reservation_id:
-            self.budget_gate.finalize_model_call(
-                reservation_id,
-                request_emitted=request_emitted,
-                usage_persisted=usage_persisted,
-            )
-
-    async def _reserved_legacy_model_complete(
-        self,
-        model: ChatModel,
-        messages: list[dict[str, str]],
-        *,
-        purpose: str,
-        temperature: float,
-        action_id: str,
-        cadence: str = "warm",
-    ) -> str:
-        """Run one legacy side call through the same atomic spend boundary.
-
-        Legacy background paths retain their own product decisions and failure
-        behavior.  This narrow wrapper only makes their provider I/O visible
-        to the shared reservation/usage ledger, so concurrent side work cannot
-        spend capacity that an in-flight CompanionTurn has already reserved.
-        """
-        reservation_id = self._reserve_model_call_budget(
-            action_id=action_id,
-            estimated_cny=self._estimate_model_call_reserve_cny(
-                model=model,
-                purpose=purpose,
-                cadence=cadence,
-                prompt_characters=sum(len(item.get("content", "")) for item in messages),
-            ),
-        )
-        try:
-            with model_call_scope(
-                purpose,
-                action_id=action_id,
-                budget_reservation_id=reservation_id,
-            ):
-                return await model.complete(messages, temperature=temperature)
-        finally:
-            self._release_model_call_budget(reservation_id)
-
             observed_at=now,
             cadence=ConversationCadence("warm", None, 0, "secondary_world_action"),
         )
@@ -607,22 +520,15 @@ class CompanionEngine:
                 purpose,
                 action_id=action_id,
                 budget_reservation_id=reservation_id,
-            ) as scope:
+            ):
                 return await complete_with_timeout(
                     _complete_structured_model(model, messages, temperature=temperature),
                     timeout_seconds=decision.soft_timeout_seconds,
                 )
         finally:
-            self._finalize_model_call_budget(
-                reservation_id,
-                request_emitted=bool(scope and scope.request_emitted),
-                usage_persisted=bool(scope and scope.usage_persisted),
-            )
+            self._release_model_call_budget(reservation_id)
 
-        scope = None
     async def aclose(self) -> None:
-            if not self._start_model_call_budget(reservation_id):
-                raise ConnectionError("model_reservation_not_startable")
         """Close runtime-owned asynchronous resources exactly once per object."""
         tasks = tuple(self._media_tasks | self._appraisal_tasks)
         for task in tasks:
@@ -1176,7 +1082,6 @@ class CompanionEngine:
                                 len(str(item.get("text") or ""))
                                 for item in appraisal_input.recent_messages
                             )
-            scope = None
                         ),
                     ),
                 )
@@ -1184,7 +1089,7 @@ class CompanionEngine:
                     "interaction_appraisal",
                     action_id=action_id,
                     budget_reservation_id=reservation_id,
-                ) as scope:
+                ):
                     result = await complete_with_timeout(
                         InteractionAppraiser(appraisal_model).assess(appraisal_input),
                         timeout_seconds=decision.soft_timeout_seconds,
@@ -1193,8 +1098,6 @@ class CompanionEngine:
                 self._fail_world_model_call(action_id, "engine_closed")
                 raise
             except Exception as exc:
-                if not self._start_model_call_budget(reservation_id):
-                    raise ConnectionError("model_reservation_not_startable")
                 self._fail_world_model_call(action_id, f"{type(exc).__name__}: {exc}")
                 logger.info(
                     "contextual user-affect advisory failed",
@@ -1202,11 +1105,7 @@ class CompanionEngine:
                 )
                 return
             finally:
-                self._finalize_model_call_budget(
-                    reservation_id,
-                    request_emitted=bool(scope and scope.request_emitted),
-                    usage_persisted=bool(scope and scope.usage_persisted),
-                )
+                self._release_model_call_budget(reservation_id)
             if result.raw_proposal is None:
                 self._fail_world_model_call(
                     action_id, result.rejection_reason or "proposal_rejected"
@@ -2685,11 +2584,7 @@ class CompanionEngine:
             self._fail_world_model_call(model_action_id, str(exc))
             raise
         finally:
-            self._finalize_model_call_budget(
-                reservation_id,
-                request_emitted=bool(scope and scope.request_emitted),
-                usage_persisted=bool(scope and scope.usage_persisted),
-            )
+            self._release_model_call_budget(reservation_id)
         if not provider_fallback:
             self._record_world_model_output(
                 purpose="reply", causation=intent_id, content=raw, action_id=model_action_id
@@ -2735,7 +2630,6 @@ class CompanionEngine:
             for entity in snapshot.get("entities", {}).values()
             if isinstance(entity, dict)
             and entity.get("kind") not in {"companion", "user"}
-        scope = None
             and str(entity.get("name") or "") in message.text
         }
         related_npc_experiences = [
@@ -2759,8 +2653,6 @@ class CompanionEngine:
                 asks_for_source_detail(message.text) and related_npc_experiences
             ),
         )
-            if not self._start_model_call_budget(reservation_id):
-                raise ConnectionError("model_reservation_not_startable")
         try:
             try:
                 mind_proposal = parse_mind_proposal(raw)
@@ -2871,7 +2763,7 @@ class CompanionEngine:
                 asks_for_source_detail(message.text)
                 and mentioned_npc_names
                 and not related_npc_experiences
-            ) as scope:
+            ):
                 candidate = {
                     "reply_text": "目前没有可以确认的互动记录，所以顺不顺利我不能乱说。",
                     "mentioned_event_ids": [], "proposed_action_ids": [], "claims": [],
@@ -3971,30 +3863,8 @@ class CompanionEngine:
                     )
                     return
             logger.info("triggering memory consolidation for %s", canonical_user_id)
-            memory_action_id = f"legacy-memory:{canonical_user_id}:{uuid4().hex}"
-            memory_reservation_id = self._reserve_model_call_budget(
-                action_id=memory_action_id,
-                estimated_cny=self._estimate_model_call_reserve_cny(
-                    model=self.model, purpose="memory_consolidation", cadence="warm",
-                    prompt_characters=sum(len(str(row["kind"])) + len(str(row["content"])) + 8 for row in self.store.memories(canonical_user_id, limit=40)),
-                ),
-            )
-            try:
-                await consolidate_memories(self.store, self.model, canonical_user_id, action_id=memory_action_id, budget_reservation_id=memory_reservation_id)
-            finally:
-                self._release_model_call_budget(memory_reservation_id)
-            self_core_action_id = f"legacy-self-core:{canonical_user_id}:{uuid4().hex}"
-            self_core_reservation_id = self._reserve_model_call_budget(
-                action_id=self_core_action_id,
-                estimated_cny=self._estimate_model_call_reserve_cny(
-                    model=self.model, purpose="self_core_generation", cadence="warm",
-                    prompt_characters=sum(len(str(row["kind"])) + len(str(row["content"])) + 8 for row in self.store.memories(canonical_user_id, limit=40)),
-                ),
-            )
-            try:
-                await build_self_core(self.store, self.model, canonical_user_id, state, action_id=self_core_action_id, budget_reservation_id=self_core_reservation_id)
-            finally:
-                self._release_model_call_budget(self_core_reservation_id)
+            await consolidate_memories(self.store, self.model, canonical_user_id)
+            await build_self_core(self.store, self.model, canonical_user_id, state)
             if self.budget_gate:
                 self.budget_gate.record(estimate, note="memory_consolidation:self_core")
         except Exception:

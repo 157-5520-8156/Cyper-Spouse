@@ -21,9 +21,6 @@ _MODEL_CALL_PURPOSE: ContextVar[str] = ContextVar(
 _MODEL_CALL_META: ContextVar[dict[str, object]] = ContextVar(
     "model_call_meta", default={}
 )
-_MODEL_CALL_STATE: ContextVar["ModelCallScopeState | None"] = ContextVar(
-    "model_call_state", default=None
-)
 
 
 @contextmanager
@@ -51,10 +48,8 @@ def model_call_scope(
     action_id: str = "",
     attempt: int = 1,
     budget_reservation_id: str = "",
-) -> Iterator["ModelCallScopeState"]:
-    state = ModelCallScopeState()
+) -> Iterator[None]:
     token = _MODEL_CALL_PURPOSE.set(purpose)
-    state_token = _MODEL_CALL_STATE.set(state)
     meta_token = _MODEL_CALL_META.set(
         {
             **_MODEL_CALL_META.get(),
@@ -64,10 +59,9 @@ def model_call_scope(
         }
     )
     try:
-        yield state
+        yield
     finally:
         _MODEL_CALL_META.reset(meta_token)
-        _MODEL_CALL_STATE.reset(state_token)
         _MODEL_CALL_PURPOSE.reset(token)
 
 
@@ -90,23 +84,6 @@ class ModelCallUsage:
     cadence: str = ""
     attempt: int = 1
     budget_reservation_id: str = ""
-    # ``unknown`` means the provider may have accepted or charged the call.
-    # Only a concrete local/provider rejection may use ``not_billed``.
-    billing_state: str = "unknown"
-
-
-@dataclass
-class ModelCallScopeState:
-    """Provider-boundary facts retained while the call scope remains active."""
-
-    request_emitted: bool = False
-    usage_persisted: bool | None = None
-
-
-def _mark_model_request_emitted() -> None:
-    state = _MODEL_CALL_STATE.get()
-    if state is not None:
-        state.request_emitted = True
 
 
 class ModelCircuitOpenError(ConnectionError):
@@ -296,7 +273,6 @@ class DeepSeekChatModel:
         try:
             if self.circuit_breaker is not None:
                 self.circuit_breaker.before_call()
-            _mark_model_request_emitted()
             response = await self.client.post(
                 f"{self.base_url}/chat/completions",
                 headers={
@@ -339,7 +315,6 @@ class DeepSeekChatModel:
                     budget_reservation_id=str(
                         call_meta.get("budget_reservation_id") or ""
                     ),
-                    billing_state="unknown",
                 )
             )
             raise
@@ -355,16 +330,6 @@ class DeepSeekChatModel:
                 error = f"provider_rejection:{exc}"
             else:
                 error = f"unexpected_error:{exc}"
-            billing_state = (
-                "not_billed"
-                if isinstance(exc, ModelCircuitOpenError)
-                or (
-                    isinstance(exc, httpx.HTTPStatusError)
-                    and exc.response.status_code not in {408, 429}
-                    and exc.response.status_code < 500
-                )
-                else "unknown"
-            )
             self._report_usage(
                 ModelCallUsage(
                     purpose=purpose,
@@ -380,7 +345,6 @@ class DeepSeekChatModel:
                     budget_reservation_id=str(
                         call_meta.get("budget_reservation_id") or ""
                     ),
-                    billing_state=billing_state,
                 )
             )
             raise
@@ -408,7 +372,6 @@ class DeepSeekChatModel:
                 cadence=str(call_meta.get("cadence") or ""),
                 attempt=max(1, int(call_meta.get("attempt") or 1)),
                 budget_reservation_id=str(call_meta.get("budget_reservation_id") or ""),
-                billing_state="known",
             )
         )
         return content
@@ -417,20 +380,13 @@ class DeepSeekChatModel:
         await self.client.aclose()
 
     def _report_usage(self, usage: ModelCallUsage) -> None:
-        state = _MODEL_CALL_STATE.get()
         if self.usage_observer is None:
-            if state is not None:
-                state.usage_persisted = False
             return
         try:
             self.usage_observer(usage)
-            if state is not None:
-                state.usage_persisted = True
         except Exception:
             # Observability must never turn a successful model response into a
             # failed companion turn.
-            if state is not None:
-                state.usage_persisted = False
             return
 
 

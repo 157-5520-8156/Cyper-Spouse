@@ -238,8 +238,6 @@ class CompanionStore:
                   automatic integer not null,
                   status text not null,
                   created_at text not null,
-                  started_at text,
-                  lease_expires_at text,
                   settled_at text
                 );
                 create index if not exists idx_model_budget_reservations_active
@@ -465,15 +463,6 @@ class CompanionStore:
                 "budget_reservation_id",
                 "text not null default ''",
             )
-            self._ensure_column(conn, "model_budget_reservations", "started_at", "text")
-            self._ensure_column(
-                conn, "model_budget_reservations", "lease_expires_at", "text"
-            )
-            # Pre-lease rows may have crossed a process boundary after their
-            # provider call was emitted.  The old schema cannot prove that they
-            # were unstarted, so migrate them conservatively rather than making
-            # them silently free on startup.
-            self._recover_expired_model_budget_reservations(conn, utc_now())
             self._init_world_schema(conn)
             conn.execute(
                 "update life_runtime set base_attention_demand = attention_demand where base_attention_demand is null"
@@ -2579,7 +2568,6 @@ class CompanionStore:
         cadence: str = "",
         attempt: int = 1,
         budget_reservation_id: str = "",
-        billing_state: str = "",
     ) -> None:
         from companion_daemon.usage_metrics import estimate_model_cost_usd
 
@@ -2634,7 +2622,7 @@ class CompanionStore:
                         """
                         update model_budget_reservations
                         set status = 'settled', actual_cny = ?, settled_at = ?
-                        where reservation_id = ? and status in ('reserved', 'in_flight', 'unknown')
+                        where reservation_id = ? and status = 'reserved'
                         """,
                         (
                             max(0.0, float(estimated_cost_usd)) * 7.2,
@@ -2642,25 +2630,12 @@ class CompanionStore:
                             budget_reservation_id,
                         ),
                     )
-                elif billing_state == "not_billed":
+                else:
                     conn.execute(
                         """
                         update model_budget_reservations
                         set status = 'released', settled_at = ?
-                        where reservation_id = ? and status in ('reserved', 'in_flight', 'unknown')
-                        """,
-                        (utc_now().isoformat(), budget_reservation_id),
-                    )
-                else:
-                    # A timeout, malformed response, caller cancellation, or
-                    # a failed usage write cannot prove that the provider did
-                    # not charge. Keep the envelope as a conservative charge
-                    # until a later usage record settles it.
-                    conn.execute(
-                        """
-                        update model_budget_reservations
-                        set status = 'unknown', actual_cny = estimated_cny, settled_at = ?
-                        where reservation_id = ? and status in ('reserved', 'in_flight')
+                        where reservation_id = ? and status = 'reserved'
                         """,
                         (utc_now().isoformat(), budget_reservation_id),
                     )
@@ -2675,7 +2650,6 @@ class CompanionStore:
         daily_budget_cny: float,
         soft_daily_budget_cny: float,
         now: datetime,
-        lease_seconds: int = 300,
     ) -> tuple[bool, str]:
         """Atomically reserve a provider-call envelope against shared spend.
 
@@ -2691,12 +2665,8 @@ class CompanionStore:
         day_prefix = observed_at.date().isoformat()
         month_prefix = observed_at.strftime("%Y-%m")
         created_at = observed_at.isoformat()
-        lease_expires_at = (
-            observed_at + timedelta(seconds=max(1, int(lease_seconds)))
-        ).isoformat()
         with self.connect() as conn:
             conn.execute("begin immediate")
-            self._recover_expired_model_budget_reservations(conn, observed_at)
             existing = conn.execute(
                 "select status from model_budget_reservations where reservation_id = ?",
                 (reservation_id,),
@@ -2724,8 +2694,7 @@ class CompanionStore:
                     """
                     select coalesce(sum(estimated_cny), 0) as total
                     from model_budget_reservations
-                    where status in ('reserved', 'in_flight', 'unknown')
-                      and substr(created_at, 1, ?) = ?
+                    where status = 'reserved' and substr(created_at, 1, ?) = ?
                     """,
                     (len(prefix), prefix),
                 ).fetchone()
@@ -2745,83 +2714,12 @@ class CompanionStore:
                 """
                 insert into model_budget_reservations (
                   reservation_id, estimated_cny, actual_cny, automatic, status,
-                  created_at, started_at, lease_expires_at, settled_at
-                ) values (?, ?, null, ?, 'reserved', ?, null, ?, null)
+                  created_at, settled_at
+                ) values (?, ?, null, ?, 'reserved', ?, null)
                 """,
-                (
-                    reservation_id[:160],
-                    amount,
-                    int(automatic),
-                    created_at,
-                    lease_expires_at,
-                ),
+                (reservation_id[:160], amount, int(automatic), created_at),
             )
         return True, "reserved"
-
-    def start_model_budget_reservation(
-        self,
-        reservation_id: str,
-        *,
-        now: datetime,
-        lease_seconds: int = 300,
-    ) -> bool:
-        """Record that a provider request is about to be emitted.
-
-        A process crash after this transition is not safe to release: expiry
-        recovers it as ``unknown`` and keeps its full envelope charged.
-        """
-        if not reservation_id:
-            return False
-        observed_at = now.astimezone(UTC)
-        with self.connect() as conn:
-            conn.execute("begin immediate")
-            self._recover_expired_model_budget_reservations(conn, observed_at)
-            result = conn.execute(
-                """
-                update model_budget_reservations
-                set status = 'in_flight', started_at = ?, lease_expires_at = ?
-                where reservation_id = ? and status = 'reserved'
-                """,
-                (
-                    observed_at.isoformat(),
-                    (
-                        observed_at + timedelta(seconds=max(1, int(lease_seconds)))
-                    ).isoformat(),
-                    reservation_id,
-                ),
-            )
-        return result.rowcount == 1
-
-    def finalize_model_budget_reservation(
-        self,
-        reservation_id: str,
-        *,
-        request_emitted: bool,
-        usage_persisted: bool,
-    ) -> None:
-        """Close a reservation after a model scope without inventing billing facts."""
-        if not reservation_id or usage_persisted:
-            return
-        with self.connect() as conn:
-            conn.execute("begin immediate")
-            if request_emitted:
-                conn.execute(
-                    """
-                    update model_budget_reservations
-                    set status = 'unknown', actual_cny = estimated_cny, settled_at = ?
-                    where reservation_id = ? and status in ('reserved', 'in_flight')
-                    """,
-                    (utc_now().isoformat(), reservation_id),
-                )
-            else:
-                conn.execute(
-                    """
-                    update model_budget_reservations
-                    set status = 'released', settled_at = ?
-                    where reservation_id = ? and status in ('reserved', 'in_flight')
-                    """,
-                    (utc_now().isoformat(), reservation_id),
-                )
 
     def release_model_budget_reservation(self, reservation_id: str) -> None:
         """Idempotently return a preflight envelope when no provider usage exists."""
@@ -2846,56 +2744,15 @@ class CompanionStore:
         else:
             raise ValueError(f"Unsupported usage window: {window}")
         with self.connect() as conn:
-            conn.execute("begin immediate")
-            self._recover_expired_model_budget_reservations(conn, now.astimezone(UTC))
             row = conn.execute(
                 """
                 select coalesce(sum(estimated_cny), 0) as total
                 from model_budget_reservations
-                where status in ('reserved', 'in_flight', 'unknown')
-                  and substr(created_at, 1, ?) = ?
+                where status = 'reserved' and substr(created_at, 1, ?) = ?
                 """,
                 (len(prefix), prefix),
             ).fetchone()
         return float(row["total"] or 0.0)
-
-    @staticmethod
-    def _recover_expired_model_budget_reservations(
-        conn: sqlite3.Connection, observed_at: datetime
-    ) -> None:
-        """Recover only preflight work that is provably unstarted.
-
-        ``in_flight`` and legacy rows lack a durable provider result, so they
-        become conservative unknown charges rather than becoming available
-        budget after a restart.
-        """
-        now_iso = observed_at.astimezone(UTC).isoformat()
-        conn.execute(
-            """
-            update model_budget_reservations
-            set status = 'released', settled_at = ?
-            where status = 'reserved' and lease_expires_at is not null
-              and lease_expires_at <= ?
-            """,
-            (now_iso, now_iso),
-        )
-        conn.execute(
-            """
-            update model_budget_reservations
-            set status = 'unknown', actual_cny = estimated_cny, settled_at = ?
-            where status = 'in_flight' and lease_expires_at is not null
-              and lease_expires_at <= ?
-            """,
-            (now_iso, now_iso),
-        )
-        conn.execute(
-            """
-            update model_budget_reservations
-            set status = 'unknown', actual_cny = estimated_cny, settled_at = ?
-            where status = 'reserved' and lease_expires_at is null
-            """,
-            (now_iso,),
-        )
 
     def recent_model_usage_samples(
         self,

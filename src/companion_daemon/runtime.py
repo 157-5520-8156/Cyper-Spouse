@@ -77,7 +77,6 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             cadence=usage.cadence,
             attempt=usage.attempt,
             budget_reservation_id=usage.budget_reservation_id,
-            billing_state=usage.billing_state,
         )
 
     interaction_appraisal_model = None
