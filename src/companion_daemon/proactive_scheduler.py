@@ -7,6 +7,13 @@ import logging
 import random
 
 from companion_daemon.config import get_settings
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    DispatchAcceptance,
+    ExternalObservation,
+    SettlementOutcome,
+    TurnBeat,
+)
 from companion_daemon.life_event import run as run_life_event
 from companion_daemon.models import IncomingMessage
 from companion_daemon.im_timing import between_part_delay_seconds
@@ -17,6 +24,7 @@ from companion_daemon.runtime import build_companion_engine
 from companion_daemon.life_runtime import maybe_apply_planned_life_result, synchronize_life_runtime
 from companion_daemon.world import ConcurrencyConflict
 from companion_daemon.world_clock import WorldClockDriver
+from companion_daemon.time import utc_now
 
 # The model may voice how long she wants to hold back, but the daemon caps how
 # much of that wish it honors so a bad decision cannot silence her for a day.
@@ -29,6 +37,74 @@ DEFERRED_RECOVERY_CONTEXT_HINT = (
     "回复时机提示: 这条消息在她忙完后才重新看到。"
     "自然接住即可，不要解释系统或承诺过的等待。"
 )
+
+
+# Keep the receipt extractor bound to the production adapter before tests (or
+# future adapter injection) replace ``QQDelivery`` with a transport double.
+_QQ_RECEIPT_CANDIDATE = QQDelivery.receipt_candidate
+
+
+class _QQScheduledTurnTransport:
+    """Adapt scheduler-owned QQ sends to the authoritative turn transport."""
+
+    def __init__(self, delivery: QQDelivery, recipient_id: str) -> None:
+        self.delivery = delivery
+        self.recipient_id = recipient_id
+
+    async def dispatch(self, beat: TurnBeat) -> DispatchAcceptance:
+        response = await self.delivery.send_text(self.recipient_id, beat.text)
+        receipt = _QQ_RECEIPT_CANDIDATE(response)
+        if not receipt:
+            return DispatchAcceptance(
+                status="unknown",
+                reason="qq_scheduler_send_returned_without_durable_receipt",
+            )
+        return DispatchAcceptance(status="delivered", external_receipt=receipt)
+
+
+async def _dispatch_world_scheduled_text(
+    engine,
+    *,
+    delivery: QQDelivery,
+    recipient_id: str,
+    action_id: str,
+    delivery_id: int,
+    idempotency_key: str,
+) -> SettlementOutcome:
+    """Send one already-authorized World action through receipt settlement."""
+    return await CompanionTurn(
+        engine,
+        _QQScheduledTurnTransport(delivery, recipient_id),
+    ).dispatch_scheduled(
+        action_id=action_id,
+        delivery_id=delivery_id,
+        observed_at=utc_now(),
+        idempotency_key=idempotency_key,
+    )
+
+
+async def _mark_world_action_unknown(
+    engine,
+    *,
+    delivery: QQDelivery,
+    recipient_id: str,
+    action_id: str,
+    idempotency_key: str,
+    reason: str,
+) -> None:
+    """Close the scheduling action when its resulting QQ send is unprovable."""
+    await CompanionTurn(
+        engine,
+        _QQScheduledTurnTransport(delivery, recipient_id),
+    ).settle(
+        ExternalObservation(
+            action_id=action_id,
+            observed_at=utc_now(),
+            idempotency_key=idempotency_key,
+            kind="timeout",
+            payload={"reason": reason},
+        )
+    )
 
 
 def _minutes_since(iso_timestamp: str | None) -> float | None:
@@ -208,13 +284,28 @@ async def recover_world_due_replies(
                 engine.complete_deferred_reply_task(action_id)
                 continue
             recipient_id = str(message.platform_user_id)
-            for index, part in enumerate(reply.text_parts or [reply.text]):
-                if index:
-                    await asyncio.sleep(between_part_delay_seconds(part))
-                await delivery.send_text(recipient_id, part)
-            engine.confirm_reply_delivery(reply)
-            engine.complete_deferred_reply_task(action_id)
-            recovered += 1
+            if reply.delivery_id is None or not reply.world_action_id:
+                raise RuntimeError("world deferred reply recovery did not stage an outgoing Action")
+            outcome = await _dispatch_world_scheduled_text(
+                engine,
+                delivery=delivery,
+                recipient_id=recipient_id,
+                action_id=reply.world_action_id,
+                delivery_id=reply.delivery_id,
+                idempotency_key=f"world-deferred-recovery:{action_id}:{reply.delivery_id}",
+            )
+            if outcome.terminal_state == "delivered":
+                engine.complete_deferred_reply_task(action_id)
+                recovered += 1
+            else:
+                await _mark_world_action_unknown(
+                    engine,
+                    delivery=delivery,
+                    recipient_id=recipient_id,
+                    action_id=action_id,
+                    idempotency_key=f"world-deferred-recovery:{action_id}:source-unknown",
+                    reason="recovered QQ reply has no durable delivery receipt",
+                )
         except Exception:
             logger.exception("failed to recover world delayed reply %s", action_id)
             if reply is not None:
@@ -338,23 +429,44 @@ async def recover_world_due_conversation_pulses(
                 engine.cancel_conversation_pulse(action_id)
                 continue
             delivery_id = engine.queue_afterthought_delivery(canonical_user_id, platform, text)
-            await delivery.send_text(platform_user_id, text)
-            engine.confirm_afterthought_delivery(canonical_user_id, platform, text, delivery_id=delivery_id)
-            engine.complete_conversation_pulse(action_id)
-            remaining = payload.get("remaining") or []
-            if remaining:
-                next_stage = remaining[0]
-                if isinstance(next_stage, dict):
-                    engine.schedule_conversation_pulse(
-                        canonical_user_id=canonical_user_id,
-                        platform=platform,
-                        platform_user_id=platform_user_id,
-                        reply_sent_at=reply_sent_at,
-                        mode=str(next_stage.get("mode") or "topic_drift"),
-                        delay_seconds=float(next_stage.get("delay_seconds") or 60),
-                        remaining=list(remaining[1:]),
-                    )
-            recovered += 1
+            afterthought_action_id = engine.world_kernel.action_id_for_delivery(
+                engine.world_id, delivery_id
+            )
+            if not afterthought_action_id:
+                raise RuntimeError("world conversation pulse recovery outbox has no World Action")
+            outcome = await _dispatch_world_scheduled_text(
+                engine,
+                delivery=delivery,
+                recipient_id=platform_user_id,
+                action_id=afterthought_action_id,
+                delivery_id=delivery_id,
+                idempotency_key=f"world-pulse-recovery:{action_id}:{delivery_id}",
+            )
+            if outcome.terminal_state == "delivered":
+                engine.complete_conversation_pulse(action_id)
+                remaining = payload.get("remaining") or []
+                if remaining:
+                    next_stage = remaining[0]
+                    if isinstance(next_stage, dict):
+                        engine.schedule_conversation_pulse(
+                            canonical_user_id=canonical_user_id,
+                            platform=platform,
+                            platform_user_id=platform_user_id,
+                            reply_sent_at=reply_sent_at,
+                            mode=str(next_stage.get("mode") or "topic_drift"),
+                            delay_seconds=float(next_stage.get("delay_seconds") or 60),
+                            remaining=list(remaining[1:]),
+                        )
+                recovered += 1
+            else:
+                await _mark_world_action_unknown(
+                    engine,
+                    delivery=delivery,
+                    recipient_id=platform_user_id,
+                    action_id=action_id,
+                    idempotency_key=f"world-pulse-recovery:{action_id}:source-unknown",
+                    reason="recovered QQ afterthought has no durable delivery receipt",
+                )
         except Exception:
             logger.exception("failed to recover world conversation pulse %s", action_id)
             if delivery_id is not None:
