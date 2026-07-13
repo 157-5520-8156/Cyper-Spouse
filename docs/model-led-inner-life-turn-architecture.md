@@ -651,7 +651,7 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
 | Phase 1 | QQ/NapCat 文本、simulator 与 HTTP Capture transport 都经过 `CompanionTurn.respond`；平台、tool、media 与 timeout 可经 `settle` 幂等结算；后台媒体、以及 World-mode 的重启后定时补发也通过同一 Turn seam | 非 World 的遗留兼容路径仍需逐步淘汰或改为同一 seam |
 | Phase 2–5 | 有界 TurnFrame、Advisory、单一 hard guard、PrivateImpression/Commitment 与 Expression Beat 已在主路径使用 | 长对话校准与各字段的体验效度尚未由外部用户数据证明 |
 | Phase 6 | 多段文本 receipt、用户插话取消、QQ 图片/贴纸/反应、NapCat 图片、后台图片、正常及重启后的 afterthought 的真实回执语义已覆盖；无 durable receipt 记为 `unknown`，NapCat 的成功/明确失败/无回执/异常矩阵已回归 | 仍需真实 NapCat/QQ 网络回执样本，并逐步淘汰非 World 遗留兼容路径 |
-| 模型与成本 | Flash 默认；强模型/thinking 路由会在能力缺失时显式降级；V4 Flash/Pro 都有版本化价格 | 记录每次调用的实际 thinking 路由并把它纳入生产基线；未知新模型价格需持续更新 |
+| 模型与成本 | Flash 默认；强模型/thinking 路由会在能力缺失时显式降级；V4 Flash/Pro 都有版本化价格；每次 provider usage 持久化实际 `thinking_enabled` / `reasoning_effort`，并按 route 聚合进入 turn 与 bare/full 基线证据 | 未知新模型价格需持续更新；真实模型质量与不同路由的长期效果仍需重复实测 |
 
 当前原则：不得为通过旧的“拒绝回复”测试而恢复软机制硬拦截；若旧测试要求低置信情绪、疲惫或普通边界压力直接静默，应改写为验证自然收住、边界表达或延后 Action，而非把它们重新变成表达审批器。
 
