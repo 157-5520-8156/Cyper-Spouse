@@ -299,7 +299,7 @@ async def test_world_afterthought_inherits_last_turn_hard_evidence(tmp_path: Pat
 
 @pytest.mark.asyncio
 async def test_world_afterthought_keeps_soft_quality_signal_without_legacy_audit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     class SimpleAfterthoughtModel:
         calls = 0
@@ -315,10 +315,6 @@ async def test_world_afterthought_keeps_soft_quality_signal_without_legacy_audit
         world_kernel=world, world_id=world_id,
     )
 
-    async def legacy_audit_must_not_run(**_kwargs: object) -> bool:
-        raise AssertionError("afterthought must not call the retired serial audit")
-
-    monkeypatch.setattr(engine, "_audit_world_reply", legacy_audit_must_not_run)
     caplog.set_level("INFO", logger="companion_daemon.engine")
 
     result = await engine.generate_afterthought("geoff", datetime.now())

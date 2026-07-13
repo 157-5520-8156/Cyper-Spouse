@@ -92,7 +92,7 @@ async def run(database: Path, output: Path) -> None:
     )
     engine = CompanionEngine(
         store, model, character.system_prompt(), world_kernel=world, world_id=world_id,
-        character_profile=character, world_grounding_audit_model=model,
+        character_profile=character,
     )
     log: list[dict[str, object]] = []
     for turn, prompt in enumerate(PROMPTS, 1):

@@ -672,11 +672,6 @@ async def test_world_proactive_keeps_soft_quality_signals_without_serial_audit(
     model = SoftSignalModel()
     engine = CompanionEngine(store, model, TEST_PROMPT, world_kernel=world, world_id=world_id)
 
-    async def legacy_audit_must_not_run(**_kwargs: object) -> bool:
-        raise AssertionError("proactive must not call the retired serial audit")
-
-    monkeypatch.setattr(engine, "_audit_world_reply", legacy_audit_must_not_run)
-
     decision = await engine.proactive_tick("geoff")
 
     assert decision.should_send is True

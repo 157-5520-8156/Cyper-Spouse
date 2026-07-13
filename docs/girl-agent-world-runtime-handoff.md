@@ -1409,7 +1409,6 @@ ToolProposed
 
 - `src/companion_daemon/engine.py`
 - `src/companion_daemon/world_conversation.py`
-- `src/companion_daemon/world_reply_audit.py`
 - `src/companion_daemon/context_orchestrator.py`
 - `src/companion_daemon/prompts.py`
 - `configs/character.yaml`

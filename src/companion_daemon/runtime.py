@@ -255,7 +255,6 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
         rewrite_model=rewrite_model,
         world_kernel=world_kernel,
         world_id=world_id,
-        world_grounding_audit_model=model if world_kernel else None,
         interaction_appraisal_model=interaction_appraisal_model,
         interaction_deep_appraisal_model=interaction_deep_appraisal_model,
         reply_repair_model=reply_repair_model,

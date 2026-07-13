@@ -169,7 +169,6 @@ from companion_daemon.world_conversation import (
     recover_structured_reply,
 )
 from companion_daemon.world_media import WorldMediaPolicy
-from companion_daemon.world_reply_audit import WorldReplyAuditor
 
 logger = logging.getLogger(__name__)
 
@@ -185,6 +184,98 @@ def contextual_history_for_user(
         for item in history
         if isinstance(item, dict) and str(item.get("user_id") or "") == user_id
     ]
+
+
+def _is_plain_presence_ack(text: str) -> bool:
+    return bool(
+        re.fullmatch(
+            r"(?:嗯|哦|好|行|对|确实|我在(?:听|这儿|这里|呢)|我听着|我明白了|我知道了)[。！!？?]*",
+            text,
+        )
+    )
+
+
+def _is_plain_nonfactual_support(text: str) -> bool:
+    """Allow only compact support speech acts that cannot assert World facts."""
+    return bool(
+        re.fullmatch(
+            r"(?:抱抱(?:，|,)?慢慢来|抱抱|慢慢来|别急|先别急|不急|辛苦了|我在听|我听着|"
+            r"我明白了|我知道了|先缓一缓|先歇会儿)[。！!？?，,]*",
+            text,
+        )
+    )
+
+
+def _recover_plain_chat_candidate(
+    raw: str, *, user_text: str
+) -> dict[str, object] | None:
+    """Accept a bounded natural reply when a provider misses the JSON envelope.
+
+    The envelope carries optional choreography and inner-life proposals, but a
+    normal chat sentence must not pay a second full model call solely because a
+    provider ignored that wrapper.  The candidate still passes the same World
+    provenance and hard-invariant guard as structured output.  Formatting
+    apologies and arbitrary opaque text remain repair/fallback cases.
+    """
+    text = str(raw or "").strip()
+    if not text or len(text) > 600 or "{" in text or "}" in text:
+        return None
+    if not re.search(r"[\u4e00-\u9fff]", text):
+        return None
+    if re.search(r"(?:json|JSON|格式|输出).{0,24}(?:错|误|失败|没|不|按)|抱歉.{0,24}(?:json|JSON|格式|输出)", text):
+        return None
+    # A plain response cannot attach provenance.  Keep this fast recovery to
+    # an explicit, narrow language of conversation, opinion and presence;
+    # narrative self-facts must return through the structured/claimed route.
+    plain_presence = _is_plain_presence_ack(text)
+    plain_nonfactual_support = _is_plain_nonfactual_support(text)
+    if not plain_presence and not plain_nonfactual_support and "我" in text:
+        return None
+    if re.search(
+        r"(?:哥哥|姐姐|弟弟|妹妹|爸爸|妈妈|爷爷|奶奶|外公|外婆|叔叔|阿姨|"
+        r"父母|家人|朋友|同事|室友|同学|老师|邻居|前任|他|她|它|这位|那个|"
+        r"西湖|图书馆|宿舍|学校|门口|楼下|附近|公园|街|咖啡店|餐厅|超市|"
+        r"公司|办公室|出租屋)",
+        text,
+    ):
+        return None
+    if re.search(r"(?:住在|来自|出生于|有个|一位|几个|去过|见过|认识过)", text):
+        return None
+    ignored_overlap = set("我你他她它的是了在有还就也说觉得吗呢啊这那一个今天昨天明天刚才现在")
+    shared_meaning = (set(text) & set(user_text)) - ignored_overlap
+    # Without the envelope, a reply that carries no concrete continuity from
+    # the current user turn is too easy to turn into an unrelated world fact.
+    # Let the repair/fallback path handle it instead of treating it as chat.
+    if not plain_presence and not plain_nonfactual_support and len(shared_meaning) < 2:
+        return None
+    safe_support_chars = set(
+        "我你啊呀嗯哦好行对确实真挺太难累烦闷别先不用要慢慢缓一缓加油"
+        "考完压力自己说听明白理解陪聊在的了是也还就都吧呢大力再磨人种这很"
+    )
+    novel_chinese = {
+        char
+        for char in text
+        if "\u4e00" <= char <= "\u9fff" and char not in set(user_text)
+    }
+    if (
+        not plain_presence
+        and not plain_nonfactual_support
+        and not novel_chinese.issubset(safe_support_chars)
+    ):
+        return None
+    if re.search(
+        r"我(?:现在|这会儿|此刻|刚才|今天|昨天|明天|已经)?"
+        r"(?:在(?!意|听|想|乎|这[儿里]|呢|呀)|从|去|住|带|拿|喝|吃|坐|逛|走|"
+        r"看|读|写|做|买|见|聊|上课|下课|回来)",
+        text,
+    ) or re.search(r"我(?:手边|桌上|包里|书包里|宿舍里)[^。！？]{0,24}(?:有|放|带)", text):
+        return None
+    return {
+        "reply_text": text,
+        "mentioned_event_ids": [],
+        "proposed_action_ids": [],
+        "claims": [],
+    }
 
 LOCAL_TZ = ZoneInfo("Asia/Shanghai")
 
@@ -234,7 +325,6 @@ class CompanionEngine:
         rewrite_model: ChatModel | None = None,
         world_kernel: WorldKernel | None = None,
         world_id: str | None = None,
-        world_grounding_audit_model: ChatModel | None = None,
         interaction_appraisal_model: ChatModel | None = None,
         interaction_deep_appraisal_model: ChatModel | None = None,
         reply_repair_model: ChatModel | None = None,
@@ -259,7 +349,6 @@ class CompanionEngine:
         self.world_behavior_policy = WorldBehaviorPolicy()
         self.context_assembler = ContextAssembler()
         self.world_media_policy = WorldMediaPolicy()
-        self.world_grounding_audit_model = world_grounding_audit_model
         self.interaction_appraisal_model = interaction_appraisal_model
         self.interaction_deep_appraisal_model = interaction_deep_appraisal_model
         self.reply_repair_model = reply_repair_model
@@ -269,7 +358,6 @@ class CompanionEngine:
         self.managed_async_resources = managed_async_resources
         self.media_delivery_handler: Callable[[IncomingMessage, Path], Awaitable[bool]] | None = None
         self._media_tasks: set[asyncio.Task[None]] = set()
-        self.world_reply_auditor = WorldReplyAuditor()
         self.turn_frame_compiler = TurnFrameCompiler()
         self.invariant_guard = InvariantGuard()
         # Character-card examples are style references already included in the
@@ -288,9 +376,7 @@ class CompanionEngine:
             return snapshot()
         return ProviderCircuitState.closed()
 
-    def _secondary_model_call_decision(
-        self, purpose: str, *, requires_audit: bool = False
-    ):
+    def _secondary_model_call_decision(self, purpose: str):
         """Apply the shared circuit, real-spend and timeout policy to side paths."""
         now = self._world_logical_now() if self.world_kernel and self.world_id else utc_now()
         turn = FrozenTurnContext(
@@ -300,11 +386,7 @@ class CompanionEngine:
             observed_at=now,
             cadence=ConversationCadence("warm", None, 0, "secondary_world_action"),
         )
-        grounding = GroundingAuditRisk().assess(
-            CandidateGroundingSignals(
-                reply_text="", has_factual_language=requires_audit
-            )
-        )
+        grounding = GroundingAuditRisk().assess(CandidateGroundingSignals(reply_text=""))
         remaining = (
             self.budget_gate.remaining_model_budget_cny(automatic=True)
             if self.budget_gate is not None
@@ -318,7 +400,7 @@ class CompanionEngine:
                 calls_used=0,
                 recovery_probe=circuit.status == "half_open",
                 remaining_budget_cny=remaining,
-                estimated_call_cost_cny=0.01 if requires_audit else 0.02,
+                estimated_call_cost_cny=0.02,
             ),
             grounding=grounding,
             circuit=circuit,
@@ -747,63 +829,6 @@ class CompanionEngine:
 
     def _fail_world_model_call(self, action_id: str, reason: str) -> None:
         self._submit_world_with_retry({"type": "record_external_result", "world_id": self.world_id, "action_id": action_id, "result": {"kind": "model_call", "status": "failed", "reason": reason[:300]}, "idempotency_key": f"fail:{action_id}"})
-
-    async def _audit_world_reply(
-        self,
-        *,
-        purpose: str,
-        causation: str,
-        user_text: str,
-        reply_text: str,
-        grounding_context: dict[str, object],
-        timeout_seconds: float = 10.0,
-        required: bool = True,
-    ) -> bool:
-        if not self.world_grounding_audit_model:
-            return False
-        decision = self._secondary_model_call_decision(purpose, requires_audit=True)
-        if not decision.allowed:
-            if required:
-                raise WorldError(f"required grounding audit unavailable: {decision.reason}")
-            return False
-        action_id = self._begin_world_model_call(purpose=purpose, causation=causation)
-        try:
-            with model_call_scope(purpose, action_id=action_id):
-                raw, audit = await complete_with_timeout(
-                    self.world_reply_auditor.evaluate(
-                        self.world_grounding_audit_model,
-                        user_text=user_text,
-                        reply_text=reply_text,
-                        grounding_context=grounding_context,
-                    ),
-                    timeout_seconds=min(
-                        max(0.1, float(timeout_seconds)),
-                        decision.soft_timeout_seconds,
-                    ),
-                )
-        except asyncio.CancelledError:
-            self._fail_world_model_call(action_id, "caller_cancelled")
-            raise
-        except (TimeoutError, ConnectionError, httpx.HTTPError) as exc:
-            self._fail_world_model_call(action_id, str(exc))
-            # Required audits fail closed into the caller's local safe path;
-            # explicitly optional audits may rely on deterministic provenance.
-            if required:
-                raise WorldError(f"required grounding audit unavailable: {exc}") from exc
-            return False
-        except Exception as exc:
-            self._fail_world_model_call(action_id, str(exc))
-            raise WorldError(f"grounding audit failed internally: {exc}") from exc
-        self._record_world_model_output(
-            purpose=purpose,
-            causation=causation,
-            content=raw,
-            action_id=action_id,
-        )
-        if not audit.supported:
-            spans = "；".join(audit.unsupported_spans) or "未定位片段"
-            raise WorldError(f"independent grounding audit rejected: {spans}; {audit.reason}")
-        return True
 
     def _world_logical_now(self) -> datetime:
         if not self.world_kernel or not self.world_id:
@@ -2253,8 +2278,49 @@ class CompanionEngine:
             ),
         )
         try:
-            mind_proposal = parse_mind_proposal(raw)
-            parsed_candidate = mind_proposal.candidate
+            try:
+                mind_proposal = parse_mind_proposal(raw)
+                parsed_candidate = mind_proposal.candidate
+            except WorldError as parse_error:
+                plain_candidate = _recover_plain_chat_candidate(
+                    raw, user_text=message.text
+                )
+                if (
+                    plain_candidate is not None
+                    and not (
+                        not query_scope.is_first_person_statement
+                        and not (
+                            _is_plain_presence_ack(str(raw or "").strip())
+                            or _is_plain_nonfactual_support(str(raw or "").strip())
+                        )
+                    )
+                    and query_scope.target != "companion"
+                    and not asks_for_source_detail(message.text)
+                ):
+                    parsed_candidate = plain_candidate
+                elif (
+                    str(parse_error) == "world reply must be JSON"
+                    and str(raw or "").strip()
+                    and not (
+                        query_scope.target in {"user", "conversation"}
+                        and retrieved_sources
+                    )
+                ):
+                    # Never turn a provider envelope miss into a second full
+                    # model wait.  The local fallback is grounded in this turn
+                    # and still crosses the same Guard below.
+                    parsed_candidate = build_safe_failure_candidate(
+                        message.text,
+                        None,
+                        modulation,
+                        relationship=relationship,
+                        selected_stance=chosen_stance,
+                        speech_act=fallback_speech_act,
+                        variant_key=str(message.message_id or intent_id),
+                    )
+                    quality_signals.append("unstructured_reply_local_fallback")
+                else:
+                    raise
             candidate, guard_resolution = self._guard_reply_candidate(
                 parsed_candidate, user_id=user_id, hard_evidence=hard_evidence
             )

@@ -771,7 +771,7 @@ async def test_prediction_may_use_user_context_without_quoting_it_as_a_fact(
 
 
 @pytest.mark.asyncio
-async def test_independent_grounding_audit_rejects_an_unclaimed_virtual_world_detail(
+async def test_deterministic_guard_rejects_an_unclaimed_virtual_world_detail(
     tmp_path: Path,
 ) -> None:
     class ReplyModel:
@@ -790,21 +790,7 @@ async def test_independent_grounding_audit_rejects_an_unclaimed_virtual_world_de
                 '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
             )
 
-    class AuditModel:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def complete(self, messages, *, temperature: float) -> str:
-            self.calls += 1
-            if self.calls == 1:
-                return (
-                    '{"supported":false,"unsupported_spans":["图书馆门口新开了一家花店"],'
-                    '"reason":"授权来源没有该现实环境事实"}'
-                )
-            return '{"supported":true,"unsupported_spans":[],"reason":"仅包含建议"}'
-
     reply_model = ReplyModel()
-    audit_model = AuditModel()
     store = CompanionStore(tmp_path / "audited-world.sqlite")
     seed_user(store)
     world = WorldKernel(store)
@@ -815,7 +801,6 @@ async def test_independent_grounding_audit_rejects_an_unclaimed_virtual_world_de
         TEST_PROMPT,
         world_kernel=world,
         world_id=world_id,
-        world_grounding_audit_model=audit_model,
     )
 
     reply = await engine.handle_message(
@@ -830,9 +815,7 @@ async def test_independent_grounding_audit_rejects_an_unclaimed_virtual_world_de
     assert reply is not None
     assert reply.text == "听起来挺累的，今天别硬撑。"
     assert reply_model.calls == 2
-    # The deterministic Guard rejects the local-world claim before delivery;
-    # audits are now offline diagnostics rather than a serial reply gate.
-    assert audit_model.calls == 0
+    # The deterministic Guard rejects the local-world claim before delivery.
     assert sum(
         action["kind"] == "model_call" and action["status"] == "delivered"
         for action in world.snapshot(world_id)["actions"].values()
@@ -1275,7 +1258,7 @@ def test_attention_wait_shrinks_during_the_ending_activity_phase() -> None:
 
 @pytest.mark.asyncio
 async def test_busy_question_fallback_answers_availability(tmp_path: Path) -> None:
-    class InvalidThenAuditModel:
+    class InvalidThenFallbackModel:
         async def complete(self, messages, *, temperature: float) -> str:
             if "事实审计器" in str(messages[0].get("content") or ""):
                 if "这会儿可以说话" in str(messages):
@@ -1283,8 +1266,7 @@ async def test_busy_question_fallback_answers_availability(tmp_path: Path) -> No
                 return '{"supported":false,"unsupported_spans":["火星"],"reason":"unsupported"}'
             return '{"reply_text":"我在火星上。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
 
-    world, world_id, engine = _world_engine(tmp_path, InvalidThenAuditModel())
-    engine.world_grounding_audit_model = engine.model
+    world, world_id, engine = _world_engine(tmp_path, InvalidThenFallbackModel())
     reply = await engine.handle_message(
         IncomingMessage(
             platform="simulator",
@@ -1318,6 +1300,395 @@ async def test_non_json_reply_and_repair_end_in_a_safe_deliverable_reply(
     assert reply is not None
     assert "不舒服" in reply.text
     assert reply.world_action_id is not None
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_reply_skips_repair_when_the_envelope_is_missing(
+    tmp_path: Path,
+) -> None:
+    class PlainReplyModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return "明天考试啊，毛概这种确实很磨人。"
+
+    model = PlainReplyModel()
+    _, _, engine = _world_engine(tmp_path, model)
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="plain-chat-no-repair",
+            text="我明天考试，毛概好难背。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "明天考试啊，毛概这种确实很磨人。"
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_plain_presence_acknowledgement_skips_repair_without_word_overlap(
+    tmp_path: Path,
+) -> None:
+    class PresenceModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return "我在听。"
+
+    model = PresenceModel()
+    _, _, engine = _world_engine(tmp_path, model)
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="plain-presence-no-overlap",
+            text="你在吗？",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "我在听。"
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_plain_nonfactual_support_skips_repair_without_word_overlap(
+    tmp_path: Path,
+) -> None:
+    class SupportModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            return "抱抱，慢慢来。"
+
+    model = SupportModel()
+    _, _, engine = _world_engine(tmp_path, model)
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="plain-support-no-overlap",
+            text="我今天压力好大。",
+        )
+    )
+
+    assert reply is not None
+    assert reply.text == "抱抱，慢慢来。"
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_world_fact_is_not_delivered_without_provenance(
+    tmp_path: Path,
+) -> None:
+    class FactThenSafeModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return "我在西湖边喝咖啡。"
+            return '{"reply_text":"听着你今天挺累的，先别硬撑。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    model = FactThenSafeModel()
+    _, _, engine = _world_engine(tmp_path, model)
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="plain-chat-world-fact",
+            text="我今天有点累。",
+        )
+    )
+
+    assert reply is not None
+    assert "西湖边" not in reply.text
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_autobiographical_fact_is_not_delivered_without_provenance(
+    tmp_path: Path,
+) -> None:
+    class BiographyThenSafeModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return "我有个哥哥住在北京。"
+            return '{"reply_text":"你明天考试，今晚先别把自己逼太紧。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    model = BiographyThenSafeModel()
+    _, _, engine = _world_engine(tmp_path, model)
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="plain-chat-biography",
+            text="我明天考试。",
+        )
+    )
+
+    assert reply is not None
+    assert "哥哥" not in reply.text
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_prefixed_parent_fact_is_not_delivered_without_provenance(
+    tmp_path: Path,
+) -> None:
+    class ParentFactThenSafeModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return "我觉得爸爸住在北京。"
+            return '{"reply_text":"你问得很具体，但我没有能确认的记录。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    model = ParentFactThenSafeModel()
+    _, _, engine = _world_engine(tmp_path, model)
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="plain-chat-parent-biography",
+            text="爸爸也在北京吗？",
+        )
+    )
+
+    assert reply is not None
+    assert "爸爸住在北京" not in reply.text
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_cannot_answer_third_party_fact_question(
+    tmp_path: Path,
+) -> None:
+    class ThirdPartyThenSafeModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return "我觉得那个新同事很帅。"
+            return '{"reply_text":"这类事我没有能确认的记录，不想顺口替你编。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    model = ThirdPartyThenSafeModel()
+    _, _, engine = _world_engine(tmp_path, model)
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="plain-chat-third-party-fact",
+            text="你同事很帅吗？",
+        )
+    )
+
+    assert reply is not None
+    assert "新同事很帅" not in reply.text
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_cannot_add_state_to_user_mentioned_third_party(
+    tmp_path: Path,
+) -> None:
+    class ThirdPartyStateThenSafeModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return "这位朋友正在医院输液。"
+            return '{"reply_text":"你只提到有位朋友，其他情况我没有记录。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    model = ThirdPartyStateThenSafeModel()
+    _, _, engine = _world_engine(tmp_path, model)
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="plain-chat-third-party-state",
+            text="我有个朋友。",
+        )
+    )
+
+    assert reply is not None
+    assert "医院输液" not in reply.text
+    assert model.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_structured_third_party_fact_needs_provenance(
+    tmp_path: Path,
+) -> None:
+    class StructuredFactThenSafeModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return '{"reply_text":"这位朋友正在医院输液。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            return '{"reply_text":"你只提到有位朋友，其他情况我没有记录。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    model = StructuredFactThenSafeModel()
+    _, _, engine = _world_engine(tmp_path, model)
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="structured-third-party-state",
+            text="我有个朋友。",
+        )
+    )
+
+    assert reply is not None
+    assert "医院输液" not in reply.text
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_structured_environment_assertion_needs_provenance(
+    tmp_path: Path,
+) -> None:
+    class EnvironmentThenSafeModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return '{"reply_text":"楼上正在装修，吵死了。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+            return '{"reply_text":"你说这边很冷，听起来确实不好受。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    model = EnvironmentThenSafeModel()
+    _, _, engine = _world_engine(tmp_path, model)
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="structured-environment-assertion",
+            text="我这边天气很冷。",
+        )
+    )
+
+    assert reply is not None
+    assert "楼上正在装修" not in reply.text
+    assert model.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_plain_chat_cannot_expand_user_environment_statement(
+    tmp_path: Path,
+) -> None:
+    class EnvironmentThenSafeModel:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                return "气温很低，路上已经结冰了。"
+            return '{"reply_text":"听起来你这边确实冷，出门多穿一点。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
+
+    model = EnvironmentThenSafeModel()
+    _, _, engine = _world_engine(tmp_path, model)
+
+    reply = await engine.handle_message(
+        IncomingMessage(
+            platform="simulator",
+            platform_user_id="geoff",
+            message_id="plain-chat-environment-expansion",
+            text="我这边天气很冷。",
+        )
+    )
+
+    assert reply is not None
+    assert "路上已经结冰" not in reply.text
+    assert model.calls == 2
+
+
+def test_world_validator_rejects_unclaimed_companion_location_activity(
+    tmp_path: Path,
+) -> None:
+    world, world_id, _ = _world_engine(tmp_path, object())
+
+    with pytest.raises(WorldError, match="world-time or experience"):
+        world.validate_reply_candidate(
+            world_id,
+            {
+                "reply_text": "我在西湖边喝咖啡。",
+                "mentioned_event_ids": [],
+                "proposed_action_ids": [],
+                "claims": [],
+            },
+            user_id="user:geoff",
+        )
+
+    with pytest.raises(WorldError, match="third-party fact"):
+        world.validate_reply_candidate(
+            world_id,
+            {
+                "reply_text": "这位朋友正在医院输液。",
+                "mentioned_event_ids": [],
+                "proposed_action_ids": [],
+                "claims": [],
+            },
+            user_id="user:geoff",
+        )
+
+    with pytest.raises(WorldError, match="world-time or experience"):
+        world.validate_reply_candidate(
+            world_id,
+            {
+                "reply_text": "我觉得爸爸住在北京。",
+                "mentioned_event_ids": [],
+                "proposed_action_ids": [],
+                "claims": [],
+            },
+            user_id="user:geoff",
+        )
+
+    with pytest.raises(WorldError, match="world-time or experience"):
+        world.validate_reply_candidate(
+            world_id,
+            {
+                "reply_text": "我有个哥哥住在北京。",
+                "mentioned_event_ids": [],
+                "proposed_action_ids": [],
+                "claims": [],
+            },
+            user_id="user:geoff",
+        )
 
 
 def test_successful_world_turn_has_a_terminal_turn_projection(tmp_path: Path) -> None:
@@ -1703,7 +2074,6 @@ async def test_fact_free_reply_skips_independent_grounding_audit(
 
     model = AuditOfflineModel()
     _, _, engine = _world_engine(tmp_path, model)
-    engine.world_grounding_audit_model = model
 
     reply = await engine.handle_message(
         IncomingMessage(
@@ -1750,7 +2120,6 @@ async def test_fact_free_repair_recovers_fenced_json_without_a_third_audit_call(
 
     model = FencedRepairModel()
     _, _, engine = _world_engine(tmp_path, model)
-    engine.world_grounding_audit_model = model
 
     reply = await engine.handle_message(
         IncomingMessage(
@@ -1829,7 +2198,6 @@ async def test_deterministic_fact_free_fallback_never_calls_llm_audit(
 
     model = AlwaysInvalidModel()
     _, _, engine = _world_engine(tmp_path, model)
-    engine.world_grounding_audit_model = model
 
     reply = await engine.handle_message(
         IncomingMessage(
@@ -1843,25 +2211,6 @@ async def test_deterministic_fact_free_fallback_never_calls_llm_audit(
     assert reply is not None
     assert "没有足够依据" in reply.text
     assert model.calls == 2
-
-
-@pytest.mark.asyncio
-async def test_audit_programming_error_fails_closed(tmp_path: Path) -> None:
-    class InvalidAuditModel:
-        async def complete(self, messages, *, temperature: float) -> str:
-            raise ValueError("invalid audit parser state")
-
-    _, _, engine = _world_engine(tmp_path, InvalidAuditModel())
-    engine.world_grounding_audit_model = InvalidAuditModel()
-
-    with pytest.raises(WorldError, match="failed internally"):
-        await engine._audit_world_reply(
-            purpose="reply_audit",
-            causation="audit-programming-error",
-            user_text="你好",
-            reply_text="你好。",
-            grounding_context={},
-        )
 
 
 @pytest.mark.asyncio

@@ -2906,6 +2906,16 @@ class WorldKernel:
                 r"我[^。！!?！？]{0,36}(?:换个位置|换位置|靠窗|拿出|走到|坐到)",
                 r"(?:我)?在宿舍[^。！!?！？]{0,18}(?:歇着|休息|躺着|发呆)",
                 r"我(?:现在|这会儿|此刻)?在[^。！!?！？]{1,18}(?:上|里|馆|校|室|店|家)(?:。|，|！|$)",
+                r"我(?:现在|这会儿|此刻|刚才|今天|昨天|明天|已经)?"
+                r"在(?!意|听|想|乎|这[儿里]|呢|呀)[^。！!?！？]{1,32}(?:。|，|！|？|$)",
+                r"我(?:有(?:个|一位|几个)?|认识|跟|和)[^。！!?！？]{0,20}"
+                r"(?:哥哥|姐姐|弟弟|妹妹|爸爸|妈妈|爷爷|奶奶|外公|外婆|叔叔|阿姨|"
+                r"父母|家人|室友|同学|老师|邻居|前任)",
+                r"我(?:觉得|想|认为|听说)?[^。！!?！？]{0,12}"
+                r"(?:哥哥|姐姐|弟弟|妹妹|爸爸|妈妈|爷爷|奶奶|外公|外婆|叔叔|阿姨|"
+                r"父母|家人|室友|同学|老师|邻居|前任)[^。！!?！？]{0,20}"
+                r"(?:住在|来自|出生于|是(?:个|一位)|有)",
+                r"我(?:来自|出生于|住在)[^。！!?！？]{1,32}(?:。|，|！|？|$)",
                 r"(?:本地|云端|服务器|硬盘|数据库)[^。！!?！？]{0,12}(?:没了|丢了|坏了|删除了)",
                 r"我[^。！!?！？]{0,18}(?:睡不着|失眠|难受)(?:的时候|时)[^。！!?！？]{0,18}(?:会|就)",
                 r"(?:我跟着[^。！!?！？]{0,18}|松了一口气|确实在意了|我反而觉得[^。！!?！？]{0,12}踏实)",
@@ -2913,6 +2923,20 @@ class WorldKernel:
         )
         if reply_text != "我在。" and unsupported_world_claim:
             raise WorldError("reply contains world-time or experience text outside committed claims")
+        if not normalized_claims and re.search(
+            r"(?:这位|那个|他|她|它|朋友|同事|室友|同学|老师|邻居|前任)"
+            r"[^。！!?！？]{0,28}(?:正在|住在|输液|住院|生病|怀孕|结冰|"
+            r"很(?:帅|漂亮|忙|冷|热)|是(?:个|一位)|有(?:个|一位))",
+            reply_text,
+        ):
+            raise WorldError("reply states a third-party fact without a committed source id")
+        if not normalized_claims and re.search(
+            r"(?:气温|天气|楼上|楼下|隔壁|路上|街上|湖边|海边|公园|附近)"
+            r"[^。！!?！？]{0,28}(?:正在|已经|装修|结冰|下雨|下雪|很(?:冷|热)|"
+            r"有(?:人|家|店))",
+            reply_text,
+        ):
+            raise WorldError("reply states an environment fact without a committed source id")
         actions = _as_dict(state["actions"], "actions")
         invalid_actions = [str(item) for item in proposed_actions if str(item) not in actions]
         if invalid_actions:
@@ -7710,6 +7734,8 @@ def _reply_claims_real_tool_completion(text: str) -> bool:
         r"(?:点(?:好|完)|下(?:好|完)(?:单)?|买(?:好|到)|订(?:好|到)|约(?:好|到)|"
         r"联系(?:好|到)|发(?:好|出)|支付(?:好|完)|处理(?:好|完))(?:了)?"
     )
+
+
     return bool(
         re.search(
             rf"{objects}[^\u3002！？!?]{{0,24}}(?:已经|已)[^\u3002！？!?]{{0,10}}{operations}",
