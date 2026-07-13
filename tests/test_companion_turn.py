@@ -19,7 +19,9 @@ from companion_daemon.companion_turn import (
     TurnTransport,
 )
 from companion_daemon.db import CompanionStore
+from companion_daemon.conversation_cadence import ConversationCadence, FrozenTurnContext
 from companion_daemon.engine import CompanionEngine, seed_user
+from companion_daemon.multimodal_analysis import AttachmentInsight
 from companion_daemon.models import IncomingMessage, MessageAttachment
 from companion_daemon.platform_adapter import DeliveryReceipt
 from companion_daemon.world import WorldError, WorldKernel
@@ -1539,3 +1541,84 @@ async def test_observe_only_records_a_normal_inbound_turn_without_staging_a_repl
         for action in snapshot["actions"].values()
         if isinstance(action, dict)
     )
+
+
+@pytest.mark.asyncio
+async def test_observe_only_preserves_the_adapter_frozen_turn_context(
+    tmp_path: Path,
+) -> None:
+    runtime, _world, world_id = _turn_runtime(
+        tmp_path,
+        RecordingTransport(DispatchAcceptance(status="delivered", external_receipt="unused")),
+    )
+    envelope = _envelope("observe-only-frozen-cadence")
+    frozen = FrozenTurnContext(
+        turn_id="observe-only-frozen-cadence",
+        world_id=world_id,
+        user_id="user:geoff",
+        observed_at=envelope.observed_at,
+        cadence=ConversationCadence("hot", 4.0, 1, "test_frozen"),
+    )
+    seen_contexts: list[FrozenTurnContext | None] = []
+
+    async def record_observation(*_args: object, **kwargs: object) -> None:
+        seen_contexts.append(kwargs.get("turn_context"))  # type: ignore[arg-type]
+
+    runtime.engine.handle_message = record_observation  # type: ignore[method-assign]
+
+    outcome = await runtime.observe_only(
+        envelope,
+        options=TurnOptions(turn_context=frozen),
+    )
+
+    assert outcome.visible_status == "observed"
+    assert seen_contexts == [frozen]
+
+
+@pytest.mark.asyncio
+async def test_attachment_turn_starts_typing_before_attachment_analysis(
+    tmp_path: Path,
+) -> None:
+    store = CompanionStore(tmp_path / "attachment-typing.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    analyzer_states: list[tuple[str, str]] = []
+
+    class TypingAwareAnalyzer:
+        async def analyze(self, _attachment: MessageAttachment) -> AttachmentInsight:
+            communication = world.snapshot(world_id)["communication"]
+            analyzer_states.append(
+                (str(communication["attention"]), str(communication["typing"]))
+            )
+            return AttachmentInsight("image", "测试图片摘要", 0.8)
+
+    engine = CompanionEngine(
+        store,
+        StaticReplyModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+        multimodal_analyzer=TypingAwareAnalyzer(),  # type: ignore[arg-type]
+    )
+    transport = RecordingTransport(
+        DispatchAcceptance(status="delivered", external_receipt="attachment-typing")
+    )
+    runtime = CompanionTurn(engine, transport, cadence_delay_seconds=0)
+    message = IncomingMessage(
+        platform="qq",
+        platform_user_id="geoff",
+        message_id="attachment-typing",
+        text="你看看这张图。",
+        attachments=[MessageAttachment(kind="image", filename="test.png")],
+    )
+    context = engine.freeze_turn_context(message)
+
+    outcome = await runtime.respond(
+        TurnEnvelope.from_message(message, idempotency_key="qq:geoff:attachment-typing"),
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+
+    assert outcome.visible_status == "delivered"
+    assert analyzer_states == [("seen", "started")]

@@ -293,16 +293,20 @@ class CompanionTurn:
         while self._delivery_continuations:
             await asyncio.gather(*tuple(self._delivery_continuations), return_exceptions=True)
 
-    async def observe_expired(self, turn: TurnEnvelope) -> TurnOutcome:
+    async def observe_expired(
+        self, turn: TurnEnvelope, *, options: TurnOptions | None = None
+    ) -> TurnOutcome:
         """Commit an inbound message after its response budget is already exhausted."""
         self._validate_turn_envelope(turn)
         existing = self._existing_outcome(turn)
         if existing is not None:
             return existing
+        resolved_options = options or TurnOptions()
         await self.engine.handle_message(
             turn.message,
             skip_reply=True,
             fast_observe=True,
+            turn_context=resolved_options.turn_context,
         )
         return self._outcome(
             turn,
@@ -313,7 +317,11 @@ class CompanionTurn:
         )
 
     async def observe_only(
-        self, turn: TurnEnvelope, *, mark_unread: bool = True
+        self,
+        turn: TurnEnvelope,
+        *,
+        mark_unread: bool = True,
+        options: TurnOptions | None = None,
     ) -> TurnOutcome:
         """Commit a real inbound observation without starting a reply Action.
 
@@ -328,10 +336,12 @@ class CompanionTurn:
         existing = self._existing_outcome(turn)
         if existing is not None:
             return existing
+        resolved_options = options or TurnOptions()
         await self.engine.handle_message(
             turn.message,
             skip_reply=True,
             mark_unread=mark_unread,
+            turn_context=resolved_options.turn_context,
         )
         return self._outcome(
             turn,

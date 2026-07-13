@@ -737,8 +737,11 @@ class QQMessageCoalescer:
                 logger.info("superseded un-dispatched QQ v2 turn for %s", key)
                 return True
             if decision == "backchannel":
+                context = self.engine.freeze_turn_context(incoming)
                 await active_turn.observe_only(
-                    self._inbound_turn_envelope(incoming), mark_unread=False
+                    self._inbound_turn_envelope(incoming, context=context),
+                    mark_unread=False,
+                    options=TurnOptions(turn_context=context),
                 )
                 logger.info("kept sending after QQ v2 backchannel interruption for %s", key)
                 return True
@@ -808,9 +811,11 @@ class QQMessageCoalescer:
         except TypeError:
             await self.engine.handle_message(incoming)
 
-    def _inbound_turn_envelope(self, incoming: IncomingMessage) -> TurnEnvelope:
+    def _inbound_turn_envelope(
+        self, incoming: IncomingMessage, *, context: object | None = None
+    ) -> TurnEnvelope:
         """Freeze one QQ observation before it crosses the World turn seam."""
-        context = self.engine.freeze_turn_context(incoming)
+        context = context or self.engine.freeze_turn_context(incoming)
         return TurnEnvelope.from_message(
             incoming,
             idempotency_key=(
@@ -981,11 +986,16 @@ class QQMessageCoalescer:
                         f"{merged.platform}:{merged.platform_user_id}:{merged.message_id}"
                     ),
                 )
+                if frozen_context is None:
+                    frozen_context = self.engine.freeze_turn_context(merged)
                 await CompanionTurn(
                     self.engine,
                     QQTurnTransport(last.reply_target),
                     sleep=self.sleep,
-                ).observe_expired(expired_turn)
+                ).observe_expired(
+                    expired_turn,
+                    options=TurnOptions(turn_context=frozen_context),
+                )
                 self._settle_input_merge(key, queued)
                 self._observe_turn(
                     TurnRuntimeObservation(
@@ -1980,6 +1990,9 @@ class CompanionQQClient(botpy.Client):
 
     async def on_ready(self) -> None:
         logger.info("QQ WebSocket client is ready: %s", self.robot.name)
+        recovered = self.engine.recover_pending_media()
+        if recovered:
+            logger.info("resumed %s pending media outbox item(s)", recovered)
 
     async def on_c2c_message_create(self, message: C2CMessage) -> None:
         user_id = message.author.user_openid

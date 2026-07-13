@@ -615,6 +615,7 @@ async def qq_webhook(
                 frozen_cadence=turn_context.cadence.heat,
             ),
             mark_unread=True,
+            options=TurnOptions(turn_context=turn_context),
         )
 
     return JSONResponse(ack_response())
