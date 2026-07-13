@@ -198,6 +198,7 @@ def test_all_production_entrypoints_use_the_world_runtime_factory() -> None:
     project = tomllib.loads((project_root / "pyproject.toml").read_text())
     scripts = project["project"]["scripts"]
     offline_tools = {"companion-eval-experience"}
+    retired_tools = {"companion-send-sticker"}
 
     for script_name, target in scripts.items():
         module_name = target.split(":", 1)[0]
@@ -208,7 +209,7 @@ def test_all_production_entrypoints_use_the_world_runtime_factory() -> None:
             for node in ast.walk(tree)
             if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
         }
-        if script_name not in offline_tools:
+        if script_name not in offline_tools | retired_tools:
             assert "build_companion_engine" in calls, (
                 f"production entrypoint {script_name!r} must use the single world runtime factory"
             )

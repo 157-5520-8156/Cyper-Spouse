@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections import Counter
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -10,8 +11,15 @@ from companion_daemon.db import CompanionStore
 from companion_daemon.dialogue_eval import evaluate_reply, summarize_results
 from companion_daemon.emotion_eval_matrix import summarize_outage_trajectory
 from companion_daemon.engine import CompanionEngine, seed_user
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    ResponseBudget,
+    TurnEnvelope,
+    TurnOptions,
+)
 from companion_daemon.llm import ProviderCircuitBreaker
 from companion_daemon.models import IncomingMessage
+from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.world import WorldKernel
 
 
@@ -196,6 +204,44 @@ def _turn_text(scenario: str, index: int) -> str:
     return f"第{index}轮，你对这件事怎么看？"
 
 
+async def _respond_outage_turn(
+    engine: CompanionEngine, message: IncomingMessage
+) -> str:
+    """Exercise the public World delivery seam used by simulator/evaluations."""
+    context = engine.freeze_turn_context(message)
+    transport = CaptureTurnTransport(receipt_namespace="outage-matrix")
+    envelope = TurnEnvelope.from_message(
+        message,
+        idempotency_key=(
+            f"{message.platform}:{message.platform_user_id}:{message.message_id}"
+        ),
+        world_id=engine.world_id,
+        canonical_user_id=engine.store.resolve_user(
+            message.platform, message.platform_user_id
+        ),
+        frozen_cadence=context.cadence.heat,
+    )
+    async def no_delay(_seconds: float) -> None:
+        await asyncio.sleep(0)
+
+    turn = CompanionTurn(
+        engine,
+        transport,
+        cadence_delay_seconds=0,
+        sleep=no_delay,
+    )
+    await turn.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+    # This outage matrix assesses each first visible reply.  It deliberately
+    # does not wait for optional delayed expression continuations: those have
+    # their own receipt/interruption tests and would turn a deterministic
+    # 20-turn availability check into wall-clock sleeps.
+    return transport.text
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "scenario",
@@ -212,32 +258,33 @@ async def test_real_engine_world_twenty_turn_provider_outage_matrix(
     forgiveness_issues = 0
     for index in range(OUTAGE_TURNS):
         user_text = _turn_text(scenario, index)
-        reply = await engine.handle_message(
+        reply_text = await _respond_outage_turn(
+            engine,
             IncomingMessage(
                 platform="simulator",
                 platform_user_id="geoff",
                 message_id=f"outage:{scenario}:{index}",
                 text=user_text,
-            )
+            ),
         )
-        assert reply is not None
-        replies.append(reply.text)
+        assert reply_text
+        replies.append(reply_text)
         plan = world.expression_plan(
             world_id,
             user_id="user:geoff",
             purpose="offline_outage_eval",
         )
-        expression_issues += int(plan.validate(reply.text) is not None)
-        evaluated = evaluate_reply(reply.text, user_text=user_text)
+        expression_issues += int(plan.validate(reply_text) is not None)
+        evaluated = evaluate_reply(reply_text, user_text=user_text)
         summary = summarize_results([(scenario, user_text, evaluated)])
         hallucination_issues += len(summary.hard_issues)
         attribution_issues += int(
             scenario == "npc_spillover"
-            and any(marker in reply.text for marker in ("你害", "你造成", "看到你就烦"))
+            and any(marker in reply_text for marker in ("你害", "你造成", "看到你就烦"))
         )
         forgiveness_issues += int(
             scenario in {"negative_affect", "boundary"}
-            and any(marker in reply.text for marker in ("完全不介意", "已经过去了", "没事啦"))
+            and any(marker in reply_text for marker in ("完全不介意", "已经过去了", "没事啦"))
         )
 
     scheduled_ids = [
@@ -279,26 +326,28 @@ async def test_real_engine_world_twenty_turn_provider_outage_matrix(
     # reopens the circuit; the next successful probe closes it.
     assert model.circuit_breaker.snapshot().status == "open"
     model.now += 31
-    failed_probe = await engine.handle_message(
+    failed_probe = await _respond_outage_turn(
+        engine,
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
             message_id=f"outage:{scenario}:probe-failed",
             text="你还在吗？",
-        )
+        ),
     )
     assert failed_probe is not None
     assert model.attempts == 3
     assert model.circuit_breaker.snapshot().status == "open"
     model.now += 31
     model.available = True
-    recovered = await engine.handle_message(
+    recovered = await _respond_outage_turn(
+        engine,
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
             message_id=f"outage:{scenario}:probe-recovered",
             text="现在恢复了吗？",
-        )
+        ),
     )
     assert recovered is not None
     assert model.attempts == 4
