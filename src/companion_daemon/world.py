@@ -5450,6 +5450,9 @@ class WorldKernel:
                     "source_message_ids": _as_list(
                         command.get("source_message_ids", []), "source message ids"
                     )[:20],
+                    "source_messages": _as_list(
+                        command.get("source_messages", []), "source messages"
+                    )[:20],
                 },
             )]
         if command_type == "commit_private_impression":

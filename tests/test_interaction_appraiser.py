@@ -9,9 +9,10 @@ from companion_daemon.interaction_appraiser import (
     InteractionAppraiser,
     InteractionEvidence,
     TurnAppraisalInput,
+    assess_appraisal_risk,
     appraise_user_affect,
 )
-from companion_daemon.models import IncomingMessage
+from companion_daemon.models import IncomingMessage, SourceMessageObservation
 
 
 class ProposalModel:
@@ -229,6 +230,37 @@ def test_interaction_evidence_is_built_from_platform_observations() -> None:
     assert evidence.reply_target == "boundary:9"
     assert evidence.source_event_ids == ("qq:30", "qq:31")
     assert evidence.reply_delay_seconds == 4.5
+
+
+def test_interaction_evidence_keeps_merged_sticker_and_reply_semantics_with_source() -> None:
+    message = IncomingMessage(
+        platform="qq",
+        platform_user_id="geoff",
+        message_id="qq:32",
+        text="第一句\n第二句",
+        source_message_ids=["qq:31", "qq:32"],
+        source_messages=[
+            SourceMessageObservation(
+                message_id="qq:31",
+                text="第一句",
+                sticker_kind="[无语]",
+                reply_target="boundary:29",
+            ),
+            SourceMessageObservation(message_id="qq:32", text="第二句"),
+        ],
+    )
+
+    evidence = InteractionEvidence.from_message(
+        message, source_event_ids=("qq:31", "qq:32"), burst_count=2
+    )
+
+    assert [item.message_id for item in evidence.source_messages] == ["qq:31", "qq:32"]
+    assert evidence.source_messages[0].sticker_kind == "[无语]"
+    assert evidence.source_messages[0].reply_target == "boundary:29"
+    assert assess_appraisal_risk(evidence, _ordinary()).reasons == (
+        "boundary_reply_target",
+        "non_text_tone",
+    )
 
 
 @pytest.mark.parametrize("cue", ["你挺忙的", "行吧", "呵呵"])

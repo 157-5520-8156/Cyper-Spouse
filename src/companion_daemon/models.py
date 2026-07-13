@@ -34,6 +34,33 @@ class MessageAttachment(BaseModel):
     height: int | None = None
 
 
+class SourceMessageObservation(BaseModel):
+    """Platform facts that belong to one source message in a merged turn.
+
+    A coalesced turn may combine several messages.  Its top-level fields remain
+    a convenience view of the latest message, while this bounded list keeps
+    sticker, quote and attachment semantics attached to their actual source.
+    """
+
+    message_id: str = Field(min_length=1, max_length=160)
+    text: str = Field(max_length=4_000)
+    attachments: list[MessageAttachment] = Field(default_factory=list, max_length=16)
+    emoji: list[str] = Field(default_factory=list, max_length=16)
+    sticker_kind: str | None = Field(default=None, max_length=80)
+    reply_target: str | None = Field(default=None, max_length=160)
+
+    @classmethod
+    def from_incoming(cls, message: "IncomingMessage") -> "SourceMessageObservation":
+        return cls(
+            message_id=str(message.message_id or message.sent_at.isoformat()),
+            text=message.text,
+            attachments=[item.model_copy(deep=True) for item in message.attachments[:16]],
+            emoji=list(message.emoji[:16]),
+            sticker_kind=message.sticker_kind,
+            reply_target=message.reply_target,
+        )
+
+
 class IncomingMessage(BaseModel):
     platform: Platform
     platform_user_id: str
@@ -45,6 +72,7 @@ class IncomingMessage(BaseModel):
     sticker_kind: str | None = None
     reply_target: str | None = None
     source_message_ids: list[str] = Field(default_factory=list)
+    source_messages: list[SourceMessageObservation] = Field(default_factory=list, max_length=20)
     sent_at: datetime = Field(default_factory=utc_now)
 
 

@@ -724,10 +724,14 @@ async def test_coalescer_batches_rapid_messages() -> None:
         def __init__(self):
             self.seen_texts: list[str] = []
             self.seen_source_ids: list[list[str]] = []
+            self.seen_source_messages: list[list[dict[str, object]]] = []
 
         async def handle_message(self, incoming: IncomingMessage) -> CompanionReply:
             self.seen_texts.append(incoming.text)
             self.seen_source_ids.append(incoming.source_message_ids)
+            self.seen_source_messages.append(
+                [item.model_dump(mode="json") for item in incoming.source_messages]
+            )
             return CompanionReply(canonical_user_id="geoff", mood="calm", text="收到")
 
     class FakeTarget:
@@ -749,7 +753,15 @@ async def test_coalescer_batches_rapid_messages() -> None:
 
     await coalescer.add(
         "c2c:user",
-        IncomingMessage(platform="qq", platform_user_id="user", message_id="qq:1", text="第一句"),
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="user",
+            message_id="qq:1",
+            text="第一句",
+            emoji=["qq-face:178"],
+            sticker_kind="[无语]",
+            reply_target="reply:prior-message",
+        ),
         first,
     )
     await coalescer.add(
@@ -761,6 +773,26 @@ async def test_coalescer_batches_rapid_messages() -> None:
 
     assert engine.seen_texts == ["第一句\n第二句"]
     assert engine.seen_source_ids == [["qq:1", "qq:2"]]
+    assert engine.seen_source_messages == [
+        [
+            {
+                "message_id": "qq:1",
+                "text": "第一句",
+                "emoji": ["qq-face:178"],
+                "sticker_kind": "[无语]",
+                "reply_target": "reply:prior-message",
+                "attachments": [],
+            },
+            {
+                "message_id": "qq:2",
+                "text": "第二句",
+                "emoji": [],
+                "sticker_kind": None,
+                "reply_target": None,
+                "attachments": [],
+            },
+        ]
+    ]
     assert first.replies == []
     assert second.replies == ["收到"]
 

@@ -28,7 +28,12 @@ from companion_daemon.companion_turn import (
     TurnTransport,
 )
 from companion_daemon.config import get_settings
-from companion_daemon.models import CompanionReply, IncomingMessage, MessageAttachment
+from companion_daemon.models import (
+    CompanionReply,
+    IncomingMessage,
+    MessageAttachment,
+    SourceMessageObservation,
+)
 from companion_daemon.im_timing import between_part_delay_seconds, initial_reply_delay_seconds
 from companion_daemon.multimodal import attachment_kind
 from companion_daemon.process_lock import AlreadyRunningError
@@ -888,15 +893,21 @@ class QQMessageCoalescer:
             attachments = [
                 attachment for item in queued for attachment in item.incoming.attachments
             ]
+            source_messages = [
+                source.model_copy(deep=True)
+                for item in queued
+                for source in (
+                    item.incoming.source_messages
+                    or [SourceMessageObservation.from_incoming(item.incoming)]
+                )
+            ][:20]
             merged = last.incoming.model_copy(
                 update={
                     "text": merged_text,
                     "attachments": attachments,
                     "emoji": [emoji for item in queued for emoji in item.incoming.emoji][:16],
-                    "source_message_ids": [
-                        str(item.incoming.message_id or item.incoming.sent_at.isoformat())
-                        for item in queued
-                    ],
+                    "source_message_ids": [item.message_id for item in source_messages],
+                    "source_messages": source_messages,
                 }
             )
 

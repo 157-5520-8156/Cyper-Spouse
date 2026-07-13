@@ -783,6 +783,9 @@ class CompanionEngine:
                 "sticker_kind": message.sticker_kind,
                 "reply_target": message.reply_target,
                 "source_message_ids": list(message.source_message_ids),
+                "source_messages": [
+                    item.model_dump(mode="json") for item in message.source_messages
+                ],
                 "sent_at": message.sent_at.isoformat(),
                 "source": f"{message.platform}:incoming",
                 "idempotency_key": f"incoming:{key}",

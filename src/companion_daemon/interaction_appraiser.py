@@ -13,7 +13,7 @@ from companion_daemon.contextual_appraisal import (
 )
 from companion_daemon.emotion_state import InteractionEvent
 from companion_daemon.llm import ChatModel
-from companion_daemon.models import IncomingMessage
+from companion_daemon.models import IncomingMessage, SourceMessageObservation
 
 
 @dataclass(frozen=True)
@@ -29,6 +29,7 @@ class InteractionEvidence:
     burst_count: int = 1
     reply_target: str | None = None
     source_event_ids: tuple[str, ...] = ()
+    source_messages: tuple[SourceMessageObservation, ...] = ()
 
     @classmethod
     def from_message(
@@ -57,6 +58,9 @@ class InteractionEvidence:
             burst_count=max(1, min(20, burst_count)),
             reply_target=message.reply_target,
             source_event_ids=references[:20],
+            source_messages=tuple(
+                item.model_copy(deep=True) for item in message.source_messages[:20]
+            ),
         )
 
     def __post_init__(self) -> None:
@@ -68,6 +72,10 @@ class InteractionEvidence:
             raise ValueError("reply_delay_seconds is outside its bounded range")
         if len(self.source_event_ids) > 20 or any(not item for item in self.source_event_ids):
             raise ValueError("source_event_ids must contain at most 20 non-empty ids")
+        if len(self.source_messages) > 20:
+            raise ValueError("source_messages must contain at most 20 entries")
+        if any(item.message_id not in self.source_event_ids for item in self.source_messages):
+            raise ValueError("source_messages must be bound to source_event_ids")
         if any(len(item) > 160 for item in self.source_event_ids):
             raise ValueError("source_event_ids contain an oversized id")
         if len(self.emoji) > 16 or any(len(item) > 32 for item in self.emoji):
@@ -109,6 +117,7 @@ class InteractionEvidence:
             "burst_count": self.burst_count,
             "reply_target": self.reply_target,
             "source_event_ids": list(self.source_event_ids),
+            "source_messages": [item.model_dump(mode="json") for item in self.source_messages],
         }
 
 
@@ -400,7 +409,11 @@ def assess_appraisal_risk(
     if evidence.burst_count >= 4:
         reasons.append("turn_burst")
         score += min(25, evidence.burst_count * 4)
-    if evidence.reply_target and "boundary" in evidence.reply_target:
+    reply_targets = (
+        evidence.reply_target,
+        *(item.reply_target for item in evidence.source_messages),
+    )
+    if any(target and "boundary" in target for target in reply_targets):
         reasons.append("boundary_reply_target")
         score += 45
     if re.search(r"(?:立刻|马上|必须|还要我说几遍|我不想再说第二遍).{0,10}(?:回答|解释|道歉|照做|回复)", evidence.text):
@@ -409,7 +422,11 @@ def assess_appraisal_risk(
     if any(mark in evidence.text for mark in ('“', '”', '「', '」', '所谓', '开玩笑')):
         reasons.append("quotation_or_joke")
         score += 20
-    if evidence.sticker_kind or evidence.emoji:
+    if (
+        evidence.sticker_kind
+        or evidence.emoji
+        or any(item.sticker_kind or item.emoji for item in evidence.source_messages)
+    ):
         reasons.append("non_text_tone")
         score += 10
 
