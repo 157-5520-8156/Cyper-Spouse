@@ -1935,6 +1935,117 @@ async def test_world_mode_uses_companion_turn_for_receipted_text_delivery(
 
 
 @pytest.mark.asyncio
+async def test_production_world_engine_fails_closed_before_legacy_qq_confirm_helpers(
+    tmp_path: Path,
+) -> None:
+    """A malformed World runtime must not revive the legacy QQ outbox seam."""
+
+    store = CompanionStore(tmp_path / "qq-world-legacy-gate.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+    )
+    # Simulate a damaged/misconfigured production runtime.  Before the gate,
+    # this exact shape selected the legacy ``handle_message`` + ``confirm_*``
+    # code below the v2 branch.
+    engine.world_kernel = object()  # type: ignore[assignment]
+
+    async def legacy_generation_must_not_run(*_args: object, **_kwargs: object) -> CompanionReply:
+        raise AssertionError("World QQ delivery must not enter legacy handle_message")
+
+    def legacy_confirm_must_not_run(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("World QQ delivery must not enter legacy confirm helpers")
+
+    engine.handle_message = legacy_generation_must_not_run  # type: ignore[method-assign]
+    engine.confirm_reply_delivery = legacy_confirm_must_not_run  # type: ignore[method-assign]
+    engine.confirm_reply_part_delivery = legacy_confirm_must_not_run  # type: ignore[method-assign]
+
+    class Target:
+        async def reply(self, **_kwargs: object) -> dict[str, str]:
+            raise AssertionError("World QQ delivery must not send adapter fallback text")
+
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.0,
+        human_timing=False,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.0, long_wait_seconds=0.0),
+    )
+    with pytest.raises(WorldError, match="requires a WorldKernel"):
+        await coalescer._generate_and_send(
+            IncomingMessage(
+                platform="qq",
+                platform_user_id="user",
+                message_id="world-legacy-gate",
+                text="你在吗？",
+            ),
+            Target(),
+            key="c2c:user",
+        )
+
+
+@pytest.mark.asyncio
+async def test_world_turn_failure_never_falls_back_to_legacy_qq_confirms(tmp_path: Path) -> None:
+    """A failed CompanionTurn leaves the Action seam; it does not emit legacy text."""
+
+    store = CompanionStore(tmp_path / "qq-world-turn-failure.sqlite")
+    seed_user(store)
+    world = WorldKernel(store)
+    world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
+    engine = CompanionEngine(
+        store,
+        FakeCompanionModel(),
+        "你是沈知栀。",
+        world_kernel=world,
+        world_id=world_id,
+    )
+
+    def legacy_confirm_must_not_run(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("World turn failure must not invoke legacy confirm helpers")
+
+    engine.confirm_reply_delivery = legacy_confirm_must_not_run  # type: ignore[method-assign]
+    engine.confirm_reply_part_delivery = legacy_confirm_must_not_run  # type: ignore[method-assign]
+
+    class Target:
+        async def reply(self, **_kwargs: object) -> dict[str, str]:
+            raise AssertionError("World turn failure must not send adapter fallback text")
+
+    observations: list[object] = []
+    coalescer = QQMessageCoalescer(
+        engine,
+        delay_seconds=0.0,
+        human_timing=False,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=0.0, long_wait_seconds=0.0),
+        on_turn_observation=observations.append,
+    )
+
+    async def fail_v2(*_args: object, **_kwargs: object) -> bool:
+        raise WorldError("simulated CompanionTurn failure")
+
+    coalescer._generate_and_send_v2 = fail_v2  # type: ignore[method-assign]
+    await coalescer.add(
+        "c2c:user",
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="user",
+            message_id="world-turn-failure",
+            text="还在吗？",
+        ),
+        Target(),
+    )
+    await asyncio.sleep(0.03)
+
+    assert len(observations) == 1
+    assert observations[0].outcome == "companion_turn_failed"
+    assert observations[0].failure_type == "WorldError"
+
+
+@pytest.mark.asyncio
 async def test_world_mode_does_not_start_a_turn_after_the_visible_budget_is_spent(
     tmp_path: Path,
 ) -> None:

@@ -71,6 +71,22 @@ class ReplyTarget:
         raise NotImplementedError
 
 
+def _requires_world_turn_runtime(engine: object) -> bool:
+    """Whether a production engine has entered World-backed operation.
+
+    The old QQ coalescer is retained solely for pre-World compatibility test
+    doubles and old installations.  A real ``CompanionEngine`` with a World
+    identity must never quietly fall through to that path: it would send a
+    reply and call legacy ``confirm_*`` helpers outside the Action/receipt
+    settlement seam.
+    """
+    return (
+        isinstance(engine, CompanionEngine)
+        and bool(getattr(engine, "world_kernel", None))
+        and bool(getattr(engine, "world_id", None))
+    )
+
+
 class QQTurnTransport(TurnTransport):
     """Official-QQ text adapter: a receipt is required before delivery is true."""
 
@@ -844,9 +860,12 @@ class QQMessageCoalescer:
                     self._settle_input_merge(key, queued)
                     return
 
-            world_mode = isinstance(
-                getattr(self.engine, "world_kernel", None), WorldKernel
-            ) and bool(getattr(self.engine, "world_id", None))
+            # A production World engine is never allowed to enter the legacy
+            # coalescer's send→confirm implementation.  ``_generate_and_send``
+            # validates the kernel before it dispatches anything; retaining
+            # this broader predicate here also prevents its error handler from
+            # producing an adapter-side fallback.
+            world_mode = _requires_world_turn_runtime(self.engine)
             if self.enable_reply_decision and not world_mode:
                 has_unread = False
                 mood_state = None
@@ -1317,16 +1336,15 @@ class QQMessageCoalescer:
         budget: ResponseBudget | None = None,
         on_first_visible: Callable[[], None] | None = None,
     ) -> bool:
-        if hasattr(self.engine, "mark_phone_read_for_message"):
-            self.engine.mark_phone_read_for_message(merged)
         has_world_runtime = bool(
             getattr(self.engine, "world_kernel", None) and getattr(self.engine, "world_id", None)
         )
-        world_v2 = (
-            isinstance(getattr(self.engine, "world_kernel", None), WorldKernel)
-            and has_world_runtime
-        )
-        if world_v2:
+        requires_world_turn = _requires_world_turn_runtime(self.engine)
+        if requires_world_turn:
+            if not isinstance(getattr(self.engine, "world_kernel", None), WorldKernel):
+                raise WorldError(
+                    "World-backed QQ delivery requires a WorldKernel CompanionTurn runtime"
+                )
             return await self._generate_and_send_v2(
                 merged,
                 reply_target,
@@ -1336,6 +1354,8 @@ class QQMessageCoalescer:
                 budget=budget,
                 on_first_visible=on_first_visible,
             )
+        if hasattr(self.engine, "mark_phone_read_for_message"):
+            self.engine.mark_phone_read_for_message(merged)
         world_mode = has_world_runtime
         typing_started = has_world_runtime
         if not has_world_runtime and hasattr(self.engine, "begin_world_typing"):
