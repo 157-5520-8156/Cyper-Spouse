@@ -1,11 +1,18 @@
 import asyncio
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 
 import pytest
 
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    ExternalObservation,
+    ResponseBudget,
+    TurnEnvelope,
+    TurnOptions,
+)
 from companion_daemon.db import CompanionStore
 from companion_daemon.engine import (
     CompanionEngine,
@@ -24,9 +31,107 @@ from companion_daemon.character import load_character
 from companion_daemon.budget import BudgetGate
 from companion_daemon.time import utc_now
 from companion_daemon.models import LifeRuntimeState
+from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.world import WorldKernel
 
 TEST_PROMPT = "你是凛，用户的赛博女友。"
+
+
+@dataclass(frozen=True)
+class CapturedWorldReply:
+    """Test-only view of a reply delivered through the public Turn seam."""
+
+    action_id: str | None
+    text: str
+    transport: CaptureTurnTransport
+    observed_message: IncomingMessage
+    sticker_path: str | None
+    image_path: str | None
+    sticker_action_id: str | None
+    media_action_id: str | None
+
+    @property
+    def world_action_id(self) -> str | None:
+        return self.action_id
+
+
+class CaptureWorldPresenter:
+    """Retains the expression plan while the real turn settles it."""
+
+    def __init__(self) -> None:
+        self.presentation = None
+        self.settle_external = None
+
+    async def before_text(self, presentation) -> None:
+        self.presentation = presentation
+
+    async def after_text(self, presentation, terminal_state) -> None:
+        if terminal_state != "delivered" or self.settle_external is None:
+            return
+        for action_id, effect in (
+            (presentation.sticker_action_id, "sticker"),
+            (presentation.media_action_id, "image"),
+        ):
+            if not action_id:
+                continue
+            await self.settle_external(
+                ExternalObservation(
+                    action_id=action_id,
+                    kind="media_result",
+                    status="delivered",
+                    observed_at=utc_now(),
+                    idempotency_key=f"engine-test:{effect}:{action_id}",
+                    external_receipt=f"engine-test:{effect}:{action_id}",
+                    payload={
+                        "status": "delivered",
+                        "external_receipt": f"engine-test:{effect}:{action_id}",
+                    },
+                )
+            )
+
+
+async def respond_world_turn(
+    engine: CompanionEngine,
+    message: IncomingMessage,
+) -> CapturedWorldReply:
+    """Exercise the adapter-owned path; never use Engine as a fake transport."""
+    context = engine.freeze_turn_context(message)
+    transport = CaptureTurnTransport(receipt_namespace="engine-test")
+    presenter = CaptureWorldPresenter()
+    turn = CompanionTurn(
+        engine,
+        transport,
+        cadence_delay_seconds=0,
+        presenter=presenter,
+    )
+    presenter.settle_external = turn.settle
+    envelope = TurnEnvelope.from_message(
+        message,
+        idempotency_key=f"{message.platform}:{message.platform_user_id}:{message.message_id}",
+        world_id=engine.world_id,
+        canonical_user_id=engine.store.resolve_user(
+            message.platform, message.platform_user_id
+        ),
+        frozen_cadence=context.cadence.heat,
+    )
+    outcome = await turn.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+    await turn.wait_for_delivery_continuations()
+    action_id = outcome.action_ids[0] if outcome.action_ids else None
+    presentation = presenter.presentation
+    return CapturedWorldReply(
+        action_id=action_id,
+        text=transport.text,
+        transport=transport,
+        observed_message=envelope.message,
+        sticker_path=presentation.sticker_path if presentation else None,
+        image_path=presentation.image_path if presentation else None,
+        sticker_action_id=presentation.sticker_action_id if presentation else None,
+        media_action_id=presentation.media_action_id if presentation else None,
+    )
 
 
 def test_afterthought_rejects_rephrased_repeat() -> None:
@@ -115,11 +220,11 @@ async def test_world_enabled_reply_records_input_action_and_delivery_settlement(
         world_id=world_id,
     )
 
-    reply = await engine.handle_message(
+    reply = await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="你在吗", message_id="world-input-1")
     )
 
-    assert reply is not None and reply.world_action_id == f"outgoing:{reply.delivery_id}"
+    assert reply.world_action_id.startswith("outgoing:")
     event_types = [event.event_type for event in world.events(world_id)]
     assert "UserMessageObserved" in event_types
     assert "ActionScheduled" in event_types
@@ -156,7 +261,7 @@ async def test_world_reply_prompt_exposes_source_ids_and_current_scene(tmp_path:
     model = GroundedModel()
     engine = CompanionEngine(store, model, TEST_PROMPT, world_kernel=world, world_id=world_id)
 
-    reply = await engine.handle_message(
+    reply = await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="上午做了什么？", message_id="grounded-recall")
     )
 
@@ -189,7 +294,7 @@ async def test_world_mode_question_thread_is_opened_only_after_delivery_and_clos
     thread_id = next(iter(threads))
     assert threads[thread_id]["status"] == "open"
 
-    await engine.handle_message(
+    await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="我今天很好，因为事情都做完了", message_id="thread-answer")
     )
     assert world.snapshot(world_id)["conversation_threads"][thread_id]["status"] == "answered"
@@ -204,7 +309,7 @@ async def test_world_mode_turn_confirms_durable_user_fact_in_world_ledger(tmp_pa
     engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
     monkeypatch.setattr(store, "upsert_memory", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy memory")))
 
-    await engine.handle_message(
+    await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="我喜欢桂花乌龙", message_id="fact-1")
     )
 
@@ -220,11 +325,11 @@ async def test_world_mode_typing_transitions_do_not_touch_legacy_mood(tmp_path: 
     engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
     message = IncomingMessage(platform="qq", platform_user_id="geoff", text="你在吗", message_id="typing-1")
 
-    await engine.handle_message(message)
+    observed = await respond_world_turn(engine, message)
     monkeypatch.setattr(store, "save_mood_state", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("legacy mood")))
-    engine.begin_world_typing(message)
+    engine.begin_world_typing(observed.observed_message)
     assert world.snapshot(world_id)["communication"]["typing"] == "started"
-    engine.stop_world_typing(message, reason="reply_sent")
+    engine.stop_world_typing(observed.observed_message, reason="reply_sent")
     assert world.snapshot(world_id)["communication"]["typing"] == "idle"
 
 
@@ -240,7 +345,7 @@ async def test_low_energy_is_advisory_and_does_not_hard_veto_a_reply(tmp_path: P
     )
     engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
 
-    reply = await engine.handle_message(
+    reply = await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="晚点聊", message_id="policy-defer")
     )
 
@@ -269,12 +374,11 @@ async def test_duplicate_world_message_returns_the_original_reply_without_a_seco
         message_id="duplicate-world-message",
     )
 
-    first = await engine.handle_message(message)
+    first = await respond_world_turn(engine, message)
     calls_after_first = len(model.calls)
-    second = await engine.handle_message(message)
+    second = await respond_world_turn(engine, message)
 
-    assert first is not None
-    assert second is None
+    assert first.action_id == second.action_id
     assert len(model.calls) == calls_after_first
     assert sum(event.event_type == "UserMessageObserved" for event in world.events(world_id)) == 1
 
@@ -300,9 +404,11 @@ async def test_concurrent_duplicate_world_message_has_one_turn_owner_and_one_out
         platform="qq", platform_user_id="geoff", text="你在吗", message_id="concurrent-duplicate"
     )
 
-    results = await asyncio.gather(engine.handle_message(message), engine.handle_message(message))
+    results = await asyncio.gather(
+        respond_world_turn(engine, message), respond_world_turn(engine, message)
+    )
 
-    assert sum(reply is not None for reply in results) == 1
+    assert sum(reply.action_id is not None for reply in results) == 1
     assert model.calls == 1
     actions = world.snapshot(world_id)["actions"].values()
     assert sum(action["kind"] == "outgoing_message" for action in actions) == 1
@@ -328,7 +434,7 @@ async def test_invalid_world_reply_locally_redacts_before_using_a_second_model_c
     model = RepairModel()
     engine = CompanionEngine(store, model, TEST_PROMPT, world_kernel=world, world_id=world_id)
 
-    reply = await engine.handle_message(
+    reply = await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="你好呀", message_id="repair-invalid")
     )
 
@@ -361,7 +467,7 @@ async def test_misquoted_current_scene_is_salvaged_as_exact_grounded_text(tmp_pa
     model = SceneMentionModel()
     engine = CompanionEngine(store, model, TEST_PROMPT, world_kernel=world, world_id=world_id)
 
-    reply = await engine.handle_message(
+    reply = await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="现在在做什么？", message_id="scene-salvage")
     )
 
@@ -401,7 +507,7 @@ async def test_world_image_request_uses_generation_and_delivery_actions(tmp_path
         store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id,
         image_generator=FakeImageGenerator(), image_output_dir=tmp_path / "images",
     )
-    await engine.handle_message(
+    await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="你好", message_id="media-register")
     )
     for index in range(1, 55):
@@ -429,8 +535,7 @@ async def test_world_image_request_uses_generation_and_delivery_actions(tmp_path
     assert reply.image_path and Path(reply.image_path).exists()
     assert reply.media_action_id
     media = next(iter(world.snapshot(world_id)["media"].values()))
-    assert media["status"] == "generated"
-    engine.confirm_media_delivery(reply)
+    assert media["status"] == "shared"
     assert world.snapshot(world_id)["media"][media["request_id"]]["status"] == "shared"
 
 
@@ -552,14 +657,13 @@ async def test_world_sticker_selection_and_delivery_are_world_actions(tmp_path: 
     )
     engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, stickers=stickers, world_kernel=world, world_id=world_id)
 
-    reply = await engine.handle_message(
+    reply = await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="我今天有点撑不住", message_id="sticker-world")
     )
 
     assert reply is not None
     assert reply.sticker_path == "assets/stickers/comfort.png"
-    assert reply.sticker_action_id == "sticker-delivery:sticker-world"
-    engine.confirm_sticker_delivery(reply)
+    assert reply.sticker_action_id == "sticker-delivery:qq:geoff:sticker-world"
     assert world.snapshot(world_id)["stickers"][reply.sticker_action_id]["status"] == "shared"
 
 
@@ -590,7 +694,7 @@ async def test_world_enabled_turn_does_not_write_legacy_life_or_social_tables(tm
     engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
     with store.connect() as conn:
         before = {table: conn.execute(f"select count(*) from {table}").fetchone()[0] for table in ("life_runtime", "life_runtime_events", "calendar_events", "social_tasks")}
-    await engine.handle_message(IncomingMessage(platform="qq", platform_user_id="geoff", text="我先忙一会儿", message_id="world-isolation"))
+    await respond_world_turn(engine, IncomingMessage(platform="qq", platform_user_id="geoff", text="我先忙一会儿", message_id="world-isolation"))
     with store.connect() as conn:
         after = {table: conn.execute(f"select count(*) from {table}").fetchone()[0] for table in before}
     assert after == before
@@ -648,7 +752,7 @@ async def test_world_mode_does_not_call_legacy_behavior_writers(tmp_path: Path, 
     ):
         monkeypatch.setattr(store, name, legacy_write)
 
-    reply = await engine.handle_message(
+    reply = await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="我今天有点累", message_id="world-only-1")
     )
 
@@ -921,7 +1025,7 @@ async def test_world_proactive_treats_an_open_conversation_thread_as_costly_soft
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
     engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
-    await engine.handle_message(
+    await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="在吗", message_id="proactive-thread-input")
     )
     # FakeCompanionModel's normal reply is not a question; create one delivered
@@ -967,7 +1071,7 @@ async def test_world_proactive_can_deliberately_override_open_thread_soft_pressu
     engine = CompanionEngine(
         store, StubbornButBoundedModel(), TEST_PROMPT, world_kernel=world, world_id=world_id
     )
-    await engine.handle_message(
+    await respond_world_turn(engine,
         IncomingMessage(
             platform="qq", platform_user_id="geoff", text="在吗", message_id="override-thread-input"
         )
@@ -1034,7 +1138,7 @@ async def test_world_remain_silent_stance_is_advisory_and_does_not_veto_a_turn(
     model = ModelStillRuns()
     engine = CompanionEngine(store, model, TEST_PROMPT, world_kernel=world, world_id=world_id)
 
-    reply = await engine.handle_message(
+    reply = await respond_world_turn(engine,
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -1061,7 +1165,7 @@ async def test_world_proactive_feedback_becomes_a_versioned_turn_consequence(tmp
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
     engine = CompanionEngine(store, FakeCompanionModel(), TEST_PROMPT, world_kernel=world, world_id=world_id)
-    await engine.handle_message(
+    await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="你好", message_id="feedback-register")
     )
     delivery_id, _, _ = world.queue_outgoing_action(
@@ -1079,7 +1183,7 @@ async def test_world_proactive_feedback_becomes_a_versioned_turn_consequence(tmp
     )
     world.settle_outgoing_action(delivery_id, delivered=True)
 
-    await engine.handle_message(
+    await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="谢谢你，我在", message_id="feedback-warm")
     )
 
@@ -1157,7 +1261,7 @@ async def test_new_world_turn_cancels_pending_conversation_pulse(tmp_path: Path)
         mode="quick_continue", delay_seconds=5, remaining=[],
     )
 
-    await engine.handle_message(IncomingMessage(platform="qq", platform_user_id="geoff", text="我回来啦", message_id="cancel-pulse"))
+    await respond_world_turn(engine, IncomingMessage(platform="qq", platform_user_id="geoff", text="我回来啦", message_id="cancel-pulse"))
 
     assert world.snapshot(world_id)["actions"][action_id]["status"] == "cancelled"
 
@@ -1175,7 +1279,7 @@ async def test_new_world_turn_supersedes_persisted_delayed_reply(tmp_path: Path)
         reason="busy",
     )
 
-    await engine.handle_message(
+    await respond_world_turn(engine,
         IncomingMessage(platform="qq", platform_user_id="geoff", text="我回来了", message_id="new-turn")
     )
 
