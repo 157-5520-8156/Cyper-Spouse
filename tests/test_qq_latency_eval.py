@@ -3,6 +3,7 @@ import asyncio
 import pytest
 
 from companion_daemon.models import CompanionReply, IncomingMessage
+from companion_daemon.conversation_cadence import ConversationCadence
 from companion_daemon.qq_latency_eval import (
     run_synthetic_qq_latency_smoke,
     summarize_qq_latency,
@@ -43,6 +44,9 @@ async def test_qq_latency_starts_at_first_input_when_a_new_message_resets_deboun
             return self.now
 
     class Engine:
+        def conversation_cadence(self, _incoming: IncomingMessage) -> ConversationCadence:
+            return ConversationCadence("hot", 10.0, 3, "active_back_and_forth")
+
         async def handle_message(self, _incoming: IncomingMessage) -> CompanionReply:
             return CompanionReply(canonical_user_id="eval", mood="calm", text="收到。")
 
@@ -87,6 +91,7 @@ async def test_qq_latency_starts_at_first_input_when_a_new_message_resets_deboun
 
     assert len(observations) == 1
     observation = observations[0]
+    assert observation.cadence == "hot"
     assert observation.input_count == 2
     assert observation.coalescing_wait_seconds == pytest.approx(0.5)
     assert observation.first_visible_elapsed_seconds == pytest.approx(0.5)
