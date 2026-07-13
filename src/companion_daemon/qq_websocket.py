@@ -488,6 +488,11 @@ class TurnRuntimeObservation:
     input_count: int = 0
     coalescing_wait_seconds: float | None = None
     first_visible_elapsed_seconds: float | None = None
+    seen_elapsed_seconds: float | None = None
+    typing_elapsed_seconds: float | None = None
+    model_returned_elapsed_seconds: float | None = None
+    candidate_accepted_elapsed_seconds: float | None = None
+    delivery_settled_elapsed_seconds: float | None = None
     # Wall-clock time is only for joining a private runtime report with an
     # operator-observed adapter incident.  Monotonic elapsed values remain the
     # latency authority.
@@ -856,6 +861,20 @@ class QQMessageCoalescer:
             coalescing_wait_seconds = max(0.0, flushed_at - input_started_at)
             cadence = self._turn_cadences.get(key, "cold")
             first_visible_at: float | None = None
+            lifecycle_elapsed: dict[str, float] = {}
+
+            def mark_lifecycle(stage: str) -> None:
+                if stage not in {
+                    "seen",
+                    "typing",
+                    "model_returned",
+                    "candidate_accepted",
+                    "delivery_settled",
+                }:
+                    return
+                lifecycle_elapsed.setdefault(
+                    stage, max(0.0, self.monotonic() - input_started_at)
+                )
 
             def mark_first_visible() -> None:
                 nonlocal first_visible_at
@@ -1023,6 +1042,7 @@ class QQMessageCoalescer:
                     turn_context=frozen_context,
                     budget=v2_budget,
                     on_first_visible=mark_first_visible,
+                    lifecycle_observer=mark_lifecycle,
                 )
             else:
                 async with asyncio.timeout(generation_budget):
@@ -1046,6 +1066,15 @@ class QQMessageCoalescer:
                         max(0.0, first_visible_at - input_started_at)
                         if first_visible_at is not None
                         else None
+                    ),
+                    seen_elapsed_seconds=lifecycle_elapsed.get("seen"),
+                    typing_elapsed_seconds=lifecycle_elapsed.get("typing"),
+                    model_returned_elapsed_seconds=lifecycle_elapsed.get("model_returned"),
+                    candidate_accepted_elapsed_seconds=lifecycle_elapsed.get(
+                        "candidate_accepted"
+                    ),
+                    delivery_settled_elapsed_seconds=lifecycle_elapsed.get(
+                        "delivery_settled"
                     ),
                 )
             )
@@ -1313,6 +1342,7 @@ class QQMessageCoalescer:
         turn_context: object | None,
         budget: ResponseBudget | None,
         on_first_visible: Callable[[], None] | None = None,
+        lifecycle_observer: Callable[[str], None] | None = None,
     ) -> bool:
         """World-mode text path: CompanionTurn owns every text Action transition."""
         response_seconds = self.response_timeout_seconds or 12.0
@@ -1324,6 +1354,12 @@ class QQMessageCoalescer:
         def terminal() -> None:
             self._active_sends.pop(key, None)
             self._active_turns.pop(key, None)
+
+        def visible_delivery() -> None:
+            if on_first_visible is not None:
+                on_first_visible()
+            if lifecycle_observer is not None:
+                lifecycle_observer("delivery_settled")
 
         async def delivered(reply: CompanionReply) -> None:
             self._schedule_afterthought(key, merged, reply_target, utc_now())
@@ -1345,7 +1381,7 @@ class QQMessageCoalescer:
             QQTurnTransport(
                 reply_target,
                 on_dispatch_started=lambda: setattr(active_send, "text_dispatch_started", True),
-                on_visible_delivery=on_first_visible,
+                on_visible_delivery=visible_delivery,
                 on_dispatch_result=trace.observe_dispatch,
             ),
             sleep=self.sleep,
@@ -1370,7 +1406,11 @@ class QQMessageCoalescer:
                     ),
                 ),
                 budget=resolved_budget,
-                options=TurnOptions(context_hint=context_hint, turn_context=turn_context),
+                options=TurnOptions(
+                    context_hint=context_hint,
+                    turn_context=turn_context,
+                    lifecycle_observer=lifecycle_observer,
+                ),
             )
         except Exception:
             terminal()
@@ -1391,6 +1431,7 @@ class QQMessageCoalescer:
         turn_context: object | None = None,
         budget: ResponseBudget | None = None,
         on_first_visible: Callable[[], None] | None = None,
+        lifecycle_observer: Callable[[str], None] | None = None,
     ) -> bool:
         has_world_runtime = bool(
             getattr(self.engine, "world_kernel", None) and getattr(self.engine, "world_id", None)
@@ -1409,6 +1450,7 @@ class QQMessageCoalescer:
                 turn_context=turn_context,
                 budget=budget,
                 on_first_visible=on_first_visible,
+                lifecycle_observer=lifecycle_observer,
             )
         if hasattr(self.engine, "mark_phone_read_for_message"):
             self.engine.mark_phone_read_for_message(merged)

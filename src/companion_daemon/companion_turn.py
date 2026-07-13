@@ -103,6 +103,9 @@ class TurnOptions:
 
     context_hint: str | None = None
     turn_context: object | None = None
+    # Privacy-safe lifecycle marks are owned by the adapter's monotonic clock.
+    # They contain no message or account data and never influence generation.
+    lifecycle_observer: Callable[[str], None] | None = None
     # A delayed reply is still the original user turn, but it must preserve
     # the scheduled Action that authorized the later response.  Keeping this
     # inside the turn options prevents scheduler callers from reaching around
@@ -386,6 +389,7 @@ class CompanionTurn:
                 complete_by_observed_at=complete_by_at,
                 context_hint=options.context_hint,
                 turn_context=options.turn_context,
+                lifecycle_observer=options.lifecycle_observer,
                 resume_action_id=options.resume_action_id,
             )
             if reply is None:

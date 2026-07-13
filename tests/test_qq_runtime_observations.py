@@ -18,6 +18,11 @@ def test_jsonl_exporter_persists_a_redacted_turn_observation(tmp_path) -> None:
             cadence="hot",
             input_count=2,
             first_visible_elapsed_seconds=0.456,
+            seen_elapsed_seconds=0.101,
+            typing_elapsed_seconds=0.123,
+            model_returned_elapsed_seconds=0.321,
+            candidate_accepted_elapsed_seconds=0.389,
+            delivery_settled_elapsed_seconds=0.456,
             observed_at=datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc),
             adapter="napcat",
             action_ids=("action-7",),
@@ -31,7 +36,7 @@ def test_jsonl_exporter_persists_a_redacted_turn_observation(tmp_path) -> None:
     rows = [json.loads(line) for line in report_path.read_text().splitlines()]
     assert rows == [
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "observed_at": "2026-07-13T08:00:00+00:00",
             "adapter": "napcat",
             "outcome": "reply_delivered",
@@ -40,6 +45,11 @@ def test_jsonl_exporter_persists_a_redacted_turn_observation(tmp_path) -> None:
             "elapsed_ms": 1234,
             "coalescing_wait_ms": None,
             "first_visible_elapsed_ms": 456,
+            "seen_elapsed_ms": 101,
+            "typing_elapsed_ms": 123,
+            "model_returned_elapsed_ms": 321,
+            "candidate_accepted_elapsed_ms": 389,
+            "delivery_settled_elapsed_ms": 456,
             "failure_type": None,
             "action_ids": ["action-7"],
             "segment_ids": ["segment-3"],

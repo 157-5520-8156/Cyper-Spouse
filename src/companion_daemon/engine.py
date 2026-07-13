@@ -1350,6 +1350,7 @@ class CompanionEngine:
         defer_delivery: bool = False,
         resume_action_id: str | None = None,
         turn_context: FrozenTurnContext | None = None,
+        lifecycle_observer: Callable[[str], None] | None = None,
         complete_by_observed_at: datetime | None = None,
         fast_observe: bool = False,
     ) -> CompanionReply | None:
@@ -1409,6 +1410,7 @@ class CompanionEngine:
                         defer_delivery=defer_delivery,
                         resume_action_id=resume_action_id,
                         cadence=cadence,
+                        lifecycle_observer=lifecycle_observer,
                         complete_by_observed_at=complete_by_observed_at,
                     )
             except Exception as exc:
@@ -1818,6 +1820,7 @@ class CompanionEngine:
         skip_reply: bool,
         defer_delivery: bool,
         resume_action_id: str | None,
+        lifecycle_observer: Callable[[str], None] | None = None,
         cadence: ConversationCadence | None = None,
         complete_by_observed_at: datetime | None = None,
     ) -> CompanionReply | None:
@@ -1829,6 +1832,14 @@ class CompanionEngine:
                 "defer_delivery must remain true"
             )
         effective_cadence = cadence or self.conversation_cadence(message)
+
+        def observe_lifecycle(stage: str) -> None:
+            if lifecycle_observer is None:
+                return
+            try:
+                lifecycle_observer(stage)
+            except Exception:
+                logger.debug("turn lifecycle observer failed at %s", stage, exc_info=True)
         for action_id, action in self.world_kernel.snapshot(self.world_id)["actions"].items():
             is_life_share = bool(action.get("trace", {}).get("life_share"))
             if action["kind"] == "decision_review" and action["status"] == "scheduled":
@@ -1908,7 +1919,9 @@ class CompanionEngine:
             # Once the inbound turn is durably seen, expose typing before that
             # optional preflight rather than making an attachment feel like a
             # silent gap before the companion has started responding.
+            observe_lifecycle("seen")
             self.begin_world_typing(message)
+            observe_lifecycle("typing")
         await self._analyze_world_attachments(canonical_user_id, message)
         user_id = self._world_user_id(canonical_user_id)
         stage_snapshot = self.world_kernel.snapshot(self.world_id)
@@ -2395,6 +2408,7 @@ class CompanionEngine:
                     timeout_seconds=reply_call_decision.soft_timeout_seconds,
                 )
                 calls_used += 1
+                observe_lifecycle("model_returned")
         except asyncio.CancelledError:
             self._fail_world_model_call(model_action_id, "caller_cancelled")
             raise
@@ -2840,6 +2854,7 @@ class CompanionEngine:
         candidate, guard_resolution = self._guard_reply_candidate(
             candidate, user_id=user_id, hard_evidence=hard_evidence
         )
+        observe_lifecycle("candidate_accepted")
         if guard_resolution.disposition == "requires_action_settlement":
             action_settlement_ids = guard_resolution.action_ids
         else:

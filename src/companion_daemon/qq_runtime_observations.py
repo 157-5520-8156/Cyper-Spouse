@@ -31,7 +31,7 @@ class QQTurnObservationJSONLExporter:
     def __call__(self, observation: "TurnRuntimeObservation") -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "observed_at": observation.observed_at.isoformat(),
             "adapter": observation.adapter,
             "outcome": observation.outcome,
@@ -43,6 +43,21 @@ class QQTurnObservationJSONLExporter:
             ),
             "first_visible_elapsed_ms": _optional_milliseconds(
                 observation.first_visible_elapsed_seconds
+            ),
+            "seen_elapsed_ms": _optional_milliseconds(
+                observation.seen_elapsed_seconds
+            ),
+            "typing_elapsed_ms": _optional_milliseconds(
+                observation.typing_elapsed_seconds
+            ),
+            "model_returned_elapsed_ms": _optional_milliseconds(
+                observation.model_returned_elapsed_seconds
+            ),
+            "candidate_accepted_elapsed_ms": _optional_milliseconds(
+                observation.candidate_accepted_elapsed_seconds
+            ),
+            "delivery_settled_elapsed_ms": _optional_milliseconds(
+                observation.delivery_settled_elapsed_seconds
             ),
             "failure_type": observation.failure_type,
             "action_ids": list(observation.action_ids),

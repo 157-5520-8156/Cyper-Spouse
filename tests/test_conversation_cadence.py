@@ -460,6 +460,7 @@ async def test_real_world_qq_two_turns_freeze_hot_cadence_type_and_settle_delive
 
     engine.begin_world_typing = record_typing  # type: ignore[method-assign]
     engine.handle_message = record_handle  # type: ignore[method-assign]
+    observations: list[object] = []
 
     class ReceiptTarget:
         def __init__(self) -> None:
@@ -475,6 +476,7 @@ async def test_real_world_qq_two_turns_freeze_hot_cadence_type_and_settle_delive
         engine,
         delay_seconds=0.01,
         turn_policy=TurnTakingPolicy(short_wait_seconds=0.01, long_wait_seconds=0.01),
+        on_turn_observation=observations.append,
     )
     for index, text in enumerate(("在吗？", "继续？"), start=1):
         await coalescer.add(
@@ -499,6 +501,16 @@ async def test_real_world_qq_two_turns_freeze_hot_cadence_type_and_settle_delive
     assert [context.cadence.heat for context in seen_contexts] == ["cold", "hot"]
     assert len(model.calls) == 2
     assert order.index("typing") < order.index("model") < order.index("delivery")
+    latest = observations[-1]
+    lifecycle = [
+        latest.seen_elapsed_seconds,
+        latest.typing_elapsed_seconds,
+        latest.model_returned_elapsed_seconds,
+        latest.candidate_accepted_elapsed_seconds,
+        latest.delivery_settled_elapsed_seconds,
+    ]
+    assert all(item is not None for item in lifecycle)
+    assert lifecycle == sorted(lifecycle)
     delivered = [
         action
         for action in world.snapshot(world_id)["actions"].values()
