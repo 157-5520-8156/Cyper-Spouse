@@ -225,10 +225,23 @@ class CompanionStore:
                   attempt integer not null default 1,
                   pricing_version text not null default '',
                   estimated_cost_usd real not null default 0,
+                  budget_reservation_id text not null default '',
                   created_at text not null
                 );
                 create index if not exists idx_model_usage_created
                   on model_usage_events (created_at, purpose);
+
+                create table if not exists model_budget_reservations (
+                  reservation_id text primary key,
+                  estimated_cny real not null,
+                  actual_cny real,
+                  automatic integer not null,
+                  status text not null,
+                  created_at text not null,
+                  settled_at text
+                );
+                create index if not exists idx_model_budget_reservations_active
+                  on model_budget_reservations (status, created_at);
 
                 create table if not exists interaction_events (
                   id integer primary key autoincrement,
@@ -443,6 +456,12 @@ class CompanionStore:
             )
             self._ensure_column(
                 conn, "model_usage_events", "estimated_cost_usd", "real not null default 0"
+            )
+            self._ensure_column(
+                conn,
+                "model_usage_events",
+                "budget_reservation_id",
+                "text not null default ''",
             )
             self._init_world_schema(conn)
             conn.execute(
@@ -2548,6 +2567,7 @@ class CompanionStore:
         action_id: str = "",
         cadence: str = "",
         attempt: int = 1,
+        budget_reservation_id: str = "",
     ) -> None:
         from companion_daemon.usage_metrics import estimate_model_cost_usd
 
@@ -2559,6 +2579,10 @@ class CompanionStore:
             cache_miss_tokens=cache_miss_tokens,
         )
         with self.connect() as conn:
+            # Usage persistence and a matching preflight reservation must move
+            # together. Otherwise a parallel reserve can briefly see both the
+            # pending envelope and its just-completed real charge, or neither.
+            conn.execute("begin immediate")
             conn.execute(
                 """
                 insert into model_usage_events (
@@ -2566,8 +2590,8 @@ class CompanionStore:
                   completion_tokens, reasoning_tokens, cache_hit_tokens,
                   cache_miss_tokens, total_tokens, error, world_id, turn_id,
                   action_id, cadence, attempt, pricing_version,
-                  estimated_cost_usd, created_at
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                  estimated_cost_usd, budget_reservation_id, created_at
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     purpose[:80],
@@ -2588,9 +2612,147 @@ class CompanionStore:
                     max(1, int(attempt)),
                     pricing_version[:80],
                     max(0.0, float(estimated_cost_usd)),
+                    budget_reservation_id[:160],
                     utc_now().isoformat(),
                 ),
             )
+            if budget_reservation_id:
+                if status == "succeeded":
+                    conn.execute(
+                        """
+                        update model_budget_reservations
+                        set status = 'settled', actual_cny = ?, settled_at = ?
+                        where reservation_id = ? and status = 'reserved'
+                        """,
+                        (
+                            max(0.0, float(estimated_cost_usd)) * 7.2,
+                            utc_now().isoformat(),
+                            budget_reservation_id,
+                        ),
+                    )
+                else:
+                    conn.execute(
+                        """
+                        update model_budget_reservations
+                        set status = 'released', settled_at = ?
+                        where reservation_id = ? and status = 'reserved'
+                        """,
+                        (utc_now().isoformat(), budget_reservation_id),
+                    )
+
+    def reserve_model_budget(
+        self,
+        *,
+        reservation_id: str,
+        estimated_cny: float,
+        automatic: bool,
+        monthly_budget_cny: float,
+        daily_budget_cny: float,
+        soft_daily_budget_cny: float,
+        now: datetime,
+    ) -> tuple[bool, str]:
+        """Atomically reserve a provider-call envelope against shared spend.
+
+        SQLite's immediate write transaction serializes the balance check with
+        reservation insertion across workers and processes sharing this store.
+        Completed provider usage is charged at its recorded real price; only
+        still-reserved envelopes are added as provisional spend.
+        """
+        amount = max(0.0, float(estimated_cny))
+        if not reservation_id or amount <= 0:
+            return False, "invalid_model_reservation"
+        observed_at = now.astimezone(UTC)
+        day_prefix = observed_at.date().isoformat()
+        month_prefix = observed_at.strftime("%Y-%m")
+        created_at = observed_at.isoformat()
+        with self.connect() as conn:
+            conn.execute("begin immediate")
+            existing = conn.execute(
+                "select status from model_budget_reservations where reservation_id = ?",
+                (reservation_id,),
+            ).fetchone()
+            if existing is not None:
+                status = str(existing["status"])
+                return (status in {"reserved", "settled"}, "reservation_reused")
+
+            def spend(prefix: str) -> tuple[float, float]:
+                fixed = conn.execute(
+                    """
+                    select coalesce(sum(estimated_cny), 0) as total
+                    from usage_events where substr(created_at, 1, ?) = ?
+                    """,
+                    (len(prefix), prefix),
+                ).fetchone()
+                model = conn.execute(
+                    """
+                    select coalesce(sum(estimated_cost_usd), 0) as total
+                    from model_usage_events where substr(created_at, 1, ?) = ?
+                    """,
+                    (len(prefix), prefix),
+                ).fetchone()
+                pending = conn.execute(
+                    """
+                    select coalesce(sum(estimated_cny), 0) as total
+                    from model_budget_reservations
+                    where status = 'reserved' and substr(created_at, 1, ?) = ?
+                    """,
+                    (len(prefix), prefix),
+                ).fetchone()
+                fixed_total = float(fixed["total"] or 0.0)
+                model_total = float(model["total"] or 0.0) * 7.2
+                return fixed_total + model_total + float(pending["total"] or 0.0), fixed_total + model_total
+
+            daily, _ = spend(day_prefix)
+            monthly, _ = spend(month_prefix)
+            if monthly + amount > max(0.0, float(monthly_budget_cny)):
+                return False, "monthly_budget_exceeded"
+            if daily + amount > max(0.0, float(daily_budget_cny)):
+                return False, "daily_budget_exceeded"
+            if automatic and daily + amount > max(0.0, float(soft_daily_budget_cny)):
+                return False, "soft_daily_budget_requires_manual"
+            conn.execute(
+                """
+                insert into model_budget_reservations (
+                  reservation_id, estimated_cny, actual_cny, automatic, status,
+                  created_at, settled_at
+                ) values (?, ?, null, ?, 'reserved', ?, null)
+                """,
+                (reservation_id[:160], amount, int(automatic), created_at),
+            )
+        return True, "reserved"
+
+    def release_model_budget_reservation(self, reservation_id: str) -> None:
+        """Idempotently return a preflight envelope when no provider usage exists."""
+        if not reservation_id:
+            return
+        with self.connect() as conn:
+            conn.execute("begin immediate")
+            conn.execute(
+                """
+                update model_budget_reservations
+                set status = 'released', settled_at = ?
+                where reservation_id = ? and status = 'reserved'
+                """,
+                (utc_now().isoformat(), reservation_id),
+            )
+
+    def pending_model_budget_reservation_total(self, window: str, now: datetime) -> float:
+        if window == "day":
+            prefix = now.date().isoformat()
+        elif window == "month":
+            prefix = now.strftime("%Y-%m")
+        else:
+            raise ValueError(f"Unsupported usage window: {window}")
+        with self.connect() as conn:
+            row = conn.execute(
+                """
+                select coalesce(sum(estimated_cny), 0) as total
+                from model_budget_reservations
+                where status = 'reserved' and substr(created_at, 1, ?) = ?
+                """,
+                (len(prefix), prefix),
+            ).fetchone()
+        return float(row["total"] or 0.0)
 
     def recent_model_usage_samples(
         self,

@@ -43,7 +43,11 @@ def model_turn_scope(
 
 @contextmanager
 def model_call_scope(
-    purpose: str, *, action_id: str = "", attempt: int = 1
+    purpose: str,
+    *,
+    action_id: str = "",
+    attempt: int = 1,
+    budget_reservation_id: str = "",
 ) -> Iterator[None]:
     token = _MODEL_CALL_PURPOSE.set(purpose)
     meta_token = _MODEL_CALL_META.set(
@@ -51,6 +55,7 @@ def model_call_scope(
             **_MODEL_CALL_META.get(),
             "action_id": action_id,
             "attempt": max(1, int(attempt)),
+            "budget_reservation_id": budget_reservation_id,
         }
     )
     try:
@@ -78,6 +83,7 @@ class ModelCallUsage:
     action_id: str = ""
     cadence: str = ""
     attempt: int = 1
+    budget_reservation_id: str = ""
 
 
 class ModelCircuitOpenError(ConnectionError):
@@ -306,6 +312,9 @@ class DeepSeekChatModel:
                     action_id=str(call_meta.get("action_id") or ""),
                     cadence=str(call_meta.get("cadence") or ""),
                     attempt=max(1, int(call_meta.get("attempt") or 1)),
+                    budget_reservation_id=str(
+                        call_meta.get("budget_reservation_id") or ""
+                    ),
                 )
             )
             raise
@@ -333,6 +342,9 @@ class DeepSeekChatModel:
                     action_id=str(call_meta.get("action_id") or ""),
                     cadence=str(call_meta.get("cadence") or ""),
                     attempt=max(1, int(call_meta.get("attempt") or 1)),
+                    budget_reservation_id=str(
+                        call_meta.get("budget_reservation_id") or ""
+                    ),
                 )
             )
             raise
@@ -359,6 +371,7 @@ class DeepSeekChatModel:
                 action_id=str(call_meta.get("action_id") or ""),
                 cadence=str(call_meta.get("cadence") or ""),
                 attempt=max(1, int(call_meta.get("attempt") or 1)),
+                budget_reservation_id=str(call_meta.get("budget_reservation_id") or ""),
             )
         )
         return content

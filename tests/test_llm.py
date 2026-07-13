@@ -119,7 +119,12 @@ async def test_model_usage_is_correlated_to_the_frozen_world_turn() -> None:
 
     with model_turn_scope(
         world_id="world-1", turn_id="turn-1", cadence="hot"
-    ), model_call_scope("reply", action_id="model-call-1", attempt=2):
+    ), model_call_scope(
+        "reply",
+        action_id="model-call-1",
+        attempt=2,
+        budget_reservation_id="reservation-1",
+    ):
         await model.complete([{"role": "user", "content": "hi"}])
 
     usage = captured[0]
@@ -128,6 +133,7 @@ async def test_model_usage_is_correlated_to_the_frozen_world_turn() -> None:
     assert usage.action_id == "model-call-1"
     assert usage.cadence == "hot"
     assert usage.attempt == 2
+    assert usage.budget_reservation_id == "reservation-1"
 
 
 @pytest.mark.asyncio

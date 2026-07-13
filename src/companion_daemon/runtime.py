@@ -76,6 +76,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             action_id=usage.action_id,
             cadence=usage.cadence,
             attempt=usage.attempt,
+            budget_reservation_id=usage.budget_reservation_id,
         )
 
     interaction_appraisal_model = None
@@ -174,6 +175,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
             budget_gate=budget_gate,
             allow_vision=settings.allow_auto_vision,
             allow_transcription=settings.allow_auto_transcription,
+            proxy_url=settings.openai_proxy_url,
         )
     image_generator = None
     image_quality_gate = None
@@ -183,6 +185,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
                 settings.openai_api_key,
                 base_url=settings.openai_base_url,
                 model=settings.image_model,
+                proxy_url=settings.openai_proxy_url,
             )
             if settings.openai_api_key
             else None
@@ -213,6 +216,7 @@ def build_companion_engine(use_fake_model: bool = False) -> CompanionEngine:
                 settings.openai_api_key,
                 base_url=settings.openai_base_url,
                 model=settings.vision_model,
+                proxy_url=settings.openai_proxy_url,
             )
     rewrite_model = None
     if settings.enable_reply_rewrite and settings.deepseek_api_key and not use_fake_model:

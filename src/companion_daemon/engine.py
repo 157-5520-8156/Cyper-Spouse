@@ -428,6 +428,29 @@ class CompanionEngine:
             observed_output_tokens=observed_output_tokens,
         )
 
+    def _reserve_model_call_budget(
+        self,
+        *,
+        action_id: str,
+        estimated_cny: float,
+    ) -> str:
+        """Atomically hold a priced envelope immediately before provider I/O."""
+        if self.budget_gate is None or estimated_cny <= 0:
+            return ""
+        reservation_id = f"model:{action_id}:{uuid4().hex}"
+        reservation = self.budget_gate.reserve_model_call(
+            reservation_id=reservation_id,
+            estimated_cny=estimated_cny,
+            automatic=True,
+        )
+        if not reservation.allowed:
+            raise ConnectionError(reservation.reason)
+        return reservation_id
+
+    def _release_model_call_budget(self, reservation_id: str) -> None:
+        if self.budget_gate is not None and reservation_id:
+            self.budget_gate.release_model_call(reservation_id)
+
     def _secondary_model_call_decision(
         self,
         purpose: str,
@@ -476,16 +499,34 @@ class CompanionEngine:
         *,
         purpose: str,
         temperature: float,
+        action_id: str = "",
     ) -> str:
         decision = self._secondary_model_call_decision(
             purpose, model=model, messages=messages
         )
         if not decision.allowed:
             raise ConnectionError(decision.reason)
-        return await complete_with_timeout(
-            _complete_structured_model(model, messages, temperature=temperature),
-            timeout_seconds=decision.soft_timeout_seconds,
+        reservation_id = self._reserve_model_call_budget(
+            action_id=action_id or f"secondary:{purpose}:{uuid4().hex}",
+            estimated_cny=self._estimate_model_call_reserve_cny(
+                model=model,
+                purpose=purpose,
+                cadence="warm",
+                prompt_characters=sum(len(item.get("content", "")) for item in messages),
+            ),
         )
+        try:
+            with model_call_scope(
+                purpose,
+                action_id=action_id,
+                budget_reservation_id=reservation_id,
+            ):
+                return await complete_with_timeout(
+                    _complete_structured_model(model, messages, temperature=temperature),
+                    timeout_seconds=decision.soft_timeout_seconds,
+                )
+        finally:
+            self._release_model_call_budget(reservation_id)
 
     async def aclose(self) -> None:
         """Close runtime-owned asynchronous resources exactly once per object."""
@@ -1027,8 +1068,28 @@ class CompanionEngine:
             action_id = self._begin_world_model_call(
                 purpose="interaction_appraisal", causation=causation
             )
+            reservation_id = ""
             try:
-                with model_call_scope("interaction_appraisal", action_id=action_id):
+                reservation_id = self._reserve_model_call_budget(
+                    action_id=action_id,
+                    estimated_cny=self._estimate_model_call_reserve_cny(
+                        model=appraisal_model,
+                        purpose="interaction_appraisal",
+                        cadence=turn.cadence.heat,
+                        prompt_characters=(
+                            len(message.text)
+                            + sum(
+                                len(str(item.get("text") or ""))
+                                for item in appraisal_input.recent_messages
+                            )
+                        ),
+                    ),
+                )
+                with model_call_scope(
+                    "interaction_appraisal",
+                    action_id=action_id,
+                    budget_reservation_id=reservation_id,
+                ):
                     result = await complete_with_timeout(
                         InteractionAppraiser(appraisal_model).assess(appraisal_input),
                         timeout_seconds=decision.soft_timeout_seconds,
@@ -1043,6 +1104,8 @@ class CompanionEngine:
                     extra={"world_id": self.world_id, "message_id": message.message_id},
                 )
                 return
+            finally:
+                self._release_model_call_budget(reservation_id)
             if result.raw_proposal is None:
                 self._fail_world_model_call(
                     action_id, result.rejection_reason or "proposal_rejected"
@@ -2445,16 +2508,35 @@ class CompanionEngine:
             ),
         )
         model_action_id = self._begin_world_model_call(purpose="reply", causation=intent_id)
+        reservation_id = ""
         try:
             if not reply_call_decision.allowed:
                 raise ConnectionError(reply_call_decision.reason)
-            with model_call_scope("reply", action_id=model_action_id):
-                reply_model = (
-                    self.expressive_model
-                    if reply_route.model_tier == "strong"
-                    and self.expressive_model is not None
-                    else self.model
-                )
+            reply_model = (
+                self.expressive_model
+                if reply_route.model_tier == "strong"
+                and self.expressive_model is not None
+                else self.model
+            )
+            reservation_id = self._reserve_model_call_budget(
+                action_id=model_action_id,
+                estimated_cny=self._estimate_model_call_reserve_cny(
+                    model=reply_model,
+                    purpose="reply",
+                    cadence=frozen_turn.cadence.heat,
+                    prompt_characters=(
+                        len(self.companion_system_prompt)
+                        + len(context_block)
+                        + len(message.text)
+                        + 800
+                    ),
+                ),
+            )
+            with model_call_scope(
+                "reply",
+                action_id=model_action_id,
+                budget_reservation_id=reservation_id,
+            ):
                 raw = await complete_with_timeout(
                     _complete_structured_model(reply_model, [
                         {"role": "system", "content": self.companion_system_prompt},
@@ -2501,6 +2583,8 @@ class CompanionEngine:
         except Exception as exc:
             self._fail_world_model_call(model_action_id, str(exc))
             raise
+        finally:
+            self._release_model_call_budget(reservation_id)
         if not provider_fallback:
             self._record_world_model_output(
                 purpose="reply", causation=intent_id, content=raw, action_id=model_action_id
@@ -3867,13 +3951,13 @@ class CompanionEngine:
             causation = f"afterthought:{reply_sent_at.isoformat()}:{mode}"
             model_action_id = self._begin_world_model_call(purpose="afterthought", causation=causation)
             try:
-                with model_call_scope("afterthought", action_id=model_action_id):
-                    raw = await self._bounded_world_model_complete(
-                        self.model,
-                        [{"role": "user", "content": prompt}],
-                        purpose="afterthought",
-                        temperature=0.7,
-                    )
+                raw = await self._bounded_world_model_complete(
+                    self.model,
+                    [{"role": "user", "content": prompt}],
+                    purpose="afterthought",
+                    temperature=0.7,
+                    action_id=model_action_id,
+                )
             except Exception as exc:
                 self._fail_world_model_call(model_action_id, str(exc))
                 logger.exception("world afterthought generation failed")
@@ -4549,13 +4633,13 @@ class CompanionEngine:
         causation = f"proactive:{self.world_kernel.revision(self.world_id)}"
         model_action_id = self._begin_world_model_call(purpose="proactive", causation=causation)
         try:
-            with model_call_scope("proactive", action_id=model_action_id):
-                raw = await self._bounded_world_model_complete(
-                    self.model,
-                    [{"role": "user", "content": prompt}],
-                    purpose="proactive",
-                    temperature=0.7,
-                )
+            raw = await self._bounded_world_model_complete(
+                self.model,
+                [{"role": "user", "content": prompt}],
+                purpose="proactive",
+                temperature=0.7,
+                action_id=model_action_id,
+            )
         except Exception as exc:
             self._fail_world_model_call(model_action_id, str(exc))
             self._settle_proactive_generation(

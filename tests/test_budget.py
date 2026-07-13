@@ -1,4 +1,5 @@
 from datetime import UTC, datetime
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from companion_daemon.budget import BudgetGate, UsageEstimate
@@ -95,3 +96,95 @@ def test_model_budget_remaining_uses_persisted_real_token_cost(tmp_path: Path) -
     # One million cache-miss input tokens cost USD 0.14, or CNY 1.008 at
     # the persisted report rate. This must reduce the automatic budget.
     assert 0 <= gate.remaining_model_budget_cny(automatic=True) < 0.01
+
+
+def test_model_call_reservation_is_atomic_across_concurrent_budget_gates(
+    tmp_path: Path,
+) -> None:
+    """Two concurrent turns cannot both spend the same remaining model budget."""
+    path = tmp_path / "atomic-model-budget.sqlite"
+
+    def reserve(reservation_id: str):
+        gate = BudgetGate(
+            CompanionStore(path),
+            monthly_budget_cny=0.03,
+            daily_budget_cny=0.02,
+            soft_daily_budget_cny=0.02,
+            monthly_image_limit=20,
+            monthly_vision_limit=120,
+            monthly_audio_limit=60,
+        )
+        return gate.reserve_model_call(
+            reservation_id=reservation_id,
+            estimated_cny=0.015,
+            automatic=True,
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        decisions = list(executor.map(reserve, ("turn-a", "turn-b")))
+
+    assert sum(decision.allowed for decision in decisions) == 1
+    assert {decision.reason for decision in decisions} == {
+        "reserved",
+        "daily_budget_exceeded",
+    }
+
+
+def test_model_call_reservation_settles_actual_usage_and_releases_failures(
+    tmp_path: Path,
+) -> None:
+    store = CompanionStore(tmp_path / "model-reservation.sqlite")
+    gate = BudgetGate(
+        store,
+        monthly_budget_cny=0.05,
+        daily_budget_cny=0.05,
+        soft_daily_budget_cny=0.05,
+        monthly_image_limit=20,
+        monthly_vision_limit=120,
+        monthly_audio_limit=60,
+    )
+
+    reserved = gate.reserve_model_call(
+        reservation_id="successful-call",
+        estimated_cny=0.04,
+        automatic=True,
+    )
+    assert reserved.allowed
+    store.record_model_usage(
+        purpose="reply",
+        model="deepseek-v4-flash",
+        status="succeeded",
+        latency_ms=20,
+        prompt_tokens=1_000,
+        cache_miss_tokens=1_000,
+        total_tokens=1_000,
+        budget_reservation_id="successful-call",
+    )
+
+    # The real price is about CNY 0.001, not the CNY 0.04 preflight envelope.
+    # Settlement must return the unused envelope before the next call reserves.
+    assert gate.reserve_model_call(
+        reservation_id="next-call",
+        estimated_cny=0.04,
+        automatic=True,
+    ).allowed
+
+    failed = gate.reserve_model_call(
+        reservation_id="failed-call",
+        estimated_cny=0.005,
+        automatic=True,
+    )
+    assert failed.allowed
+    store.record_model_usage(
+        purpose="reply",
+        model="deepseek-v4-flash",
+        status="failed",
+        latency_ms=20,
+        budget_reservation_id="failed-call",
+    )
+
+    assert gate.reserve_model_call(
+        reservation_id="after-failure",
+        estimated_cny=0.005,
+        automatic=True,
+    ).allowed

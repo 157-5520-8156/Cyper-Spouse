@@ -11,6 +11,13 @@ class BudgetDecision:
 
 
 @dataclass(frozen=True)
+class ModelBudgetReservation:
+    allowed: bool
+    reason: str
+    reservation_id: str
+
+
+@dataclass(frozen=True)
 class UsageEstimate:
     kind: str
     cny: float
@@ -81,12 +88,46 @@ class BudgetGate:
             ]
         )
         limits = [
-            self.daily_budget_cny - daily_fixed - daily_model,
-            self.monthly_budget_cny - monthly_fixed - monthly_model,
+            self.daily_budget_cny
+            - daily_fixed
+            - daily_model
+            - self.store.pending_model_budget_reservation_total("day", observed_at),
+            self.monthly_budget_cny
+            - monthly_fixed
+            - monthly_model
+            - self.store.pending_model_budget_reservation_total("month", observed_at),
         ]
         if automatic:
-            limits.append(self.soft_daily_budget_cny - daily_fixed - daily_model)
+            limits.append(
+                self.soft_daily_budget_cny
+                - daily_fixed
+                - daily_model
+                - self.store.pending_model_budget_reservation_total("day", observed_at)
+            )
         return max(0.0, min(limits))
+
+    def reserve_model_call(
+        self,
+        *,
+        reservation_id: str,
+        estimated_cny: float,
+        automatic: bool,
+        now: datetime | None = None,
+    ) -> ModelBudgetReservation:
+        """Reserve a priced provider call before it reaches the network."""
+        allowed, reason = self.store.reserve_model_budget(
+            reservation_id=reservation_id,
+            estimated_cny=estimated_cny,
+            automatic=automatic,
+            monthly_budget_cny=self.monthly_budget_cny,
+            daily_budget_cny=self.daily_budget_cny,
+            soft_daily_budget_cny=self.soft_daily_budget_cny,
+            now=now or datetime.now(UTC),
+        )
+        return ModelBudgetReservation(allowed, reason, reservation_id)
+
+    def release_model_call(self, reservation_id: str) -> None:
+        self.store.release_model_budget_reservation(reservation_id)
 
 
 ESTIMATES = {
