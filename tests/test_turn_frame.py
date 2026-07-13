@@ -212,6 +212,37 @@ def test_unresolved_user_disappointment_becomes_repair_advisory_despite_surface_
     assert repair.source_event_ids == ("qq:geoff:earlier",)
 
 
+def test_recent_assistant_question_becomes_a_non_veto_rhythm_advisory() -> None:
+    compiler = TurnFrameCompiler()
+    frame = compiler.compile(
+        world_id="world:1",
+        revision=11,
+        state_hash="f" * 64,
+        snapshot={
+            "clock": {},
+            "recent_messages": [
+                {
+                    "message_id": "out:question",
+                    "user_id": "user:geoff",
+                    "direction": "out",
+                    "text": "后来怎么样了？",
+                }
+            ],
+            "relationships": {}, "emotion_modulation": {}, "facts": {}, "experiences": {},
+            "conversation_threads": {}, "actions": {}, "agenda": {},
+        },
+        user_id="user:geoff",
+        message=IncomingMessage(
+            platform="qq", platform_user_id="geoff", message_id="in:story", text="后来雨更大了。"
+        ),
+    )
+
+    rhythm = [item for item in compiler.advisories(frame) if item.kind == "rhythm"]
+
+    assert any("刚刚已经问过问题" in item.tendency for item in rhythm)
+    assert any(item.source_event_ids == ("message:out:question",) for item in rhythm)
+
+
 def test_turn_frame_injects_only_active_user_scoped_inner_records_as_fallible_delta() -> None:
     compiler = TurnFrameCompiler()
     frame = compiler.compile(

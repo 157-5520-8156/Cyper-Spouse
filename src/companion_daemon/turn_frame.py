@@ -307,6 +307,26 @@ class TurnFrameCompiler:
                     source_event_ids=(f"world_revision:{frame.revision}",),
                 )
             )
+        recent_question_sources = tuple(
+            str(item.get("source_id") or "")
+            for item in frame.recent_messages[-4:]
+            if str(item.get("direction") or "") == "out"
+            and str(item.get("text") or "").rstrip().endswith(("？", "?"))
+            and str(item.get("source_id") or "")
+        )
+        if recent_question_sources:
+            advisories.append(
+                InnerAdvisory(
+                    kind="rhythm",
+                    tendency=(
+                        "刚刚已经问过问题；若用户是在继续分享，先用完整陈述接住，"
+                        "不必再用问题收尾。"
+                    ),
+                    intensity=65,
+                    confidence=0.85,
+                    source_event_ids=recent_question_sources,
+                )
+            )
         return tuple(advisories)
 
     @staticmethod
