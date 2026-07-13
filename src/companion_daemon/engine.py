@@ -342,7 +342,6 @@ class CompanionEngine:
         world_id: str | None = None,
         interaction_appraisal_model: ChatModel | None = None,
         interaction_deep_appraisal_model: ChatModel | None = None,
-        reply_repair_model: ChatModel | None = None,
         expressive_model: ChatModel | None = None,
         attachment_cache: AttachmentCache | None = None,
         attachment_fetcher: Callable[[str], Awaitable[bytes]] | None = None,
@@ -366,7 +365,6 @@ class CompanionEngine:
         self.world_media_policy = WorldMediaPolicy()
         self.interaction_appraisal_model = interaction_appraisal_model
         self.interaction_deep_appraisal_model = interaction_deep_appraisal_model
-        self.reply_repair_model = reply_repair_model
         self.expressive_model = expressive_model
         self.attachment_cache = attachment_cache
         self.attachment_fetcher = attachment_fetcher or self._fetch_attachment

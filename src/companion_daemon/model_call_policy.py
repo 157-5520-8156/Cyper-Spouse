@@ -12,8 +12,6 @@ ModelCallPurpose = Literal[
     "reply",
     "interaction_appraisal",
     "reply_audit",
-    "reply_repair",
-    "reply_repair_audit",
     "reply_fallback_audit",
     "proactive",
     "proactive_audit",
@@ -55,8 +53,6 @@ _TURN_MODEL_CALL_PURPOSES = frozenset(
         "reply",
         "interaction_appraisal",
         "reply_audit",
-        "reply_repair",
-        "reply_repair_audit",
         "reply_fallback_audit",
         "proactive",
         "proactive_audit",
@@ -205,8 +201,6 @@ class TurnModelCallBudget:
             3,
             1 + int(request.ambiguous) + int(grounding.requires_independent_audit),
         )
-        if request.purpose == "reply_repair" and turn.cadence.heat != "hot":
-            max_calls = max(2, max_calls)
         if request.purpose not in _TURN_MODEL_CALL_PURPOSES:
             return ModelCallDecision(
                 allowed=False,
@@ -296,7 +290,7 @@ class TurnModelCallBudget:
             request.complexity != "routine"
             and turn.cadence.heat != "hot"
             and request.purpose
-            in {"reply", "interaction_appraisal", "reply_repair", "reply_audit"}
+            in {"reply", "interaction_appraisal", "reply_audit"}
         )
         return ModelCallDecision(
             allowed=allowed,

@@ -1488,7 +1488,7 @@ async def test_invalid_user_memory_answer_never_uses_companion_timeline_as_fallb
 
 
 @pytest.mark.asyncio
-async def test_failed_reply_repair_preserves_a_question_instead_of_saying_en_you_say(
+async def test_invalid_candidate_fallback_preserves_a_question_instead_of_saying_en_you_say(
     tmp_path: Path,
 ) -> None:
     class AlwaysInvalidModel:
@@ -2705,7 +2705,9 @@ async def test_cold_invalid_candidate_uses_one_call_and_fact_free_local_fallback
 
 
 @pytest.mark.asyncio
-async def test_cold_invalid_candidate_skips_configured_repair_model(tmp_path: Path) -> None:
+async def test_cold_invalid_candidate_uses_local_fallback_without_repair_model(
+    tmp_path: Path,
+) -> None:
     class PrimaryModel:
         def __init__(self) -> None:
             self.calls = 0
@@ -2717,21 +2719,8 @@ async def test_cold_invalid_candidate_skips_configured_repair_model(tmp_path: Pa
                 '"proposed_action_ids":[],"claims":[]}'
             )
 
-    class RepairModel:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def complete(self, messages, *, temperature: float) -> str:
-            self.calls += 1
-            return (
-                '{"reply_text":"我觉得先处理最影响体感的响应问题。",'
-                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
-            )
-
     primary = PrimaryModel()
-    repair = RepairModel()
     _, _, engine = _world_engine(tmp_path, primary)
-    engine.reply_repair_model = repair
 
     reply = await engine.handle_message(
         IncomingMessage(
@@ -2746,7 +2735,6 @@ async def test_cold_invalid_candidate_skips_configured_repair_model(tmp_path: Pa
     assert "证据不够" in reply.text or "依据" in reply.text or "还不够" in reply.text
     assert "我刚从商场回来" not in reply.text
     assert primary.calls == 1
-    assert repair.calls == 0
 
 
 @pytest.mark.asyncio
@@ -2764,21 +2752,8 @@ async def test_outcome_assumption_uses_local_fallback_without_inventing_user_out
                 '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
             )
 
-    class RepairModel:
-        def __init__(self) -> None:
-            self.calls = 0
-
-        async def complete(self, messages, *, temperature: float) -> str:
-            self.calls += 1
-            return (
-                '{"reply_text":"老师居然也迟到了，这一下确实有点荒唐。",'
-                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
-            )
-
     primary = PrimaryModel()
-    repair = RepairModel()
     _, _, engine = _world_engine(tmp_path, primary)
-    engine.reply_repair_model = repair
 
     reply = await engine.handle_message(
         IncomingMessage(
@@ -2793,7 +2768,6 @@ async def test_outcome_assumption_uses_local_fallback_without_inventing_user_out
     assert "一起迟到" not in reply.text
     assert reply.text
     assert primary.calls == 1
-    assert repair.calls == 0
 
 
 @pytest.mark.asyncio

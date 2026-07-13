@@ -47,13 +47,13 @@ def test_hot_fact_free_reply_has_one_fast_model_call_without_independent_audit()
     assert decision.thinking is False
 
 
-def test_warm_complex_relation_repair_may_use_strong_thinking_within_one_call() -> None:
+def test_warm_complex_expression_may_use_strong_thinking_within_one_call() -> None:
     risk = GroundingAuditRisk().assess(CandidateGroundingSignals(reply_text=""))
 
     decision = TurnModelCallBudget().decide(
         turn=_turn("warm"),
         request=ModelCallRequest(
-            purpose="reply_repair",
+            purpose="reply",
             calls_used=0,
             complexity="cross_turn_relation_repair",
         ),
@@ -138,7 +138,7 @@ def test_hot_complex_turn_stays_on_flash_instead_of_serially_escalating() -> Non
     decision = TurnModelCallBudget().decide(
         turn=_turn("hot"),
         request=ModelCallRequest(
-            purpose="reply_repair",
+            purpose="reply",
             calls_used=0,
             complexity="cross_turn_relation_repair",
         ),
@@ -209,7 +209,7 @@ def test_ambiguous_factual_turn_bounds_appraisal_reply_and_audit_to_three_calls(
     )
     exhausted = budget.decide(
         turn=_turn("warm"),
-        request=ModelCallRequest(purpose="reply_repair", calls_used=3, ambiguous=True),
+        request=ModelCallRequest(purpose="reply", calls_used=3, ambiguous=True),
         grounding=risk,
         circuit=ProviderCircuitState.closed(),
     )
@@ -356,24 +356,16 @@ def test_real_spend_remaining_budget_can_force_a_hard_invariant_fallback() -> No
     assert decision.hard_invariants_required is True
 
 
-def test_wording_repair_is_available_cold_but_never_adds_a_second_hot_call() -> None:
+def test_unknown_model_call_purpose_is_rejected_at_runtime() -> None:
     risk = GroundingAuditRisk().assess(CandidateGroundingSignals(reply_text="好。"))
     policy = TurnModelCallBudget()
 
-    hot = policy.decide(
-        turn=_turn("hot"),
-        request=ModelCallRequest(purpose="reply_repair", calls_used=1),
-        grounding=risk,
-        circuit=ProviderCircuitState.closed(),
-    )
-    cold = policy.decide(
+    decision = policy.decide(
         turn=_turn("cold"),
-        request=ModelCallRequest(purpose="reply_repair", calls_used=1),
+        request=ModelCallRequest(purpose="unknown", calls_used=0),  # type: ignore[arg-type]
         grounding=risk,
         circuit=ProviderCircuitState.closed(),
     )
 
-    assert hot.allowed is False
-    assert hot.max_calls == 1
-    assert cold.allowed is True
-    assert cold.max_calls == 2
+    assert decision.allowed is False
+    assert decision.reason == "unsupported_model_call_purpose"

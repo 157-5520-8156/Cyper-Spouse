@@ -27,8 +27,6 @@ def test_daemon_prompt_core_is_default_without_env() -> None:
     assert settings.deepseek_thinking_enabled is False
     assert settings.deepseek_deep_appraisal_model == "deepseek-v4-flash"
     assert settings.deepseek_deep_appraisal_thinking_enabled is True
-    assert settings.deepseek_repair_model == "deepseek-v4-flash"
-    assert settings.deepseek_repair_thinking_enabled is True
     assert not hasattr(settings, "world_runtime_enabled")
 
 
@@ -76,8 +74,6 @@ async def test_runtime_routes_daily_reply_to_flash_and_exposes_task_level_deep_m
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     monkeypatch.setenv("DEEPSEEK_DEEP_APPRAISAL_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("DEEPSEEK_DEEP_APPRAISAL_THINKING_ENABLED", "true")
-    monkeypatch.setenv("DEEPSEEK_REPAIR_MODEL", "deepseek-v4-pro")
-    monkeypatch.setenv("DEEPSEEK_REPAIR_THINKING_ENABLED", "false")
     monkeypatch.setenv("DEEPSEEK_EXPRESSIVE_MODEL", "deepseek-v4-pro")
     monkeypatch.setenv("DEEPSEEK_EXPRESSIVE_THINKING_ENABLED", "true")
     get_settings.cache_clear()
@@ -92,10 +88,6 @@ async def test_runtime_routes_daily_reply_to_flash_and_exposes_task_level_deep_m
     assert engine.interaction_appraisal_model.thinking_enabled is False
     assert engine.interaction_deep_appraisal_model.model == "deepseek-v4-pro"
     assert engine.interaction_deep_appraisal_model.thinking_enabled is True
-    assert engine.reply_repair_model.model == "deepseek-v4-pro"
-    assert engine.reply_repair_model.thinking_enabled is False
-    assert engine.reply_repair_model.client is engine.model.client
-    assert engine.reply_repair_model.circuit_breaker is engine.model.circuit_breaker
     assert engine.expressive_model is not None
     assert engine.expressive_model.model == "deepseek-v4-pro"
     assert engine.expressive_model.thinking_enabled is True

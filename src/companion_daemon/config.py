@@ -33,15 +33,6 @@ class Settings(BaseSettings):
     deepseek_deep_appraisal_reasoning_effort: str = Field(
         default="high", alias="DEEPSEEK_DEEP_APPRAISAL_REASONING_EFFORT"
     )
-    deepseek_repair_model: str = Field(
-        default="deepseek-v4-flash", alias="DEEPSEEK_REPAIR_MODEL"
-    )
-    deepseek_repair_thinking_enabled: bool = Field(
-        default=True, alias="DEEPSEEK_REPAIR_THINKING_ENABLED"
-    )
-    deepseek_repair_reasoning_effort: str = Field(
-        default="high", alias="DEEPSEEK_REPAIR_REASONING_EFFORT"
-    )
     enable_reply_rewrite: bool = Field(default=False, alias="ENABLE_REPLY_REWRITE")
     enable_reply_decision: bool = Field(default=True, alias="ENABLE_REPLY_DECISION")
     qq_adapter: Literal["official", "napcat", "onebot"] = Field(
