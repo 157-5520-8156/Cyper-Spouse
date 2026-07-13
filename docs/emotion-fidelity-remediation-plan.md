@@ -1,6 +1,6 @@
 # Girl-Agent 高拟真人类情绪：剩余缺口、目标架构与实施计划
 
-状态：主链路完成，持续验收中（2026-07-13 审计发现的 P0 修复进行中）
+状态：本地 P0/P1 修复与公共 seam 回归完成，持续进行外部验收（2026-07-14）
 
 创建日期：2026-07-12
 
@@ -735,7 +735,7 @@ EF-01 至 EF-18 已按本文接口落地，关键证据如下：
 - `InteractionAppraiser` 统一本地明确判断、语用风险路由、V4 Flash proposal 和证据校验；OneBot 合并消息保留每条 source message id、emoji、贴纸、附件、reply target 和可由已结算上一条外发推导的 reply delay；这些证据进入 World ledger；
 - Emotion Programs 接入 shame、guilt、jealousy、suppression 和 rumination；生活事件 appraisal 读取已提交的关系、目标重要性和 needs；
 - `ExpressionPlan` 绑定 revision、recipient、intent 和 plan hash，并以同一个 spec 生成 prompt、validator 和 fallback；reply、repair、afterthought、proactive 均在使用前从当前 Projection 编译；
-- cadence 在适配层冻结并贯穿 Engine、Action 和 usage；hot/warm/cold soft timeout 为 6/10/15 秒，typing 在生成前开始；
+- cadence 在适配层冻结并贯穿 Engine、Action 和 usage；provider 的 hot/warm/cold soft timeout 为 3.5/10/15 秒，typing 在生成前开始；
 - V4 Flash 主模型、普通非 thinking appraisal 和高风险 thinking appraisal 共用 HTTP client 与 provider circuit；timeout、transport、HTTP 408/429/5xx、schema 和程序错误分开处理；不合作取消有独立 grace 上限，主回复、repair、audit、afterthought 和 proactive 均使用统一预算/熔断/timeout；
 - usage 可按 world、turn、action、purpose、cadence、model 聚合真实 token、缓存命中、尝试次数、费用和 p50/p95；真实 token 费用会扣减后续自动模型预算，预算不足时保持 Hard Invariant 并走本地安全路径；
 - archive projection 有界保留最近 256 条 resolved episode，完整旧因果仍保存在追加式 World Event 中，避免每次投影携带无限 archive；
