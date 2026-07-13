@@ -2785,6 +2785,26 @@ class CompanionEngine:
             )
             if fallback_grounding.requires_independent_audit:
                 grounding_diagnostic_recommended = True
+        # A bare exact quotation is provenance-correct but can still evade a
+        # user's concrete follow-up (for example, an interaction record does
+        # not establish who an NPC is or whether it went well).  Keep the one
+        # known fact visible, then explicitly mark the requested detail as
+        # unconfirmed.  This is intentionally limited to the deterministic
+        # "only recites sources" case; a model answer that actually addresses
+        # the question must remain untouched.
+        if (
+            asks_for_source_detail(message.text)
+            and only_repeats_claimed_sources(message.text, candidate)
+            and "没有能确认的记录" not in str(candidate.get("reply_text") or "")
+        ):
+            source_text = str(candidate.get("reply_text") or "").strip()
+            candidate = {
+                **candidate,
+                "reply_text": (
+                    f"我只确定这件事：{source_text}"
+                    "至于你问的细节，我这里没有能确认的记录，不想乱说。"
+                ),
+            }
         # A committed harmful appraisal is not a style preference: if the
         # visible wording erases its boundary, the user receives a false
         # emotional outcome.  Keep the replacement fact-free and run it

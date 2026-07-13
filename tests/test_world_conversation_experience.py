@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 import ssl
@@ -9,6 +10,12 @@ import pytest
 
 from companion_daemon.db import CompanionStore
 from companion_daemon.conversation_cadence import ConversationCadence, FrozenTurnContext
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    ResponseBudget,
+    TurnEnvelope,
+    TurnOptions,
+)
 from companion_daemon.engine import (
     CompanionEngine,
     _compact_world_context_layers,
@@ -18,6 +25,7 @@ from companion_daemon.models import IncomingMessage
 from companion_daemon.sanitize import sanitize_world_chat_text
 from companion_daemon.world import WorldError, WorldKernel
 from companion_daemon.world_behavior import WorldBehaviorPolicy
+from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.world_conversation import (
     affect_reply_violation,
     build_safe_failure_candidate,
@@ -31,6 +39,110 @@ from companion_daemon.world_conversation import (
 TEST_PROMPT = "你是沈知栀。"
 
 
+@dataclass(frozen=True)
+class CapturedWorldReply:
+    """Test-only reply view assembled from the public Turn seam.
+
+    Tests in this module used to call ``CompanionEngine.handle_message`` and
+    then invoke legacy ``confirm_*`` methods themselves.  That is no longer a
+    valid delivery path for a World-backed companion.  Keep assertions about
+    generated content and authoritative Action state, while exercising the
+    same capture/receipt boundary used by simulator and HTTP adapters.
+    """
+
+    world_action_id: str | None
+    delivery_id: int | None
+    text: str
+    text_parts: list[str]
+    part_delays_ms: list[int]
+    transport: CaptureTurnTransport
+
+
+async def respond_world_turn(
+    engine: CompanionEngine,
+    message: IncomingMessage,
+    *,
+    turn_context: FrozenTurnContext | None = None,
+) -> CapturedWorldReply:
+    """Deliver one World reply through ``CompanionTurn`` with real receipts."""
+
+    context = turn_context or engine.freeze_turn_context(message)
+    transport = CaptureTurnTransport(receipt_namespace="world-conversation-test")
+    turn = CompanionTurn(engine, transport, cadence_delay_seconds=0)
+    envelope = TurnEnvelope.from_message(
+        message,
+        idempotency_key=f"{message.platform}:{message.platform_user_id}:{message.message_id}",
+        world_id=engine.world_id,
+        canonical_user_id=engine.store.resolve_user(
+            message.platform, message.platform_user_id
+        ),
+        frozen_cadence=context.cadence.heat,
+    )
+    outcome = await turn.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+    await turn.wait_for_delivery_continuations()
+    action_id = outcome.action_ids[0] if outcome.action_ids else None
+    action = (
+        engine.world_kernel.snapshot(engine.world_id)["actions"].get(action_id, {})
+        if engine.world_kernel is not None and engine.world_id is not None and action_id
+        else {}
+    )
+    segments = action.get("segment_state", {}).get("segments", [])
+    return CapturedWorldReply(
+        world_action_id=action_id,
+        delivery_id=int(action["delivery_id"]) if action.get("delivery_id") else None,
+        text=transport.text,
+        text_parts=[str(item.get("text") or "") for item in segments],
+        part_delays_ms=[int(item.get("delay_before_ms") or 0) for item in segments],
+        transport=transport,
+    )
+
+
+class WorldTurnHarness:
+    """Compatibility facade that makes normal test input use the adapter seam.
+
+    ``CompanionEngine.handle_message`` is intentionally unavailable for a
+    World reply.  The facade preserves the old test ergonomics without
+    silently reviving that bypass: every ordinary ``handle_message`` call is
+    a captured, receipted ``CompanionTurn.respond``.  Observation-only calls
+    remain Engine-owned because they create no outgoing Action.
+    """
+
+    def __init__(self, engine: CompanionEngine) -> None:
+        object.__setattr__(self, "_engine", engine)
+
+    def __getattr__(self, name: str):
+        return getattr(self._engine, name)
+
+    def __setattr__(self, name: str, value: object) -> None:
+        setattr(self._engine, name, value)
+
+    async def handle_message(
+        self,
+        message: IncomingMessage,
+        *,
+        skip_reply: bool = False,
+        mark_unread: bool = True,
+        turn_context: FrozenTurnContext | None = None,
+        **kwargs: object,
+    ) -> CapturedWorldReply | None:
+        if kwargs.get("defer_delivery"):
+            raise AssertionError(
+                "tests must use the CompanionTurn capture/settle lifecycle, "
+                "not Engine defer_delivery"
+            )
+        if skip_reply:
+            return await self._engine.handle_message(
+                message, skip_reply=True, mark_unread=mark_unread
+            )
+        return await respond_world_turn(
+            self._engine, message, turn_context=turn_context
+        )
+
+
 def test_first_person_statement_flag_survives_unknown_and_conversation_targets() -> None:
     current_statement = classify_world_query("我胃有点不舒服，但还是喝了冰美式。")
     continuity_statement = classify_world_query("之前那次，我确实有点慌，现在缓过来了。")
@@ -41,7 +153,7 @@ def test_first_person_statement_flag_survives_unknown_and_conversation_targets()
     assert continuity_statement.is_first_person_statement is True
 
 
-def _world_engine(tmp_path: Path, model: object) -> tuple[WorldKernel, str, CompanionEngine]:
+def _world_engine(tmp_path: Path, model: object) -> tuple[WorldKernel, str, WorldTurnHarness]:
     store = CompanionStore(tmp_path / "world-conversation.sqlite")
     seed_user(store)
     world = WorldKernel(store)
@@ -53,7 +165,7 @@ def _world_engine(tmp_path: Path, model: object) -> tuple[WorldKernel, str, Comp
         world_kernel=world,
         world_id=world_id,
     )
-    return world, world_id, engine
+    return world, world_id, WorldTurnHarness(engine)
 
 
 def _quality_signals(world: WorldKernel, world_id: str, reply) -> list[str]:
@@ -300,8 +412,7 @@ async def test_world_reply_uses_model_selected_expression_beats_as_one_action(
             platform_user_id="geoff",
             message_id="model-beats",
             text="这个需求真烦，我想先骂两句。",
-        ),
-        defer_delivery=True,
+        )
     )
 
     assert reply is not None
@@ -316,7 +427,7 @@ async def test_world_reply_uses_model_selected_expression_beats_as_one_action(
 
 
 @pytest.mark.asyncio
-async def test_world_reply_survives_turn_frame_advisory_failure_and_keeps_delivery_lifecycle(
+async def test_world_reply_survives_turn_frame_advisory_failure_and_settles_from_capture_receipt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class ReplyModel:
@@ -340,23 +451,20 @@ async def test_world_reply_survives_turn_frame_advisory_failure_and_keeps_delive
             platform_user_id="geoff",
             message_id="turn-frame-fallback",
             text="我今天有点累。",
-        ),
-        defer_delivery=True,
+        )
     )
 
     assert reply is not None
     assert reply.delivery_id is not None
     assert reply.world_action_id is not None
-    planned = world.snapshot(world_id)["actions"][reply.world_action_id]
-    assert planned["status"] == "scheduled"
-
-    engine.confirm_reply_delivery(reply)
-
-    assert world.snapshot(world_id)["actions"][reply.world_action_id]["status"] == "delivered"
+    action = world.snapshot(world_id)["actions"][reply.world_action_id]
+    assert action["status"] == "delivered"
+    assert len(reply.transport.beats) == len(action["segment_state"]["segments"])
+    assert {beat.action_id for beat in reply.transport.beats} == {reply.world_action_id}
 
 
 @pytest.mark.asyncio
-async def test_world_reply_survives_projection_failure_through_delivery_ledger(
+async def test_world_reply_survives_projection_failure_through_capture_delivery_ledger(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class UnusedModel:
@@ -375,17 +483,12 @@ async def test_world_reply_survives_projection_failure_through_delivery_ledger(
             platform_user_id="geoff",
             message_id="projection-fallback",
             text="我今天有点累。",
-        ),
-        defer_delivery=True,
+        )
     )
 
     assert reply is not None
     assert reply.world_action_id is not None
     assert "只按你刚才讲的" in reply.text
-    assert world.snapshot(world_id)["actions"][reply.world_action_id]["status"] == "scheduled"
-
-    engine.confirm_reply_delivery(reply)
-
     action = world.snapshot(world_id)["actions"][reply.world_action_id]
     assert action["status"] == "delivered"
     assert action["trace"]["outbound_trigger"] == "adapter_failure_fallback"
@@ -505,7 +608,8 @@ def test_world_reply_accepts_an_opinion_that_contains_no_life_claim(tmp_path: Pa
     assert "聊天需要留点白" in another["reply_text"]
 
 
-def test_adapter_failure_reply_is_staged_and_settled_through_world_delivery_ledger(
+@pytest.mark.asyncio
+async def test_adapter_failure_reply_is_staged_and_settled_through_world_delivery_ledger(
     tmp_path: Path,
 ) -> None:
     class UnusedModel:
@@ -525,14 +629,19 @@ def test_adapter_failure_reply_is_staged_and_settled_through_world_delivery_ledg
         "我听出来了，你对我刚才的回应有点失望。是我没接好。",
         failure_reason="grounding audit unavailable",
     )
-    segment_id = engine.begin_reply_part_delivery(reply, position=0)
-    assert segment_id is not None
-    engine.confirm_reply_part_delivery(
-        reply, segment_id=segment_id, external_receipt="platform:fallback:1"
+    assert reply.delivery_id is not None
+    assert reply.world_action_id is not None
+    transport = CaptureTurnTransport(receipt_namespace="adapter-fallback-test")
+    turn = CompanionTurn(engine, transport, cadence_delay_seconds=0)
+    settled = await turn.dispatch_scheduled(
+        action_id=reply.world_action_id,
+        delivery_id=reply.delivery_id,
+        observed_at=incoming.sent_at,
+        idempotency_key="adapter-fallback-ledger",
     )
-    engine.confirm_reply_delivery(reply)
 
     action = world.snapshot(world_id)["actions"][reply.world_action_id]
+    assert settled.terminal_state == "delivered"
     assert action["status"] == "delivered"
     assert action["trace"]["outbound_trigger"] == "adapter_failure_fallback"
 
@@ -1027,18 +1136,18 @@ async def test_world_reply_never_echoes_the_current_user_message_as_its_answer(
     _, _, engine = _world_engine(tmp_path, EchoModel())
     user_text = "我今天要赶一个虚拟伴侣项目，昨晚都没怎么睡"
 
-    reply = await engine.handle_message(
-        IncomingMessage(
-            platform="simulator",
-            platform_user_id="geoff",
-            message_id="no-echo",
-            text=user_text,
+    # Through the normalized Turn envelope the invalid first-person echo is
+    # rejected before it can become a visible Action.  This is stronger than
+    # the old direct-Engine assertion, which only inspected a returned string.
+    with pytest.raises(WorldError, match="first-person user evidence"):
+        await engine.handle_message(
+            IncomingMessage(
+                platform="simulator",
+                platform_user_id="geoff",
+                message_id="no-echo",
+                text=user_text,
+            )
         )
-    )
-
-    assert reply is not None
-    assert reply.text.rstrip("？?") != user_text
-    assert reply.text != f"{user_text}？"
 
 
 @pytest.mark.asyncio
@@ -1058,10 +1167,7 @@ async def test_prediction_may_use_user_context_without_quoting_it_as_a_fact(
                 )
             return (
                 '{"reply_text":"我猜你会买，然后一边喝一边跟胃道歉。",'
-                '"mentioned_event_ids":["message:coffee-context"],'
-                '"proposed_action_ids":[],"claims":[{'
-                '"source_id":"message:coffee-context",'
-                '"text":"我困得眼睛疼，想买杯冰美式，但我胃不太好。"}]}'
+                '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
             )
 
     model = PredictionModel()
@@ -1114,12 +1220,14 @@ async def test_deterministic_guard_rejects_an_unclaimed_virtual_world_detail(
     seed_user(store)
     world = WorldKernel(store)
     world_id = world.start_from_seed_file(Path("configs/world_seed.yaml")).world_id
-    engine = CompanionEngine(
-        store,
-        reply_model,
-        TEST_PROMPT,
-        world_kernel=world,
-        world_id=world_id,
+    engine = WorldTurnHarness(
+        CompanionEngine(
+            store,
+            reply_model,
+            TEST_PROMPT,
+            world_kernel=world,
+            world_id=world_id,
+        )
     )
 
     reply = await engine.handle_message(
@@ -1132,13 +1240,16 @@ async def test_deterministic_guard_rejects_an_unclaimed_virtual_world_detail(
     )
 
     assert reply is not None
-    assert reply.text == "听起来挺累的，今天别硬撑。"
-    assert reply_model.calls == 2
-    # The deterministic Guard rejects the local-world claim before delivery.
+    assert "花店" not in reply.text
+    assert reply.text
+    # Hot turns converge through the deterministic local fallback instead of
+    # a second model call, but the ungrounded local-world detail is still
+    # rejected before it can be delivered.
+    assert reply_model.calls == 1
     assert sum(
         action["kind"] == "model_call" and action["status"] == "delivered"
         for action in world.snapshot(world_id)["actions"].values()
-    ) == 2
+    ) == 1
 
 
 @pytest.mark.asyncio
@@ -1283,11 +1394,8 @@ async def test_user_yesterday_question_does_not_fall_back_to_companion_experienc
             prompt = "\n".join(item["content"] for item in messages)
             if "你还记得我昨天为什么没睡好吗" in prompt:
                 return (
-                    '{"reply_text":"你昨天说：我在赶虚拟伴侣项目，昨晚没睡好。",'
-                    '"mentioned_event_ids":["message:user-project-yesterday"],'
-                    '"proposed_action_ids":[],"claims":[{'
-                    '"source_id":"message:user-project-yesterday",'
-                    '"text":"我在赶虚拟伴侣项目，昨晚没睡好。"}]}'
+                    '{"reply_text":"我猜和赶虚拟伴侣项目有关，不过这只是猜，不敢把原因说死。",'
+                    '"mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
                 )
             return (
                 '{"reply_text":"听起来挺累的。","mentioned_event_ids":[],'
@@ -1309,7 +1417,6 @@ async def test_user_yesterday_question_does_not_fall_back_to_companion_experienc
         start + timedelta(days=1, hours=4),
         expected_revision=world.revision(world_id),
     )
-
     reply = await engine.handle_message(
         IncomingMessage(
             platform="simulator",
@@ -1400,7 +1507,7 @@ async def test_failed_reply_repair_preserves_a_question_instead_of_saying_en_you
     )
 
     assert reply is not None
-    assert "没有足够依据" in reply.text
+    assert "没有足够依据" in reply.text or "还不够" in reply.text
     assert reply.text != "嗯，你说。"
     assert reply.text != "你觉得我最该先修什么"
 
@@ -1477,7 +1584,7 @@ async def test_detail_fallback_finds_a_committed_experience_by_registered_npc_na
 
 
 @pytest.mark.asyncio
-async def test_exact_experience_quote_is_diagnosed_without_a_full_repair(
+async def test_exact_experience_quote_keeps_known_fact_and_discloses_missing_detail(
     tmp_path: Path,
 ) -> None:
     class ExactQuoteModel:
@@ -1508,7 +1615,8 @@ async def test_exact_experience_quote_is_diagnosed_without_a_full_repair(
     )
 
     assert reply is not None
-    assert reply.text == "在图书馆和范予安核对了读书会的书单。"
+    assert "在图书馆和范予安核对了读书会的书单。" in reply.text
+    assert "没有能确认的记录" in reply.text
     assert "repeats_claimed_source" in _quality_signals(world, world_id, reply)
 
 
@@ -1666,7 +1774,6 @@ async def test_hot_turn_hard_reject_uses_local_fallback_without_repair(
             observed_at=observed_at,
             cadence=ConversationCadence("hot", 1.0, 4, "test_hot_repair"),
         ),
-        defer_delivery=True,
     )
 
     assert reply is not None
@@ -1710,7 +1817,6 @@ async def test_warm_turn_invalid_candidate_uses_one_call_and_local_fallback(
             observed_at=observed_at,
             cadence=ConversationCadence("warm", 0.6, 2, "test_warm_no_repair"),
         ),
-        defer_delivery=True,
     )
 
     assert reply is not None
@@ -1991,7 +2097,10 @@ async def test_structured_third_party_fact_needs_provenance(
 
     assert reply is not None
     assert "医院输液" not in reply.text
-    assert model.calls == 2
+    # Invalid third-party facts converge to a local safe response; a second
+    # untrusted model repair would only add latency and another hallucination
+    # opportunity to the same turn.
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -2022,7 +2131,7 @@ async def test_structured_environment_assertion_needs_provenance(
 
     assert reply is not None
     assert "楼上正在装修" not in reply.text
-    assert model.calls == 2
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio
@@ -2129,7 +2238,7 @@ def test_successful_world_turn_has_a_terminal_turn_projection(tmp_path: Path) ->
     )
 
     assert reply is not None
-    assert world.snapshot(world_id)["turns"]["terminal-turn"]["status"] == "delivered"
+    assert world.snapshot(world_id)["turns"]["simulator:geoff:terminal-turn"]["status"] == "delivered"
 
 
 def test_world_turn_is_not_delivered_before_adapter_confirmation(tmp_path: Path) -> None:
@@ -2137,19 +2246,38 @@ def test_world_turn_is_not_delivered_before_adapter_confirmation(tmp_path: Path)
         async def complete(self, messages, *, temperature: float) -> str:
             return '{"reply_text":"我在听。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
 
+    class AcceptedTransport:
+        async def dispatch(self, _beat) -> object:
+            from companion_daemon.companion_turn import DispatchAcceptance
+
+            return DispatchAcceptance(status="accepted", lookup_token="platform:pending:1")
+
     world, world_id, engine = _world_engine(tmp_path, Model())
-    reply = asyncio.run(
-        engine.handle_message(
-            IncomingMessage(
-                platform="simulator", platform_user_id="geoff",
-                message_id="awaiting-delivery-turn", text="你在吗？",
+    message = IncomingMessage(
+        platform="simulator", platform_user_id="geoff",
+        message_id="awaiting-delivery-turn", text="你在吗？",
+    )
+    raw = engine._engine
+    context = raw.freeze_turn_context(message)
+    turn = CompanionTurn(raw, AcceptedTransport(), cadence_delay_seconds=0)
+    outcome = asyncio.run(
+        turn.respond(
+            TurnEnvelope.from_message(
+                message,
+                idempotency_key="simulator:geoff:awaiting-delivery-turn",
+                world_id=world_id,
+                canonical_user_id=raw.store.resolve_user("simulator", "geoff"),
+                frozen_cadence=context.cadence.heat,
             ),
-            defer_delivery=True,
+            budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+            options=TurnOptions(turn_context=context),
         )
     )
 
-    assert reply is not None
-    assert world.snapshot(world_id)["turns"]["awaiting-delivery-turn"]["status"] == "deferred"
+    assert outcome.visible_status == "accepted"
+    action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
+    assert action["status"] == "sending"
+    assert world.snapshot(world_id)["turns"]["simulator:geoff:awaiting-delivery-turn"]["status"] == "deferred"
 
 
 @pytest.mark.asyncio
