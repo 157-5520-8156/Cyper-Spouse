@@ -44,6 +44,22 @@ A traceable attempt to produce an observable online or external effect. An Actio
 
 A recorded outcome from a model, random draw, media generator, tool, network, clock, or platform receipt that replay must not invoke again.
 
+## Photo Candidate
+
+A rebuildable Projection entry indicating that a Committed Experience may have enough visual and sharing value to become media. It is not permission to generate or send anything.
+
+## Media Opportunity
+
+The World's frozen selection of one Photo Candidate for possible rendering. It identifies one Committed Experience, chooses life-share or character-media, and sets a privacy ceiling.
+
+## Media Plan
+
+One evidence-bound, replayable photographic interpretation of a Media Opportunity. It selects exactly one primary visual subject, capture authorship, visual form, sharing intent, polish, tone, and privacy level without changing World facts or deciding whether to send.
+
+## Media Inspection
+
+A recorded visual assessment of media. It states whether the artifact is deliverable and describes what is actually visible, including deviations from the Media Plan.
+
 ## Relationship Stage
 
 A slow projection of settled interaction history. It influences likely choices and their cost but does not grant the user control over the companion or act as a context-free vocabulary licence.
