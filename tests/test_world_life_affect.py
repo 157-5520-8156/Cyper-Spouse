@@ -143,6 +143,18 @@ async def test_npc_conflict_changes_affect_then_next_turn_deliberation_and_promp
     ]
     assert affect_events
     assert affect_events[-1].payload["source_reference"].startswith("outcome:")
+    experience_appraisals = [
+        event for event in world.events(started.world_id)
+        if event.event_type == "ExperienceAppraised"
+        and event.payload.get("appraisal") == "npc_conflict"
+    ]
+    assert experience_appraisals
+    dimensions = experience_appraisals[-1].payload["dimensions"]
+    assert dimensions["agency"] == "npc"
+    assert dimensions["source_event_ids"] == [
+        experience_appraisals[-1].payload["source_reference"]
+    ]
+    assert all(not source.startswith("message:") for source in dimensions["source_event_ids"])
     assert after_conflict["vector"]["anger"] > baseline["anger"]
     assert after_conflict["vector"]["hurt"] > baseline["hurt"]
     assert after_conflict["unresolved"] is True

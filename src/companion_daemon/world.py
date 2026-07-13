@@ -24,7 +24,10 @@ from companion_daemon.action_coordinator import (
 from companion_daemon.affect_display import plan_affect_display
 from companion_daemon.expression_plan import ExpressionPlan, compile_expression_plan
 from companion_daemon.life_simulation import LifeSimulation
-from companion_daemon.life_appraisal import appraise_committed_life_outcome
+from companion_daemon.life_appraisal import (
+    appraise_committed_life_outcome,
+    derive_life_appraisal_context,
+)
 from companion_daemon.life_evolution import LifeEvolution
 from companion_daemon.time import utc_now
 from companion_daemon.world_interaction_rules import (
@@ -4129,6 +4132,22 @@ class WorldKernel:
                                 ),
                                 "affect goal",
                             ) if goal_id else {}
+                            life_context = derive_life_appraisal_context(
+                                outcome_payload,
+                                prior_outcomes=_as_dict(
+                                    working.get("outcomes", {}), "life outcomes"
+                                ),
+                                experiences=_as_dict(
+                                    working.get("experiences", {}), "experiences"
+                                ),
+                                active_episodes=_as_list(
+                                    _as_dict(
+                                        working.get("emotion_modulation", {}),
+                                        "emotion modulation",
+                                    ).get("active_episodes", []),
+                                    "active affect episodes",
+                                ),
+                            )
                             cognitive_appraisal = appraise_committed_life_outcome(
                                 outcome_payload,
                                 needs=_as_dict(working.get("needs", {}), "needs"),
@@ -4138,10 +4157,14 @@ class WorldKernel:
                                     or goal.get("priority")
                                     or 50 if goal_id else 0
                                 ),
+                                context=life_context,
                             )
                             outcome_payload = {
                                 **outcome_payload,
-                                "dimensions": cognitive_appraisal.payload(),
+                                "dimensions": {
+                                    **cognitive_appraisal.payload(),
+                                    **life_context.payload(),
+                                },
                                 "rule_version": cognitive_appraisal.rule_version,
                             }
                             emit(outcome_type, outcome_payload)
@@ -4165,6 +4188,7 @@ class WorldKernel:
                                 ),
                                 appraisal_dimensions={
                                     **cognitive_appraisal.payload(),
+                                    **life_context.payload(),
                                     "program_target": (
                                         "valued_relationship"
                                         if npc_id and cognitive_appraisal.relationship_value >= 60

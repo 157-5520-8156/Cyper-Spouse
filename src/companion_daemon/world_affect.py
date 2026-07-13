@@ -729,7 +729,9 @@ def _new_episode(
             relationship_value=int(dimensions.get("relationship_value", 0)),
             comparison_salience=int(dimensions.get("comparison_salience", 0)),
             comparison_target=str(dimensions.get("comparison_target") or ""),
-            source_event_ids=(source_reference,) if source_reference else (),
+            source_event_ids=_bounded_source_event_ids(
+                dimensions.get("source_event_ids"), source_reference
+            ),
             expression_safety=int(dimensions.get("expression_safety", 100)),
             unresolved=bool(dimensions.get("unresolved", False)),
             attention_capture=int(dimensions.get("attention_capture", 0)),
@@ -817,6 +819,9 @@ def _new_episode(
             "processes": list(program.processes),
             "process_effects": dict(program.process_effects),
             "component_deltas": program_component_deltas,
+            "source_event_ids": list(
+                _bounded_source_event_ids(dimensions.get("source_event_ids"), source_reference)
+            ),
             "appraisal_inputs": {
                 "certainty": int(dimensions.get("certainty", 100)),
                 "controllability": int(dimensions.get("controllability", 50)),
@@ -825,6 +830,15 @@ def _new_episode(
             "version": program.program_version,
         },
     }
+
+
+def _bounded_source_event_ids(raw: object, fallback: str) -> tuple[str, ...]:
+    """Keep auditable cause references bounded even for imported ledgers."""
+    values = raw if isinstance(raw, (list, tuple)) else ()
+    candidates = [str(item) for item in values]
+    if fallback:
+        candidates.append(fallback)
+    return tuple(sorted({item for item in candidates if item and len(item) <= 160}))[:8]
 
 
 def _responsibility(dimensions: dict[str, object]) -> int:
