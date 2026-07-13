@@ -14,6 +14,12 @@ from pathlib import Path
 import pytest
 
 from companion_daemon.db import CompanionStore
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    ResponseBudget,
+    TurnEnvelope,
+    TurnOptions,
+)
 from companion_daemon.emotion_state import (
     interpret_interaction,
     transition_emotional_state,
@@ -21,6 +27,7 @@ from companion_daemon.emotion_state import (
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.models import IncomingMessage, MoodState
+from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.world import WorldKernel
 
 
@@ -61,6 +68,29 @@ def _legacy_engine(tmp_path: Path) -> CompanionEngine:
     store = CompanionStore(tmp_path / "legacy-offense-experience.sqlite")
     seed_user(store)
     return CompanionEngine(store, FakeCompanionModel(), "你是沈知栀。")
+
+
+async def _respond_world_turn(engine: CompanionEngine, message: IncomingMessage) -> str:
+    """Exercise the authoritative World reply and its receipt together."""
+    context = engine.freeze_turn_context(message)
+    transport = CaptureTurnTransport(receipt_namespace="world-offense")
+    envelope = TurnEnvelope.from_message(
+        message,
+        idempotency_key=f"{message.platform}:{message.platform_user_id}:{message.message_id}",
+        world_id=engine.world_id,
+        canonical_user_id=engine.store.resolve_user(
+            message.platform, message.platform_user_id
+        ),
+        frozen_cadence=context.cadence.heat,
+    )
+    turn = CompanionTurn(engine, transport, cadence_delay_seconds=0)
+    await turn.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+    await turn.wait_for_delivery_continuations()
+    return transport.text
 
 
 @pytest.mark.parametrize(
@@ -190,7 +220,7 @@ async def test_world_offense_selects_a_boundary_stance_and_makes_it_observable(
 ) -> None:
     world, world_id, engine = _world_engine(tmp_path)
 
-    reply = await engine.handle_message(_message("滚，你就是个废物。", "boundary-1"))
+    reply = await _respond_world_turn(engine, _message("滚，你就是个废物。", "boundary-1"))
 
     snapshot = world.snapshot(world_id)
     assert snapshot["last_appraisal"]["appraisal"] == "boundary_violation"
@@ -200,11 +230,10 @@ async def test_world_offense_selects_a_boundary_stance_and_makes_it_observable(
         "refuse_to_affirm",
         "seek_repair",
     }
-    assert reply is not None
     assert re.search(
         r"不喜欢|不接受|别这样|不要这样|不舒服|越界|边界|先停",
-        reply.text,
-    ), f"offense produced no observable boundary: {reply.text!r}"
+        reply,
+    ), f"offense produced no observable boundary: {reply!r}"
 
 
 @pytest.mark.asyncio
@@ -220,7 +249,7 @@ async def test_repeated_offenses_accumulate_affect_violation_and_long_term_affin
     hurt_levels: list[int] = []
 
     for index, text in enumerate(messages, start=1):
-        await engine.handle_message(_message(text, f"repeated-offense-{index}"))
+        await _respond_world_turn(engine, _message(text, f"repeated-offense-{index}"))
         affect = world.snapshot(world_id)["emotion_modulation"]
         hurt_levels.append(int(affect["vector"]["hurt"]))
 

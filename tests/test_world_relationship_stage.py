@@ -3,9 +3,16 @@ from pathlib import Path
 import pytest
 
 from companion_daemon.db import CompanionStore
+from companion_daemon.companion_turn import (
+    CompanionTurn,
+    ResponseBudget,
+    TurnEnvelope,
+    TurnOptions,
+)
 from companion_daemon.emotion_state import interpret_interaction
 from companion_daemon.engine import CompanionEngine
 from companion_daemon.models import IncomingMessage, MoodState
+from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.world import WorldKernel
 from companion_daemon.world_relationship import evaluate_relationship_stage
 from companion_daemon.world_conversation import human_reply_contract_violation
@@ -41,6 +48,29 @@ def _appraise(kernel: WorldKernel, world_id: str, index: int, appraisal: str) ->
         },
         expected_revision=kernel.revision(world_id),
     )
+
+
+async def _respond_world_turn(engine: CompanionEngine, message: IncomingMessage) -> str:
+    """Run a World reply through the receipt-owning public turn seam."""
+    context = engine.freeze_turn_context(message)
+    transport = CaptureTurnTransport(receipt_namespace="relationship-stage")
+    envelope = TurnEnvelope.from_message(
+        message,
+        idempotency_key=f"{message.platform}:{message.platform_user_id}:{message.message_id}",
+        world_id=engine.world_id,
+        canonical_user_id=engine.store.resolve_user(
+            message.platform, message.platform_user_id
+        ),
+        frozen_cadence=context.cadence.heat,
+    )
+    turn = CompanionTurn(engine, transport, cadence_delay_seconds=0)
+    await turn.respond(
+        envelope,
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+        options=TurnOptions(turn_context=context),
+    )
+    await turn.wait_for_delivery_continuations()
+    return transport.text
 
 
 def test_world_relationship_starts_as_stranger_and_promotes_from_ledger_interactions(
@@ -320,7 +350,8 @@ async def test_world_reply_prompt_reads_the_projected_friend_stage(tmp_path: Pat
         world_id=world_id,
     )
 
-    reply = await engine.handle_message(
+    await _respond_world_turn(
+        engine,
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -329,7 +360,6 @@ async def test_world_reply_prompt_reads_the_projected_friend_stage(tmp_path: Pat
         )
     )
 
-    assert reply is not None
     prompt = "\n".join(str(item.get("content") or "") for item in model.calls[0])
     assert "关系投影" in prompt
     assert '"stage":"friend"' in prompt

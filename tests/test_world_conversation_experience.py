@@ -43,8 +43,8 @@ TEST_PROMPT = "你是沈知栀。"
 class CapturedWorldReply:
     """Test-only reply view assembled from the public Turn seam.
 
-    Tests in this module used to call ``CompanionEngine.handle_message`` and
-    then invoke legacy ``confirm_*`` methods themselves.  That is no longer a
+    Tests in this module once used the Engine's legacy reply entry point and
+    then invoked legacy ``confirm_*`` methods themselves.  That is no longer a
     valid delivery path for a World-backed companion.  Keep assertions about
     generated content and authoritative Action state, while exercising the
     same capture/receipt boundary used by simulator and HTTP adapters.
@@ -102,13 +102,11 @@ async def respond_world_turn(
 
 
 class WorldTurnHarness:
-    """Compatibility facade that makes normal test input use the adapter seam.
+    """Test fixture exposing only the captured ``CompanionTurn`` reply seam.
 
-    ``CompanionEngine.handle_message`` is intentionally unavailable for a
-    World reply.  The facade preserves the old test ergonomics without
-    silently reviving that bypass: every ordinary ``handle_message`` call is
-    a captured, receipted ``CompanionTurn.respond``.  Observation-only calls
-    remain Engine-owned because they create no outgoing Action.
+    World-backed replies must cross the same capture/receipt boundary as a
+    real adapter.  This fixture deliberately does not expose an Engine reply
+    compatibility method, so tests cannot accidentally revive that bypass.
     """
 
     def __init__(self, engine: CompanionEngine) -> None:
@@ -120,24 +118,12 @@ class WorldTurnHarness:
     def __setattr__(self, name: str, value: object) -> None:
         setattr(self._engine, name, value)
 
-    async def handle_message(
+    async def respond(
         self,
         message: IncomingMessage,
         *,
-        skip_reply: bool = False,
-        mark_unread: bool = True,
         turn_context: FrozenTurnContext | None = None,
-        **kwargs: object,
-    ) -> CapturedWorldReply | None:
-        if kwargs.get("defer_delivery"):
-            raise AssertionError(
-                "tests must use the CompanionTurn capture/settle lifecycle, "
-                "not Engine defer_delivery"
-            )
-        if skip_reply:
-            return await self._engine.handle_message(
-                message, skip_reply=True, mark_unread=mark_unread
-            )
+    ) -> CapturedWorldReply:
         return await respond_world_turn(
             self._engine, message, turn_context=turn_context
         )
@@ -194,8 +180,8 @@ async def test_local_fallback_trace_records_reason_and_content_free_replay_hashe
     world_a, world_id_a, engine_a = _world_engine(tmp_path / "a", InvalidWorldFactModel())
     world_b, world_id_b, engine_b = _world_engine(tmp_path / "b", InvalidWorldFactModel())
 
-    reply_a = await engine_a.handle_message(incoming)
-    reply_b = await engine_b.handle_message(incoming)
+    reply_a = await engine_a.respond(incoming)
+    reply_b = await engine_b.respond(incoming)
 
     assert reply_a is not None and reply_b is not None
     trace_a = world_a.snapshot(world_id_a)["actions"][reply_a.world_action_id]["trace"]
@@ -265,7 +251,7 @@ async def test_hot_minimal_ack_fallback_never_turns_into_old_source_recall(
             )
 
     _, _, engine = _world_engine(tmp_path, Model())
-    await engine.handle_message(
+    await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -273,7 +259,7 @@ async def test_hot_minimal_ack_fallback_never_turns_into_old_source_recall(
             text="毛概真的好难背。",
         )
     )
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -308,7 +294,7 @@ async def test_hot_story_fallback_never_replaces_current_event_with_old_quote(
             )
 
     _, _, engine = _world_engine(tmp_path, Model())
-    await engine.handle_message(
+    await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -316,7 +302,7 @@ async def test_hot_story_fallback_never_replaces_current_event_with_old_quote(
             text="早上雨特别大，我的伞还找不到。",
         )
     )
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -360,7 +346,7 @@ async def test_hot_fallback_does_not_recall_an_unrelated_old_message(
             )
 
     _, _, engine = _world_engine(tmp_path, Model())
-    await engine.handle_message(
+    await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -368,7 +354,7 @@ async def test_hot_fallback_does_not_recall_an_unrelated_old_message(
             text="我明天考试。",
         )
     )
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -408,7 +394,7 @@ async def test_hot_continuation_after_a_question_gets_a_rhythm_prompt(
             )
 
     _, _, engine = _world_engine(tmp_path, Model())
-    await engine.handle_message(
+    await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -416,7 +402,7 @@ async def test_hot_continuation_after_a_question_gets_a_rhythm_prompt(
             text="我明天考试。",
         )
     )
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -444,7 +430,7 @@ async def test_world_reply_uses_model_selected_expression_beats_as_one_action(
             )
 
     world, world_id, engine = _world_engine(tmp_path, BeatModel())
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -483,7 +469,7 @@ async def test_world_reply_survives_turn_frame_advisory_failure_and_settles_from
 
     monkeypatch.setattr(engine.turn_frame_compiler, "compile", broken_turn_frame)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -515,7 +501,7 @@ async def test_world_reply_survives_projection_failure_through_capture_delivery_
         raise RuntimeError("injected projection failure")
 
     monkeypatch.setattr(world, "turn_projection", broken_projection)
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="qq",
             platform_user_id="geoff",
@@ -1180,7 +1166,7 @@ async def test_world_reply_never_echoes_the_current_user_message_as_its_answer(
     # The invalid model echo is never visible as a companion assertion.  The
     # Turn now substitutes a bounded, fact-free fallback instead of spending
     # another model call on repair.
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1216,7 +1202,7 @@ async def test_prediction_may_use_user_context_without_quoting_it_as_a_fact(
 
     model = PredictionModel()
     _, _, engine = _world_engine(tmp_path, model)
-    await engine.handle_message(
+    await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1225,7 +1211,7 @@ async def test_prediction_may_use_user_context_without_quoting_it_as_a_fact(
         )
     )
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1274,7 +1260,7 @@ async def test_deterministic_guard_rejects_an_unclaimed_virtual_world_detail(
         )
     )
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1309,7 +1295,7 @@ async def test_statement_containing_ni_jue_de_does_not_open_a_question_thread(
 
     world, world_id, engine = _world_engine(tmp_path, StatementModel())
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1338,7 +1324,7 @@ async def test_world_reply_prompt_contains_recent_delivered_conversation(tmp_pat
     model = RecordingModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    await engine.handle_message(
+    await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1346,7 +1332,7 @@ async def test_world_reply_prompt_contains_recent_delivered_conversation(tmp_pat
             text="我在赶一个虚拟伴侣项目，昨晚没睡好。",
         )
     )
-    await engine.handle_message(
+    await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1447,7 +1433,7 @@ async def test_user_yesterday_question_does_not_fall_back_to_companion_experienc
             )
 
     world, world_id, engine = _world_engine(tmp_path, UserMemoryModel())
-    await engine.handle_message(
+    await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1461,7 +1447,7 @@ async def test_user_yesterday_question_does_not_fall_back_to_companion_experienc
         start + timedelta(days=1, hours=4),
         expected_revision=world.revision(world_id),
     )
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1498,7 +1484,7 @@ async def test_invalid_user_memory_answer_never_uses_companion_timeline_as_fallb
 
     model = InvalidMemoryModel()
     world, world_id, engine = _world_engine(tmp_path, model)
-    await engine.handle_message(
+    await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1513,7 +1499,7 @@ async def test_invalid_user_memory_answer_never_uses_companion_timeline_as_fallb
         expected_revision=world.revision(world_id),
     )
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1541,7 +1527,7 @@ async def test_invalid_candidate_fallback_preserves_a_question_instead_of_saying
 
     _, _, engine = _world_engine(tmp_path, AlwaysInvalidModel())
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1578,7 +1564,7 @@ async def test_failed_detail_answer_admits_the_source_has_no_requested_detail(
         expected_revision=world.revision(world_id),
     )
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1613,7 +1599,7 @@ async def test_detail_fallback_finds_a_committed_experience_by_registered_npc_na
         expected_revision=world.revision(world_id),
     )
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1649,7 +1635,7 @@ async def test_exact_experience_quote_keeps_known_fact_and_discloses_missing_det
         expected_revision=world.revision(world_id),
     )
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1687,7 +1673,7 @@ async def test_non_interruptible_activity_is_an_advisory_not_a_pre_model_veto(
         expected_revision=world.revision(world_id),
     )
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1753,7 +1739,7 @@ async def test_busy_question_fallback_answers_availability(tmp_path: Path) -> No
             return '{"reply_text":"我在火星上。","mentioned_event_ids":[],"proposed_action_ids":[],"claims":[]}'
 
     world, world_id, engine = _world_engine(tmp_path, InvalidThenFallbackModel())
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1776,7 +1762,7 @@ async def test_non_json_reply_and_repair_end_in_a_safe_deliverable_reply(
 
     world, world_id, engine = _world_engine(tmp_path, NonJsonModel())
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="non-json-world-reply", text="我胃还是有点不舒服。",
@@ -1803,7 +1789,7 @@ async def test_hot_turn_hard_reject_uses_local_fallback_without_repair(
     model = UnsupportedActionModel()
     world, world_id, engine = _world_engine(tmp_path, model)
     observed_at = datetime.now().astimezone()
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1846,7 +1832,7 @@ async def test_warm_turn_invalid_candidate_uses_one_call_and_local_fallback(
     world, world_id, engine = _world_engine(tmp_path, model)
     observed_at = datetime.now().astimezone()
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1886,7 +1872,7 @@ async def test_plain_chat_reply_skips_repair_when_the_envelope_is_missing(
     model = PlainReplyModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1915,7 +1901,7 @@ async def test_plain_presence_acknowledgement_skips_repair_without_word_overlap(
     model = PresenceModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1944,7 +1930,7 @@ async def test_plain_nonfactual_support_skips_repair_without_word_overlap(
     model = SupportModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -1975,7 +1961,7 @@ async def test_plain_chat_world_fact_is_not_delivered_without_provenance(
     model = FactThenSafeModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2006,7 +1992,7 @@ async def test_plain_chat_autobiographical_fact_is_not_delivered_without_provena
     model = BiographyThenSafeModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2037,7 +2023,7 @@ async def test_plain_chat_prefixed_parent_fact_is_not_delivered_without_provenan
     model = ParentFactThenSafeModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2068,7 +2054,7 @@ async def test_plain_chat_cannot_answer_third_party_fact_question(
     model = ThirdPartyThenSafeModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2099,7 +2085,7 @@ async def test_plain_chat_cannot_add_state_to_user_mentioned_third_party(
     model = ThirdPartyStateThenSafeModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2130,7 +2116,7 @@ async def test_structured_third_party_fact_needs_provenance(
     model = StructuredFactThenSafeModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2164,7 +2150,7 @@ async def test_structured_environment_assertion_needs_provenance(
     model = EnvironmentThenSafeModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2195,7 +2181,7 @@ async def test_plain_chat_cannot_expand_user_environment_statement(
     model = EnvironmentThenSafeModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2273,7 +2259,7 @@ def test_successful_world_turn_has_a_terminal_turn_projection(tmp_path: Path) ->
 
     world, world_id, engine = _world_engine(tmp_path, Model())
     reply = asyncio.run(
-        engine.handle_message(
+        engine.respond(
             IncomingMessage(
                 platform="simulator", platform_user_id="geoff",
                 message_id="terminal-turn", text="你在吗？",
@@ -2338,7 +2324,7 @@ async def test_empty_model_output_uses_one_call_safe_fallback(tmp_path: Path) ->
 
     model = EmptyThenValidModel()
     _, _, engine = _world_engine(tmp_path, model)
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="empty-model-output", text="我胃有点不舒服。",
@@ -2358,7 +2344,7 @@ async def test_failed_cross_day_recall_uses_retrieved_user_fact(tmp_path: Path) 
             return "not-json"
 
     world, world_id, engine = _world_engine(tmp_path, InvalidModel())
-    await engine.handle_message(
+    await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="cross-day-source", text="我在赶虚拟伴侣项目，昨晚没睡好。",
@@ -2369,7 +2355,7 @@ async def test_failed_cross_day_recall_uses_retrieved_user_fact(tmp_path: Path) 
         world_id, now + timedelta(days=1), expected_revision=world.revision(world_id)
     )
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="cross-day-query", text="你还记得我昨天为什么没睡好吗？",
@@ -2400,7 +2386,7 @@ async def test_logical_time_advance_cannot_expire_an_inflight_model_call(
     model = ControlledModel()
     world, world_id, engine = _world_engine(tmp_path, model)
     task = asyncio.create_task(
-        engine.handle_message(
+        engine.respond(
             IncomingMessage(
                 platform="simulator",
                 platform_user_id="geoff",
@@ -2446,7 +2432,7 @@ async def test_advice_against_requested_presence_is_diagnosed_without_repair(
 
     model = AdviceModel()
     world, world_id, engine = _world_engine(tmp_path, model)
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="vent-not-advice",
@@ -2474,7 +2460,7 @@ async def test_old_health_topic_hijack_is_diagnosed_without_repair(
             )
 
     world, world_id, engine = _world_engine(tmp_path, TopicHijackModel())
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="fear-no-human-feel",
@@ -2499,7 +2485,7 @@ async def test_early_instant_love_language_is_diagnosed_without_repair(tmp_path:
             )
 
     world, world_id, engine = _world_engine(tmp_path, InstantLoveModel())
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="early-love-pressure", text="你是不是喜欢我？",
@@ -2574,7 +2560,7 @@ async def test_reply_prose_cannot_create_companion_affect_after_appraisal(tmp_pa
             )
 
     world, world_id, engine = _world_engine(tmp_path, Model())
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="current-discomfort", text="嗯。",
@@ -2598,7 +2584,7 @@ async def test_provider_outage_returns_a_local_fact_safe_reply(tmp_path: Path) -
 
     world, world_id, engine = _world_engine(tmp_path, OfflineModel())
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2610,7 +2596,7 @@ async def test_provider_outage_returns_a_local_fact_safe_reply(tmp_path: Path) -
     assert reply is not None
     assert reply.text
     assert reply.delivery_id is not None
-    second = await engine.handle_message(
+    second = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2637,7 +2623,7 @@ async def test_provider_tls_error_returns_a_local_fact_safe_reply(tmp_path: Path
 
     _world, _world_id, engine = _world_engine(tmp_path, TlsFailingModel())
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2662,7 +2648,7 @@ async def test_reply_programming_error_fails_closed_instead_of_becoming_outage_f
     world, world_id, engine = _world_engine(tmp_path, BrokenModel())
 
     with pytest.raises(RuntimeError, match="programming integration bug"):
-        await engine.handle_message(
+        await engine.respond(
             IncomingMessage(
                 platform="simulator",
                 platform_user_id="geoff",
@@ -2696,7 +2682,7 @@ async def test_fact_free_reply_skips_independent_grounding_audit(
     model = AuditOfflineModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2730,7 +2716,7 @@ async def test_cold_invalid_candidate_uses_one_call_and_fact_free_local_fallback
     model = InvalidCandidateModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2763,7 +2749,7 @@ async def test_cold_invalid_candidate_uses_local_fallback_without_repair_model(
     primary = PrimaryModel()
     _, _, engine = _world_engine(tmp_path, primary)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2796,7 +2782,7 @@ async def test_outcome_assumption_uses_local_fallback_without_inventing_user_out
     primary = PrimaryModel()
     _, _, engine = _world_engine(tmp_path, primary)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2831,7 +2817,7 @@ async def test_deterministic_fact_free_fallback_never_calls_llm_audit(
     model = AlwaysInvalidModel()
     _, _, engine = _world_engine(tmp_path, model)
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2948,7 +2934,7 @@ def test_causal_user_recall_must_mark_the_reason_as_unconfirmed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_handle_message_keeps_a_normal_advice_reply_in_the_world_path(
+async def test_turn_reply_keeps_a_normal_advice_reply_in_the_world_path(
     tmp_path: Path,
 ) -> None:
     class AdviceModel:
@@ -2963,7 +2949,7 @@ async def test_handle_message_keeps_a_normal_advice_reply_in_the_world_path(
 
     model = AdviceModel()
     _, _, engine = _world_engine(tmp_path, model)
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -2997,14 +2983,14 @@ async def test_user_recall_fallback_selects_one_relevant_source_instead_of_mixin
         ("project-recall", "你还记得我刚才说在赶什么吗？"),
         ("stomach", "我胃有点不舒服，但还是喝了冰美式。"),
     ):
-        await engine.handle_message(
+        await engine.respond(
             IncomingMessage(
                 platform="simulator", platform_user_id="geoff",
                 message_id=message_id, text=text,
             )
         )
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="stomach-recall", text="我刚才说胃怎么了？",
@@ -3028,7 +3014,7 @@ async def test_urgent_restatement_is_diagnosed_without_repair(tmp_path: Path) ->
 
     world, world_id, engine = _world_engine(tmp_path, EchoingEmergencyModel())
     user_text = "急，我项目数据好像丢了，你先回我。"
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="urgent-no-restatement", text=user_text,
@@ -3062,7 +3048,7 @@ async def test_occurrence_status_question_answers_committed_not_planned(tmp_path
         expected_revision=world.revision(world_id),
     )
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="committed-or-planned",
@@ -3091,7 +3077,7 @@ async def test_reply_cannot_invent_user_history_or_an_uncommitted_inner_reason(
 
     model = MindReadingModel()
     _, _, engine = _world_engine(tmp_path, model)
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="no-mind-reading",
@@ -3123,7 +3109,7 @@ async def test_reply_cannot_turn_emotional_permission_into_absolute_agency_claim
 
     model = AbsoluteAgencyModel()
     _, _, engine = _world_engine(tmp_path, model)
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -3153,7 +3139,7 @@ async def test_meta_character_question_rejects_absolute_agency_guarantee(tmp_pat
 
     model = AbsoluteAgencyModel()
     _, _, engine = _world_engine(tmp_path, model)
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="meta-agency",
@@ -3193,7 +3179,7 @@ async def test_singular_experience_concatenation_is_diagnosed_without_repair(
         expected_revision=world.revision(world_id),
     )
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="one-memorable-event",
@@ -3223,7 +3209,7 @@ async def test_external_execution_offer_requires_a_scheduled_action(tmp_path: Pa
 
     model = UnsupportedOrderingModel()
     _, _, engine = _world_engine(tmp_path, model)
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="unsupported-coffee-order",
@@ -3252,7 +3238,7 @@ async def test_reply_cannot_invent_accumulated_personal_experience(tmp_path: Pat
 
     model = InventedAutobiographyModel()
     _, _, engine = _world_engine(tmp_path, model)
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="no-invented-autobiography",
@@ -3293,7 +3279,7 @@ async def test_current_first_person_statement_rejects_unrelated_old_claims(
         },
         expected_revision=world.revision(world_id),
     )
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="current-stomach",
@@ -3323,7 +3309,7 @@ async def test_explicit_no_guessing_instruction_gets_an_epistemic_boundary_reply
 
     model = GenericFailureModel()
     _, _, engine = _world_engine(tmp_path, model)
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="explicit-no-guessing",
@@ -3361,7 +3347,7 @@ async def test_opinion_quote_degradation_is_diagnosed_without_repair(
         },
         expected_revision=world.revision(world_id),
     )
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="opinion-only-quote",
@@ -3393,7 +3379,7 @@ async def test_safe_failure_speech_act_has_hard_negatives_for_ambiguous_words(
 
     _, _, engine = _world_engine(tmp_path, NonJsonModel())
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator",
             platform_user_id="geoff",
@@ -3427,7 +3413,7 @@ async def test_degree_escalation_is_rejected_when_user_only_said_not_much_sleep(
         },
         expected_revision=world.revision(world_id),
     )
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="degree-escalation", text="我胃有点不舒服，但还是喝了冰美式。",
@@ -3451,7 +3437,7 @@ async def test_meta_reply_cannot_claim_to_read_user_sincerity(
             )
 
     _, _, engine = _world_engine(tmp_path, MindReadingModel())
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="meta-sincerity", text="我有时候会怀疑，你的关心是真心还是角色卡教的。",
@@ -3483,7 +3469,7 @@ async def test_reply_cannot_deny_a_registered_npc_interaction_that_is_in_the_led
         expected_revision=world.revision(world_id),
     )
 
-    reply = await engine.handle_message(
+    reply = await engine.respond(
         IncomingMessage(
             platform="simulator", platform_user_id="geoff",
             message_id="npc-denial", text="范予安是谁？你们核对得顺利吗？",
