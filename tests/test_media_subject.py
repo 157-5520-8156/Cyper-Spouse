@@ -1,9 +1,14 @@
 from pathlib import Path
 
+import yaml
+
 from companion_daemon.media_subject import (
+    SubjectAppearance,
+    SubjectPerformance,
     SubjectPresentationPlan,
     build_subject_candidates,
     load_subject_catalog,
+    presentation_prompt_block,
     select_identity_references,
 )
 
@@ -129,6 +134,108 @@ def test_subject_presentation_payload_round_trip() -> None:
     )[0].presentation
 
     assert SubjectPresentationPlan.from_payload(presentation.to_payload()) == presentation
+
+
+def test_legacy_v2_subject_payload_without_hand_fields_still_loads() -> None:
+    presentation = build_subject_candidates(
+        snapshot=_snapshot(),
+        opportunity_id="op:legacy-v2",
+        capture_mode="character_front_camera",
+        character_visibility="identifiable",
+        config_path=CONFIG,
+    )[0].presentation
+    payload = presentation.to_payload()
+    performance = payload["performance"]
+    assert isinstance(performance, dict)
+    performance.pop("hand_occupancy")
+    performance.pop("occlusion_complexity")
+
+    restored = SubjectPresentationPlan.from_payload(payload)
+
+    assert restored.performance.hand_occupancy == "unspecified"
+    assert restored.performance.occlusion_complexity == "unknown"
+
+
+def test_capture_mode_derives_hand_occupancy_and_occlusion_risk() -> None:
+    selfie = build_subject_candidates(
+        snapshot=_snapshot(),
+        opportunity_id="op:hands",
+        capture_mode="character_front_camera",
+        character_visibility="identifiable",
+        config_path=CONFIG,
+    )
+    timer = build_subject_candidates(
+        snapshot=_snapshot(),
+        opportunity_id="op:hands",
+        capture_mode="timer_fixed",
+        character_visibility="identifiable",
+        config_path=CONFIG,
+    )
+
+    aware = next(item for item in selfie if item.variant_id == "aware_three_quarter")
+    timed = next(item for item in timer if item.variant_id == "timer_environment_pose")
+    assert aware.presentation.performance.hand_occupancy == (
+        "one_hand_operates_phone_other_presents_evidence"
+    )
+    assert aware.presentation.performance.occlusion_complexity == "medium"
+    assert timed.presentation.performance.hand_occupancy == "both_hands_available"
+    assert timed.presentation.performance.occlusion_complexity == "low"
+
+
+def test_configured_high_occlusion_is_downranked_but_remains_legal(tmp_path: Path) -> None:
+    raw = yaml.safe_load(CONFIG.read_text(encoding="utf-8"))
+    aware = next(item for item in raw["variants"] if item["id"] == "aware_three_quarter")
+    aware["performance"]["occlusion_complexity"] = "high"
+    configured = tmp_path / "subjects.yaml"
+    configured.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+
+    candidates = build_subject_candidates(
+        snapshot=_snapshot(),
+        opportunity_id="op:high-risk",
+        capture_mode="character_front_camera",
+        character_visibility="identifiable",
+        config_path=configured,
+    )
+
+    selected = next(item for item in candidates if item.variant_id == "aware_three_quarter")
+    assert selected.presentation.performance.occlusion_complexity == "high"
+    assert candidates.index(selected) > 0
+
+
+def test_prompt_compiles_internal_enums_to_visible_instructions() -> None:
+    appearance = SubjectAppearance(
+        source="media_local",
+        hair_arrangement="clipped_back",
+        outfit_role="event_appropriate_casual",
+        grooming="natural",
+        accessories=("teal_hair_clip",),
+    )
+    performance = SubjectPerformance(
+        head_yaw="toward_frame_right",
+        head_pitch="level",
+        head_roll="none",
+        gaze_target="lens",
+        expression="trying_not_to_laugh",
+        shoulder_orientation="three_quarter_opposite_head",
+        posture="relaxed_engaged",
+        gesture="show_primary_evidence",
+        photo_awareness="aware_light_pose",
+        hand_occupancy="one_hand_operates_phone_other_presents_evidence",
+        occlusion_complexity="medium",
+    )
+    signature = (
+        "clipped_back|toward_frame_right|level|none|lens|trying_not_to_laugh|"
+        "three_quarter_opposite_head|show_primary_evidence"
+    )
+
+    prompt = presentation_prompt_block(
+        SubjectPresentationPlan("test", appearance, performance, signature),
+        config_path=CONFIG,
+    )
+
+    assert "front and side strands visibly secured away from the face" in prompt
+    assert "one hand operates the phone" in prompt
+    assert "hair: clipped_back" not in prompt
 
 
 def test_reference_selector_avoids_copying_planned_pose(tmp_path: Path) -> None:

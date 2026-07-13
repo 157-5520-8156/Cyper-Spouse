@@ -156,6 +156,116 @@ variants:
       gesture: present_specific_body_detail
       photo_awareness: deliberate_detail_showing
 
+render_lexicon:
+  hair_arrangement:
+    hair_down_tucked: hair worn down, with the front strands visibly tucked behind one ear
+    half_up: upper hair visibly gathered into a relaxed half-up arrangement
+    low_ponytail: hair visibly gathered into a low ponytail at the nape
+    loose_small_bun: hair visibly gathered into a loose small bun, with a few natural strands free
+    clipped_back: front and side strands visibly secured away from the face by the selected clip; the clip must functionally hold the hair rather than merely decorate loose hair
+    natural_down: naturally loose shoulder-length hair with no forced symmetry
+  outfit_role:
+    home_cooking: ordinary comfortable home clothes suitable for cooking, with practical sleeves
+    event_appropriate_casual: ordinary casual clothes visibly appropriate to the current activity and location
+    campus_casual: understated campus clothes suitable for studying or class
+    athletic: practical exercise clothing supported by the current activity
+    home_rest: relaxed modest clothing suitable for resting at home
+    travel_casual: comfortable layered clothing suitable for travel
+    outdoor_casual: comfortable everyday clothing suitable for walking outdoors
+    event_appropriate: clothing visibly appropriate to the frozen event
+    navy_cardigan_and_cream_top: a navy cardigan over a cream top
+  grooming:
+    natural: natural grooming with real skin texture and no editorial polish
+    lightly_put_together: lightly put together while retaining an everyday appearance
+  accessories:
+    teal_hair_clip: one muted teal hair clip, visibly performing the planned hair arrangement
+  head_yaw:
+    near_front: face almost forward, without a habitual cute head tilt
+    toward_frame_left: head turned toward the left side of the image frame
+    toward_frame_right: head turned toward the right side of the image frame
+    away_then_back: head caught during a natural look away and partial glance back
+    not_applicable: head is outside this body-detail composition
+  head_pitch:
+    level: chin and eye line remain level, neither noticeably raised nor lowered
+    slightly_down: chin lowered slightly while the neck remains natural
+    slightly_up: chin raised slightly without an exaggerated angle
+    not_applicable: head pitch is outside this body-detail composition
+  head_roll:
+    none: keep both eyes approximately level; do not tilt the head toward either shoulder
+    slight: use only a subtle natural roll, not the identity reference's habitual tilt
+    slight_opposite: use a subtle roll opposite to the shoulder turn
+    not_applicable: head roll is outside this body-detail composition
+  gaze_target:
+    lens: eyes look into the camera lens
+    primary_evidence: eyes visibly attend to the selected event evidence
+    phone_screen: eyes check the phone screen rather than staring into the lens
+    mirror_phone_screen: eyes plausibly look at the reflected phone screen
+    photographer: eyes acknowledge the person taking the photo
+    known_companion: eyes attend to the known companion
+    nearby_activity: eyes attend to the nearby activity
+    not_applicable: gaze is outside this body-detail composition
+  expression:
+    trying_not_to_laugh: a restrained trying-not-to-laugh expression, not the reference's closed-mouth smile
+    focused_amused: attention stays on the activity with a small trace of amusement
+    embarrassed_half_smile: a mildly embarrassed asymmetric half-smile
+    playful_asymmetric_smile: a playful but believable asymmetric smile
+    calm_self_check: a calm expression while checking her appearance
+    open_warm_smile: an open warm smile appropriate to a deliberately taken photo
+    bright_photo_smile: a bright but non-commercial smile for a friendly requested photo
+    caught_in_real_laugh: a natural laugh caught during interaction rather than performed for an advertisement
+    neutral_attentive: a neutral attentive expression grounded in the activity
+    not_applicable: facial expression is outside this body-detail composition
+  shoulder_orientation:
+    three_quarter_opposite_head: shoulders turn in a gentle three-quarter direction opposite the head turn
+    open_three_quarter: shoulders remain open in a relaxed three-quarter angle
+    slightly_turned: shoulders turn slightly rather than facing the camera squarely
+    dynamic_three_quarter: shoulders use an energetic but believable three-quarter angle
+    three_quarter: shoulders form a clear natural three-quarter line
+    open_to_environment: torso and shoulders stay visually connected to the surrounding place
+    three_quarter_to_environment: shoulders angle toward the environment while the face acknowledges the camera
+    turned_toward_companion: shoulders turn toward the known companion
+    in_motion_three_quarter: shoulders show a natural transitional three-quarter orientation
+    not_applicable: shoulders are outside this body-detail composition
+  posture:
+    relaxed_engaged: relaxed posture with visible engagement in the sharing action
+    leaning_slightly_into_activity: body leans slightly toward the current activity
+    compact_casual: compact casual posture suited to a close front-camera frame
+    weight_shifted: weight shifts naturally rather than forming a centered static pose
+    balanced_weight_shift: balanced mirror pose with a subtle natural weight shift
+    mid_step_or_weight_shift: either a small mid-step or a clear natural weight shift
+    settled_pose_with_energy: a settled friendly pose that still carries some energy
+    relaxed_in_interaction: relaxed posture visibly connected to the social interaction
+    active_not_surveillance: active everyday posture, never surveillance-like
+    stable_detail_presentation: stable positioning that makes the intended detail easy to inspect
+  gesture:
+    show_primary_evidence: use the free hand or free forearm to present the selected event evidence clearly
+    interact_with_primary_evidence: visibly interact with the selected evidence instead of merely standing beside it
+    hold_or_point_at_primary_evidence: naturally hold or point toward the selected evidence with an anatomically clear hand
+    small_contextual_pose: make a small deliberate pose that is meaningful in the current context
+    adjust_clothing_or_accessory: naturally adjust the selected clothing or accessory without tangling fingers or fabric
+    contextual_hand_pose: use a small hand pose that fits the place and activity
+    acknowledge_place_or_object: use a restrained gesture acknowledging the selected place or object
+    conversational_hand_gesture: use a natural hand gesture from an ongoing conversation
+    continue_event_action: continue the event action rather than freezing for the camera
+    present_specific_body_detail: position the relevant body detail clearly without inventing another condition
+  photo_awareness:
+    aware_light_pose: clearly aware of the camera and making a light friend-facing pose
+    aware_of_photo_not_staring: aware of being photographed without forcing direct eye contact
+    checking_own_frame: visibly checking her own phone framing
+    deliberately_playful: knowingly playful for the photo without exaggerated performance
+    composed_mirror_pose: deliberately composed for a mirror photo
+    friendly_requested_photo: posing naturally for a friendly requested photo
+    clearly_posing_for_friend: clearly but casually posing for a friend
+    noticed_camera_mid_moment: has just noticed the camera during a real interaction
+    lightly_aware: lightly aware of the camera while staying in the activity
+    deliberate_detail_showing: deliberately making the requested detail visible
+  hand_occupancy:
+    one_hand_operates_phone_other_presents_evidence: one hand operates the phone while the other free hand or forearm presents the evidence; never merge the two arms
+    one_hand_operates_phone_other_remains_natural: one hand operates the phone while the other remains anatomically natural
+    one_hand_holds_phone_other_performs_gesture: one hand visibly holds the phone in the mirror while the other performs the planned gesture
+    both_hands_available: the camera is externally supported, so both hands are available for the planned gesture
+    unspecified: preserve physically plausible hand responsibilities for the stated capture mode
+
 reference_pose_metadata:
   assets/reference/celia-v2-reference-01-canonical.png:
     head_yaw: near_front

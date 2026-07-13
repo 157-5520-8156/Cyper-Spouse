@@ -26,6 +26,7 @@ from companion_daemon.media_subject import (
     DEFAULT_SUBJECT_CONFIG,
     SubjectPresentationPlan,
     build_subject_candidates,
+    capture_hand_feasibility_error,
     presentation_prompt_block,
     select_identity_references,
 )
@@ -35,7 +36,7 @@ from companion_daemon.visual_identity import load_visual_identity
 PLAN_VERSION_V1 = "event-media-plan-v1"
 PLAN_VERSION = "event-media-plan-v2"
 SUPPORTED_PLAN_VERSIONS = {PLAN_VERSION_V1, PLAN_VERSION}
-INSPECTION_VERSION = "media-inspection-v2"
+INSPECTION_VERSION = "media-inspection-v3"
 
 FAMILIES = {"life_share", "character_media"}
 CONTENT_DOMAINS = {
@@ -485,6 +486,9 @@ class MediaInspection:
     rule_version: str = INSPECTION_VERSION
     observed_subject_presentation: dict[str, object] | None = None
     reference_pose_copy: bool = False
+    garment_topology_ok: bool | None = None
+    hand_sleeve_occlusion_ok: bool | None = None
+    evidence_attachment_ok: bool | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -613,7 +617,11 @@ class MediaRenderer:
         if invalid:
             return MediaRenderFailure(plan.plan_id, f"invalid_frozen_plan:{invalid}", 0)
         references = self._references(plan)
-        prompt = compile_media_prompt(plan, self.visual_identity_path)
+        prompt = compile_media_prompt(
+            plan,
+            self.visual_identity_path,
+            subject_config_path=self.subject_config_path,
+        )
         if plan.route == "reuse_existing":
             path = Path(plan.existing_artifact_path or "")
             if not path.is_file():
@@ -654,6 +662,7 @@ class MediaRenderer:
                 inspection,
                 automatic=plan.delivery_mode == "automatic",
                 subject_required=plan.subject_presentation is not None,
+                quality_required=plan.version == PLAN_VERSION,
             )
             last_inspection = inspection
             if inspection.passed:
@@ -701,6 +710,7 @@ class MediaRenderer:
             inspection,
             automatic=plan.delivery_mode == "automatic",
             subject_required=plan.subject_presentation is not None,
+            quality_required=plan.version == PLAN_VERSION,
         )
         if not inspection.passed:
             return MediaRenderFailure(plan.plan_id, inspection.reason, 0, inspection)
@@ -836,7 +846,10 @@ class OpenAIMediaInspector:
                 if isinstance(payload.get("observed_subject_presentation"), dict)
                 else None
             ),
-            reference_pose_copy=bool(payload.get("reference_pose_copy", False)),
+            reference_pose_copy=_optional_bool(payload, "reference_pose_copy") is True,
+            garment_topology_ok=_optional_bool(payload, "garment_topology_ok"),
+            hand_sleeve_occlusion_ok=_optional_bool(payload, "hand_sleeve_occlusion_ok"),
+            evidence_attachment_ok=_optional_bool(payload, "evidence_attachment_ok"),
         )
 
 
@@ -926,7 +939,12 @@ class LegacyMediaShotAdapter:
         )
 
 
-def compile_media_prompt(plan: MediaPlan, visual_identity_path: Path | None) -> str:
+def compile_media_prompt(
+    plan: MediaPlan,
+    visual_identity_path: Path | None,
+    *,
+    subject_config_path: Path = DEFAULT_SUBJECT_CONFIG,
+) -> str:
     """Compile only frozen, selected evidence; never reopen the World snapshot."""
     evidence = "\n".join(
         f"- {pointer}: {_compact_value(value)}" for pointer, value in plan.evidence_values.items()
@@ -956,7 +974,11 @@ def compile_media_prompt(plan: MediaPlan, visual_identity_path: Path | None) -> 
         else "No sexualized or intimate escalation."
     )
     subject = (
-        "\n" + presentation_prompt_block(plan.subject_presentation)
+        "\n"
+        + presentation_prompt_block(
+            plan.subject_presentation,
+            config_path=subject_config_path,
+        )
         if plan.subject_presentation
         else ""
     )
@@ -971,8 +993,8 @@ def compile_media_prompt(plan: MediaPlan, visual_identity_path: Path | None) -> 
         f"Selected event evidence only:\n{evidence}\n"
         f"People rule: {people}\nPrivacy rule: {privacy}\n"
         f"Non-negotiable constraints: {'; '.join(plan.constraints) or 'stay faithful to selected evidence'}."
-        f"{subject}"
         f"{identity}"
+        f"{subject}"
     )
 
 
@@ -1390,6 +1412,13 @@ def _validate_frozen_plan(plan: MediaPlan) -> str | None:
             SubjectPresentationPlan.from_payload(plan.subject_presentation.to_payload())
         except ValueError:
             return "invalid_subject_presentation"
+        feasibility_error = capture_hand_feasibility_error(
+            plan.subject_presentation,
+            capture_mode=plan.capture_mode,
+            character_visibility=plan.character_visibility,
+        )
+        if feasibility_error:
+            return feasibility_error
     return None
 
 
@@ -1458,13 +1487,20 @@ def _inspection_prompt(plan: MediaPlan) -> str:
         if plan.subject_presentation
         else ""
     )
+    quality_fields = (
+        " Return garment_topology_ok, hand_sleeve_occlusion_ok, and evidence_attachment_ok as "
+        "booleans. Reject fused or impossible cuffs/sleeves/wrists, hands hidden by implausible "
+        "garment topology, or selected evidence that floats, merges, or attaches to the wrong "
+        "surface. Use true when a check is visibly sound or genuinely not applicable."
+    )
     return (
         "Inspect this fictional personal-media image. Return JSON only with passed (boolean), reason "
         "(string), observed_summary (one factual Chinese sentence), observed_facts (string array), "
         "and deviations (string array). Reject malformed face/hands/body, unwanted text/watermark, "
         "identity mismatch when a reference is supplied, privacy escalation, or a visible contradiction "
         "of capture source, character visibility, people visibility, composition, action, or selected "
-        f"evidence.{subject_fields} Frozen plan: {_stable_json(plan.to_payload())[:5000]}"
+        f"evidence.{subject_fields}{quality_fields} Frozen plan: "
+        f"{_stable_json(plan.to_payload())[:5000]}"
     )
 
 
@@ -1478,8 +1514,36 @@ def _repair_prompt(prompt: str, inspection: MediaInspection) -> str:
 
 
 def _enforce_inspection_contract(
-    inspection: MediaInspection, *, automatic: bool, subject_required: bool = False
+    inspection: MediaInspection,
+    *,
+    automatic: bool,
+    subject_required: bool = False,
+    quality_required: bool = False,
 ) -> MediaInspection:
+    quality_defects = tuple(
+        name
+        for name, value in (
+            ("garment_topology_failed", inspection.garment_topology_ok),
+            ("hand_sleeve_occlusion_failed", inspection.hand_sleeve_occlusion_ok),
+            ("evidence_attachment_failed", inspection.evidence_attachment_ok),
+        )
+        if value is False
+    )
+    if inspection.passed and quality_defects:
+        return MediaInspection(
+            passed=False,
+            reason=quality_defects[0],
+            observed_summary=inspection.observed_summary,
+            observed_facts=inspection.observed_facts,
+            deviations=(*inspection.deviations, *quality_defects),
+            inspector_model=inspection.inspector_model,
+            rule_version=inspection.rule_version,
+            observed_subject_presentation=inspection.observed_subject_presentation,
+            reference_pose_copy=inspection.reference_pose_copy,
+            garment_topology_ok=inspection.garment_topology_ok,
+            hand_sleeve_occlusion_ok=inspection.hand_sleeve_occlusion_ok,
+            evidence_attachment_ok=inspection.evidence_attachment_ok,
+        )
     if inspection.passed and inspection.reference_pose_copy:
         return MediaInspection(
             passed=False,
@@ -1491,12 +1555,24 @@ def _enforce_inspection_contract(
             rule_version=inspection.rule_version,
             observed_subject_presentation=inspection.observed_subject_presentation,
             reference_pose_copy=True,
+            garment_topology_ok=inspection.garment_topology_ok,
+            hand_sleeve_occlusion_ok=inspection.hand_sleeve_occlusion_ok,
+            evidence_attachment_ok=inspection.evidence_attachment_ok,
         )
     missing = ""
     if automatic and not inspection.observed_summary.strip():
         missing = "inspection_summary_missing"
     elif automatic and subject_required and not inspection.observed_subject_presentation:
         missing = "observed_subject_presentation_missing"
+    elif automatic and quality_required and any(
+        value is None
+        for value in (
+            inspection.garment_topology_ok,
+            inspection.hand_sleeve_occlusion_ok,
+            inspection.evidence_attachment_ok,
+        )
+    ):
+        missing = "inspection_quality_fields_missing"
     if inspection.passed and missing:
         return MediaInspection(
             passed=False,
@@ -1508,6 +1584,9 @@ def _enforce_inspection_contract(
             rule_version=inspection.rule_version,
             observed_subject_presentation=inspection.observed_subject_presentation,
             reference_pose_copy=inspection.reference_pose_copy,
+            garment_topology_ok=inspection.garment_topology_ok,
+            hand_sleeve_occlusion_ok=inspection.hand_sleeve_occlusion_ok,
+            evidence_attachment_ok=inspection.evidence_attachment_ok,
         )
     return inspection
 
@@ -1749,6 +1828,11 @@ def _image_content(path: Path, _label: str) -> dict[str, object]:
         "type": "image_url",
         "image_url": {"url": f"data:{mime};base64,{encoded}", "detail": "high"},
     }
+
+
+def _optional_bool(value: dict[str, object], key: str) -> bool | None:
+    item = value.get(key)
+    return item if isinstance(item, bool) else None
 
 
 __all__ = [

@@ -289,9 +289,10 @@ async def test_new_character_plan_freezes_subject_presentation_in_same_call() ->
     assert "legal_subject_presentation_candidates" in model.messages[1]["content"]
     restored = MediaPlan.from_payload(result.plan.to_payload())
     assert restored == result.plan
-    prompt = compile_media_prompt(restored, None)
+    prompt = compile_media_prompt(restored, Path("configs/visual_identity.yaml"))
     assert "Frozen subject presentation" in prompt
     assert "Do not copy their head angle" in prompt
+    assert prompt.rfind("Frozen subject presentation") > prompt.rfind("Character identity anchor")
 
 
 @pytest.mark.asyncio
@@ -360,6 +361,21 @@ async def test_v1_plan_replays_without_new_subject_interpretation() -> None:
 
     assert restored.subject_presentation is None
     assert "Frozen subject presentation" not in compile_media_prompt(restored, None)
+
+
+@pytest.mark.asyncio
+async def test_frozen_plan_rejects_tampered_hand_occupancy() -> None:
+    current = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity())
+    assert isinstance(current, PlannedMedia)
+    payload = current.plan.to_payload()
+    subject = payload["subject_presentation"]
+    assert isinstance(subject, dict)
+    performance = subject["performance"]
+    assert isinstance(performance, dict)
+    performance["hand_occupancy"] = "both_hands_available"
+
+    with pytest.raises(ValueError, match="capture_hand_occupancy_conflict"):
+        MediaPlan.from_payload(payload)
 
 
 @pytest.mark.asyncio
@@ -905,6 +921,38 @@ async def test_renderer_rejects_reference_pose_copy_and_repairs_once(tmp_path: P
 
 
 @pytest.mark.asyncio
+async def test_renderer_repairs_garment_and_evidence_attachment_defects(tmp_path: Path) -> None:
+    planned = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity())
+    assert isinstance(planned, PlannedMedia)
+    defective = MediaInspection(
+        passed=True,
+        reason="ok",
+        observed_summary="角色展示袖口上的物品",
+        observed_facts=("角色可识别",),
+        deviations=(),
+        inspector_model="fake",
+        observed_subject_presentation={"gesture": "show_primary_evidence"},
+        garment_topology_ok=False,
+        hand_sleeve_occlusion_ok=False,
+        evidence_attachment_ok=False,
+    )
+    generator = FakeGenerator()
+
+    result = await MediaRenderer(
+        generator=generator,
+        inspector=FakeInspector([defective, _inspection(True)]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+
+    assert isinstance(result, RenderedMedia)
+    assert result.attempts == 2
+    assert "garment_topology_failed" in generator.prompts[1]
+    assert "hand_sleeve_occlusion" in generator.prompts[1]
+    assert "evidence_attachment" in generator.prompts[1]
+
+
+@pytest.mark.asyncio
 async def test_renderer_keeps_references_for_adapter_without_quality_parameter(
     tmp_path: Path,
 ) -> None:
@@ -985,6 +1033,31 @@ async def test_automatic_render_fails_closed_without_observed_summary(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_automatic_v2_render_requires_structural_quality_fields(tmp_path: Path) -> None:
+    planned = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity(automatic=True))
+    assert isinstance(planned, PlannedMedia)
+    incomplete = MediaInspection(
+        passed=True,
+        reason="ok",
+        observed_summary="角色在咖啡馆展示食物",
+        observed_facts=("角色可识别",),
+        deviations=(),
+        inspector_model="fake",
+        observed_subject_presentation={"gesture": "show_primary_evidence"},
+    )
+
+    result = await MediaRenderer(
+        generator=FakeGenerator(),
+        inspector=FakeInspector([incomplete, incomplete]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+
+    assert not isinstance(result, RenderedMedia)
+    assert result.reason == "inspection_quality_fields_missing"
+
+
+@pytest.mark.asyncio
 async def test_openai_inspector_returns_actual_summary_in_same_visual_call(tmp_path: Path) -> None:
     observed: dict[str, object] = {}
 
@@ -1003,6 +1076,9 @@ async def test_openai_inspector_returns_actual_summary_in_same_visual_call(tmp_p
                                     "observed_summary": "角色在咖啡馆举着吃过一口的可颂自拍。",
                                     "observed_facts": ["咖啡馆", "可颂", "自拍"],
                                     "deviations": [],
+                                    "garment_topology_ok": True,
+                                    "hand_sleeve_occlusion_ok": True,
+                                    "evidence_attachment_ok": True,
                                 },
                                 ensure_ascii=False,
                             )
@@ -1021,5 +1097,9 @@ async def test_openai_inspector_returns_actual_summary_in_same_visual_call(tmp_p
     result = await inspector.inspect(image, plan=planned.plan, prompt="ignored")
 
     assert result.passed and result.observed_summary.startswith("角色在咖啡馆")
+    assert result.garment_topology_ok is True
+    assert result.hand_sleeve_occlusion_ok is True
+    assert result.evidence_attachment_ok is True
     content = observed["payload"]["messages"][0]["content"]  # type: ignore[index]
     assert "observed_summary" in content[0]["text"]
+    assert "garment_topology_ok" in content[0]["text"]
