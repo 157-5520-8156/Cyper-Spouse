@@ -1121,6 +1121,7 @@ async def test_world_reply_prompt_contains_recent_delivered_conversation(tmp_pat
     assert '"max_chars"' in prompt
     assert '"max_items"' in prompt
     assert "最近已结算对话" in prompt
+    assert "普通分享、吐槽和连续讲述默认先给一两句完整反应" in prompt
     assert "我在赶一个虚拟伴侣项目，昨晚没睡好。" in prompt
     assert "听起来挺累的。" in prompt
 
