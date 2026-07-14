@@ -263,12 +263,13 @@ CompletionContract
   outcome_ref
   expected_actor_ref
   allowed_event_types[]
-  settlement_schema_ref?       # required for settled_occurrence_outcome
+  contract_schema_ref          # kind 对应的 contract schema
+  completion_parser_ref        # kind 对应的纯解析器
+  evidence_schema_ref          # occurrence/fact 各自的来源 authority schema
   required_fact_predicate?
   required_fact_value_hash?
   evidence_cutoff_world_revision
   privacy_class
-  contract_schema_ref          # closed registry中的exact schema
   policy_version
   policy_digest
   contract_digest              # 上述字段canonical hash
@@ -281,7 +282,8 @@ WorldOccurrenceCompletionEvidence
   evidence_kind=settled_occurrence_outcome
   occurrence_id, occurrence_entity_revision
   settlement_event_ref, world_revision, payload_hash
-  resolved_actor_ref, settled_outcome_ref, settlement_schema_ref
+  resolved_actor_ref, settled_outcome_ref
+  evidence_schema_ref=world-occurrence-settlement.1
   privacy_class
 
 CommittedFactStateCompletionEvidence
@@ -290,6 +292,7 @@ CommittedFactStateCompletionEvidence
   fact_event_ref, world_revision, payload_hash
   resolved_actor_ref, resolved_outcome_ref
   resolved_fact_predicate, resolved_fact_value_hash
+  evidence_schema_ref=fact-authority.1
   privacy_class
 
 GoalRationale
