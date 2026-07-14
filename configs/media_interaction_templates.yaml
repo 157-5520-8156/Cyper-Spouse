@@ -2,6 +2,16 @@ version: 1
 
 # Affinities guide one bounded planning call; they are not event-to-response rules.
 interaction_bids:
+  inform_status:
+    hoped_response: acknowledge_current_status
+    response_pressure: none
+    share_intent_affinities: [record, check_in, progress_update]
+    minimum_privacy: ordinary
+  coordinate_next_step:
+    hoped_response: use_visual_context_for_next_step
+    response_pressure: medium
+    share_intent_affinities: [check_in, seek_feedback]
+    minimum_privacy: ordinary
   share_presence:
     hoped_response: acknowledge_or_light_reaction
     response_pressure: low
@@ -36,6 +46,11 @@ interaction_bids:
     hoped_response: check_in_or_reassure
     response_pressure: medium
     share_intent_affinities: [care_update, complain]
+    minimum_privacy: personal
+  offer_reassurance:
+    hoped_response: feel_reassured_or_less_worried
+    response_pressure: none
+    share_intent_affinities: [care_update, check_in, progress_update]
     minimum_privacy: personal
   invite_closeness:
     hoped_response: affectionate_acknowledgement

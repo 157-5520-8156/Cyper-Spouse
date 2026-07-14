@@ -36,6 +36,64 @@ _PERFORMANCE_REQUIRED_FIELDS = (
 )
 _OCCLUSION_RANK = {"low": 0, "medium": 1, "high": 2}
 SUBJECT_PRESENTATION_V2 = "subject-presentation-v2"
+SUBJECT_PRESENTATION_V3 = "subject-presentation-v3"
+
+EXPRESSION_FAMILIES = {
+    "neutral_present", "warm", "amused", "playfully_performed", "proud",
+    "frustrated", "embarrassed", "tired", "vulnerable", "tender",
+    "desire_direct", "desire_withheld",
+}
+MOUTH_BEHAVIORS = {
+    "relaxed_closed", "relaxed_parted", "small_smile", "asymmetric_half_smile",
+    "suppressed_laugh", "open_laugh", "subtle_pout", "lightly_pressed",
+    "mid_speech", "not_visible",
+}
+EYE_BEHAVIORS = {
+    "steady_lens", "soft_lens", "screen_check", "evidence_focus", "look_away",
+    "glance_back", "companion_focus", "relaxed_heavy_lidded", "not_visible",
+}
+BROW_BEHAVIORS = {
+    "neutral", "slight_lift", "single_brow_energy", "faint_inward_draw",
+    "relaxed_lowered", "not_visible",
+}
+GAZE_SEQUENCES = {
+    "continuous_lens", "evidence_then_lens", "lens_then_away", "away_then_back",
+    "screen_then_lens", "companion_then_camera", "no_face",
+}
+FACIAL_ENERGIES = {"low", "contained", "lively", "breathless", "held", "recovering"}
+
+
+@dataclass(frozen=True)
+class FacialPerformance:
+    expression_family: str
+    mouth_behavior: str
+    eye_behavior: str
+    brow_behavior: str
+    gaze_sequence: str
+    facial_energy: str
+
+    def to_payload(self) -> dict[str, str]:
+        return asdict(self)
+
+    @classmethod
+    def from_payload(cls, value: object) -> "FacialPerformance":
+        if not isinstance(value, dict):
+            raise ValueError("facial performance must be an object")
+        result = cls(**{name: _required_text(value, name) for name in (
+            "expression_family", "mouth_behavior", "eye_behavior", "brow_behavior",
+            "gaze_sequence", "facial_energy",
+        )})
+        enums = (
+            (result.expression_family, EXPRESSION_FAMILIES),
+            (result.mouth_behavior, MOUTH_BEHAVIORS),
+            (result.eye_behavior, EYE_BEHAVIORS),
+            (result.brow_behavior, BROW_BEHAVIORS),
+            (result.gaze_sequence, GAZE_SEQUENCES),
+            (result.facial_energy, FACIAL_ENERGIES),
+        )
+        if any(item not in allowed for item, allowed in enums):
+            raise ValueError("invalid facial performance enum")
+        return result
 
 
 @dataclass(frozen=True)
@@ -160,6 +218,7 @@ class SubjectPresentationPlan:
     subject_signature: str
     version: str = "subject-presentation-v1"
     display_strategy: PhotoDisplayStrategy | None = None
+    facial_performance: FacialPerformance | None = None
 
     def to_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -172,6 +231,16 @@ class SubjectPresentationPlan:
             payload["version"] = self.version
             payload["display_strategy"] = (
                 self.display_strategy.to_payload() if self.display_strategy else None
+            )
+        elif self.version == SUBJECT_PRESENTATION_V3:
+            payload["version"] = self.version
+            payload["performance"].pop("expression", None)  # pose does not own the face in v3
+            payload["performance"].pop("gaze_target", None)
+            payload["display_strategy"] = (
+                self.display_strategy.to_payload() if self.display_strategy else None
+            )
+            payload["facial_performance"] = (
+                self.facial_performance.to_payload() if self.facial_performance else None
             )
         return payload
 
@@ -200,26 +269,144 @@ class SubjectPresentationPlan:
         version = str(value.get("version") or "subject-presentation-v1")
         display_strategy = (
             PhotoDisplayStrategy.from_payload(value.get("display_strategy"))
-            if version == SUBJECT_PRESENTATION_V2
+            if version in {SUBJECT_PRESENTATION_V2, SUBJECT_PRESENTATION_V3}
+            else None
+        )
+        performance_value = value.get("performance")
+        if version == SUBJECT_PRESENTATION_V3 and isinstance(performance_value, dict):
+            performance_value = {
+                **performance_value,
+                "expression": "facial_performance_v3",
+                "gaze_target": "facial_performance_v3",
+            }
+        facial_performance = (
+            FacialPerformance.from_payload(value.get("facial_performance"))
+            if version == SUBJECT_PRESENTATION_V3
             else None
         )
         presentation = cls(
             variant_id=_required_text(value, "variant_id"),
             appearance=SubjectAppearance.from_payload(value.get("appearance")),
-            performance=SubjectPerformance.from_payload(value.get("performance")),
+            performance=SubjectPerformance.from_payload(performance_value),
             subject_signature=_required_text(value, "subject_signature"),
             version=version,
             display_strategy=display_strategy,
+            facial_performance=facial_performance,
         )
-        if version not in {"subject-presentation-v1", SUBJECT_PRESENTATION_V2}:
+        if version not in {"subject-presentation-v1", SUBJECT_PRESENTATION_V2, SUBJECT_PRESENTATION_V3}:
             raise ValueError("unsupported subject presentation version")
-        if version == SUBJECT_PRESENTATION_V2 and display_strategy is None:
+        if version in {SUBJECT_PRESENTATION_V2, SUBJECT_PRESENTATION_V3} and display_strategy is None:
             raise ValueError("missing photo display strategy")
+        if version == SUBJECT_PRESENTATION_V3 and facial_performance is None:
+            raise ValueError("missing facial performance")
         if presentation.subject_signature != _subject_signature(
-            presentation.appearance, presentation.performance, presentation.display_strategy
+            presentation.appearance, presentation.performance, presentation.display_strategy,
+            presentation.facial_performance,
         ):
             raise ValueError("invalid subject signature")
         return presentation
+
+
+def upgrade_subject_presentation_v3(
+    presentation: SubjectPresentationPlan,
+) -> SubjectPresentationPlan:
+    """Split a coherent v2 display recipe into pose and facial contracts."""
+
+    if presentation.version == SUBJECT_PRESENTATION_V3:
+        return presentation
+    if presentation.version != SUBJECT_PRESENTATION_V2 or presentation.display_strategy is None:
+        raise ValueError("subject v3 requires a v2 display strategy")
+    facial = _facial_performance(presentation.display_strategy)
+    performance = replace(
+        presentation.performance,
+        expression="facial_performance_v3",
+        gaze_target="facial_performance_v3",
+    )
+    return SubjectPresentationPlan(
+        variant_id=presentation.variant_id,
+        appearance=presentation.appearance,
+        performance=performance,
+        subject_signature=_subject_signature(
+            presentation.appearance, performance, presentation.display_strategy, facial
+        ),
+        version=SUBJECT_PRESENTATION_V3,
+        display_strategy=presentation.display_strategy,
+        facial_performance=facial,
+    )
+
+
+def adapt_subject_for_attraction_mechanism_v3(
+    presentation: SubjectPresentationPlan,
+    mechanism: str,
+) -> SubjectPresentationPlan:
+    """Bind attraction intent to a complete face performance, not loose facial axes."""
+
+    if presentation.version != SUBJECT_PRESENTATION_V3 or presentation.facial_performance is None:
+        raise ValueError("attraction adaptation requires subject presentation v3")
+    recipes: dict[str, FacialPerformance] = {
+        "direct_invitation": FacialPerformance("desire_direct", "relaxed_parted", "steady_lens", "neutral", "continuous_lens", "held"),
+        "playful_tease": FacialPerformance("playfully_performed", "subtle_pout", "steady_lens", "single_brow_energy", "away_then_back", "lively"),
+        "withheld_attention": FacialPerformance("desire_withheld", "relaxed_closed", "glance_back", "relaxed_lowered", "away_then_back", "held"),
+        "sensory_immediacy": FacialPerformance("desire_direct", "relaxed_parted", "soft_lens", "neutral", "lens_then_away", "breathless"),
+        "private_trust": FacialPerformance("tender", "relaxed_parted", "relaxed_heavy_lidded", "relaxed_lowered", "continuous_lens", "low"),
+        "confident_display": FacialPerformance("desire_direct", "asymmetric_half_smile", "steady_lens", "single_brow_energy", "continuous_lens", "contained"),
+        "interrupted_transition": FacialPerformance("desire_withheld", "relaxed_parted", "evidence_focus", "slight_lift", "evidence_then_lens", "recovering"),
+        "close_proximity": FacialPerformance("tender", "relaxed_parted", "soft_lens", "neutral", "continuous_lens", "held"),
+        "atmospheric_suggestion": FacialPerformance("desire_withheld", "relaxed_closed", "look_away", "relaxed_lowered", "lens_then_away", "low"),
+    }
+    facial = recipes.get(mechanism)
+    if facial is None:
+        raise ValueError("unknown attraction mechanism")
+    return replace(
+        presentation,
+        facial_performance=facial,
+        subject_signature=_subject_signature(
+            presentation.appearance,
+            presentation.performance,
+            presentation.display_strategy,
+            facial,
+        ),
+    )
+
+
+def adapt_subject_for_media_address_v3(
+    presentation: SubjectPresentationPlan,
+    *,
+    engagement_tactic: str,
+    attraction_mechanism: str | None = None,
+) -> SubjectPresentationPlan:
+    """Give every whole-image tactic a coherent face without reusing v2 goal bindings."""
+
+    if attraction_mechanism:
+        return adapt_subject_for_attraction_mechanism_v3(presentation, attraction_mechanism)
+    recipes = {
+        "presence": FacialPerformance("warm", "relaxed_closed", "soft_lens", "neutral", "continuous_lens", "contained"),
+        "reveal": FacialPerformance("proud", "small_smile", "evidence_focus", "slight_lift", "evidence_then_lens", "contained"),
+        "demonstration": FacialPerformance("neutral_present", "relaxed_closed", "evidence_focus", "neutral", "evidence_then_lens", "contained"),
+        "question": FacialPerformance("neutral_present", "relaxed_parted", "steady_lens", "slight_lift", "continuous_lens", "held"),
+        "comparison": FacialPerformance("neutral_present", "lightly_pressed", "evidence_focus", "slight_lift", "evidence_then_lens", "contained"),
+        "contrast": FacialPerformance("amused", "asymmetric_half_smile", "glance_back", "single_brow_energy", "away_then_back", "lively"),
+        "comic_hook": FacialPerformance("playfully_performed", "subtle_pout", "steady_lens", "slight_lift", "continuous_lens", "lively"),
+        "celebration": FacialPerformance("proud", "open_laugh", "steady_lens", "slight_lift", "continuous_lens", "lively"),
+        "vulnerability": FacialPerformance("vulnerable", "relaxed_parted", "soft_lens", "faint_inward_draw", "lens_then_away", "low"),
+        "reassurance": FacialPerformance("tender", "small_smile", "soft_lens", "neutral", "continuous_lens", "contained"),
+        "coordination": FacialPerformance("neutral_present", "mid_speech", "evidence_focus", "slight_lift", "evidence_then_lens", "contained"),
+        "affection": FacialPerformance("tender", "relaxed_parted", "soft_lens", "relaxed_lowered", "continuous_lens", "held"),
+        "nostalgia": FacialPerformance("tender", "small_smile", "look_away", "relaxed_lowered", "lens_then_away", "low"),
+    }
+    facial = recipes.get(engagement_tactic)
+    if presentation.version != SUBJECT_PRESENTATION_V3 or facial is None:
+        raise ValueError("unsupported media address facial performance")
+    return replace(
+        presentation,
+        facial_performance=facial,
+        subject_signature=_subject_signature(
+            presentation.appearance,
+            presentation.performance,
+            presentation.display_strategy,
+            facial,
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -481,7 +668,7 @@ def presentation_prompt_block(
     accessories = "; ".join(render("accessories", item) for item in appearance.accessories)
     accessories = accessories or "no accessory"
     social = ""
-    if presentation.display_strategy:
+    if presentation.display_strategy and presentation.version != SUBJECT_PRESENTATION_V3:
         strategy = presentation.display_strategy
         forbidden = "; ".join(_forbidden_cue_text(item) for item in strategy.forbidden_cues)
         social = (
@@ -494,6 +681,15 @@ def presentation_prompt_block(
             f"- captured beat: {strategy.temporal_beat.replace('_', ' ')}\n"
             f"- forbidden expression cues: {forbidden or 'none'}\n"
         )
+    facial = presentation.facial_performance
+    facial_line = (
+        f"- facial performance: family={facial.expression_family}; mouth={facial.mouth_behavior}; "
+        f"eyes={facial.eye_behavior}; brows={facial.brow_behavior}; "
+        f"gaze sequence={facial.gaze_sequence}; energy={facial.facial_energy}\n"
+        if facial
+        else f"- expression and body: {render('expression', performance.expression)}; "
+    )
+    body_prefix = "- body: " if facial else ""
     return (
         "Frozen subject presentation (camera-frame directions, not the character's left/right):\n"
         f"- appearance source: {appearance.source}; hair: "
@@ -501,12 +697,11 @@ def presentation_prompt_block(
         f"outfit: {render('outfit_role', appearance.outfit_role)}; "
         f"grooming: {render('grooming', appearance.grooming)}; "
         f"accessories: {accessories}\n"
-        f"- head and gaze: {render('head_yaw', performance.head_yaw)}; "
+        f"- head geometry: {render('head_yaw', performance.head_yaw)}; "
         f"{render('head_pitch', performance.head_pitch)}; "
-        f"{render('head_roll', performance.head_roll)}; "
-        f"{render('gaze_target', performance.gaze_target)}\n"
-        f"- expression and body: {render('expression', performance.expression)}; "
-        f"{render('shoulder_orientation', performance.shoulder_orientation)}; "
+        f"{render('head_roll', performance.head_roll)}"
+        f"{'' if facial else '; ' + render('gaze_target', performance.gaze_target)}\n"
+        f"{facial_line}{body_prefix}{render('shoulder_orientation', performance.shoulder_orientation)}; "
         f"{render('posture', performance.posture)}\n"
         f"- action and camera awareness: {render('gesture', performance.gesture)}; "
         f"{render('photo_awareness', performance.photo_awareness)}\n"
@@ -595,6 +790,7 @@ def _subject_signature(
     appearance: SubjectAppearance,
     performance: SubjectPerformance,
     display_strategy: PhotoDisplayStrategy | None = None,
+    facial_performance: FacialPerformance | None = None,
 ) -> str:
     axes = [
             appearance.hair_arrangement,
@@ -622,7 +818,53 @@ def _subject_signature(
                 ).hexdigest(),
             )
         )
+    if facial_performance:
+        axes.extend(facial_performance.to_payload().values())
     return "|".join(axes)
+
+
+def _facial_performance(strategy: PhotoDisplayStrategy) -> FacialPerformance:
+    family = {
+        "pretend_innocent": "playfully_performed",
+        "mock_wronged": "playfully_performed",
+        "deadpan_reveal": "neutral_present",
+        "suppressed_laugh": "amused",
+        "self_deprecating_grin": "embarrassed",
+        "small_proud_reveal": "proud",
+        "soft_bid_for_care": "vulnerable",
+        "tired_unfiltered": "tired",
+        "composed_attraction": "desire_direct",
+        "playful_challenge": "desire_direct",
+        "warm_include_you": "tender",
+        "candid_enjoyment": "warm",
+    }.get(strategy.strategy_id, "neutral_present")
+    mouth = {
+        "pretend_innocent": "subtle_pout",
+        "suppressed_laugh": "suppressed_laugh",
+        "self_deprecating_grin": "asymmetric_half_smile",
+        "composed_attraction": "relaxed_parted",
+        "playful_challenge": "asymmetric_half_smile",
+        "tired_unfiltered": "relaxed_parted",
+    }.get(strategy.strategy_id, "small_smile" if family in {"warm", "proud", "tender"} else "relaxed_closed")
+    eye = {
+        "composed_attraction": "steady_lens",
+        "playful_challenge": "steady_lens",
+        "tired_unfiltered": "relaxed_heavy_lidded",
+        "curious_check": "evidence_focus",
+    }.get(strategy.strategy_id, "soft_lens")
+    gaze = {
+        "curious_check": "evidence_then_lens",
+        "suppressed_laugh": "lens_then_away",
+        "playful_challenge": "away_then_back",
+    }.get(strategy.strategy_id, "continuous_lens")
+    return FacialPerformance(
+        expression_family=family,
+        mouth_behavior=mouth,
+        eye_behavior=eye,
+        brow_behavior=("single_brow_energy" if strategy.strategy_id == "playful_challenge" else "slight_lift" if family == "playfully_performed" else "neutral"),
+        gaze_sequence=gaze,
+        facial_energy=("held" if family.startswith("desire") else "low" if family in {"tired", "vulnerable"} else "contained"),
+    )
 
 
 def _forbidden_cue_text(value: str) -> str:

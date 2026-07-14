@@ -1,0 +1,54 @@
+version: media-camera-catalog-v1
+
+axes:
+  shot_distance: [detail, intimate_close, close, medium, full_body, long, wide]
+  camera_height: [floor, low, chest, eye, high, overhead]
+  view_axis: [front, left_three_quarter, right_three_quarter, left_profile, right_profile, rear_three_quarter, over_shoulder, top_down_pov, reflection_oblique, environment_pov]
+  pitch: [upward, level, slight_down, steep_down]
+  roll: [level, slight_left, slight_right]
+  orientation: [portrait, landscape, square]
+  subject_occupancy: [absent, trace, small, balanced, dominant, detail]
+  subject_placement: [not_applicable, center, left_third, right_third, edge_left, edge_right, lower_frame, distributed]
+  environment_share: [minimal, supporting, balanced, dominant]
+  focus_behavior: [deep_context, subject_priority, evidence_priority, layered_foreground]
+  imperfection_profile: [clean_intentional, casual_offset, partial_crop, motion_trace, foreground_interrupt, focus_breathing, reflection_layer]
+  device_visibility: [out_of_frame, visible_handheld, mirror_visible, fixed_unseen, external_unseen, artifact_inherited]
+
+capture_modes:
+  character_front_camera:
+    distances: [intimate_close, close, medium]
+    devices: [out_of_frame, visible_handheld]
+  character_rear_camera:
+    distances: [detail, intimate_close, close, medium, full_body, long, wide]
+    devices: [out_of_frame, visible_handheld]
+  mirror:
+    distances: [close, medium, full_body, long]
+    devices: [mirror_visible]
+    axes: [reflection_oblique]
+  timer_fixed:
+    distances: [close, medium, full_body, long, wide]
+    devices: [fixed_unseen]
+  requested_helper:
+    distances: [close, medium, full_body, long, wide]
+    devices: [external_unseen]
+  known_companion:
+    distances: [close, medium, full_body, long, wide]
+    devices: [external_unseen]
+  external_sender:
+    distances: [close, medium, full_body, long, wide]
+    devices: [external_unseen]
+  existing_artifact:
+    distances: [detail, intimate_close, close, medium, full_body, long, wide]
+    devices: [artifact_inherited]
+
+visual_forms:
+  wide_scene: {distances: [medium, long, wide], occupancies: [absent, trace, small, balanced], environment: [balanced, dominant]}
+  contextual_still_life: {distances: [detail, close, medium], occupancies: [absent, trace], environment: [supporting, balanced]}
+  process_pov: {distances: [detail, close, medium], occupancies: [absent, trace, detail], environment: [supporting]}
+  subject_closeup: {distances: [detail, close], occupancies: [dominant, detail], environment: [minimal, supporting]}
+  result_showcase: {distances: [close, medium, wide], occupancies: [absent, trace, small, balanced], environment: [supporting, balanced]}
+  portrait_closeup: {distances: [intimate_close, close], occupancies: [dominant], environment: [minimal, supporting]}
+  portrait_context: {distances: [close, medium], occupancies: [balanced, dominant], environment: [supporting, balanced]}
+  full_body: {distances: [full_body, long], occupancies: [balanced, dominant], environment: [supporting, balanced]}
+  body_detail: {distances: [detail, close], occupancies: [detail], environment: [minimal, supporting]}
+  social_frame: {distances: [medium, long, wide], occupancies: [balanced, distributed], environment: [supporting, balanced]}

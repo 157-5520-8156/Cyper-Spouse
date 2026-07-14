@@ -3,6 +3,7 @@ from companion_daemon.media_embodiment import (
     VisiblePhysicalStateResolver,
     build_embodied_candidates,
     embodiment_prompt_block,
+    upgrade_embodied_presentation_v3,
 )
 
 
@@ -114,6 +115,23 @@ def test_ambiguous_workout_candidates_allow_charged_but_not_veiled() -> None:
 
     restored = EmbodiedPresentation.from_payload(candidates[0].presentation.to_payload())
     assert restored == candidates[0].presentation
+
+
+def test_embodied_v3_round_trips_without_changing_frozen_body_contract() -> None:
+    source = build_embodied_candidates(
+        snapshot=_snapshot(),
+        opportunity_id="opportunity:v3",
+        relationship_stage="ambiguous",
+        sensual_charge_ceiling="charged",
+        limit=1,
+    )[0].presentation
+
+    upgraded = upgrade_embodied_presentation_v3(source)
+
+    assert upgraded.version == "embodied-presentation-v3"
+    assert upgraded.body_strategy_id == source.body_strategy_id
+    assert upgraded.action_variant_id == source.action_variant_id
+    assert EmbodiedPresentation.from_payload(upgraded.to_payload()) == upgraded
 
 
 def test_hair_retie_variants_preserve_camera_authorship_and_free_hands() -> None:

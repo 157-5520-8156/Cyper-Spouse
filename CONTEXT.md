@@ -72,6 +72,14 @@ The frozen, shot-local way a character appears and performs in one Media Plan: a
 
 The response a character hopes one delivered Media Plan may invite, including its communicative goal, hoped response, and response pressure. It is an invitation rather than a claim or obligation. Planning freezes it, but only a confirmed delivery may open a pending World interaction state.
 
+## Media Address Strategy
+
+The frozen, whole-image way a Media Plan addresses its intended recipient: observational or direct stance, engagement tactic, disclosure, staging, temporal beat, visual priority, and expression charge. It translates a Media Interaction Bid into photographic communication without deciding whether to send.
+
+## Camera Geometry
+
+The frozen physical camera contract for one Media Plan: distance, height, view axis, pitch, roll, orientation, subject occupancy and placement, environment share, focus, imperfection, and device visibility. It is independent of Capture Mode, which identifies who operates the camera.
+
 ## Photo Display Strategy
 
 The shot-local social performance used to make a Media Interaction Bid visually legible, such as playing innocent, sharing restrained pride, or presenting a mishap deadpan. It belongs to Subject Presentation, not Affect or World truth, and freezes a coherent expression recipe rather than independently composed facial axes.

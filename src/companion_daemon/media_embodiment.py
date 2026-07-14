@@ -198,6 +198,7 @@ class VisiblePhysicalStateResolver:
 
 EMBODIED_PRESENTATION_V1 = "embodied-presentation-v1"
 EMBODIED_PRESENTATION_V2 = "embodied-presentation-v2"
+EMBODIED_PRESENTATION_V3 = "embodied-presentation-v3"
 
 
 @dataclass(frozen=True)
@@ -278,6 +279,24 @@ class EmbodiedPresentation:
         if presentation.contract_signature != _embodied_signature(presentation):
             raise ValueError("invalid embodied presentation contract")
         return presentation
+
+
+def upgrade_embodied_presentation_v3(
+    presentation: EmbodiedPresentation,
+) -> EmbodiedPresentation:
+    """Version the same frozen body contract for MediaPlan v5 composition."""
+
+    if presentation.version == EMBODIED_PRESENTATION_V3:
+        return presentation
+    if presentation.version != EMBODIED_PRESENTATION_V2:
+        raise ValueError("embodied v3 requires a v2 contract")
+    return EmbodiedPresentation.create(
+        **{
+            **presentation.__dict__,
+            "version": EMBODIED_PRESENTATION_V3,
+            "contract_signature": "",
+        }
+    )
 
 
 @dataclass(frozen=True)
@@ -460,7 +479,7 @@ def embodiment_prompt_block(presentation: EmbodiedPresentation) -> str:
     action_contract = (
         f"- action variant: {presentation.action_variant_id}; requires "
         f"{presentation.required_free_hands} free hand(s); camera support={presentation.camera_support}\n"
-        if presentation.version == EMBODIED_PRESENTATION_V2
+        if presentation.version in {EMBODIED_PRESENTATION_V2, EMBODIED_PRESENTATION_V3}
         else ""
     )
     return (
@@ -514,7 +533,11 @@ def embodied_capture_feasibility_error(
 
 
 def _validate_embodied_presentation(presentation: EmbodiedPresentation) -> None:
-    if presentation.version not in {EMBODIED_PRESENTATION_V1, EMBODIED_PRESENTATION_V2}:
+    if presentation.version not in {
+        EMBODIED_PRESENTATION_V1,
+        EMBODIED_PRESENTATION_V2,
+        EMBODIED_PRESENTATION_V3,
+    }:
         raise ValueError("unsupported embodied presentation version")
     if presentation.physical_salience not in PHYSICAL_SALIENCE_LEVELS:
         raise ValueError("invalid physical salience")
@@ -554,7 +577,7 @@ def _validate_embodied_presentation(presentation: EmbodiedPresentation) -> None:
         raise ValueError("incomplete embodied presentation")
     if any(region not in VISIBLE_BODY_REGIONS for region in presentation.allowed_regions):
         raise ValueError("invalid embodied presentation region")
-    if presentation.version == EMBODIED_PRESENTATION_V2:
+    if presentation.version in {EMBODIED_PRESENTATION_V2, EMBODIED_PRESENTATION_V3}:
         if not presentation.action_variant_id:
             raise ValueError("missing embodied action variant")
         if presentation.required_free_hands not in {0, 1, 2}:
@@ -632,7 +655,7 @@ def _embodied_signature(presentation: EmbodiedPresentation) -> str:
         presentation.sensual_charge_ceiling,
         presentation.wardrobe_evidence_refs,
     )
-    if presentation.version == EMBODIED_PRESENTATION_V2:
+    if presentation.version in {EMBODIED_PRESENTATION_V2, EMBODIED_PRESENTATION_V3}:
         values = (
             *values,
             presentation.action_variant_id,
@@ -649,7 +672,7 @@ def _embodied_axis_overlap(presentation: EmbodiedPresentation, recent: str) -> i
         presentation.coverage_mode,
         presentation.body_strategy_id,
     )
-    if presentation.version == EMBODIED_PRESENTATION_V2:
+    if presentation.version in {EMBODIED_PRESENTATION_V2, EMBODIED_PRESENTATION_V3}:
         axes += (presentation.action_variant_id,)
     return sum(
         axis in recent

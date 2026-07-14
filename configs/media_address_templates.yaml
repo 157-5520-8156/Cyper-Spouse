@@ -1,0 +1,64 @@
+version: media-address-catalog-v1
+
+axes:
+  address_mode: [observational, shared_attention, direct_recipient, consultative, evidence_mediated, photographer_relational, memory_recall]
+  engagement_tactic: [presence, reveal, demonstration, question, comparison, contrast, comic_hook, celebration, vulnerability, reassurance, coordination, affection, attraction, nostalgia]
+  disclosure_mode: [open_context, selective_focus, partial_reveal, unguarded_access, polished_display, evidence_first]
+  staging_degree: [unposed, camera_aware, lightly_arranged, deliberately_posed, privately_composed, existing_artifact]
+  temporal_beat: [anticipation, mid_action, just_after, reaction, held_for_response, aftermath, retrospective]
+  visual_priority: [environment, primary_evidence, process, character, relationship]
+  expression_charge: [none, subtle, charged, veiled]
+
+bid_groups:
+  status_coordination:
+    bids: [inform_status, coordinate_next_step, share_presence]
+    address_modes: [shared_attention, evidence_mediated, consultative]
+    tactics: [presence, demonstration, coordination]
+    disclosures: [open_context, evidence_first]
+  discovery_display:
+    bids: [share_discovery, invite_appreciation]
+    address_modes: [shared_attention, evidence_mediated, direct_recipient]
+    tactics: [reveal, demonstration, comparison, celebration]
+    disclosures: [open_context, selective_focus, polished_display]
+  feedback:
+    bids: [invite_opinion]
+    address_modes: [consultative, direct_recipient]
+    tactics: [question, comparison]
+    disclosures: [evidence_first, selective_focus]
+  play_validation:
+    bids: [invite_playful_exchange, seek_validation]
+    address_modes: [direct_recipient, photographer_relational, evidence_mediated]
+    tactics: [comic_hook, contrast, vulnerability]
+    disclosures: [partial_reveal, unguarded_access, open_context]
+  care_reassurance:
+    bids: [seek_care, offer_reassurance]
+    address_modes: [direct_recipient, evidence_mediated]
+    tactics: [vulnerability, reassurance]
+    disclosures: [unguarded_access, selective_focus, evidence_first]
+  closeness_attraction:
+    bids: [invite_closeness, invite_desire]
+    address_modes: [direct_recipient, photographer_relational]
+    tactics: [affection, attraction]
+    disclosures: [selective_focus, partial_reveal, unguarded_access, polished_display]
+  memory:
+    bids: [revisit_memory]
+    address_modes: [memory_recall, shared_attention]
+    tactics: [nostalgia, presence]
+    disclosures: [open_context, selective_focus]
+
+attraction_mechanisms:
+  direct_invitation: {priority: character}
+  playful_tease: {priority: character}
+  withheld_attention: {priority: character}
+  sensory_immediacy: {priority: character}
+  private_trust: {priority: relationship}
+  confident_display: {priority: character}
+  interrupted_transition: {priority: process}
+  close_proximity: {priority: relationship}
+  atmospheric_suggestion: {priority: environment, permits_life_share: true}
+
+hard_rules:
+  - expression_charge_above_none_requires_intimate_privacy_and_intimate_signal
+  - attraction_requires_direct_or_photographer_relational_address
+  - life_share_attraction_uses_atmospheric_suggestion_only
+  - veiled_requires_lover_and_grounded_opaque_coverage

@@ -11,6 +11,7 @@ from companion_daemon.media_subject import (
     load_subject_catalog,
     presentation_prompt_block,
     select_identity_references,
+    upgrade_subject_presentation_v3,
 )
 
 
@@ -109,6 +110,30 @@ def test_social_performance_prompt_leads_with_holistic_behavior() -> None:
 
     assert prompt.index("knowingly plays innocent") < prompt.index("subtle relaxed pout")
     assert "not an exaggerated duck face" in prompt
+
+
+def test_subject_v3_keeps_expression_out_of_pose_performance() -> None:
+    source = next(
+        item.presentation
+        for item in build_subject_candidates(
+            snapshot=_snapshot(),
+            opportunity_id="op:v3-face",
+            capture_mode="character_front_camera",
+            character_visibility="identifiable",
+            config_path=CONFIG,
+            limit=32,
+        )
+        if item.presentation.display_strategy is not None
+    )
+
+    upgraded = upgrade_subject_presentation_v3(source)
+    payload = upgraded.to_payload()
+
+    assert upgraded.version == "subject-presentation-v3"
+    assert "expression" not in payload["performance"]
+    assert "gaze_target" not in payload["performance"]
+    assert payload["facial_performance"]["expression_family"]
+    assert SubjectPresentationPlan.from_payload(payload) == upgraded
 
 
 def test_subject_candidate_matrix_exposes_every_social_strategy_without_flat_rules() -> None:

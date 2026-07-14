@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from pathlib import Path
 
 import httpx
@@ -64,6 +65,7 @@ def _opportunity(
     snapshot=None,
     automatic: bool = False,
     sensual_charge_ceiling: str = "none",
+    expression_charge_ceiling: str | None = None,
     audience_context: AudienceContext | None = None,
 ) -> MediaOpportunity:
     return MediaOpportunity(
@@ -73,8 +75,38 @@ def _opportunity(
         event_snapshot=snapshot or _snapshot(),
         delivery_mode="automatic" if automatic else "preview",
         sensual_charge_ceiling=sensual_charge_ceiling,
+        expression_charge_ceiling=expression_charge_ceiling,
         audience_context=audience_context,
     )
+
+
+@pytest.mark.asyncio
+async def test_expression_charge_ceiling_falls_back_and_rejects_conflicts() -> None:
+    audience = AudienceContext(recipient_ref="user:1", relationship_stage="lover")
+    compatible = _opportunity(
+        privacy="intimate",
+        sensual_charge_ceiling="charged",
+        audience_context=audience,
+    )
+    explicit = _opportunity(
+        privacy="intimate",
+        sensual_charge_ceiling="charged",
+        expression_charge_ceiling="charged",
+        audience_context=audience,
+    )
+    conflict = _opportunity(
+        privacy="intimate",
+        sensual_charge_ceiling="subtle",
+        expression_charge_ceiling="charged",
+        audience_context=audience,
+    )
+
+    proposal = _proposal()
+    assert not isinstance(await MediaPlanner(FakeModel(proposal)).plan(compatible), NotRenderable)
+    assert not isinstance(await MediaPlanner(FakeModel(proposal)).plan(explicit), NotRenderable)
+    rejected = await MediaPlanner(FakeModel(proposal)).plan(conflict)
+    assert isinstance(rejected, NotRenderable)
+    assert rejected.reason == "conflicting_expression_charge_ceilings"
 
 
 def _proposal(**overrides: object) -> dict[str, object]:
@@ -236,6 +268,224 @@ class RawFakeModel(FakeModel):
         self.calls += 1
         self.messages = messages
         return json.dumps(self.payload, ensure_ascii=False)
+
+
+class V5SelectingModel(FakeModel):
+    async def complete(self, messages, *, temperature=0.8):
+        self.calls += 1
+        self.messages = messages
+        payload = dict(self.payload)
+        user = str(messages[-1]["content"])
+        encoded = user.split("legal_complete_media_expression_candidates=", 1)[1].split("\n", 1)[0]
+        candidates = json.loads(encoded)
+        legal = [
+            item
+            for item in candidates
+            if payload["interaction_bid_id"] in item["legal_interaction_bids"]
+            and payload["character_visibility"] in item["legal_character_visibilities"]
+            and payload["route"] in item["legal_routes"]
+        ]
+        if not legal:
+            legal = [
+                item
+                for item in candidates
+                if payload["visual_form"] in item["legal_visual_forms"]
+                and payload["share_intent"] in item["legal_share_intents"]
+                and payload["character_visibility"] in item["legal_character_visibilities"]
+                and payload["route"] in item["legal_routes"]
+            ] or candidates
+        selected = next(
+            (
+                item
+                for item in legal
+                if payload["capture_mode"] in item["legal_capture_modes"]
+                and payload["visual_form"] in item["legal_visual_forms"]
+                and payload["share_intent"] in item["legal_share_intents"]
+            ),
+            next(
+                (
+                    item
+                    for item in legal
+                    if payload["visual_form"] in item["legal_visual_forms"]
+                    and payload["share_intent"] in item["legal_share_intents"]
+                ),
+                legal[0],
+            ),
+        )
+        payload["capture_mode"] = selected["legal_capture_modes"][0]
+        payload["visual_form"] = selected["legal_visual_forms"][0]
+        if payload["share_intent"] not in selected["legal_share_intents"]:
+            payload["share_intent"] = selected["legal_share_intents"][0]
+        payload["complete_candidate_id"] = selected["complete_candidate_id"]
+        payload["interaction_bid_id"] = selected["legal_interaction_bids"][0]
+        payload["character_visibility"] = selected["legal_character_visibilities"][0]
+        payload["route"] = selected["legal_routes"][0]
+        if payload["content_domain"] == "food_drink" and payload["visual_form"] not in {
+            "portrait_closeup",
+            "portrait_context",
+        }:
+            if payload["visual_form"] in {"full_body", "social_frame"}:
+                payload["content_domain"] = "activity_process"
+                payload["primary_evidence_ref"] = "/activity/description"
+                payload["share_intent"] = "record"
+            elif payload["visual_form"] == "wide_scene":
+                payload["content_domain"] = "place_environment"
+                payload["primary_evidence_ref"] = "/location/name"
+                payload["share_intent"] = "atmosphere"
+            elif payload["visual_form"] in {"subject_closeup", "body_detail"}:
+                payload["content_domain"] = "object_possession"
+                payload["primary_evidence_ref"] = "/objects/0/description"
+                payload["share_intent"] = "show_and_tell"
+            payload["supporting_evidence_refs"] = [
+                item
+                for item in payload["supporting_evidence_refs"]
+                if item != payload["primary_evidence_ref"]
+            ]
+        return json.dumps(payload, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_v5_freezes_complete_expression_candidate_without_free_direction_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    proposal = _proposal()
+    proposal["interaction_bid_id"] = "share_presence"
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
+        proposal.pop(field, None)
+
+    result = await MediaPlanner(V5SelectingModel(proposal)).plan(_opportunity())
+
+    assert isinstance(result, PlannedMedia)
+    assert result.plan.version == "event-media-plan-v5"
+    assert result.plan.action_template_id
+    assert result.plan.media_address_strategy is not None
+    assert result.plan.camera_geometry is not None
+    assert result.plan.identity_reference_selection is not None
+    assert result.plan.subject_presentation.version == "subject-presentation-v3"
+    assert result.plan.embodied_presentation.version == "embodied-presentation-v3"
+    payload = result.plan.to_payload()
+    assert not {"composition", "action", "camera_direction", "sharing_motive"} & payload.keys()
+    assert MediaPlan.from_payload(payload) == result.plan
+    prompt = compile_media_prompt(result.plan, None)
+    assert prompt.index("Selected event evidence") < prompt.index("Interaction Bid")
+    assert prompt.index("Interaction Bid") < prompt.index("Media Address Strategy")
+    assert prompt.index("Media Address Strategy") < prompt.index("Camera Geometry")
+    assert "facial performance" in prompt
+
+
+@pytest.mark.asyncio
+async def test_v5_allows_grounded_intimate_life_share_without_character_invention(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    proposal = {
+        "content_domain": "place_environment",
+        "visual_form": "contextual_still_life",
+        "share_intent": "intimate_signal",
+        "capture_mode": "character_rear_camera",
+        "character_visibility": "trace_only",
+        "other_people_visibility": "none",
+        "polish": "casual",
+        "tone": "tender",
+        "privacy": "intimate",
+        "primary_evidence_ref": "/location/name",
+        "supporting_evidence_refs": ["/environment/lighting"],
+        "constraints": ["不生成可读文字"],
+        "route": "generate",
+        "interaction_bid_id": "invite_desire",
+    }
+    opportunity = _opportunity(
+        family="life_share",
+        privacy="intimate",
+        sensual_charge_ceiling="charged",
+        audience_context=AudienceContext(recipient_ref="user:1", relationship_stage="lover"),
+    )
+
+    result = await MediaPlanner(V5SelectingModel(proposal)).plan(opportunity)
+
+    assert isinstance(result, PlannedMedia)
+    assert result.plan.family == "life_share"
+    assert result.plan.subject_presentation is None
+    assert result.plan.media_address_strategy.attraction_mechanism == "atmospheric_suggestion"
+
+
+@pytest.mark.asyncio
+async def test_v5_new_status_bid_is_available_to_character_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    proposal = _proposal(interaction_bid_id="inform_status")
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
+        proposal.pop(field, None)
+
+    result = await MediaPlanner(V5SelectingModel(proposal)).plan(_opportunity())
+
+    assert isinstance(result, PlannedMedia)
+    assert result.plan.interaction_bid.communicative_goal == "inform_status"
+    assert result.plan.media_address_strategy.engagement_tactic in {"presence", "demonstration"}
+
+
+@pytest.mark.asyncio
+async def test_v5_candidate_space_is_replay_stable_and_varies_across_opportunities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    proposal = _proposal(interaction_bid_id="share_presence")
+    proposal["supporting_evidence_refs"].append("/participants/0/id")
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
+        proposal.pop(field, None)
+    base = _opportunity()
+
+    first = await MediaPlanner(V5SelectingModel(proposal)).plan(base)
+    repeated = await MediaPlanner(V5SelectingModel(proposal)).plan(base)
+    assert isinstance(first, PlannedMedia)
+    assert isinstance(repeated, PlannedMedia)
+    assert first.plan.to_payload() == repeated.plan.to_payload()
+
+    signatures: set[tuple[str, ...]] = set()
+    for index in range(8):
+        model = V5SelectingModel(proposal)
+        result = await MediaPlanner(model).plan(
+            replace(base, opportunity_id=f"opportunity:variation:{index}")
+        )
+        assert isinstance(result, PlannedMedia)
+        signatures.add(
+            (
+                result.plan.camera_geometry.shot_distance,
+                result.plan.camera_geometry.camera_height,
+                result.plan.camera_geometry.view_axis,
+                result.plan.camera_geometry.orientation,
+                result.plan.subject_presentation.facial_performance.expression_family,
+                result.plan.subject_presentation.performance.head_yaw,
+            )
+        )
+        encoded = (
+            model.messages[-1]["content"]
+            .split("legal_complete_media_expression_candidates=", 1)[1]
+            .split("\n", 1)[0]
+        )
+        assert len(json.loads(encoded)) <= 24
+
+    assert len(signatures) >= 2
 
 
 @pytest.mark.asyncio
@@ -1047,7 +1297,18 @@ async def test_v4_plan_freezes_one_complete_character_presentation_candidate() -
     assert result.plan.diversity_fingerprint.endswith(
         result.plan.embodied_presentation.action_variant_id
     )
-    assert MediaPlan.from_payload(result.plan.to_payload()) == result.plan
+    payload = result.plan.to_payload()
+    assert (
+        not {
+            "action_template_id",
+            "action_cue",
+            "media_address_strategy",
+            "camera_geometry",
+            "identity_reference_selection",
+        }
+        & payload.keys()
+    )
+    assert MediaPlan.from_payload(payload) == result.plan
 
 
 @pytest.mark.asyncio
@@ -1317,7 +1578,60 @@ def _inspection(
         capture_authorship_matches=True,
         hand_action_contract_matches=True,
         social_bid_broadly_legible=True,
+        observed_camera_geometry={"shot_distance": "medium"},
+        camera_geometry_broadly_matches=True,
+        observed_address_strategy={"engagement_tactic": "presence"},
+        address_strategy_broadly_matches=True,
+        interaction_bid_legible=True,
+        capture_relationship_legible=True,
+        generic_portrait_dilution=False,
+        photographic_authenticity_ok=True,
+        identity_consistency_ok=True,
+        observed_expression_family="warm",
+        perceptual_signature="presence|medium|eye|left_three_quarter|balanced|warm",
     )
+
+
+@pytest.mark.asyncio
+async def test_v5_renderer_repairs_generic_portrait_without_replanning(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    proposal = _proposal(interaction_bid_id="share_presence")
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
+        proposal.pop(field, None)
+    planned = await MediaPlanner(V5SelectingModel(proposal)).plan(_opportunity())
+    assert isinstance(planned, PlannedMedia)
+    rejected = MediaInspection(
+        **{
+            **_inspection(True).__dict__,
+            "rule_version": "media-inspection-v7",
+            "generic_portrait_dilution": True,
+        }
+    )
+    accepted = MediaInspection(
+        **{**_inspection(True).__dict__, "rule_version": "media-inspection-v7"}
+    )
+    generator = FakeGenerator()
+
+    rendered = await MediaRenderer(
+        generator=generator,
+        inspector=FakeInspector([rejected, accepted]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+
+    assert isinstance(rendered, RenderedMedia)
+    assert rendered.attempts == 2
+    assert "generic_portrait_dilution" in generator.prompts[1]
+    assert planned.plan.plan_id in generator.prompts[1]
 
 
 @pytest.mark.asyncio
