@@ -712,6 +712,10 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
 - 真实 QQ/NapCat 运行可设置 `QQ_TURN_OBSERVATION_PATH=data/private/qq-turns.jsonl`；该
   文件会以 `0600` 权限追加仅含运行事实的 JSONL，供离线按 cadence 汇总。它不是聊天日志，
   不得用来重建用户文本、用户账号、附件、平台回执值或密钥；
+- 真实 QQ/NapCat 样本的统一审计命令：
+  `python -m companion_daemon.qq_latency_eval --observation-jsonl data/private/qq-turns.jsonl`。
+  输出同时包含 first-visible/complete 延迟分位、cadence 分组、multi-segment/afterthought、
+  selected affordance 分布、用户情绪/私密印象入账率和隐私声明；
 - 任何迁移阶段都不能只看测试通过而忽略 baseline 变差。
 
 已记录的实测证据（不纳入仓库，以避免把运行数据或环境细节提交）：
