@@ -246,6 +246,11 @@ class BaselineComparison:
     reasons: tuple[str, ...]
     quality_status: str = "unproven"
     quality_reasons: tuple[str, ...] = ()
+    token_status: str = "unproven"
+    full_hot_total_tokens: int | None = None
+    bare_hot_total_tokens: int | None = None
+    permitted_full_hot_total_tokens: int | None = None
+    token_reasons: tuple[str, ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -259,6 +264,11 @@ class BaselineComparison:
             "latency_status": self.status,
             "quality_status": self.quality_status,
             "quality_reasons": list(self.quality_reasons),
+            "token_status": self.token_status,
+            "full_hot_total_tokens": self.full_hot_total_tokens,
+            "bare_hot_total_tokens": self.bare_hot_total_tokens,
+            "permitted_full_hot_total_tokens": self.permitted_full_hot_total_tokens,
+            "token_reasons": list(self.token_reasons),
         }
 
 
@@ -499,6 +509,8 @@ _BASELINE_HOT_P50_TARGET_MS = 3_000
 _BASELINE_HOT_P95_TARGET_MS = 5_000
 _BASELINE_RELATIVE_P95_MULTIPLIER = 1.5
 _BASELINE_RELATIVE_P95_ALLOWANCE_MS = 1_000
+_BASELINE_TOKEN_OVERHEAD_RATIO = 2.5
+_BASELINE_TOKEN_OVERHEAD_ALLOWANCE = 6_000
 
 
 def baseline_definition() -> dict[str, object]:
@@ -515,6 +527,8 @@ def baseline_definition() -> dict[str, object]:
         "hot_p95_target_ms": _BASELINE_HOT_P95_TARGET_MS,
         "relative_p95_multiplier": _BASELINE_RELATIVE_P95_MULTIPLIER,
         "relative_p95_allowance_ms": _BASELINE_RELATIVE_P95_ALLOWANCE_MS,
+        "token_overhead_ratio": _BASELINE_TOKEN_OVERHEAD_RATIO,
+        "token_overhead_allowance": _BASELINE_TOKEN_OVERHEAD_ALLOWANCE,
         "first_visible_metric": "first successful transport dispatch; provider TTFT unavailable",
     }
 
@@ -582,6 +596,8 @@ def assess_baseline(
     full_p50 = full_hot.p50_first_visible_delivery_ms if full_hot else None
     full_p95 = full_hot.p95_first_visible_delivery_ms if full_hot else None
     bare_p95 = bare_hot.p95_first_visible_delivery_ms if bare_hot else None
+    full_tokens = full_hot.total_tokens if full_hot else None
+    bare_tokens = bare_hot.total_tokens if bare_hot else None
     permitted = (
         max(
             _BASELINE_HOT_P95_TARGET_MS,
@@ -591,7 +607,16 @@ def assess_baseline(
         if bare_p95 is not None
         else None
     )
+    permitted_tokens = (
+        max(
+            bare_tokens + _BASELINE_TOKEN_OVERHEAD_ALLOWANCE,
+            ceil(bare_tokens * _BASELINE_TOKEN_OVERHEAD_RATIO),
+        )
+        if bare_tokens is not None
+        else None
+    )
     reasons: list[str] = []
+    token_reasons: list[str] = []
     quality_reasons: list[str] = [
         "Human blind evaluation remains required for naturalness; heuristic issue counts are diagnostic."
     ]
@@ -610,6 +635,18 @@ def assess_baseline(
     )
     if missing_visible_latency:
         reasons.append("Both variants need visible hot deliveries before latency can be assessed.")
+    if not live or hot_samples < _BASELINE_MIN_HOT_SAMPLES or full_tokens is None or bare_tokens is None:
+        token_status = "insufficient_evidence"
+        token_reasons.append(
+            "Need the same sufficiently sampled live hot baseline before token overhead can be assessed."
+        )
+    elif permitted_tokens is not None and full_tokens > permitted_tokens:
+        token_status = "token_watch"
+        token_reasons.append(
+            f"Full hot path used {full_tokens} tokens versus bare {bare_tokens}; permitted {permitted_tokens}."
+        )
+    else:
+        token_status = "pass"
     if full_hot is None or bare_hot is None:
         quality_status = "insufficient_evidence"
         quality_reasons.append("Both variants need hot samples before paired quality diagnostics are meaningful.")
@@ -629,15 +666,20 @@ def assess_baseline(
             )
     if not live or hot_samples < _BASELINE_MIN_HOT_SAMPLES or missing_visible_latency:
         return BaselineComparison(
-            "insufficient_evidence",
-            hot_samples,
-            full_p50,
-            full_p95,
-            bare_p95,
-            permitted,
-            tuple(reasons),
-            quality_status,
-            tuple(quality_reasons),
+            status="insufficient_evidence",
+            hot_samples_per_variant=hot_samples,
+            full_hot_p50_ms=full_p50,
+            full_hot_p95_ms=full_p95,
+            bare_hot_p95_ms=bare_p95,
+            permitted_full_hot_p95_ms=permitted,
+            reasons=tuple(reasons),
+            quality_status=quality_status,
+            quality_reasons=tuple(quality_reasons),
+            token_status=token_status,
+            full_hot_total_tokens=full_tokens,
+            bare_hot_total_tokens=bare_tokens,
+            permitted_full_hot_total_tokens=permitted_tokens,
+            token_reasons=tuple(token_reasons),
         )
     failures: list[str] = []
     if full_p50 > _BASELINE_HOT_P50_TARGET_MS:
@@ -653,15 +695,20 @@ def assess_baseline(
             f"Full hot P95 {full_p95}ms exceeds bare-relative allowance {permitted}ms."
         )
     return BaselineComparison(
-        "fail" if failures else "pass",
-        hot_samples,
-        full_p50,
-        full_p95,
-        bare_p95,
-        permitted,
-        tuple(reasons + failures),
-        quality_status,
-        tuple(quality_reasons),
+        status="fail" if failures else "pass",
+        hot_samples_per_variant=hot_samples,
+        full_hot_p50_ms=full_p50,
+        full_hot_p95_ms=full_p95,
+        bare_hot_p95_ms=bare_p95,
+        permitted_full_hot_p95_ms=permitted,
+        reasons=tuple(reasons + failures),
+        quality_status=quality_status,
+        quality_reasons=tuple(quality_reasons),
+        token_status=token_status,
+        full_hot_total_tokens=full_tokens,
+        bare_hot_total_tokens=bare_tokens,
+        permitted_full_hot_total_tokens=permitted_tokens,
+        token_reasons=tuple(token_reasons),
     )
 
 
@@ -1214,18 +1261,25 @@ def format_baseline_report(report: BaselineReport) -> str:
         )
     comparison = report.comparison
     lines.append(
-        "baseline latency_verdict={} quality_status={} hot_samples={} full_hot_p50_ms={} full_hot_p95_ms={} "
-        "bare_hot_p95_ms={} permitted_full_hot_p95_ms={}".format(
+        "baseline latency_verdict={} token_status={} quality_status={} hot_samples={} "
+        "full_hot_p50_ms={} full_hot_p95_ms={} bare_hot_p95_ms={} "
+        "permitted_full_hot_p95_ms={} full_hot_tokens={} bare_hot_tokens={} "
+        "permitted_full_hot_tokens={}".format(
             comparison.status,
+            comparison.token_status,
             comparison.quality_status,
             comparison.hot_samples_per_variant,
             comparison.full_hot_p50_ms,
             comparison.full_hot_p95_ms,
             comparison.bare_hot_p95_ms,
             comparison.permitted_full_hot_p95_ms,
+            comparison.full_hot_total_tokens,
+            comparison.bare_hot_total_tokens,
+            comparison.permitted_full_hot_total_tokens,
         )
     )
     lines.extend(f"baseline evidence: {reason}" for reason in comparison.reasons)
+    lines.extend(f"baseline token evidence: {reason}" for reason in comparison.token_reasons)
     lines.extend(f"baseline quality evidence: {reason}" for reason in comparison.quality_reasons)
     return "\n".join(lines)
 

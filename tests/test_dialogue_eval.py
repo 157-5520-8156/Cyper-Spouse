@@ -138,10 +138,13 @@ def test_formatted_baseline_discloses_effective_model_route_and_failures() -> No
 
     assert "failed_calls=0" in formatted
     assert "deepseek-v4-flash|thinking=0|default" in formatted
+    assert "token_status=unproven" in formatted
 
 
 def test_live_baseline_gate_requires_samples_then_checks_absolute_and_relative_slo() -> None:
-    def summary(variant: str, *, p50: int, p95: int) -> BaselineSummary:
+    def summary(
+        variant: str, *, p50: int, p95: int, total_tokens: int = 2_000
+    ) -> BaselineSummary:
         return BaselineSummary(
             variant=variant,
             cadence="hot",
@@ -153,7 +156,7 @@ def test_live_baseline_gate_requires_samples_then_checks_absolute_and_relative_s
             p50_end_to_end_complete_ms=p50,
             p95_end_to_end_complete_ms=p95,
             model_calls=20,
-            total_tokens=2_000,
+            total_tokens=total_tokens,
             reasoning_tokens=0,
             issue_count=0,
             hard_issue_count=0,
@@ -169,11 +172,27 @@ def test_live_baseline_gate_requires_samples_then_checks_absolute_and_relative_s
     )
 
     assert passed.status == "pass"
+    assert passed.token_status == "pass"
+    assert passed.full_hot_total_tokens == 2_000
+    assert passed.bare_hot_total_tokens == 2_000
     assert passed.quality_status == "requires_blind_evaluation"
     assert passed.permitted_full_hot_p95_ms == 5_000
     assert failed.status == "fail"
     assert any("P50" in reason for reason in failed.reasons)
     assert any("P95" in reason for reason in failed.reasons)
+
+    token_watch = assess_baseline(
+        [
+            summary("bare", p50=1_000, p95=1_400, total_tokens=2_000),
+            summary("full", p50=1_900, p95=2_000, total_tokens=9_001),
+        ],
+        live=True,
+    )
+
+    assert token_watch.status == "pass"
+    assert token_watch.token_status == "token_watch"
+    assert token_watch.permitted_full_hot_total_tokens == 8_000
+    assert any("Full hot path used" in reason for reason in token_watch.token_reasons)
 
 
 def test_context_regression_suite_passes() -> None:
