@@ -27,6 +27,7 @@ def test_installed_family_manifest_owns_all_current_typed_proposals() -> None:
         "proposal-contract:appraisal-legacy.1",
         "proposal-contract:outcome-legacy.1",
         "proposal-contract:relationship.1",
+        "proposal-contract:thread.1",
     )
     assert family_for_mutation("AffectEpisodeOpened").contract_ref == (
         "proposal-contract:affect-legacy.1"

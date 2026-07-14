@@ -143,6 +143,13 @@ def _life_identity_components(
             payload.get("to_logical_time"),
             config_digests,
         )
+    if event_type == "ThreadExpired":
+        return (
+            world_id,
+            _nested(payload, "thread_after", "thread_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
     if event_type == "TriggerProcessOpened":
         return world_id, _nested(payload, "process", "trigger_id"), "opened"
     if event_type in {"TriggerProcessClaimed", "TriggerProcessReclaimed"}:

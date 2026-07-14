@@ -85,6 +85,13 @@ from .relationship_reducers import (
     adjust_relationship_slow_variables,
     change_boundary,
 )
+from .thread_events import (
+    THREAD_PAYLOAD_MODELS,
+    ThreadAuthorizedMutationPayload,
+    ThreadChangedPayload,
+    ThreadExpiredPayload,
+)
+from .thread_reducers import expire_thread, reduce_thread
 from .typed_proposal_families import INSTALLED_TYPED_PROPOSAL_FAMILIES
 from .typed_proposals import (
     TypedProposalRegistration,
@@ -134,13 +141,16 @@ from .schemas import (
     RelationshipProposalProjection,
     RelationshipSignalProjection,
     RelationshipStateProjection,
+    ThreadProjection,
+    ThreadProposalProjection,
+    ThreadTransitionProjection,
     TriggerProcess,
     WorldOccurrenceProjection,
     WorldEvent,
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.9"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.10"
 INSTALLED_APPRAISAL_POLICY_REFS = ("policy:appraisal-v1",)
 INSTALLED_APPRAISAL_MATRIX_VERSION = "appraisal-matrix.1"
 INSTALLED_SOURCE_CLUSTERING_VERSION = "source-clustering.1"
@@ -151,6 +161,7 @@ INSTALLED_AFFECT_MERGE_WINDOW_SECONDS = 900
 INSTALLED_RELATIONSHIP_SIGNAL_POLICY_REFS = ("policy:relationship-signal-v1",)
 INSTALLED_RELATIONSHIP_POLICY_REFS = ("policy:relationship-v1",)
 INSTALLED_BOUNDARY_POLICY_REFS = ("policy:boundary-v1",)
+INSTALLED_THREAD_POLICY_REFS = ("policy:thread-v1",)
 
 
 class RevisionClass(StrEnum):
@@ -205,6 +216,10 @@ class ReducerState(FrozenModel):
     boundaries: tuple[BoundaryProjection, ...] = ()
     relationship_proposals: tuple[RelationshipProposalProjection, ...] = ()
     relationship_proposal_ids: tuple[str, ...] = ()
+    threads: tuple[ThreadProjection, ...] = ()
+    thread_transitions: tuple[ThreadTransitionProjection, ...] = ()
+    thread_proposals: tuple[ThreadProposalProjection, ...] = ()
+    thread_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
@@ -349,6 +364,60 @@ class ReducerState(FrozenModel):
                     or projection.origin.transition_id != latest.transition_id
                 ):
                     raise ValueError("authorization projection does not match lineage head")
+        thread_ids = tuple(item.thread_id for item in self.threads)
+        if len(thread_ids) != len(set(thread_ids)):
+            raise ValueError("thread ids must be unique")
+        thread_transition_ids = tuple(item.transition_id for item in self.thread_transitions)
+        if len(thread_transition_ids) != len(set(thread_transition_ids)):
+            raise ValueError("thread transition ids must be unique")
+        if any(item.thread_id not in set(thread_ids) for item in self.thread_transitions):
+            raise ValueError("thread transition has no projected thread")
+        authority_transition_ids = tuple(
+            item.transition_id
+            for item in (
+                *self.actor_authority_transitions,
+                *self.capability_transitions,
+                *self.consent_transitions,
+                *self.privacy_transitions,
+                *self.thread_transitions,
+            )
+        )
+        if len(authority_transition_ids) != len(set(authority_transition_ids)):
+            raise ValueError("authority transition ids must be globally unique")
+        if len(self.thread_proposal_ids) != len(set(self.thread_proposal_ids)):
+            raise ValueError("thread proposal ids must be unique")
+        if any(
+            item.proposal_id not in set(self.thread_proposal_ids)
+            for item in self.thread_proposals
+        ):
+            raise ValueError("pending thread proposal is absent from its durable index")
+        active_fingerprints = tuple(
+            item.semantic_fingerprint for item in self.threads if item.values.status == "open"
+        )
+        if len(active_fingerprints) != len(set(active_fingerprints)):
+            raise ValueError("active thread semantic fingerprints must be unique")
+        for thread in self.threads:
+            lineage = tuple(
+                item for item in self.thread_transitions if item.thread_id == thread.thread_id
+            )
+            if not lineage or lineage[0].operation != "open":
+                raise ValueError("thread lineage must begin with open")
+            if tuple(item.entity_revision for item in lineage) != tuple(
+                range(1, len(lineage) + 1)
+            ):
+                raise ValueError("thread lineage revisions must be contiguous")
+            if lineage[0].values_before is not None or any(
+                current.values_before != previous.values_after
+                for previous, current in zip(lineage, lineage[1:])
+            ):
+                raise ValueError("thread lineage before values are discontinuous")
+            latest = lineage[-1]
+            if (
+                thread.entity_revision != latest.entity_revision
+                or thread.values != latest.values_after
+                or thread.origin.transition_id != latest.transition_id
+            ):
+                raise ValueError("thread projection does not match lineage head")
         return self
 
     def semantic_payload(
@@ -358,7 +427,7 @@ class ReducerState(FrozenModel):
         world_revision: int,
         reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
     ) -> dict[str, Any]:
-        return {
+        payload = {
             "reducer_bundle_version": reducer_bundle_version,
             "schema_version": "world-v2.1",
             "world_id": world_id,
@@ -450,6 +519,12 @@ class ReducerState(FrozenModel):
             ),
             "boundaries": tuple(item.model_dump(mode="json") for item in self.boundaries),
         }
+        if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            payload["threads"] = tuple(item.model_dump(mode="json") for item in self.threads)
+            payload["thread_transitions"] = tuple(
+                item.model_dump(mode="json") for item in self.thread_transitions
+            )
+        return payload
 
 
 Reducer = Callable[[ReducerState, WorldEvent], ReducerState]
@@ -554,11 +629,37 @@ class _RelationshipProposalStore:
         )
 
 
+class _ThreadProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        if not isinstance(event, WorldEvent) or not isinstance(
+            proposal, ThreadProposalProjection
+        ):
+            raise TypeError("thread proposal adapter received incompatible values")
+        return _thread_proposal_recorded(state, event, proposal=proposal)
+
+    def find(self, state: ReducerState, proposal_id: str) -> ThreadProposalProjection | None:
+        return next(
+            (item for item in state.thread_proposals if item.proposal_id == proposal_id),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        return state.model_copy(
+            update={
+                "thread_proposals": tuple(
+                    item for item in state.thread_proposals if item.proposal_id != proposal_id
+                )
+            }
+        )
+
 _TYPED_PROPOSAL_STORES = {
     "proposal-contract:appraisal-legacy.1": _LegacyAppraisalProposalStore(),
     "proposal-contract:affect-legacy.1": _LegacyAffectProposalStore(),
     "proposal-contract:outcome-legacy.1": _LegacyOutcomeProposalStore(),
     "proposal-contract:relationship.1": _RelationshipProposalStore(),
+    "proposal-contract:thread.1": _ThreadProposalStore(),
 }
 
 _TYPED_PROPOSAL_REGISTRY = TypedProposalRegistry(
@@ -799,6 +900,60 @@ def _relationship_proposal_recorded(
         update={
             "relationship_proposals": (*state.relationship_proposals, proposal),
             "relationship_proposal_ids": (*state.relationship_proposal_ids, proposal.proposal_id),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
+def _thread_proposal_recorded(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    proposal: ThreadProposalProjection | None = None,
+) -> ReducerState:
+    proposal = proposal or ThreadProposalProjection.model_validate_json(event.payload_json)
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("thread proposal must evaluate the current world revision")
+    if proposal.proposal_id in state.thread_proposal_ids:
+        raise ValueError("thread proposal identity is already registered")
+    proposed_model = THREAD_PAYLOAD_MODELS[proposal.proposed_mutation.event_type]
+    proposed_payload = proposed_model.model_validate_json(proposal.proposed_mutation.payload_json)
+    if not isinstance(proposed_payload, ThreadAuthorizedMutationPayload):
+        raise ValueError("thread proposal does not contain an authorized mutation")
+    if (
+        proposed_payload.proposal_id != proposal.proposal_id
+        or proposed_payload.change_id != proposal.change_id
+        or proposed_payload.transition_id != proposal.transition_id
+        or proposed_payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or proposed_payload.expected_entity_revision != proposal.expected_entity_revision
+        or proposed_payload.accepted_change_hash != proposal.proposed_change_hash
+        or proposed_payload.evidence_refs != proposal.evidence_refs
+        or proposed_payload.policy_refs != proposal.policy_refs
+    ):
+        raise ValueError("persisted thread proposal body does not match its index")
+    if proposal.policy_refs != INSTALLED_THREAD_POLICY_REFS:
+        raise ValueError("thread proposal references an uninstalled policy")
+    _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
+    logical_time = _require_life_time(state, event)
+    if isinstance(proposed_payload, ThreadChangedPayload):
+        reduce_thread(
+            state.threads,
+            state.thread_transitions,
+            proposed_payload,
+            event_type=proposal.proposed_mutation.event_type,
+            logical_time=logical_time,
+        )
+    return state.model_copy(
+        update={
+            "thread_proposals": (*state.thread_proposals, proposal),
+            "thread_proposal_ids": (*state.thread_proposal_ids, proposal.proposal_id),
             "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
             "proposal_revisions": (
                 *state.proposal_revisions,
@@ -2055,6 +2210,106 @@ def _boundary_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
     )
 
 
+def _thread_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = ThreadChangedPayload.model_validate_json(event.payload_json)
+    if payload.policy_refs != INSTALLED_THREAD_POLICY_REFS:
+        raise ValueError("thread transition references an uninstalled policy")
+    if payload.thread_after.origin.accepted_event_ref != event.event_id:
+        raise ValueError("thread origin does not identify its mutation event")
+    proposal = _require_authorized_thread(state, payload)
+    threads, transitions = reduce_thread(
+        state.threads,
+        state.thread_transitions,
+        payload,
+        event_type=event.event_type,
+        logical_time=logical_time,
+    )
+    return state.model_copy(
+        update={
+            "threads": threads,
+            "thread_transitions": transitions,
+            "thread_proposals": tuple(
+                item for item in state.thread_proposals if item != proposal
+            ),
+        }
+    )
+
+
+def _thread_expired(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = ThreadExpiredPayload.model_validate_json(event.payload_json)
+    _validate_evidence_authority(state, (payload.clock_evidence_ref,), require_all=True)
+    clock_authority = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == payload.clock_event_ref
+        ),
+        None,
+    )
+    if (
+        clock_authority is None
+        or clock_authority.event_type != "ClockAdvanced"
+        or clock_authority.logical_time != logical_time
+        or clock_authority.payload_hash != payload.clock_event_payload_hash
+    ):
+        raise ValueError("thread expiry requires its committed ClockAdvanced authority")
+    if payload.thread_after.origin.accepted_event_ref != event.event_id:
+        raise ValueError("thread expiry origin does not identify its mutation event")
+    threads, transitions = expire_thread(
+        state.threads,
+        state.thread_transitions,
+        payload,
+        logical_time=logical_time,
+    )
+    return state.model_copy(update={"threads": threads, "thread_transitions": transitions})
+
+
+def _require_authorized_thread(
+    state: ReducerState,
+    payload: ThreadAuthorizedMutationPayload,
+) -> ThreadProposalProjection:
+    proposal = next(
+        (item for item in state.thread_proposals if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    decision = next(
+        (item for item in state.acceptance_decisions if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    if proposal is None:
+        raise ValueError("thread transition requires a persisted typed proposal")
+    if (
+        decision is None
+        or decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+    ):
+        raise ValueError("thread transition requires its accepted decision")
+    if (
+        not state.committed_world_event_refs
+        or state.committed_world_event_refs[-1].event_type != "AcceptanceRecorded"
+        or not state.acceptance_decisions
+        or state.acceptance_decisions[-1] != decision
+    ):
+        raise ValueError("thread transition requires adjacent AcceptanceRecorded authority")
+    if (
+        proposal.transition_kind != getattr(payload, "operation", None)
+        or proposal.change_id != payload.change_id
+        or proposal.transition_id != payload.transition_id
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.expected_entity_revision != payload.expected_entity_revision
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or proposal.evidence_refs != payload.evidence_refs
+        or json.loads(proposal.proposed_mutation.payload_json)
+        != payload.model_dump(mode="json")
+    ):
+        raise ValueError("accepted thread transition does not match its proposal")
+    return proposal
+
+
 def _require_authorized_relationship(
     state: ReducerState,
     payload: RelationshipAuthorizedMutationPayload,
@@ -2445,6 +2700,11 @@ _EVENTS = {
             _relationship_slow_variable_adjusted,
         ),
         EventDefinition("BoundaryChanged", RevisionClass.WORLD, _boundary_changed),
+        *(
+            EventDefinition(event_type, RevisionClass.WORLD, _thread_changed)
+            for event_type in THREAD_PAYLOAD_MODELS
+        ),
+        EventDefinition("ThreadExpired", RevisionClass.WORLD, _thread_expired),
     )
 }
 
@@ -2577,6 +2837,10 @@ def make_projection(
         boundaries=state.boundaries,
         relationship_proposals=state.relationship_proposals,
         relationship_proposal_ids=state.relationship_proposal_ids,
+        threads=state.threads,
+        thread_transitions=state.thread_transitions,
+        thread_proposals=state.thread_proposals,
+        thread_proposal_ids=state.thread_proposal_ids,
         proposal_ids=state.proposal_ids,
         proposal_revisions=state.proposal_revisions,
         acceptance_decisions=state.acceptance_decisions,

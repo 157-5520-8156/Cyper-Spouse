@@ -982,7 +982,7 @@ def test_sqlite_migrates_verified_v7_head_to_actor_authority_bundle(tmp_path) ->
         )
 
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert reopened.project().reducer_bundle_version == "world-v2-reducers.9"
+    assert reopened.project().reducer_bundle_version == "world-v2-reducers.10"
     assert reopened.project() == expected
     assert reopened.rebuild() == expected
     reopened.close()

@@ -22,6 +22,7 @@ from .actor_authority_events import ACTOR_AUTHORITY_PAYLOAD_MODELS
 from .authorization_events import AUTHORIZATION_PAYLOAD_MODELS
 from .life_events import LIFE_PAYLOAD_MODELS
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
+from .thread_events import THREAD_MECHANICAL_PAYLOAD_MODELS, THREAD_PAYLOAD_MODELS
 from .schemas import (
     Action,
     ActionReconciliation,
@@ -52,7 +53,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.9"
+    reducer_bundle: str = "world-v2-reducers.10"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -236,6 +237,8 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **APPRAISAL_PAYLOAD_MODELS,
         **AFFECT_PAYLOAD_MODELS,
         **RELATIONSHIP_PAYLOAD_MODELS,
+        **THREAD_PAYLOAD_MODELS,
+        **THREAD_MECHANICAL_PAYLOAD_MODELS,
         **ACTOR_AUTHORITY_PAYLOAD_MODELS,
         **AUTHORIZATION_PAYLOAD_MODELS,
     }
@@ -302,6 +305,11 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "RelationshipSignalAccepted": "world_id+signal_semantic_fingerprint",
         "RelationshipSlowVariableAdjusted": "relationship_id+expected_entity_revision+adjustment_id",
         "BoundaryChanged": "boundary_id+expected_entity_revision+transition_id",
+        **{
+            event_type: "world_id+thread_id+expected_entity_revision+transition_id"
+            for event_type in THREAD_PAYLOAD_MODELS
+        },
+        "ThreadExpired": "world_id+thread_id+expected_entity_revision+transition_id",
         "ActorAuthorityBootstrapped": "world_id+authority_id+transition_id",
         "ActorAuthorityRotated": "world_id+authority_id+expected_entity_revision+transition_id",
         "ActorAuthorityRevoked": "world_id+authority_id+expected_entity_revision+transition_id",
@@ -404,6 +412,14 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     ),
                 )
                 for event_type, payload_model in AUTHORIZATION_PAYLOAD_MODELS.items()
+            ),
+            _contract(
+                "ThreadExpired",
+                "logical_clock",
+                "world",
+                "ThreadExpiredPayload",
+                allowed_predecessors=("ClockAdvanced", "ThreadExpired"),
+                evidence_types=("clock_observation",),
             ),
             _contract(
                 "ObservationRecorded",
@@ -961,6 +977,20 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 allowed_predecessors=("AcceptanceRecorded",),
                 evidence_types=_RELATIONSHIP_EVIDENCE_TYPES,
                 compensations=("BoundaryChanged",),
+            ),
+            *(
+                _contract(
+                    event_type,
+                    "proposal_acceptance",
+                    "world",
+                    payload_model.__name__,
+                    allowed_predecessors=("AcceptanceRecorded",),
+                    evidence_types=_RELATIONSHIP_EVIDENCE_TYPES,
+                    compensations=(
+                        ("ThreadCompensated",) if event_type == "ThreadUpdated" else ()
+                    ),
+                )
+                for event_type, payload_model in THREAD_PAYLOAD_MODELS.items()
             ),
         )
     }

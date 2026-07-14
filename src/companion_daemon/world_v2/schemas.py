@@ -624,6 +624,7 @@ class EvidenceRef(FrozenModel):
         "future_plan",
         "private_hypothesis",
         "action_authorization",
+        "conversation_continuity",
     ]
     source_world_revision: int | None = Field(default=None, ge=1)
     immutable_hash: str | None = Field(default=None, min_length=64, max_length=64)
@@ -1547,6 +1548,220 @@ class ConversationThreadProjection(FrozenModel):
     resolution_ref: str | None = None
 
 
+ThreadKind = Literal[
+    "question_pending",
+    "topic_open",
+    "repair_open",
+    "external_result_pending",
+    "coordination_pending",
+    "reply_reconsideration",
+]
+ThreadStatus = Literal["open", "resolved", "superseded", "cancelled", "expired"]
+
+
+def thread_semantic_fingerprint(
+    *,
+    kind: ThreadKind,
+    subject_ref: str,
+    conversation_ref: str,
+    anchor_evidence_refs: tuple[EvidenceRef, ...],
+    resolution_contract_ref: str,
+    policy_refs: tuple[str, ...],
+) -> str:
+    """Stable active-thread identity; intentionally excludes IDs and tunable labels."""
+
+    material = {
+        "kind": kind,
+        "subject_ref": subject_ref,
+        "conversation_ref": conversation_ref,
+        "anchor_evidence_identity": sorted(
+            (
+                {
+                    "ref_id": item.ref_id,
+                    "evidence_type": item.evidence_type,
+                    "source_world_revision": item.source_world_revision,
+                    "immutable_hash": item.immutable_hash,
+                }
+                for item in anchor_evidence_refs
+            ),
+            key=lambda item: (str(item["ref_id"]), json.dumps(item, sort_keys=True)),
+        ),
+        "resolution_contract_ref": resolution_contract_ref,
+        "policy_refs": sorted(policy_refs),
+    }
+    return hashlib.sha256(
+        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+class ThreadValues(FrozenModel):
+    kind: ThreadKind
+    subject_ref: str = Field(min_length=1)
+    conversation_ref: str = Field(min_length=1)
+    anchor_evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    source_evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    importance_bp: int = Field(ge=0, le=10_000)
+    due_window: DueWindow | None = None
+    expires_at: datetime | None = None
+    resolution_contract_ref: str = Field(min_length=1)
+    privacy_class: PrivacyClass = "private"
+    status: ThreadStatus = "open"
+    resolution_kind: Literal["answered", "skipped"] | None = None
+    resolution_ref: str | None = None
+    cancellation_reason_code: Literal["user_withdrew", "obsolete", "invalid", "duplicate"] | None = None
+    cancellation_evidence_ref: str | None = None
+    superseded_by_thread_ref: str | None = None
+    predecessor_thread_refs: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def lifecycle_shape_is_explicit(self) -> ThreadValues:
+        temporal_values = (
+            *((self.due_window.opens_at, self.due_window.closes_at) if self.due_window else ()),
+            *((self.expires_at,) if self.expires_at else ()),
+        )
+        if any(item.tzinfo is None or item.utcoffset() is None for item in temporal_values):
+            raise ValueError("thread temporal bounds must be timezone-aware")
+        if len(self.source_evidence_refs) != len(
+            {item.ref_id for item in self.source_evidence_refs}
+        ):
+            raise ValueError("thread source evidence refs must be unique")
+        if not set(self.anchor_evidence_refs).issubset(set(self.source_evidence_refs)):
+            raise ValueError("thread anchor evidence must remain in source evidence")
+        if self.expires_at is not None and self.due_window is not None:
+            if self.expires_at < self.due_window.closes_at:
+                raise ValueError("thread expiry cannot precede its due window close")
+        if self.status == "open" and (
+            self.resolution_ref is not None
+            or self.resolution_kind is not None
+            or self.cancellation_reason_code is not None
+            or self.cancellation_evidence_ref is not None
+            or self.superseded_by_thread_ref is not None
+        ):
+            raise ValueError("open thread cannot carry terminal resolution")
+        if self.status == "resolved" and (
+            not self.resolution_ref or self.resolution_kind is None
+        ):
+            raise ValueError("resolved thread requires a resolution ref")
+        if self.status == "cancelled" and (
+            self.cancellation_reason_code is None or not self.cancellation_evidence_ref
+        ):
+            raise ValueError("cancelled thread requires a reason ref")
+        if self.status == "superseded" and not self.superseded_by_thread_ref:
+            raise ValueError("superseded thread requires its successor ref")
+        if self.status != "superseded" and self.superseded_by_thread_ref is not None:
+            raise ValueError("only superseded thread may identify a successor")
+        if self.status != "resolved" and (
+            self.resolution_kind is not None or self.resolution_ref is not None
+        ):
+            raise ValueError("only resolved thread may carry a resolution")
+        if self.status != "cancelled" and (
+            self.cancellation_reason_code is not None
+            or self.cancellation_evidence_ref is not None
+        ):
+            raise ValueError("only cancelled thread may carry a cancellation reason")
+        return self
+
+
+class ThreadOrigin(FrozenModel):
+    authority_mode: Literal["accepted_proposal", "mechanical_clock"] = "accepted_proposal"
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+
+
+class ThreadProjection(FrozenModel):
+    thread_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    semantic_fingerprint: str = Field(min_length=64, max_length=64)
+    values: ThreadValues
+    origin: ThreadOrigin
+    opened_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def semantic_identity_matches_sources(self) -> ThreadProjection:
+        expected = thread_semantic_fingerprint(
+            kind=self.values.kind,
+            subject_ref=self.values.subject_ref,
+            conversation_ref=self.values.conversation_ref,
+            anchor_evidence_refs=self.values.anchor_evidence_refs,
+            resolution_contract_ref=self.values.resolution_contract_ref,
+            policy_refs=self.origin.policy_refs,
+        )
+        if self.semantic_fingerprint != expected:
+            raise ValueError("thread semantic fingerprint does not match its sources")
+        return self
+
+
+class ThreadTransitionProjection(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    thread_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    operation: Literal[
+        "open", "update", "resolve", "cancel", "supersede", "compensate", "expire"
+    ]
+    values_before: ThreadValues | None
+    values_after: ThreadValues
+    change_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+    accepted_at: datetime
+    compensates_transition_id: str | None = None
+
+
+class ThreadProposedMutation(FrozenModel):
+    event_type: Literal[
+        "ThreadOpened",
+        "ThreadUpdated",
+        "ThreadResolved",
+        "ThreadCancelled",
+        "ThreadSuperseded",
+        "ThreadCompensated",
+    ]
+    payload_json: str = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def payload_is_canonical(self) -> ThreadProposedMutation:
+        decoded = json.loads(self.payload_json)
+        if not isinstance(decoded, dict):
+            raise ValueError("thread mutation payload must be an object")
+        canonical = json.dumps(decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if canonical != self.payload_json:
+            raise ValueError("thread mutation payload must use canonical JSON")
+        return self
+
+
+class ThreadProposalProjection(FrozenModel):
+    proposal_id: str = Field(min_length=1)
+    proposal_kind: Literal["thread_transition"] = "thread_transition"
+    proposal_encoding: Literal["typed-authority-v1"]
+    authority_contract_ref: Literal["proposal-contract:thread.1"]
+    transition_kind: Literal["open", "update", "resolve", "cancel", "supersede", "compensate"]
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    expected_entity_revision: int = Field(ge=0)
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    proposed_mutation: ThreadProposedMutation
+
+    @model_validator(mode="after")
+    def transition_matches_event(self) -> ThreadProposalProjection:
+        expected = {
+            "open": "ThreadOpened",
+            "update": "ThreadUpdated",
+            "resolve": "ThreadResolved",
+            "cancel": "ThreadCancelled",
+            "supersede": "ThreadSuperseded",
+            "compensate": "ThreadCompensated",
+        }[self.transition_kind]
+        if self.proposed_mutation.event_type != expected:
+            raise ValueError("thread proposal transition does not match event")
+        return self
+
+
 class PrincipalActionEvidence(FrozenModel):
     source_event_ref: str = Field(min_length=1)
     payload_hash: str = Field(min_length=64, max_length=64)
@@ -1933,7 +2148,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.9"
+    reducer_bundle_version: str = "world-v2-reducers.10"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -1983,6 +2198,10 @@ class LedgerProjection(FrozenModel):
     boundaries: tuple[BoundaryProjection, ...] = ()
     relationship_proposals: tuple[RelationshipProposalProjection, ...] = ()
     relationship_proposal_ids: tuple[str, ...] = ()
+    threads: tuple[ThreadProjection, ...] = ()
+    thread_transitions: tuple[ThreadTransitionProjection, ...] = ()
+    thread_proposals: tuple[ThreadProposalProjection, ...] = ()
+    thread_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
