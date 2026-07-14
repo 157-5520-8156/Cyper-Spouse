@@ -1394,6 +1394,68 @@ async def test_world_reply_prompt_contains_recent_delivered_conversation(tmp_pat
     assert "听起来挺累的。" in prompt
 
 
+@pytest.mark.asyncio
+async def test_world_user_facts_and_recent_life_context_reach_next_reply_prompt(
+    tmp_path: Path,
+) -> None:
+    class RecordingModel:
+        def __init__(self) -> None:
+            self.calls: list[list[dict[str, str]]] = []
+
+        async def complete(self, messages, *, temperature: float) -> str:
+            self.calls.append(messages)
+            return (
+                '{"reply_text":"嗯，我听着。","mentioned_event_ids":[],'
+                '"proposed_action_ids":[],"claims":[]}'
+            )
+
+    model = RecordingModel()
+    world, world_id, engine = _world_engine(tmp_path, model)
+
+    await engine.respond(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="user-fact-tea-city",
+            text="我最近特别喜欢桂花乌龙，而且我人在成都。",
+        )
+    )
+    await engine.respond(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="user-recent-home-bed",
+            text="今天终于回安徽了，家里的床确实软一点。",
+        )
+    )
+    await engine.respond(
+        IncomingMessage(
+            platform="qq",
+            platform_user_id="geoff",
+            message_id="user-bed-followup",
+            text="刚刚说到床，我有点想睡了。",
+        )
+    )
+
+    facts = [
+        str(item.get("value") or "")
+        for item in world.snapshot(world_id)["facts"].values()
+        if isinstance(item, dict)
+    ]
+    prompt = "\n".join(item["content"] for item in model.calls[-1])
+
+    assert any("桂花乌龙" in fact for fact in facts)
+    assert any("成都" in fact for fact in facts)
+    assert '"user_profile"' in prompt
+    assert "桂花乌龙" in prompt
+    assert "成都" in prompt
+    # Recent non-durable life context still has to be available through the
+    # retrieved experience layer, otherwise replies feel amnesic across turns.
+    assert '"retrieved_experiences"' in prompt
+    assert "回安徽" in prompt
+    assert "家里的床" in prompt
+
+
 def test_conversation_context_exposes_user_message_as_a_citable_source(tmp_path: Path) -> None:
     class UnusedModel:
         async def complete(self, messages, *, temperature: float) -> str:

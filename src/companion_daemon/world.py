@@ -3192,37 +3192,26 @@ class WorldKernel:
         # deterministic and deliberately conservative: claims are either
         # quoted from a committed source above, or use an explicitly
         # first-person/implicit-current-world opening here and are rejected.
-        unsupported_world_claim = any(
-            re.search(pattern, remainder)
-            for pattern in (
-                r"(?:这会儿|此刻|刚刚?|现在|正在|还在)[^。！!?！？]{0,36}(?:醒|睡|赖|爬|去|上课|下课|吃|看书|散步|整理|忙|回来|在床|在宿舍|在图书馆|盘)",
-                r"(?:昨天|昨晚|早上|上午|下午|今晚|今天|明天)[^。！!?！？]{0,36}(?:去了|做了|吃了|见了|聊了|看了|参加了|完成了|回来|上课|下课)",
-                r"我(?:以前|曾经|也)[^。！!?！？]{0,24}(?:有过|经历过|做过|去过|见过|聊过)",
-                r"(?:我这儿|我这里|这边|这里)[^。！!?！？]{0,36}(?:空调|天气|温度|有点凉|有点冷|有点热|很吵|很安静|下雨)",
-                r"我(?:书包里|包里|手边|桌上|宿舍里)[^。！!?！？]{0,30}(?:常备|放着|带着|有茶|有咖啡)",
-                r"(?:桌上|手边|旁边|包里)[^。！!?！？]{0,24}(?:正好)?(?:有|放着|摆着)[^。！!?！？]{0,16}(?:杯|茶|咖啡|饮料|书|东西)",
-                r"(?:难怪)?你[^。！!?！？]{0,12}(?:一大早|这么早)[^。！!?！？]{0,12}(?:起来|醒|没睡)",
-                r"(?:最近|现在)[^。！!?！？]{0,28}(?:很多人|挺多人|大家都|很流行|都在做)",
-                r"我[^。！!?！？]{0,36}(?:换个位置|换位置|靠窗|拿出|走到|坐到)",
-                r"(?:我)?在宿舍[^。！!?！？]{0,18}(?:歇着|休息|躺着|发呆)",
-                r"我(?:现在|这会儿|此刻)?在[^。！!?！？]{1,18}(?:上|里|馆|校|室|店|家)(?:。|，|！|$)",
-                r"我(?:也|正|就|还)?(?:现在|这会儿|此刻|刚才|今天|昨天|明天|已经)?"
-                r"在(?!意|听|想|乎|这[儿里]|呢|呀)[^。！!?！？]{1,32}(?:。|，|！|？|$)",
-                r"我(?:有(?:个|一位|几个)?|认识|跟|和)[^。！!?！？]{0,20}"
-                r"(?:哥哥|姐姐|弟弟|妹妹|爸爸|妈妈|爷爷|奶奶|外公|外婆|叔叔|阿姨|"
-                r"父母|家人|室友|同学|老师|邻居|前任)",
-                r"我(?:觉得|想|认为|听说)?[^。！!?！？]{0,12}"
-                r"(?:哥哥|姐姐|弟弟|妹妹|爸爸|妈妈|爷爷|奶奶|外公|外婆|叔叔|阿姨|"
-                r"父母|家人|室友|同学|老师|邻居|前任)[^。！!?！？]{0,20}"
-                r"(?:住在|来自|出生于|是(?:个|一位)|有)",
-                r"我(?:来自|出生于|住在)[^。！!?！？]{1,32}(?:。|，|！|？|$)",
-                r"(?:本地|云端|服务器|硬盘|数据库)[^。！!?！？]{0,12}(?:没了|丢了|坏了|删除了)",
-                r"我[^。！!?！？]{0,18}(?:睡不着|失眠|难受)(?:的时候|时)[^。！!?！？]{0,18}(?:会|就)",
-                r"(?:我跟着[^。！!?！？]{0,18}|松了一口气|确实在意了|我反而觉得[^。！!?！？]{0,12}踏实)",
-            )
+        unsupported_world_match = next(
+            (
+                match
+                for pattern in _UNSUPPORTED_WORLD_CLAIM_PATTERNS
+                if (match := re.search(pattern, remainder))
+            ),
+            None,
         )
-        if reply_text != "我在。" and unsupported_world_claim:
-            raise WorldError("reply contains world-time or experience text outside committed claims")
+        if (
+            reply_text != "我在。"
+            and unsupported_world_match
+            and not _span_supported_by_user_source(
+                unsupported_world_match.group(0),
+                sources=sources,
+                user_owned_sources=user_owned_sources,
+            )
+        ):
+            raise WorldError(
+                "reply contains world-time or experience text outside committed claims"
+            )
         if not normalized_claims and re.search(
             r"(?:这位|那个|他|她|它|朋友|同事|室友|同学|老师|邻居|前任)"
             r"[^。！!?！？]{0,28}(?:正在|住在|输液|住院|生病|怀孕|结冰|"
@@ -8517,24 +8506,112 @@ def _bounded_paraphrase(assertion: str, evidence: str) -> bool:
     ):
         return False
     additive_anchors = (
-        "宿舍", "图书馆", "教室", "书店", "床上", "家里", "窗边", "路上",
-        "因为", "所以", "不然", "免得", "导致", "为了",
-        "顺便", "然后", "同时", "接着", "还要",
-        "心里", "脑子里", "觉得", "想着", "担心", "害怕", "高兴", "难过", "会忘",
-        "出神", "最想记住", "安静选片", "感觉",
-        "上课", "下课", "课上完", "回宿舍", "到宿舍", "出门", "回来",
+        "宿舍",
+        "图书馆",
+        "教室",
+        "书店",
+        "床上",
+        "家里",
+        "窗边",
+        "路上",
+        "因为",
+        "所以",
+        "不然",
+        "免得",
+        "导致",
+        "为了",
+        "顺便",
+        "然后",
+        "同时",
+        "接着",
+        "还要",
+        "心里",
+        "脑子里",
+        "觉得",
+        "想着",
+        "担心",
+        "害怕",
+        "高兴",
+        "难过",
+        "会忘",
+        "出神",
+        "最想记住",
+        "安静选片",
+        "感觉",
+        "上课",
+        "下课",
+        "课上完",
+        "回宿舍",
+        "到宿舍",
+        "出门",
+        "回来",
     )
     if any(
         anchor in normalized_assertion and anchor not in normalized_evidence
         for anchor in additive_anchors
     ):
         return False
-    return SequenceMatcher(
-        None,
-        normalized_assertion,
-        normalized_evidence,
-        autojunk=False,
-    ).ratio() >= 0.35
+    return (
+        SequenceMatcher(
+            None,
+            normalized_assertion,
+            normalized_evidence,
+            autojunk=False,
+        ).ratio()
+        >= 0.35
+    )
+
+
+_UNSUPPORTED_WORLD_CLAIM_PATTERNS = (
+    r"(?:这会儿|此刻|刚刚?|现在|正在|还在)[^。！!?！？]{0,36}(?:醒|睡|赖|爬|去|上课|下课|吃|看书|散步|整理|忙|回来|在床|在宿舍|在图书馆|盘)",
+    r"(?:昨天|昨晚|早上|上午|下午|今晚|今天|明天)[^。！!?！？]{0,36}(?:去了|做了|吃了|见了|聊了|看了|参加了|完成了|回来|上课|下课)",
+    r"我(?:以前|曾经|也)[^。！!?！？]{0,24}(?:有过|经历过|做过|去过|见过|聊过)",
+    r"(?:我这儿|我这里|这边|这里)[^。！!?！？]{0,36}(?:空调|天气|温度|有点凉|有点冷|有点热|很吵|很安静|下雨)",
+    r"我(?:书包里|包里|手边|桌上|宿舍里)[^。！!?！？]{0,30}(?:常备|放着|带着|有茶|有咖啡)",
+    r"(?:桌上|手边|旁边|包里)[^。！!?！？]{0,24}(?:正好)?(?:有|放着|摆着)[^。！!?！？]{0,16}(?:杯|茶|咖啡|饮料|书|东西)",
+    r"(?:难怪)?你[^。！!?！？]{0,12}(?:一大早|这么早)[^。！!?！？]{0,12}(?:起来|醒|没睡)",
+    r"(?:最近|现在)[^。！!?！？]{0,28}(?:很多人|挺多人|大家都|很流行|都在做)",
+    r"我[^。！!?！？]{0,36}(?:换个位置|换位置|靠窗|拿出|走到|坐到)",
+    r"(?:我)?在宿舍[^。！!?！？]{0,18}(?:歇着|休息|躺着|发呆)",
+    r"我(?:现在|这会儿|此刻)?在[^。！!?！？]{1,18}(?:上|里|馆|校|室|店|家)(?:。|，|！|$)",
+    r"我(?:也|正|就|还)?(?:现在|这会儿|此刻|刚才|今天|昨天|明天|已经)?"
+    r"在(?!意|听|想|乎|这[儿里]|呢|呀)[^。！!?！？]{1,32}(?:。|，|！|？|$)",
+    r"我(?:有(?:个|一位|几个)?|认识|跟|和)[^。！!?！？]{0,20}"
+    r"(?:哥哥|姐姐|弟弟|妹妹|爸爸|妈妈|爷爷|奶奶|外公|外婆|叔叔|阿姨|"
+    r"父母|家人|室友|同学|老师|邻居|前任)",
+    r"我(?:觉得|想|认为|听说)?[^。！!?！？]{0,12}"
+    r"(?:哥哥|姐姐|弟弟|妹妹|爸爸|妈妈|爷爷|奶奶|外公|外婆|叔叔|阿姨|"
+    r"父母|家人|室友|同学|老师|邻居|前任)[^。！!?！？]{0,20}"
+    r"(?:住在|来自|出生于|是(?:个|一位)|有)",
+    r"我(?:来自|出生于|住在)[^。！!?！？]{1,32}(?:。|，|！|？|$)",
+    r"(?:本地|云端|服务器|硬盘|数据库)[^。！!?！？]{0,12}(?:没了|丢了|坏了|删除了)",
+    r"我[^。！!?！？]{0,18}(?:睡不着|失眠|难受)(?:的时候|时)[^。！!?！？]{0,18}(?:会|就)",
+    r"(?:我跟着[^。！!?！？]{0,18}|松了一口气|确实在意了|我反而觉得[^。！!?！？]{0,12}踏实)",
+)
+
+
+def _span_supported_by_user_source(
+    span: str,
+    *,
+    sources: dict[str, str],
+    user_owned_sources: set[str],
+) -> bool:
+    """Allow direct user-sourced speaker rewrites without explicit model claims.
+
+    The hard guard should still reject unsourced world narration, but ordinary
+    IM replies often restate the current user's own sentence as ``你...``.
+    Requiring the model to attach a second explicit claim for that current
+    sentence made sourced memory replies fall through to stiff local fallbacks.
+    """
+    cleaned = span.strip("，。！？!?；;：: ")
+    if not cleaned:
+        return False
+    return any(
+        source_id in user_owned_sources
+        and source_text
+        and _bounded_paraphrase(cleaned, source_text)
+        for source_id, source_text in sources.items()
+    )
 
 
 def _conversation_relevance(query: str, content: str) -> int:

@@ -14,6 +14,7 @@ from companion_daemon.qq_websocket import (
     ActiveSend,
     AfterthoughtPlan,
     CompanionQQClient,
+    DeferredReply,
     QueuedQQMessage,
     QQMessageCoalescer,
     QQTurnTransport,
@@ -34,6 +35,7 @@ from companion_daemon.companion_turn import (
     ExternalObservation,
     TurnPresentation,
 )
+from companion_daemon.reply_decision import ReplyAction, ReplyDecision
 from companion_daemon.turn_taking import TurnState, TurnTakingPolicy
 from companion_daemon.world import WorldKernel
 from companion_daemon.world import WorldError
@@ -1595,6 +1597,64 @@ async def test_upset_state_ghosts_through_read_later_and_uses_ghost_context_hint
 
     assert engine.read_later_reasons == ["emotional_ghost"]
     assert "故意没有马上回" in (engine.context_hints[0] or "")
+
+
+@pytest.mark.asyncio
+async def test_world_deferred_timer_resumes_the_scheduled_reply_action() -> None:
+    class FakeStore:
+        def resolve_user(self, platform: str, platform_user_id: str) -> str:
+            return "geoff"
+
+    class FakeEngine:
+        store = FakeStore()
+
+        def __init__(self) -> None:
+            self.completed: list[str | None] = []
+
+        def complete_deferred_reply_task(self, task_id: str | None) -> None:
+            self.completed.append(task_id)
+
+    class FakeTarget:
+        async def reply(self, **kwargs) -> dict[str, str]:
+            return {"id": "unused"}
+
+    async def fake_sleep(seconds: float) -> None:
+        return None
+
+    engine = FakeEngine()
+    coalescer = QQMessageCoalescer(
+        engine,  # type: ignore[arg-type]
+        delay_seconds=0.01,
+        sleep=fake_sleep,
+        human_timing=False,
+    )
+    observed: list[dict[str, object]] = []
+
+    async def fake_generate_and_send(*args, **kwargs) -> bool:
+        observed.append(kwargs)
+        return True
+
+    coalescer._generate_and_send = fake_generate_and_send  # type: ignore[method-assign]
+    coalescer._deferred["c2c:user"] = DeferredReply(
+        merged=IncomingMessage(
+            platform="qq",
+            platform_user_id="user",
+            message_id="deferred-world-message",
+            text="等下回我",
+        ),
+        reply_target=FakeTarget(),
+        task_id="reply_later:deferred-world-message",
+    )
+
+    await coalescer._fire_deferred_after(
+        "c2c:user",
+        0.01,
+        ReplyDecision(ReplyAction.DEFER, defer_minutes=0.01, reason="busy"),
+    )
+
+    assert observed
+    assert observed[0]["resume_action_id"] == "reply_later:deferred-world-message"
+    assert engine.completed == ["reply_later:deferred-world-message"]
 
 
 @pytest.mark.asyncio

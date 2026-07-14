@@ -1363,8 +1363,18 @@ class QQMessageCoalescer:
                 if decision.reason == "emotional_ghost"
                 else DEFERRED_CONTEXT_HINT
             )
+            resume_action_id = (
+                str(deferred.task_id)
+                if isinstance(deferred.task_id, str)
+                and deferred.task_id.startswith("reply_later:")
+                else None
+            )
             delivered = await self._generate_and_send(
-                deferred.merged, deferred.reply_target, key=key, context_hint=context_hint
+                deferred.merged,
+                deferred.reply_target,
+                key=key,
+                context_hint=context_hint,
+                resume_action_id=resume_action_id,
             )
             if delivered and hasattr(self.engine, "complete_deferred_reply_task"):
                 self.engine.complete_deferred_reply_task(deferred.task_id)
@@ -1430,6 +1440,7 @@ class QQMessageCoalescer:
         budget: ResponseBudget | None,
         on_first_visible: Callable[[], None] | None = None,
         lifecycle_observer: Callable[[str], None] | None = None,
+        resume_action_id: str | None = None,
     ) -> bool:
         """World-mode text path: CompanionTurn owns every text Action transition."""
         response_seconds = self.response_timeout_seconds or 12.0
@@ -1497,6 +1508,7 @@ class QQMessageCoalescer:
                     context_hint=context_hint,
                     turn_context=turn_context,
                     lifecycle_observer=lifecycle_observer,
+                    resume_action_id=resume_action_id,
                 ),
             )
         except Exception:
@@ -1519,6 +1531,7 @@ class QQMessageCoalescer:
         budget: ResponseBudget | None = None,
         on_first_visible: Callable[[], None] | None = None,
         lifecycle_observer: Callable[[str], None] | None = None,
+        resume_action_id: str | None = None,
     ) -> bool:
         has_world_runtime = bool(
             getattr(self.engine, "world_kernel", None) and getattr(self.engine, "world_id", None)
@@ -1538,6 +1551,7 @@ class QQMessageCoalescer:
                 budget=budget,
                 on_first_visible=on_first_visible,
                 lifecycle_observer=lifecycle_observer,
+                resume_action_id=resume_action_id,
             )
         if hasattr(self.engine, "mark_phone_read_for_message"):
             self.engine.mark_phone_read_for_message(merged)
