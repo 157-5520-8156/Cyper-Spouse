@@ -77,6 +77,7 @@ def reduce_actor_authority(
     *,
     event: WorldEvent,
     logical_time: datetime,
+    accepted_world_revision: int,
 ) -> tuple[
     tuple[ActorAuthorityProjection, ...],
     tuple[ActorAuthorityTransitionProjection, ...],
@@ -217,6 +218,9 @@ def reduce_actor_authority(
         root_keyset_digest=payload.root_proof.keyset_digest,
         root_nonce_hash=nonce_hash,
         root_proof_hash=proof_hash,
+        accepted_event_ref=event.event_id,
+        accepted_world_revision=accepted_world_revision,
+        accepted_payload_hash=event.payload_hash,
         changed_at=payload.changed_at,
         compensates_transition_id=payload.compensates_transition_id,
     )

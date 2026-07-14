@@ -33,8 +33,10 @@ def test_installed_family_manifest_owns_all_current_typed_proposals() -> None:
         "proposal-contract:outcome-legacy.1",
         "proposal-contract:relationship.1",
         "proposal-contract:thread.1",
+        "proposal-contract:v2-attention.1",
         "proposal-contract:v2-goal.1",
         "proposal-contract:v2-location.1",
+        "proposal-contract:v2-resource.1",
     )
     assert family_for_mutation("AffectEpisodeOpened").contract_ref == (
         "proposal-contract:affect-legacy.1"
@@ -50,6 +52,13 @@ def test_installed_family_manifest_owns_all_current_typed_proposals() -> None:
     assert family_for_mutation("CharacterCoreRevised").contract_ref == (
         "proposal-contract:character-core.1"
     )
+    assert family_for_mutation("V2ResourceStateAdjusted").contract_ref == (
+        "proposal-contract:v2-resource.1"
+    )
+    assert family_for_mutation("V2AttentionChanged").contract_ref == (
+        "proposal-contract:v2-attention.1"
+    )
+    assert family_for_mutation("V2ResourceClockAdjusted") is None
 
 
 def test_record_routing_preserves_legacy_and_generic_boundaries() -> None:

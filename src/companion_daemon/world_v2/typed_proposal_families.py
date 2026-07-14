@@ -18,6 +18,12 @@ from .appraisal_events import (
     AppraisalContradictedPayload,
     AppraisalSupersededPayload,
 )
+from .attention_authority_contract import (
+    V2_ATTENTION_MUTATION_EVENT_TYPES,
+    require_attention_event_operation,
+)
+from .attention_authority_events import V2AttentionChangedPayload
+from .attention_authority_schemas import V2AttentionProposalProjection
 from .commitment_events import CommitmentChangedPayload
 from .character_core_events import CHARACTER_CORE_PAYLOAD_MODELS, CharacterCoreChangedPayload
 from .fact_events import FACT_PAYLOAD_MODELS, FactChangedPayload
@@ -30,6 +36,8 @@ from .location_authority_contract import (
 )
 from .location_authority_events import V2LocationChangedPayload
 from .location_authority_schemas import V2LocationProposalProjection
+from .resource_authority_contract import V2_RESOURCE_EVENT_TYPES
+from .resource_authority_events import V2_RESOURCE_CODEC
 from .experience_events import EXPERIENCE_PAYLOAD_MODELS, ExperienceCommittedPayload
 from .life_events import OutcomeProposalRecordedPayload, WorldOccurrenceSettledPayload
 from .memory_events import (
@@ -738,6 +746,62 @@ class _V2LocationFamilyCodec:
             payload.get("transition_id"),
         )
 
+
+class _V2AttentionFamilyCodec:
+    def decode_record(
+        self, *, event_type: str, payload: dict[str, object]
+    ) -> V2AttentionProposalProjection:
+        if event_type != "ProposalRecorded":
+            raise ValueError("Attention codec only accepts ProposalRecorded")
+        return _validate_json(V2AttentionProposalProjection, payload)  # type: ignore[return-value]
+
+    def bind(self, proposal: object) -> ProposalAuthorityBinding:
+        if not isinstance(proposal, V2AttentionProposalProjection):
+            raise TypeError("Attention codec received an incompatible proposal")
+        return ProposalAuthorityBinding(
+            proposal_id=proposal.proposal_id,
+            proposal_kind=proposal.proposal_kind,
+            authority_contract_ref=proposal.authority_contract_ref,
+            change_id=proposal.change_id,
+            proposed_change_hash=proposal.proposed_change_hash,
+            evaluated_world_revision=proposal.evaluated_world_revision,
+            expected_entity_revision=proposal.expected_entity_revision,
+            mutation_event_type=proposal.proposed_mutation.event_type,
+        )
+
+    def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
+        mutation = _validate_json(V2AttentionChangedPayload, payload)
+        require_attention_event_operation(
+            event_type=event_type,
+            operation=mutation.operation,  # type: ignore[attr-defined]
+        )
+        return mutation
+
+    def bind_mutation(self, mutation: object) -> AcceptedMutationBinding:
+        if not isinstance(mutation, V2AttentionChangedPayload):
+            raise TypeError("Attention codec received an incompatible mutation")
+        return _accepted_binding(mutation)
+
+    def record_identity(
+        self, *, world_id: str, event_type: str, payload: dict[str, object]
+    ) -> IdentityComponents:
+        return (
+            world_id,
+            payload.get("proposal_id"),
+            payload.get("change_id"),
+            payload.get("authority_contract_ref"),
+        )
+
+    def mutation_identity(
+        self, *, world_id: str, event_type: str, payload: dict[str, object]
+    ) -> IdentityComponents:
+        return (
+            world_id,
+            _nested(payload, "attention_after", "actor_ref"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
+
 INSTALLED_TYPED_PROPOSAL_FAMILIES = tuple(
     sorted(
         (
@@ -847,6 +911,22 @@ INSTALLED_TYPED_PROPOSAL_FAMILIES = tuple(
                 requires_separate_deliberation_commit=True,
                 mutation_event_types=V2_LOCATION_MUTATION_EVENT_TYPES,
                 codec=_V2LocationFamilyCodec(),
+            ),
+            TypedProposalFamily(
+                contract_ref="proposal-contract:v2-resource.1",
+                selector=RecordSelector("ProposalRecorded", "v2_resource_transition"),
+                record_mode="explicit_contract",
+                requires_separate_deliberation_commit=True,
+                mutation_event_types=V2_RESOURCE_EVENT_TYPES,
+                codec=V2_RESOURCE_CODEC,
+            ),
+            TypedProposalFamily(
+                contract_ref="proposal-contract:v2-attention.1",
+                selector=RecordSelector("ProposalRecorded", "v2_attention_transition"),
+                record_mode="explicit_contract",
+                requires_separate_deliberation_commit=True,
+                mutation_event_types=V2_ATTENTION_MUTATION_EVENT_TYPES,
+                codec=_V2AttentionFamilyCodec(),
             ),
         ),
         key=lambda item: item.contract_ref,

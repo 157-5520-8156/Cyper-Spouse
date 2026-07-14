@@ -28,6 +28,11 @@ from .goal_authority_events import (
     V2_GOAL_PAYLOAD_MODELS,
 )
 from .location_authority_events import V2_LOCATION_PAYLOAD_MODELS
+from .attention_authority_events import V2_ATTENTION_PAYLOAD_MODELS
+from .resource_authority_events import (
+    V2_RESOURCE_MECHANICAL_PAYLOAD_MODELS,
+    V2_RESOURCE_PAYLOAD_MODELS,
+)
 from .experience_events import (
     EXPERIENCE_PAYLOAD_MODELS,
     LegacyExperienceCommittedPayload,
@@ -259,6 +264,9 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **V2_GOAL_PAYLOAD_MODELS,
         **V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
         **V2_LOCATION_PAYLOAD_MODELS,
+        **V2_ATTENTION_PAYLOAD_MODELS,
+        **V2_RESOURCE_PAYLOAD_MODELS,
+        **V2_RESOURCE_MECHANICAL_PAYLOAD_MODELS,
         "LegacyExperienceCommitted": LegacyExperienceCommittedPayload,
         **THREAD_MECHANICAL_PAYLOAD_MODELS,
         **ACTOR_AUTHORITY_PAYLOAD_MODELS,
@@ -357,6 +365,17 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
             event_type: "world_id+actor_ref+expected_entity_revision+transition_id"
             for event_type in V2_LOCATION_PAYLOAD_MODELS
         },
+        **{
+            event_type: "world_id+actor_ref+expected_entity_revision+transition_id"
+            for event_type in V2_ATTENTION_PAYLOAD_MODELS
+        },
+        **{
+            event_type: "world_id+actor_ref+resource_kind+expected_entity_revision+transition_id"
+            for event_type in V2_RESOURCE_PAYLOAD_MODELS
+        },
+        "V2ResourceClockAdjusted": (
+            "world_id+actor_ref+resource_kind+expected_entity_revision+transition_id+input_digest"
+        ),
         "V2GoalExpired": (
             "world_id+operation+goal_id+expected_entity_revision+"
             "clock_event_ref+policy_digest"
@@ -982,6 +1001,38 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     compensations=("V2LocationChangeCompensated",),
                 )
                 for event_type, payload_model in V2_LOCATION_PAYLOAD_MODELS.items()
+            ),
+            *(
+                _contract(
+                    event_type,
+                    "proposal_acceptance",
+                    "world",
+                    payload_model.__name__,
+                    allowed_predecessors=("AcceptanceRecorded",),
+                    evidence_types=("committed_world_event",),
+                    compensations=("V2AttentionTransitionCompensated",),
+                )
+                for event_type, payload_model in V2_ATTENTION_PAYLOAD_MODELS.items()
+            ),
+            *(
+                _contract(
+                    event_type,
+                    "proposal_acceptance",
+                    "world",
+                    payload_model.__name__,
+                    allowed_predecessors=("AcceptanceRecorded",),
+                    evidence_types=("committed_world_event",),
+                    compensations=("V2ResourceTransitionCompensated",),
+                )
+                for event_type, payload_model in V2_RESOURCE_PAYLOAD_MODELS.items()
+            ),
+            _contract(
+                "V2ResourceClockAdjusted",
+                "world_runtime",
+                "world",
+                "V2ResourceClockAdjustedPayload",
+                allowed_predecessors=("ClockAdvanced",),
+                evidence_types=("clock_observation", "settled_world_event"),
             ),
             _contract(
                 "V2GoalExpired",

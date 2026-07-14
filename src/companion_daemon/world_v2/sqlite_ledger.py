@@ -36,6 +36,14 @@ _V16_ONLY_STATE_KEYS = frozenset(
         "location_transitions",
         "location_proposals",
         "location_proposal_ids",
+        "resources",
+        "resource_transitions",
+        "resource_proposals",
+        "resource_proposal_ids",
+        "attentions",
+        "attention_transitions",
+        "attention_proposals",
+        "attention_proposal_ids",
     }
 )
 
@@ -389,6 +397,20 @@ class SQLiteWorldLedger:
                 raise ValueError(
                     f"legacy head cannot claim v16 authority fields {injected_v16_keys!r}"
                 )
+            actor_transitions = raw_state.get("actor_authority_transitions", [])
+            actor_binding_keys = {
+                "accepted_event_ref",
+                "accepted_world_revision",
+                "accepted_payload_hash",
+            }
+            if isinstance(actor_transitions, list) and any(
+                isinstance(transition, dict)
+                and actor_binding_keys.intersection(transition)
+                for transition in actor_transitions
+            ):
+                raise ValueError(
+                    "legacy ActorAuthority transition cannot claim a v16 event binding"
+                )
             occurrences = raw_state.get("world_occurrences", [])
             if isinstance(occurrences, list) and any(
                 isinstance(occurrence, dict)
@@ -563,6 +585,14 @@ class SQLiteWorldLedger:
             location_transitions=projection.location_transitions,
             location_proposals=projection.location_proposals,
             location_proposal_ids=projection.location_proposal_ids,
+            resources=projection.resources,
+            resource_transitions=projection.resource_transitions,
+            resource_proposals=projection.resource_proposals,
+            resource_proposal_ids=projection.resource_proposal_ids,
+            attentions=projection.attentions,
+            attention_transitions=projection.attention_transitions,
+            attention_proposals=projection.attention_proposals,
+            attention_proposal_ids=projection.attention_proposal_ids,
             logical_time=projection.logical_time,
             actions=projection.actions,
             pending_actions=projection.pending_actions,

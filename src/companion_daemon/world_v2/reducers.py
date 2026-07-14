@@ -9,7 +9,7 @@ import hashlib
 import json
 from typing import Any
 
-from pydantic import model_validator
+from pydantic import ValidationInfo, model_validator
 
 from .action_lifecycle import TERMINAL_ACTION_STATES, transition_action
 from .affect_events import (
@@ -41,6 +41,15 @@ from .appraisal_reducers import (
     contradict_appraisal,
     expire_appraisal,
     supersede_appraisal,
+)
+from .attention_authority_contract import V2_ATTENTION_MUTATION_EVENT_TYPES
+from .attention_authority_events import V2AttentionChangedPayload
+from .attention_authority_reducers import V2_ATTENTION_POLICY_REFS, reduce_v2_attention
+from .attention_authority_schemas import (
+    V2AttentionProjection,
+    V2AttentionProposalProjection,
+    V2AttentionTransitionProjection,
+    validate_v2_attention_authority_state,
 )
 from .actor_authority_events import ActorAuthorityMutationPayload
 from .actor_authority_reducers import reduce_actor_authority
@@ -87,6 +96,19 @@ from .location_authority_schemas import (
     V2LocationProposalProjection,
     V2LocationTransitionProjection,
     validate_v2_location_authority_state,
+)
+from .resource_authority_contract import V2_RESOURCE_EVENT_TYPES
+from .resource_authority_events import (
+    V2ResourceChangedPayload,
+    V2ResourceClockAdjustedPayload,
+    reduce_v2_resource_clock_adjustment,
+)
+from .resource_authority_reducers import V2_RESOURCE_POLICY_REFS, reduce_v2_resource
+from .resource_authority_schemas import (
+    V2ResourceProjection,
+    V2ResourceProposalProjection,
+    V2ResourceTransitionProjection,
+    validate_v2_resource_authority_state,
 )
 from .experience_events import (
     ExperienceAuthorizedMutationPayload,
@@ -218,10 +240,15 @@ from .schemas import (
     TriggerProcess,
     WorldOccurrenceProjection,
     WorldEvent,
+    validate_actor_authority_event_bindings,
 )
 
 
 REDUCER_BUNDLE_VERSION = "world-v2-reducers.16"
+_LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
+    f"world-v2-reducers.{version}"
+    for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+)
 INSTALLED_APPRAISAL_POLICY_REFS = ("policy:appraisal-v1",)
 INSTALLED_APPRAISAL_MATRIX_VERSION = "appraisal-matrix.1"
 INSTALLED_SOURCE_CLUSTERING_VERSION = "source-clustering.1"
@@ -259,6 +286,19 @@ def _experience_semantic_dump(
     return dumped
 
 
+def _actor_authority_transition_semantic_dump(
+    transition: ActorAuthorityTransitionProjection,
+    *,
+    reducer_bundle_version: str,
+) -> dict[str, Any]:
+    dumped = transition.model_dump(mode="json")
+    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+        dumped.pop("accepted_event_ref", None)
+        dumped.pop("accepted_world_revision", None)
+        dumped.pop("accepted_payload_hash", None)
+    return dumped
+
+
 class RevisionClass(StrEnum):
     WORLD = "world"
     DELIBERATION = "deliberation"
@@ -290,6 +330,14 @@ class ReducerState(FrozenModel):
     location_transitions: tuple[V2LocationTransitionProjection, ...] = ()
     location_proposals: tuple[V2LocationProposalProjection, ...] = ()
     location_proposal_ids: tuple[str, ...] = ()
+    resources: tuple[V2ResourceProjection, ...] = ()
+    resource_transitions: tuple[V2ResourceTransitionProjection, ...] = ()
+    resource_proposals: tuple[V2ResourceProposalProjection, ...] = ()
+    resource_proposal_ids: tuple[str, ...] = ()
+    attentions: tuple[V2AttentionProjection, ...] = ()
+    attention_transitions: tuple[V2AttentionTransitionProjection, ...] = ()
+    attention_proposals: tuple[V2AttentionProposalProjection, ...] = ()
+    attention_proposal_ids: tuple[str, ...] = ()
     logical_time: datetime | None = None
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
@@ -348,12 +396,19 @@ class ReducerState(FrozenModel):
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
 
     @model_validator(mode="after")
-    def pending_index_matches_actions(self) -> ReducerState:
+    def pending_index_matches_actions(self, info: ValidationInfo) -> ReducerState:
         expected = tuple(
             action for action in self.actions if action.state not in TERMINAL_ACTION_STATES
         )
         if self.pending_actions != expected:
             raise ValueError("pending_actions must equal the non-terminal action index")
+        validate_actor_authority_event_bindings(
+            self.actor_authorities,
+            self.actor_authority_transitions,
+            self.committed_world_event_refs,
+            allow_legacy_missing=(info.context or {}).get("source_reducer_bundle")
+            in _LEGACY_ACTOR_BINDING_BUNDLES,
+        )
         validate_clock_history(
             self.clock_transition_history,
             current_logical_time=self.logical_time,
@@ -374,6 +429,26 @@ class ReducerState(FrozenModel):
             actor_authority_transitions=self.actor_authority_transitions,
             committed_events=self.committed_world_event_refs,
             logical_time=self.logical_time,
+        )
+        validate_v2_resource_authority_state(
+            self.resources,
+            self.resource_transitions,
+            self.resource_proposals,
+            self.resource_proposal_ids,
+            global_proposal_ids=self.proposal_ids,
+            actor_authority_transitions=self.actor_authority_transitions,
+            committed_events=self.committed_world_event_refs,
+            logical_time=self.logical_time,
+            require_operator_bindings=True,
+        )
+        validate_v2_attention_authority_state(
+            self.attentions,
+            self.attention_transitions,
+            self.attention_proposals,
+            self.attention_proposal_ids,
+            global_proposal_ids=self.proposal_ids,
+            actor_authority_transitions=self.actor_authority_transitions,
+            committed_events=self.committed_world_event_refs,
         )
         dimensions = tuple(item.dimension for item in self.affect_baselines)
         if len(dimensions) != len(set(dimensions)):
@@ -853,7 +928,10 @@ class ReducerState(FrozenModel):
                 item.model_dump(mode="json") for item in self.actor_authorities
             ),
             "actor_authority_transitions": tuple(
-                item.model_dump(mode="json") for item in self.actor_authority_transitions
+                _actor_authority_transition_semantic_dump(
+                    item, reducer_bundle_version=reducer_bundle_version
+                )
+                for item in self.actor_authority_transitions
             ),
             "consumed_actor_root_nonces": self.consumed_actor_root_nonces,
             "capability_grants": tuple(
@@ -1058,8 +1136,20 @@ class ReducerState(FrozenModel):
             payload["locations"] = tuple(
                 item.model_dump(mode="json") for item in self.locations
             )
+            payload["resources"] = tuple(
+                item.model_dump(mode="json") for item in self.resources
+            )
+            payload["resource_transitions"] = tuple(
+                item.model_dump(mode="json") for item in self.resource_transitions
+            )
             payload["location_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.location_transitions
+            )
+            payload["attentions"] = tuple(
+                item.model_dump(mode="json") for item in self.attentions
+            )
+            payload["attention_transitions"] = tuple(
+                item.model_dump(mode="json") for item in self.attention_transitions
             )
         return payload
 
@@ -1401,6 +1491,66 @@ class _V2LocationProposalStore:
             }
         )
 
+
+class _V2ResourceProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        if not isinstance(event, WorldEvent) or not isinstance(
+            proposal, V2ResourceProposalProjection
+        ):
+            raise TypeError("Resource proposal adapter received incompatible values")
+        return _v2_resource_proposal_recorded(state, event, proposal=proposal)
+
+    def find(
+        self, state: ReducerState, proposal_id: str
+    ) -> V2ResourceProposalProjection | None:
+        return next(
+            (item for item in state.resource_proposals if item.proposal_id == proposal_id),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        remaining = tuple(
+            item for item in state.resource_proposals if item.proposal_id != proposal_id
+        )
+        return state.model_copy(
+            update={
+                "resource_proposals": remaining,
+                "resource_proposal_ids": tuple(item.proposal_id for item in remaining),
+            }
+        )
+
+
+class _V2AttentionProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        if not isinstance(event, WorldEvent) or not isinstance(
+            proposal, V2AttentionProposalProjection
+        ):
+            raise TypeError("Attention proposal adapter received incompatible values")
+        return _v2_attention_proposal_recorded(state, event, proposal=proposal)
+
+    def find(
+        self, state: ReducerState, proposal_id: str
+    ) -> V2AttentionProposalProjection | None:
+        return next(
+            (item for item in state.attention_proposals if item.proposal_id == proposal_id),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        remaining = tuple(
+            item for item in state.attention_proposals if item.proposal_id != proposal_id
+        )
+        return state.model_copy(
+            update={
+                "attention_proposals": remaining,
+                "attention_proposal_ids": tuple(item.proposal_id for item in remaining),
+            }
+        )
+
 _TYPED_PROPOSAL_STORES = {
     "proposal-contract:appraisal-legacy.1": _LegacyAppraisalProposalStore(),
     "proposal-contract:affect-legacy.1": _LegacyAffectProposalStore(),
@@ -1414,6 +1564,8 @@ _TYPED_PROPOSAL_STORES = {
     "proposal-contract:character-core.1": _CharacterCoreProposalStore(),
     "proposal-contract:v2-goal.1": _V2GoalProposalStore(),
     "proposal-contract:v2-location.1": _V2LocationProposalStore(),
+    "proposal-contract:v2-resource.1": _V2ResourceProposalStore(),
+    "proposal-contract:v2-attention.1": _V2AttentionProposalStore(),
 }
 
 _TYPED_PROPOSAL_REGISTRY = TypedProposalRegistry(
@@ -1448,6 +1600,7 @@ def _actor_authority_changed(state: ReducerState, event: WorldEvent) -> ReducerS
         payload,
         event=event,
         logical_time=logical_time,
+        accepted_world_revision=len(state.committed_world_event_refs) + 1,
     )
     return state.model_copy(
         update={
@@ -2131,6 +2284,131 @@ def _v2_location_proposal_recorded(
             "location_proposals": (*state.location_proposals, proposal),
             "location_proposal_ids": (
                 *state.location_proposal_ids,
+                proposal.proposal_id,
+            ),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
+def _v2_resource_proposal_recorded(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    proposal: V2ResourceProposalProjection | None = None,
+) -> ReducerState:
+    proposal = proposal or V2ResourceProposalProjection.model_validate_json(
+        event.payload_json
+    )
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("Resource proposal must evaluate the current world revision")
+    if proposal.proposal_id in state.resource_proposal_ids:
+        raise ValueError("Resource proposal identity is already registered")
+    payload = V2ResourceChangedPayload.model_validate_json(
+        proposal.proposed_mutation.payload_json
+    )
+    if (
+        payload.proposal_id != proposal.proposal_id
+        or payload.change_id != proposal.change_id
+        or payload.transition_id != proposal.transition_id
+        or payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or payload.expected_entity_revision != proposal.expected_entity_revision
+        or payload.accepted_change_hash != proposal.proposed_change_hash
+        or payload.evidence_refs != proposal.evidence_refs
+        or payload.policy_refs != proposal.policy_refs
+        or payload.operation != proposal.transition_kind
+        or payload.model_dump(mode="json")
+        != json.loads(proposal.proposed_mutation.payload_json)
+    ):
+        raise ValueError("persisted Resource proposal body does not match its index")
+    if proposal.policy_refs != V2_RESOURCE_POLICY_REFS:
+        raise ValueError("Resource proposal references an uninstalled policy")
+    _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
+    reduce_v2_resource(
+        state.resources,
+        state.resource_transitions,
+        payload,
+        event_type=proposal.proposed_mutation.event_type,
+        event_id=payload.resource_after.origin.accepted_event_ref,
+        logical_time=_require_life_time(state, event),
+        actor_authorities=state.actor_authorities,
+        committed_events=state.committed_world_event_refs,
+    )
+    return state.model_copy(
+        update={
+            "resource_proposals": (*state.resource_proposals, proposal),
+            "resource_proposal_ids": (*state.resource_proposal_ids, proposal.proposal_id),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
+def _v2_attention_proposal_recorded(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    proposal: V2AttentionProposalProjection | None = None,
+) -> ReducerState:
+    proposal = proposal or V2AttentionProposalProjection.model_validate_json(
+        event.payload_json
+    )
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("Attention proposal must evaluate the current world revision")
+    if proposal.proposal_id in state.attention_proposal_ids:
+        raise ValueError("Attention proposal identity is already registered")
+    payload = V2AttentionChangedPayload.model_validate_json(
+        proposal.proposed_mutation.payload_json
+    )
+    if (
+        payload.proposal_id != proposal.proposal_id
+        or payload.change_id != proposal.change_id
+        or payload.transition_id != proposal.transition_id
+        or payload.attention_after.actor_ref != proposal.actor_ref
+        or payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or payload.expected_entity_revision != proposal.expected_entity_revision
+        or payload.accepted_change_hash != proposal.proposed_change_hash
+        or payload.evidence_refs != proposal.evidence_refs
+        or payload.policy_refs != proposal.policy_refs
+        or payload.operation != proposal.transition_kind
+        or payload.model_dump(mode="json")
+        != json.loads(proposal.proposed_mutation.payload_json)
+    ):
+        raise ValueError("persisted Attention proposal body does not match its index")
+    if proposal.policy_refs != V2_ATTENTION_POLICY_REFS:
+        raise ValueError("Attention proposal references an uninstalled policy")
+    _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
+    reduce_v2_attention(
+        state.attentions,
+        state.attention_transitions,
+        payload,
+        event_type=proposal.proposed_mutation.event_type,
+        event_id=payload.attention_after.origin.accepted_event_ref,
+        logical_time=_require_life_time(state, event),
+        actor_authorities=state.actor_authorities,
+        committed_events=state.committed_world_event_refs,
+        plans=state.plans,
+        world_occurrences=state.world_occurrences,
+        triggers=state.trigger_processes,
+    )
+    return state.model_copy(
+        update={
+            "attention_proposals": (*state.attention_proposals, proposal),
+            "attention_proposal_ids": (
+                *state.attention_proposal_ids,
                 proposal.proposal_id,
             ),
             "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
@@ -4056,6 +4334,156 @@ def _require_authorized_v2_location(
     return proposal
 
 
+def _v2_resource_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = V2ResourceChangedPayload.model_validate_json(event.payload_json)
+    proposal = _require_authorized_v2_resource(state, payload)
+    resources, transitions = reduce_v2_resource(
+        state.resources,
+        state.resource_transitions,
+        payload,
+        event_type=event.event_type,
+        event_id=event.event_id,
+        logical_time=logical_time,
+        actor_authorities=state.actor_authorities,
+        committed_events=state.committed_world_event_refs,
+    )
+    remaining = tuple(item for item in state.resource_proposals if item != proposal)
+    return state.model_copy(
+        update={
+            "resources": resources,
+            "resource_transitions": transitions,
+            "resource_proposals": remaining,
+            "resource_proposal_ids": tuple(item.proposal_id for item in remaining),
+        }
+    )
+
+
+def _v2_resource_clock_adjusted(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = V2ResourceClockAdjustedPayload.model_validate_json(event.payload_json)
+    reduce_v2_resource_clock_adjustment(state.resources, payload)
+    raise AssertionError("unreachable Resource recovery capability")
+
+
+def _require_authorized_v2_resource(
+    state: ReducerState,
+    payload: V2ResourceChangedPayload,
+) -> V2ResourceProposalProjection:
+    proposal = next(
+        (item for item in state.resource_proposals if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    decision = next(
+        (item for item in state.acceptance_decisions if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    if proposal is None:
+        raise ValueError("Resource transition requires a persisted typed proposal")
+    if (
+        decision is None
+        or decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+    ):
+        raise ValueError("Resource transition requires its accepted decision")
+    if (
+        not state.committed_world_event_refs
+        or state.committed_world_event_refs[-1].event_type != "AcceptanceRecorded"
+        or not state.acceptance_decisions
+        or state.acceptance_decisions[-1] != decision
+    ):
+        raise ValueError("Resource transition requires adjacent AcceptanceRecorded authority")
+    if (
+        proposal.transition_kind != payload.operation
+        or proposal.change_id != payload.change_id
+        or proposal.transition_id != payload.transition_id
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.expected_entity_revision != payload.expected_entity_revision
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or proposal.evidence_refs != payload.evidence_refs
+        or proposal.policy_refs != payload.policy_refs
+        or json.loads(proposal.proposed_mutation.payload_json)
+        != payload.model_dump(mode="json")
+    ):
+        raise ValueError("accepted Resource transition does not match its proposal")
+    return proposal
+
+
+def _v2_attention_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = V2AttentionChangedPayload.model_validate_json(event.payload_json)
+    proposal = _require_authorized_v2_attention(state, payload)
+    attentions, transitions = reduce_v2_attention(
+        state.attentions,
+        state.attention_transitions,
+        payload,
+        event_type=event.event_type,
+        event_id=event.event_id,
+        logical_time=logical_time,
+        actor_authorities=state.actor_authorities,
+        committed_events=state.committed_world_event_refs,
+        plans=state.plans,
+        world_occurrences=state.world_occurrences,
+        triggers=state.trigger_processes,
+    )
+    remaining = tuple(item for item in state.attention_proposals if item != proposal)
+    return state.model_copy(
+        update={
+            "attentions": attentions,
+            "attention_transitions": transitions,
+            "attention_proposals": remaining,
+            "attention_proposal_ids": tuple(item.proposal_id for item in remaining),
+        }
+    )
+
+
+def _require_authorized_v2_attention(
+    state: ReducerState,
+    payload: V2AttentionChangedPayload,
+) -> V2AttentionProposalProjection:
+    proposal = next(
+        (item for item in state.attention_proposals if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    decision = next(
+        (item for item in state.acceptance_decisions if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    if proposal is None:
+        raise ValueError("Attention transition requires a persisted typed proposal")
+    if (
+        decision is None
+        or decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+    ):
+        raise ValueError("Attention transition requires its accepted decision")
+    if (
+        not state.committed_world_event_refs
+        or state.committed_world_event_refs[-1].event_type != "AcceptanceRecorded"
+        or not state.acceptance_decisions
+        or state.acceptance_decisions[-1] != decision
+    ):
+        raise ValueError("Attention transition requires adjacent AcceptanceRecorded authority")
+    if (
+        proposal.transition_kind != payload.operation
+        or proposal.change_id != payload.change_id
+        or proposal.transition_id != payload.transition_id
+        or proposal.actor_ref != payload.attention_after.actor_ref
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.expected_entity_revision != payload.expected_entity_revision
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or proposal.evidence_refs != payload.evidence_refs
+        or proposal.policy_refs != payload.policy_refs
+        or json.loads(proposal.proposed_mutation.payload_json)
+        != payload.model_dump(mode="json")
+    ):
+        raise ValueError("accepted Attention transition does not match its proposal")
+    return proposal
+
+
 def _require_authorized_v2_goal(
     state: ReducerState,
     payload: V2GoalChangedPayload,
@@ -4665,6 +5093,19 @@ _EVENTS = {
             for event_type in V2_LOCATION_MUTATION_EVENT_TYPES
         ),
         *(
+            EventDefinition(event_type, RevisionClass.WORLD, _v2_resource_changed)
+            for event_type in V2_RESOURCE_EVENT_TYPES
+        ),
+        *(
+            EventDefinition(event_type, RevisionClass.WORLD, _v2_attention_changed)
+            for event_type in V2_ATTENTION_MUTATION_EVENT_TYPES
+        ),
+        EventDefinition(
+            "V2ResourceClockAdjusted",
+            RevisionClass.WORLD,
+            _v2_resource_clock_adjusted,
+        ),
+        *(
             EventDefinition(event_type, RevisionClass.WORLD, _fact_changed)
             for event_type in FACT_PAYLOAD_MODELS
         ),
@@ -4789,6 +5230,14 @@ def make_projection(
         location_transitions=state.location_transitions,
         location_proposals=state.location_proposals,
         location_proposal_ids=state.location_proposal_ids,
+        resources=state.resources,
+        resource_transitions=state.resource_transitions,
+        resource_proposals=state.resource_proposals,
+        resource_proposal_ids=state.resource_proposal_ids,
+        attentions=state.attentions,
+        attention_transitions=state.attention_transitions,
+        attention_proposals=state.attention_proposals,
+        attention_proposal_ids=state.attention_proposal_ids,
         actions=state.actions,
         pending_actions=state.pending_actions,
         budget_accounts=state.budget_accounts,

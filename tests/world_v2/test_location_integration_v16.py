@@ -15,6 +15,24 @@ from companion_daemon.world_v2.actor_authority_events import (
 from companion_daemon.world_v2.actor_authority_reducers import (
     ACTOR_AUTHORITY_V2_POLICY_DIGEST,
 )
+from companion_daemon.world_v2.attention_authority_events import (
+    V2AttentionChangedPayload,
+    v2_attention_evidence_refs,
+    v2_attention_mutation_hash,
+)
+from companion_daemon.world_v2.attention_authority_reducers import (
+    V2_ATTENTION_POLICY_DIGEST,
+    V2_ATTENTION_POLICY_REFS,
+    V2_ATTENTION_POLICY_VERSION,
+)
+from companion_daemon.world_v2.attention_authority_schemas import (
+    V2AttentionOrigin,
+    V2AttentionProjection,
+    V2AttentionProposalProjection,
+    V2AttentionProposedMutation,
+    V2AttentionValues,
+    v2_attention_semantic_fingerprint,
+)
 from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.event_catalog import event_contract
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
@@ -40,6 +58,27 @@ from companion_daemon.world_v2.location_authority_schemas import (
     V2LocationProposedMutation,
     V2LocationValues,
     v2_location_semantic_fingerprint,
+)
+from companion_daemon.world_v2.resource_authority_events import (
+    V2ResourceChangedPayload,
+    v2_resource_evidence_refs,
+    v2_resource_mutation_hash,
+)
+from companion_daemon.world_v2.resource_authority_reducers import (
+    RESOURCE_BAND_POLICY_DIGEST,
+    RESOURCE_BAND_POLICY_VERSION,
+    V2_RESOURCE_POLICY_DIGEST,
+    V2_RESOURCE_POLICY_REFS,
+    V2_RESOURCE_POLICY_VERSION,
+)
+from companion_daemon.world_v2.resource_authority_schemas import (
+    V2ResourceOrigin,
+    V2ResourceProposalProjection,
+    V2ResourceProjection,
+    V2ResourceProposedMutation,
+    V2ResourceValues,
+    validate_v2_resource_authority_state,
+    v2_resource_semantic_fingerprint,
 )
 from companion_daemon.world_v2.reducers import ReducerState
 from companion_daemon.world_v2.schemas import (
@@ -97,7 +136,11 @@ def bootstrap_event() -> WorldEvent:
         principal_ref="operator:deployment",
         principal_kind="deployment_operator",
         credential_ref="credential:location-integration",
-        allowed_operations=("v2_location_governance",),
+        allowed_operations=(
+            "v2_attention_governance",
+            "v2_location_governance",
+            "v2_resource_governance",
+        ),
         valid_from=NOW - timedelta(days=1),
         expires_at=NOW + timedelta(days=1),
         status="active",
@@ -308,6 +351,200 @@ def location_payload(
     return payload, proposal
 
 
+def resource_payload(
+    projection: LedgerProjection,
+    *,
+    event_id: str,
+    proposal_id: str,
+) -> tuple[V2ResourceChangedPayload, V2ResourceProposalProjection]:
+    authority = projection.actor_authorities[0]
+    source = next(
+        item for item in projection.committed_world_event_refs
+        if item.event_id == authority.origin.event_ref
+    )
+    binding = DomainOperatorAuthorityBinding(
+        authority_id=authority.authority_id,
+        authority_revision=authority.entity_revision,
+        principal_ref=authority.values.principal_ref,
+        authority_event_ref=source.event_id,
+        authority_world_revision=source.world_revision,
+        authority_payload_hash=source.payload_hash,
+        authority_values_hash=canonical_hash(authority.values.model_dump(mode="json")),
+        authority_policy_digest=authority.policy_digest,
+        authorization_contract="deployment-actor-authority:v16-domain.1",
+        required_operation="v2_resource_governance",
+    )
+    values = V2ResourceValues(
+        value_bp=7000,
+        derived_band="high",
+        band_policy_version=RESOURCE_BAND_POLICY_VERSION,
+        band_policy_digest=RESOURCE_BAND_POLICY_DIGEST,
+        privacy_class="private",
+    )
+    origin = V2ResourceOrigin(
+        change_id="change:resource:initialize",
+        transition_id="transition:resource:initialize",
+        policy_refs=V2_RESOURCE_POLICY_REFS,
+        accepted_event_ref=event_id,
+    )
+    after = V2ResourceProjection(
+        actor_ref="actor:companion",
+        resource_kind="physical_energy",
+        entity_revision=1,
+        semantic_fingerprint=v2_resource_semantic_fingerprint(
+            actor_ref="actor:companion",
+            resource_kind="physical_energy",
+            values=values,
+            policy_refs=origin.policy_refs,
+        ),
+        values=values,
+        origin=origin,
+        updated_at=NOW,
+    )
+    raw = {
+        "change_id": origin.change_id,
+        "transition_id": origin.transition_id,
+        "expected_entity_revision": 0,
+        "evidence_refs": (),
+        "policy_refs": V2_RESOURCE_POLICY_REFS,
+        "acceptance_id": "acceptance:resource:initialize",
+        "proposal_id": proposal_id,
+        "evaluated_world_revision": projection.world_revision,
+        "accepted_change_hash": "0" * 64,
+        "operation": "initialize",
+        "authority_lane": "operator",
+        "selection_mode": "direct",
+        "random_draw_binding": None,
+        "resource_before": None,
+        "resource_after": after,
+        "adjust_kind": None,
+        "delta_bp": None,
+        "cause_authority": binding,
+        "policy_version": V2_RESOURCE_POLICY_VERSION,
+        "policy_digest": V2_RESOURCE_POLICY_DIGEST,
+    }
+    raw["evidence_refs"] = v2_resource_evidence_refs(raw)
+    raw["accepted_change_hash"] = v2_resource_mutation_hash(raw)
+    payload = V2ResourceChangedPayload.model_validate(raw)
+    encoded = json.dumps(
+        payload.model_dump(mode="json"), ensure_ascii=False,
+        sort_keys=True, separators=(",", ":"),
+    )
+    proposal = V2ResourceProposalProjection(
+        proposal_id=proposal_id,
+        transition_kind="initialize",
+        change_id=payload.change_id,
+        transition_id=payload.transition_id,
+        actor_ref=after.actor_ref,
+        resource_kind=after.resource_kind,
+        evaluated_world_revision=payload.evaluated_world_revision,
+        expected_entity_revision=0,
+        proposed_change_hash=payload.accepted_change_hash,
+        evidence_refs=payload.evidence_refs,
+        policy_refs=payload.policy_refs,
+        proposed_mutation=V2ResourceProposedMutation(
+            event_type="V2ResourceStateInitialized", payload_json=encoded
+        ),
+    )
+    return payload, proposal
+
+
+def attention_payload(
+    projection: LedgerProjection,
+    *,
+    event_id: str,
+    proposal_id: str,
+) -> tuple[V2AttentionChangedPayload, V2AttentionProposalProjection]:
+    authority = projection.actor_authorities[0]
+    source = next(
+        item
+        for item in projection.committed_world_event_refs
+        if item.event_id == authority.origin.event_ref
+    )
+    binding = DomainOperatorAuthorityBinding(
+        authority_id=authority.authority_id,
+        authority_revision=authority.entity_revision,
+        principal_ref=authority.values.principal_ref,
+        authority_event_ref=source.event_id,
+        authority_world_revision=source.world_revision,
+        authority_payload_hash=source.payload_hash,
+        authority_values_hash=canonical_hash(authority.values.model_dump(mode="json")),
+        authority_policy_digest=authority.policy_digest,
+        authorization_contract="deployment-actor-authority:v16-domain.1",
+        required_operation="v2_attention_governance",
+    )
+    values = V2AttentionValues(
+        mode="available",
+        allocation_bp=3500,
+        interruptibility_bp=8000,
+        since=NOW,
+        privacy_class="private",
+    )
+    origin = V2AttentionOrigin(
+        change_id="change:attention:establish",
+        transition_id="transition:attention:establish",
+        policy_refs=V2_ATTENTION_POLICY_REFS,
+        accepted_event_ref=event_id,
+    )
+    after = V2AttentionProjection(
+        actor_ref="actor:companion",
+        entity_revision=1,
+        semantic_fingerprint=v2_attention_semantic_fingerprint(
+            actor_ref="actor:companion",
+            values=values,
+            policy_refs=origin.policy_refs,
+        ),
+        values=values,
+        origin=origin,
+        updated_at=NOW,
+    )
+    raw = {
+        "change_id": origin.change_id,
+        "transition_id": origin.transition_id,
+        "expected_entity_revision": 0,
+        "evidence_refs": (),
+        "policy_refs": V2_ATTENTION_POLICY_REFS,
+        "acceptance_id": "acceptance:attention:establish",
+        "proposal_id": proposal_id,
+        "evaluated_world_revision": projection.world_revision,
+        "accepted_change_hash": "0" * 64,
+        "operation": "establish",
+        "authority_lane": "operator",
+        "selection_mode": "direct",
+        "random_draw_binding": None,
+        "attention_before": None,
+        "attention_after": after,
+        "cause_authority": binding,
+        "policy_version": V2_ATTENTION_POLICY_VERSION,
+        "policy_digest": V2_ATTENTION_POLICY_DIGEST,
+    }
+    raw["evidence_refs"] = v2_attention_evidence_refs(raw)
+    raw["accepted_change_hash"] = v2_attention_mutation_hash(raw)
+    payload = V2AttentionChangedPayload.model_validate(raw)
+    encoded = json.dumps(
+        payload.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    proposal = V2AttentionProposalProjection(
+        proposal_id=proposal_id,
+        transition_kind="establish",
+        change_id=payload.change_id,
+        transition_id=payload.transition_id,
+        actor_ref=after.actor_ref,
+        evaluated_world_revision=payload.evaluated_world_revision,
+        expected_entity_revision=0,
+        proposed_change_hash=payload.accepted_change_hash,
+        evidence_refs=payload.evidence_refs,
+        policy_refs=payload.policy_refs,
+        proposed_mutation=V2AttentionProposedMutation(
+            event_type="V2AttentionChanged", payload_json=encoded
+        ),
+    )
+    return payload, proposal
+
+
 def seed_operator(ledger: WorldLedger | SQLiteWorldLedger) -> LedgerProjection:
     ledger.commit(
         [
@@ -330,6 +567,74 @@ def seed_operator(ledger: WorldLedger | SQLiteWorldLedger) -> LedgerProjection:
         expected_deliberation_revision=clocked.deliberation_revision,
     )
     return ledger.project()
+
+
+def test_attention_typed_roundtrip_reopen_rebuild_and_semantic_hash(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("WORLD_V2_ENABLE_INSECURE_TEST_ROOT", "1")
+    path = tmp_path / "attention-v16.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    before = seed_operator(ledger)
+    payload, proposal = attention_payload(
+        before,
+        event_id="event:attention:establish",
+        proposal_id="proposal:attention:establish",
+    )
+    assert family_for_mutation("V2AttentionChanged").contract_ref == (
+        "proposal-contract:v2-attention.1"
+    )
+    assert event_contract("V2AttentionChanged").allowed_predecessors == (
+        "AcceptanceRecorded",
+    )
+    ledger.commit(
+        [
+            world_event(
+                "event:proposal:attention:establish",
+                "ProposalRecorded",
+                proposal.model_dump(mode="json"),
+            )
+        ],
+        expected_world_revision=before.world_revision,
+        expected_deliberation_revision=before.deliberation_revision,
+    )
+    proposed = ledger.project()
+    assert proposed.attentions == ()
+    assert proposed.attention_proposals == (proposal,)
+    ledger.commit(
+        [
+            world_event(
+                "event:acceptance:attention:establish",
+                "AcceptanceRecorded",
+                {
+                    "proposal_id": payload.proposal_id,
+                    "evaluated_world_revision": payload.evaluated_world_revision,
+                    "acceptance_id": payload.acceptance_id,
+                    "status": "accepted",
+                    "accepted_change_id": payload.change_id,
+                    "accepted_change_hash": payload.accepted_change_hash,
+                },
+            ),
+            world_event(
+                "event:attention:establish",
+                "V2AttentionChanged",
+                payload.model_dump(mode="json"),
+            ),
+        ],
+        expected_world_revision=proposed.world_revision,
+        expected_deliberation_revision=proposed.deliberation_revision,
+    )
+    expected = ledger.project()
+    assert expected.attentions == (payload.attention_after,)
+    assert len(expected.attention_transitions) == 1
+    assert expected.attention_proposals == expected.attention_proposal_ids == ()
+    assert ledger.rebuild() == expected
+    ledger.close()
+
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert reopened.project() == expected
+    assert reopened.rebuild() == expected
+    reopened.close()
 
 
 def test_location_typed_roundtrip_reopen_rebuild_and_project_at(
@@ -573,6 +878,167 @@ def test_location_registry_catalog_identity_and_proposal_dry_run_cas(monkeypatch
             expected_deliberation_revision=before.deliberation_revision,
         )
     assert ledger.project() == before
+
+
+def test_resource_typed_roundtrip_sqlite_reopen_rebuild_and_project_at(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setenv("WORLD_V2_ENABLE_INSECURE_TEST_ROOT", "1")
+    path = tmp_path / "resource-v16.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    before = seed_operator(ledger)
+    payload, proposal = resource_payload(
+        before,
+        event_id="event:resource:initialize",
+        proposal_id="proposal:resource:initialize",
+    )
+    ledger.commit(
+        [world_event("event:proposal:resource", "ProposalRecorded", proposal.model_dump(mode="json"))],
+        expected_world_revision=before.world_revision,
+        expected_deliberation_revision=before.deliberation_revision,
+    )
+    proposed = ledger.project()
+    cursor = ProjectionCursor(
+        world_revision=proposed.world_revision,
+        deliberation_revision=proposed.deliberation_revision,
+        ledger_sequence=proposed.ledger_sequence,
+    )
+    assert proposed.resource_proposals == (proposal,)
+    validate_v2_resource_authority_state(
+        (),
+        (),
+        (proposal,),
+        (proposal.proposal_id,),
+        global_proposal_ids=(proposal.proposal_id,),
+        actor_authority_transitions=proposed.actor_authority_transitions,
+        committed_events=proposed.committed_world_event_refs,
+        logical_time=proposed.logical_time,
+        require_operator_bindings=True,
+    )
+    with pytest.raises(ValueError, match="require committed authority"):
+        validate_v2_resource_authority_state(
+            (),
+            (),
+            (proposal,),
+            (proposal.proposal_id,),
+            global_proposal_ids=(proposal.proposal_id,),
+            actor_authority_transitions=proposed.actor_authority_transitions,
+            committed_events=(),
+            logical_time=proposed.logical_time,
+            require_operator_bindings=True,
+        )
+    clock_ref = next(
+        item for item in proposed.committed_world_event_refs
+        if item.event_type == "ClockAdvanced"
+    )
+    forged_cause = payload.cause_authority.model_copy(
+        update={
+            "authority_event_ref": clock_ref.event_id,
+            "authority_world_revision": clock_ref.world_revision,
+            "authority_payload_hash": clock_ref.payload_hash,
+        }
+    )
+    forged_raw = payload.model_dump(mode="python")
+    forged_raw.update(
+        cause_authority=forged_cause,
+        evidence_refs=(),
+        accepted_change_hash="0" * 64,
+    )
+    forged_raw["evidence_refs"] = v2_resource_evidence_refs(forged_raw)
+    forged_raw["accepted_change_hash"] = v2_resource_mutation_hash(forged_raw)
+    forged_payload = V2ResourceChangedPayload.model_validate(forged_raw)
+    forged_proposal_raw = proposal.model_dump(mode="python")
+    forged_proposal_raw.update(
+        proposed_change_hash=forged_payload.accepted_change_hash,
+        evidence_refs=forged_payload.evidence_refs,
+        proposed_mutation=V2ResourceProposedMutation(
+            event_type="V2ResourceStateInitialized",
+            payload_json=json.dumps(
+                forged_payload.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ),
+    )
+    forged_proposal = V2ResourceProposalProjection.model_validate(
+        forged_proposal_raw
+    )
+    with pytest.raises(ValueError, match="exact operator authority"):
+        validate_v2_resource_authority_state(
+            (),
+            (),
+            (forged_proposal,),
+            (forged_proposal.proposal_id,),
+            global_proposal_ids=(forged_proposal.proposal_id,),
+            actor_authority_transitions=proposed.actor_authority_transitions,
+            committed_events=proposed.committed_world_event_refs,
+            logical_time=proposed.logical_time,
+            require_operator_bindings=True,
+        )
+    forged_projection = proposed.model_dump(mode="json")
+    forged_projection["resource_proposals"] = [
+        forged_proposal.model_dump(mode="json")
+    ]
+    with pytest.raises(ValueError, match="exact operator authority"):
+        LedgerProjection.model_validate_json(json.dumps(forged_projection))
+    acceptance = {
+        "proposal_id": payload.proposal_id,
+        "evaluated_world_revision": payload.evaluated_world_revision,
+        "acceptance_id": payload.acceptance_id,
+        "status": "accepted",
+        "accepted_change_id": payload.change_id,
+        "accepted_change_hash": payload.accepted_change_hash,
+    }
+    ledger.commit(
+        [
+            world_event("event:acceptance:resource", "AcceptanceRecorded", acceptance),
+            world_event(
+                "event:resource:initialize",
+                "V2ResourceStateInitialized",
+                payload.model_dump(mode="json"),
+            ),
+        ],
+        expected_world_revision=proposed.world_revision,
+        expected_deliberation_revision=proposed.deliberation_revision,
+    )
+    expected = ledger.project()
+    assert expected.resources == (payload.resource_after,)
+    assert len(expected.resource_transitions) == 1
+    assert expected.resource_proposals == expected.resource_proposal_ids == ()
+    assert expected.locations == before.locations
+    forged = expected.model_dump(mode="json")
+    forged_digest = "f" * 64
+    forged["actor_authorities"][0]["policy_digest"] = forged_digest
+    forged["actor_authority_transitions"][0]["policy_digest"] = forged_digest
+    forged["resource_transitions"][0]["cause_authority"][
+        "authority_policy_digest"
+    ] = forged_digest
+    with pytest.raises(ValueError, match="exact operator authority"):
+        LedgerProjection.model_validate_json(json.dumps(forged))
+    assert ledger.project_at(cursor).resources == ()
+    assert ledger.project_at(cursor).resource_proposals == (proposal,)
+    assert ledger.rebuild() == expected
+    ledger.close()
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert reopened.project() == expected
+    assert reopened.rebuild() == expected
+    reopened.close()
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("resources", "resource_transitions", "resource_proposals", "resource_proposal_ids"),
+)
+def test_legacy_heads_cannot_inject_resource_authority_fields(tmp_path, field: str) -> None:
+    ledger = SQLiteWorldLedger(path=tmp_path / f"legacy-resource-{field}.sqlite3", world_id=WORLD)
+    with pytest.raises(LedgerIntegrityError, match="legacy head state is invalid"):
+        ledger._legacy_semantic_hash(
+            state_json=json.dumps({field: []}),
+            world_revision=0,
+            reducer_bundle_version="world-v2-reducers.15",
+        )
+    ledger.close()
 
 
 @pytest.mark.parametrize(

@@ -398,9 +398,17 @@ def validate_v2_location_authority_state(
             if (
                 authority is None
                 or committed is None
+                or getattr(authority, "accepted_event_ref", None)
+                != operator.authority_event_ref
+                or getattr(authority, "accepted_world_revision", None)
+                != operator.authority_world_revision
+                or getattr(authority, "accepted_payload_hash", None)
+                != operator.authority_payload_hash
                 or authority_values_hash != operator.authority_values_hash
                 or getattr(authority, "policy_version", None)
                 != "actor-authority-policy.2"
+                or getattr(authority, "policy_digest", None)
+                != "b6ef98db3e5313349fad22179af3a0a079a126b9aafb374f9c16fe3783b2a4ce"
                 or getattr(authority, "policy_digest", None)
                 != operator.authority_policy_digest
                 or authority_values.principal_ref != operator.principal_ref
@@ -417,11 +425,14 @@ def validate_v2_location_authority_state(
                 or getattr(committed, "payload_hash", None)
                 != operator.authority_payload_hash
                 or getattr(committed, "event_type", None)
-                not in {
-                    "ActorAuthorityBootstrapped",
-                    "ActorAuthorityRotated",
-                    "ActorAuthorityCompensated",
-                }
+                != {
+                    "bootstrap": "ActorAuthorityBootstrapped",
+                    "rotate": "ActorAuthorityRotated",
+                    "revoke": "ActorAuthorityRevoked",
+                    "compensate": "ActorAuthorityCompensated",
+                }.get(getattr(authority, "operation", None))
+                or getattr(committed, "logical_time", None)
+                != getattr(authority, "changed_at", None)
                 or getattr(committed, "world_revision", 0)
                 >= getattr(accepted_event, "world_revision", 0)
             ):
@@ -659,15 +670,24 @@ def validate_v2_location_authority_state(
         if (
             authority is None
             or committed is None
+            or getattr(authority, "accepted_event_ref", None)
+            != operator.authority_event_ref
+            or getattr(authority, "accepted_world_revision", None)
+            != operator.authority_world_revision
+            or getattr(authority, "accepted_payload_hash", None)
+            != operator.authority_payload_hash
             or values_hash != operator.authority_values_hash
             or getattr(authority, "policy_version", None)
             != "actor-authority-policy.2"
+            or getattr(authority, "policy_digest", None)
+            != "b6ef98db3e5313349fad22179af3a0a079a126b9aafb374f9c16fe3783b2a4ce"
             or getattr(authority, "policy_digest", None)
             != operator.authority_policy_digest
             or values.principal_ref != operator.principal_ref
             or values.principal_kind != "deployment_operator"
             or values.status != "active"
             or "v2_location_governance" not in values.allowed_operations
+            or operator.required_operation != "v2_location_governance"
             or values.valid_from > at
             or (values.expires_at is not None and values.expires_at <= at)
             or getattr(committed, "world_revision", None)
@@ -677,10 +697,13 @@ def validate_v2_location_authority_state(
             or getattr(committed, "world_revision", payload.evaluated_world_revision + 1)
             > payload.evaluated_world_revision
             or getattr(committed, "event_type", None)
-            not in {
-                "ActorAuthorityBootstrapped",
-                "ActorAuthorityRotated",
-                "ActorAuthorityCompensated",
-            }
+            != {
+                "bootstrap": "ActorAuthorityBootstrapped",
+                "rotate": "ActorAuthorityRotated",
+                "revoke": "ActorAuthorityRevoked",
+                "compensate": "ActorAuthorityCompensated",
+            }.get(getattr(authority, "operation", None))
+            or getattr(committed, "logical_time", None)
+            != getattr(authority, "changed_at", None)
         ):
             raise ValueError("pending Location proposal lacks exact operator authority")

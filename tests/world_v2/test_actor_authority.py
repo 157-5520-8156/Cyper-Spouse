@@ -26,7 +26,12 @@ from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.projection import ProjectionAuthority, ProjectionGrant
 from companion_daemon.world_v2.reducers import ReducerState
-from companion_daemon.world_v2.schemas import ActorAuthorityValues, WorldEvent
+from companion_daemon.world_v2.schemas import (
+    ActorAuthorityTransitionProjection,
+    ActorAuthorityValues,
+    LedgerProjection,
+    WorldEvent,
+)
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
 
@@ -974,6 +979,7 @@ def test_actor_authority_state_rejects_broken_lineage_and_nonce_index(
         actor_authorities=projection.actor_authorities,
         actor_authority_transitions=projection.actor_authority_transitions,
         consumed_actor_root_nonces=projection.consumed_actor_root_nonces,
+        committed_world_event_refs=projection.committed_world_event_refs,
     )
     raw = state.model_dump(mode="json")
     raw["consumed_actor_root_nonces"] = []
@@ -1030,6 +1036,103 @@ def test_sqlite_actor_authority_survives_restart_rebuild_and_detects_tamper(
         )
     with pytest.raises(LedgerIntegrityError, match="head state( hash)? is invalid"):
         SQLiteWorldLedger(path=path, world_id=WORLD)
+
+
+def test_actor_transition_binding_is_v16_only_and_legacy_injection_is_rejected(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setenv("WORLD_V2_ENABLE_INSECURE_TEST_ROOT", "1")
+    ledger = seeded_ledger()
+    commit_actor(
+        ledger,
+        "event:binding:bootstrap",
+        "ActorAuthorityBootstrapped",
+        signed_payload(
+            operation="bootstrap",
+            transition_id="transition:binding:bootstrap",
+            expected_revision=0,
+            before=None,
+            after=values(),
+        ),
+    )
+    projection = ledger.project()
+    state = SQLiteWorldLedger._state_from_projection(projection)
+    legacy = state.semantic_payload(
+        world_id=WORLD,
+        world_revision=projection.world_revision,
+        reducer_bundle_version="world-v2-reducers.15",
+    )
+    current = state.semantic_payload(
+        world_id=WORLD,
+        world_revision=projection.world_revision,
+        reducer_bundle_version="world-v2-reducers.16",
+    )
+    assert set(current["actor_authority_transitions"][0]) - set(
+        legacy["actor_authority_transitions"][0]
+    ) == {
+        "accepted_event_ref",
+        "accepted_world_revision",
+        "accepted_payload_hash",
+    }
+    legacy_hash = hashlib.sha256(
+        json.dumps(
+            legacy, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+    assert legacy_hash == "d2eb4ff96bd2e1a6395c4b9edcc5a2f031b49671038540411b1de96c909574b5"
+    missing = projection.actor_authority_transitions[0].model_dump(mode="python")
+    missing.pop("accepted_event_ref")
+    missing.pop("accepted_world_revision")
+    missing.pop("accepted_payload_hash")
+    with pytest.raises(ValueError, match="requires exact accepted event binding"):
+        ActorAuthorityTransitionProjection.model_validate(missing)
+
+    sqlite = SQLiteWorldLedger(path=tmp_path / "legacy-binding.sqlite3", world_id=WORLD)
+    with pytest.raises(LedgerIntegrityError, match="legacy head state is invalid"):
+        sqlite._legacy_semantic_hash(
+            state_json=json.dumps(state.model_dump(mode="json")),
+            world_revision=projection.world_revision,
+            reducer_bundle_version="world-v2-reducers.15",
+        )
+    sqlite.close()
+
+
+def test_same_tick_actor_events_cannot_swap_transition_bindings(monkeypatch) -> None:
+    monkeypatch.setenv("WORLD_V2_ENABLE_INSECURE_TEST_ROOT", "1")
+    ledger = seeded_ledger()
+    for suffix in ("a", "b"):
+        commit_actor(
+            ledger,
+            f"event:binding:{suffix}",
+            "ActorAuthorityBootstrapped",
+            signed_payload(
+                operation="bootstrap",
+                transition_id=f"transition:binding:{suffix}",
+                expected_revision=0,
+                before=None,
+                after=values(
+                    principal_ref=f"operator:{suffix}",
+                    credential_ref=f"credential:{suffix}",
+                ),
+                authority_id=f"actor-authority:{suffix}",
+                nonce=f"nonce:binding:{suffix}:1234567890",
+            ),
+        )
+    raw = ledger.project().model_dump(mode="json")
+    first, second = raw["actor_authority_transitions"]
+    fields = (
+        "accepted_event_ref",
+        "accepted_world_revision",
+        "accepted_payload_hash",
+    )
+    first_binding = {field: first[field] for field in fields}
+    second_binding = {field: second[field] for field in fields}
+    first.update(second_binding)
+    second.update(first_binding)
+    with pytest.raises(
+        ValueError, match="accepted event binding|head origin|event revisions must be canonical"
+    ):
+        LedgerProjection.model_validate_json(json.dumps(raw))
 
 
 def test_sqlite_migrates_verified_v7_head_to_actor_authority_bundle(tmp_path) -> None:

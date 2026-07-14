@@ -14,6 +14,13 @@ from pydantic import (
     model_validator,
 )
 
+from .attention_authority_schemas import (
+    V2AttentionProjection,
+    V2AttentionProposalProjection,
+    V2AttentionTransitionProjection,
+    validate_v2_attention_authority_state,
+)
+
 from .goal_situation_schemas import (
     V2GoalProjection,
     V2GoalProposalProjection,
@@ -25,6 +32,12 @@ from .location_authority_schemas import (
     V2LocationProposalProjection,
     V2LocationTransitionProjection,
     validate_v2_location_authority_state,
+)
+from .resource_authority_schemas import (
+    V2ResourceProjection,
+    V2ResourceProposalProjection,
+    V2ResourceTransitionProjection,
+    validate_v2_resource_authority_state,
 )
 from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
 
@@ -3291,8 +3304,87 @@ class ActorAuthorityTransitionProjection(FrozenModel):
     root_keyset_digest: str = Field(min_length=64, max_length=64)
     root_nonce_hash: str = Field(min_length=64, max_length=64)
     root_proof_hash: str = Field(min_length=64, max_length=64)
+    accepted_event_ref: str | None = Field(default=None, min_length=1)
+    accepted_world_revision: int | None = Field(default=None, ge=1)
+    accepted_payload_hash: str | None = Field(default=None, min_length=64, max_length=64)
     changed_at: datetime
     compensates_transition_id: str | None = None
+
+    @model_validator(mode="after")
+    def accepted_event_binding_is_complete(
+        self, info: ValidationInfo
+    ) -> ActorAuthorityTransitionProjection:
+        binding = (
+            self.accepted_event_ref,
+            self.accepted_world_revision,
+            self.accepted_payload_hash,
+        )
+        if all(item is None for item in binding):
+            source = (info.context or {}).get("source_reducer_bundle")
+            if source in _LEGACY_WITHOUT_SETTLED_OUTCOME:
+                return self
+            raise ValueError("ActorAuthority transition requires exact accepted event binding")
+        if any(item is None for item in binding):
+            raise ValueError("ActorAuthority accepted event binding cannot be partial")
+        return self
+
+
+def validate_actor_authority_event_bindings(
+    authorities: tuple[ActorAuthorityProjection, ...],
+    transitions: tuple[ActorAuthorityTransitionProjection, ...],
+    committed_events: tuple[CommittedWorldEventRef, ...],
+    *,
+    allow_legacy_missing: bool = False,
+) -> None:
+    event_by_operation = {
+        "bootstrap": "ActorAuthorityBootstrapped",
+        "rotate": "ActorAuthorityRotated",
+        "revoke": "ActorAuthorityRevoked",
+        "compensate": "ActorAuthorityCompensated",
+    }
+    revisions: list[int] = []
+    accepted_refs: list[str] = []
+    for transition in transitions:
+        if transition.accepted_event_ref is None:
+            if allow_legacy_missing:
+                continue
+            raise ValueError("ActorAuthority transition lacks accepted event binding")
+        event = next(
+            (
+                item for item in committed_events
+                if item.event_id == transition.accepted_event_ref
+            ),
+            None,
+        )
+        if (
+            event is None
+            or event.event_type != event_by_operation[transition.operation]
+            or event.world_revision != transition.accepted_world_revision
+            or event.payload_hash != transition.accepted_payload_hash
+            or event.logical_time != transition.changed_at
+        ):
+            raise ValueError("ActorAuthority transition accepted event binding is not exact")
+        revisions.append(event.world_revision)
+        accepted_refs.append(event.event_id)
+    if revisions != sorted(revisions) or len(revisions) != len(set(revisions)):
+        raise ValueError("ActorAuthority transition event revisions must be canonical")
+    if len(accepted_refs) != len(set(accepted_refs)):
+        raise ValueError("ActorAuthority accepted event refs must be unique")
+    for authority in authorities:
+        lineage = tuple(
+            item for item in transitions if item.authority_id == authority.authority_id
+        )
+        if not lineage:
+            continue
+        latest = lineage[-1]
+        if (
+            latest.accepted_event_ref is not None
+            and (
+                authority.origin.event_ref != latest.accepted_event_ref
+                or authority.updated_at != latest.changed_at
+            )
+        ):
+            raise ValueError("ActorAuthority head origin does not match latest accepted event")
 
 
 class ConsentGrantValues(FrozenModel):
@@ -3554,6 +3646,14 @@ class LedgerProjection(FrozenModel):
     location_transitions: tuple[V2LocationTransitionProjection, ...] = ()
     location_proposals: tuple[V2LocationProposalProjection, ...] = ()
     location_proposal_ids: tuple[str, ...] = ()
+    resources: tuple[V2ResourceProjection, ...] = ()
+    resource_transitions: tuple[V2ResourceTransitionProjection, ...] = ()
+    resource_proposals: tuple[V2ResourceProposalProjection, ...] = ()
+    resource_proposal_ids: tuple[str, ...] = ()
+    attentions: tuple[V2AttentionProjection, ...] = ()
+    attention_transitions: tuple[V2AttentionTransitionProjection, ...] = ()
+    attention_proposals: tuple[V2AttentionProposalProjection, ...] = ()
+    attention_proposal_ids: tuple[str, ...] = ()
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
@@ -3617,6 +3717,11 @@ class LedgerProjection(FrozenModel):
         expected = tuple(action for action in self.actions if action.state not in terminal)
         if self.pending_actions != expected:
             raise ValueError("pending_actions must equal the non-terminal action index")
+        validate_actor_authority_event_bindings(
+            self.actor_authorities,
+            self.actor_authority_transitions,
+            self.committed_world_event_refs,
+        )
         dimensions = tuple(item.dimension for item in self.affect_baselines)
         if len(dimensions) != len(set(dimensions)):
             raise ValueError("affect baseline dimensions must be unique")
@@ -3636,5 +3741,25 @@ class LedgerProjection(FrozenModel):
             actor_authority_transitions=self.actor_authority_transitions,
             committed_events=self.committed_world_event_refs,
             logical_time=self.logical_time,
+        )
+        validate_v2_resource_authority_state(
+            self.resources,
+            self.resource_transitions,
+            self.resource_proposals,
+            self.resource_proposal_ids,
+            global_proposal_ids=self.proposal_ids,
+            actor_authority_transitions=self.actor_authority_transitions,
+            committed_events=self.committed_world_event_refs,
+            logical_time=self.logical_time,
+            require_operator_bindings=True,
+        )
+        validate_v2_attention_authority_state(
+            self.attentions,
+            self.attention_transitions,
+            self.attention_proposals,
+            self.attention_proposal_ids,
+            global_proposal_ids=self.proposal_ids,
+            actor_authority_transitions=self.actor_authority_transitions,
+            committed_events=self.committed_world_event_refs,
         )
         return self
