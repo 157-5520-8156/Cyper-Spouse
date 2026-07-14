@@ -19,6 +19,9 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # Avoid a runtime import cycle with the QQ adapter.
     from companion_daemon.qq_websocket import TurnRuntimeObservation
 
+_EXPERIENCE_MIN_SAMPLE_COUNT = 8
+_SINGLE_BUBBLE_WATCH_RATE = 0.8
+
 
 class QQTurnObservationJSONLExporter:
     """Append redacted real-adapter turn evidence to a private JSONL report.
@@ -200,6 +203,46 @@ def summarize_qq_turn_experience(
     }
 
 
+def assess_qq_turn_experience_evidence(
+    summary: Mapping[str, object],
+) -> dict[str, object]:
+    """Assess redacted live-turn experience evidence without content access.
+
+    This is a diagnostic, not an automatic human-quality verdict.  It catches
+    the failure modes that motivated the live observation work: too few real
+    turns, a fixed expression pattern, or a return to single-bubble Q/A rhythm.
+    """
+    sample_count = int(summary.get("sample_count") or 0)
+    reasons: list[str] = []
+    if sample_count < _EXPERIENCE_MIN_SAMPLE_COUNT:
+        reasons.append(
+            f"Need at least {_EXPERIENCE_MIN_SAMPLE_COUNT} live turns before experience pattern evidence is meaningful; observed {sample_count}."
+        )
+    fixed_pattern = str(summary.get("fixed_pattern_diagnostic") or "")
+    if fixed_pattern == "possible_fixed_pattern":
+        reasons.append("Selected expression affordance distribution may be too fixed.")
+    single_bubble_rate = float(summary.get("single_bubble_reply_rate") or 0.0)
+    afterthought_rate = float(summary.get("afterthought_rate") or 0.0)
+    multi_segment_rate = float(summary.get("multi_segment_rate") or 0.0)
+    if sample_count >= _EXPERIENCE_MIN_SAMPLE_COUNT and single_bubble_rate >= _SINGLE_BUBBLE_WATCH_RATE:
+        reasons.append(
+            f"Single-bubble reply rate {single_bubble_rate:.4f} is high; check for one-question-one-answer rhythm."
+        )
+    if sample_count < _EXPERIENCE_MIN_SAMPLE_COUNT:
+        return {"status": "insufficient_evidence", "reasons": reasons}
+    if fixed_pattern == "possible_fixed_pattern" or single_bubble_rate >= _SINGLE_BUBBLE_WATCH_RATE:
+        return {"status": "experience_watch", "reasons": reasons}
+    if afterthought_rate == 0.0 and multi_segment_rate == 0.0:
+        return {
+            "status": "experience_watch",
+            "reasons": [
+                *reasons,
+                "No multi-segment or afterthought evidence observed; inspect whether the adapter has fallen back to one-bubble replies.",
+            ],
+        }
+    return {"status": "pass", "reasons": reasons}
+
+
 def _milliseconds(seconds: float) -> int:
     return max(0, int(seconds * 1_000))
 
@@ -244,8 +287,13 @@ def _main(argv: Iterable[str] | None = None) -> int:
     args = parser.parse_args(tuple(argv) if argv is not None else None)
 
     summary = summarize_qq_turn_experience(load_qq_turn_observation_jsonl(args.path))
+    report = {
+        **summary,
+        "experience_status": assess_qq_turn_experience_evidence(summary)["status"],
+        "experience_reasons": assess_qq_turn_experience_evidence(summary)["reasons"],
+    }
     json.dump(
-        summary,
+        report,
         sys.stdout,
         ensure_ascii=False,
         indent=2 if args.pretty else None,

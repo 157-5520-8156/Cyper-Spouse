@@ -179,6 +179,8 @@ def test_live_observation_jsonl_latency_report_reuses_redacted_rows(tmp_path) ->
     assert report["source"] == "redacted_qq_turn_observation_jsonl"
     assert report["evidence_status"] == "insufficient_evidence"
     assert report["evidence_reasons"]
+    assert report["experience_status"] == "insufficient_evidence"
+    assert report["experience_reasons"]
     summaries = {item["cadence"]: item for item in report["summaries"]}  # type: ignore[index]
     assert summaries["hot"]["sample_count"] == 2
     assert summaries["hot"]["p95_first_visible_ms"] == 800
@@ -233,6 +235,7 @@ def test_live_qq_observation_cli_can_assert_evidence_status(tmp_path, capsys) ->
     assert _main(("--observation-jsonl", str(insufficient_path), "--assert-live-evidence")) == 1
     insufficient_output = json.loads(capsys.readouterr().out)
     assert insufficient_output["evidence_status"] == "insufficient_evidence"
+    assert insufficient_output["experience_status"] == "insufficient_evidence"
 
     passing_path = tmp_path / "passing.jsonl"
     passing_path.write_text(
@@ -257,3 +260,4 @@ def test_live_qq_observation_cli_can_assert_evidence_status(tmp_path, capsys) ->
     assert _main(("--observation-jsonl", str(passing_path), "--assert-live-evidence")) == 0
     passing_output = json.loads(capsys.readouterr().out)
     assert passing_output["evidence_status"] == "pass"
+    assert passing_output["experience_status"] == "experience_watch"

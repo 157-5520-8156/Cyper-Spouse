@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from companion_daemon.qq_runtime_observations import (
     QQTurnObservationJSONLExporter,
     _main,
+    assess_qq_turn_experience_evidence,
     load_qq_turn_observation_jsonl,
     summarize_qq_turn_experience,
 )
@@ -198,6 +199,53 @@ def test_redacted_turn_observation_summary_flags_repetitive_affordance_pattern()
     assert summary["fixed_pattern_diagnostic"] == "possible_fixed_pattern"
 
 
+def test_redacted_turn_experience_evidence_flags_fixed_or_single_bubble_patterns() -> None:
+    insufficient = assess_qq_turn_experience_evidence(
+        {
+            "sample_count": 3,
+            "fixed_pattern_diagnostic": "insufficient_sample",
+            "single_bubble_reply_rate": 0.0,
+            "afterthought_rate": 0.0,
+            "multi_segment_rate": 0.0,
+        }
+    )
+
+    assert insufficient["status"] == "insufficient_evidence"
+    assert "Need at least" in str(insufficient["reasons"])
+
+    fixed = assess_qq_turn_experience_evidence(
+        {
+            "sample_count": 10,
+            "fixed_pattern_diagnostic": "possible_fixed_pattern",
+            "single_bubble_reply_rate": 0.2,
+            "afterthought_rate": 0.1,
+            "multi_segment_rate": 0.2,
+        }
+    )
+    single_bubble = assess_qq_turn_experience_evidence(
+        {
+            "sample_count": 10,
+            "fixed_pattern_diagnostic": "varied",
+            "single_bubble_reply_rate": 0.9,
+            "afterthought_rate": 0.1,
+            "multi_segment_rate": 0.2,
+        }
+    )
+    passing = assess_qq_turn_experience_evidence(
+        {
+            "sample_count": 10,
+            "fixed_pattern_diagnostic": "varied",
+            "single_bubble_reply_rate": 0.5,
+            "afterthought_rate": 0.1,
+            "multi_segment_rate": 0.2,
+        }
+    )
+
+    assert fixed["status"] == "experience_watch"
+    assert single_bubble["status"] == "experience_watch"
+    assert passing == {"status": "pass", "reasons": []}
+
+
 def test_redacted_turn_observation_cli_prints_summary_without_private_content(
     tmp_path, capsys
 ) -> None:
@@ -227,6 +275,8 @@ def test_redacted_turn_observation_cli_prints_summary_without_private_content(
     output = capsys.readouterr().out
     summary = json.loads(output)
     assert summary["sample_count"] == 1
+    assert summary["experience_status"] == "insufficient_evidence"
+    assert summary["experience_reasons"]
     assert summary["selected_affordance_counts"] == {"soft_repair": 1}
     assert summary["user_affect_kind_counts"] == {"disappointment": 1}
     assert "private-user-id" not in output

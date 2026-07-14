@@ -18,6 +18,7 @@ from collections.abc import Iterable, Mapping
 from companion_daemon.conversation_cadence import ConversationCadence
 from companion_daemon.models import CompanionReply, IncomingMessage
 from companion_daemon.qq_runtime_observations import (
+    assess_qq_turn_experience_evidence,
     load_qq_turn_observation_jsonl,
     summarize_qq_turn_experience,
 )
@@ -153,6 +154,8 @@ def qq_latency_observation_jsonl_report(path: Path) -> dict[str, object]:
     rows = load_qq_turn_observation_jsonl(path)
     summaries = summarize_qq_latency_observation_rows(rows)
     evidence = assess_live_qq_observation_evidence(summaries)
+    experience_summary = summarize_qq_turn_experience(rows)
+    experience_evidence = assess_qq_turn_experience_evidence(experience_summary)
     return {
         "live": True,
         "source": "redacted_qq_turn_observation_jsonl",
@@ -161,7 +164,9 @@ def qq_latency_observation_jsonl_report(path: Path) -> dict[str, object]:
         "summaries": [asdict(row) for row in summaries],
         "evidence_status": evidence["status"],
         "evidence_reasons": evidence["reasons"],
-        "experience_summary": summarize_qq_turn_experience(rows),
+        "experience_status": experience_evidence["status"],
+        "experience_reasons": experience_evidence["reasons"],
+        "experience_summary": experience_summary,
         "privacy": {
             "contains_message_text": False,
             "contains_user_or_platform_identifier": False,
