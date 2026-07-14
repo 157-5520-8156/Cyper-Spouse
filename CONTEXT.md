@@ -125,6 +125,58 @@ A truth, Action, delivery, safety, privacy, legal, or consent rule that personal
 A sourced, bounded, and non-authoritative signal about what may be influencing the companion, such as an Appraisal, Drive, Affect tendency, repair need, or candidate Stance. It may shape a Proposal but cannot write World truth or veto expression.
 _Avoid_: Rule verdict, mandatory stance
 
+## Context Capsule
+
+A bounded, revision-pinned packet compiled from authoritative World Projections plus explicitly non-authoritative advisories for one Deliberation. It has a token budget and truncation log, and is not a second store of truth.
+_Avoid_: Full-history prompt, free-form context dump
+
+## Internal World Snapshot
+
+A revision-pinned, read-only deep Projection containing the authoritative material required by WorldRuntime internals. It is produced by deterministic reducers and is never exposed as a viewer-facing projection or edited as a second source of truth.
+
+## World Revision
+
+The compare-and-swap revision advanced only by events that change authoritative World, Action, budget, or grant state. Draws and model audit records advance a separate deliberation revision so that a turn cannot invalidate its own Acceptance.
+
+## Trigger Process
+
+The effect-once processing lifecycle for one Observation, clock trigger, recovery item, or settlement input. Concurrent callers join the same process instead of independently deliberating and authorizing duplicate Actions.
+
+## Action Intent
+
+A stable-identity value object inside a Proposal describing a candidate external effect. It is not an Action and gains no execution authority until Proposal Acceptance creates an authorized Action.
+
+## Action Reconciliation
+
+A compensating record that resolves evidence about an Action already settled as unknown. It may establish an external outcome or budget correction, but it never reopens or re-executes the original Action.
+
+## Behavior Tendency
+
+A model-facing coordinate describing a plausible direction of action, such as maintain, explore, avoid, repair, or set boundary. It changes proposal likelihood but never mandates a visible response.
+_Avoid_: Behavior rule, mandatory reaction
+
+## Change Phase
+
+A sourced, time-bound stage describing how the companion is departing from or returning toward baseline: baseline, preference deviation, stress response, relationship tension, or recovery. A single phase cannot rewrite Character Core.
+_Avoid_: Mood label, personality rewrite
+
+## Affect Episode
+
+A sourced set of time-varying Affect components with versioned decay, residue, and lifecycle semantics. Surface expression does not implicitly resolve it, and replay uses Logical Time plus the recorded policy version.
+
+## Relationship Adjustment
+
+A sourced, accepted delta to one or more slow relationship variables under a versioned integrity policy. It records both proposed and accepted deltas and never dictates a particular visible response.
+
+## Action Layer
+
+The authority layer at which a proposed change belongs: internal state transition, World event, external Action, media Action, or read-only tool. Each layer has distinct commit and settlement semantics.
+
+## Model Result
+
+A versioned, hashed record of a bounded model call, including its purpose, input capsule identity, parsed payload, latency, usage, and failure metadata. Replay reuses it and never silently calls a live model.
+_Avoid_: Unlogged model answer, replay-time inference
+
 ## Private Impression
 
 The companion's fallible, source-bound interpretation of a user, relationship, or event. It carries confidence, possible counter-evidence, and an expiry or settlement condition, and is never a User Fact.
