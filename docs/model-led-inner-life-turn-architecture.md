@@ -702,6 +702,10 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
   `tests/test_world_offense_experience.py`、`tests/test_world_28_day_emotion_replay.py`、
   `tests/test_conversation_cadence.py`、`tests/test_turn_taking.py`、`tests/test_qq_latency_eval.py`
   合计 216 passed（2026-07-14）。
+- 本地非外部条件验收入口：`python scripts/validate_companion_turn_v2.py`。默认会跑关键
+  `py_compile`、CompanionTurn/TurnFrame/情绪/QQ observation/dialogue baseline 目标测试、
+  synthetic QQ latency 和 live observation 非门禁报告；真实 QQ/NapCat 样本门禁需显式加
+  `--include-live-qq-gates`，避免在样本为 0 的开发环境里误伤 deterministic seam 验证。
 
 仍不声明完成：真实 QQ/NapCat 端到端网络样本、人工盲评和长期权重校准仍缺。
 
