@@ -42,6 +42,8 @@ from .appraisal_reducers import (
     expire_appraisal,
     supersede_appraisal,
 )
+from .actor_authority_events import ActorAuthorityMutationPayload
+from .actor_authority_reducers import reduce_actor_authority
 from .batch_invariants import interaction_appraisal_trigger_identity
 from .errors import UnknownEventType
 from .event_catalog import event_contract
@@ -91,6 +93,8 @@ from .schemas import (
     ActionDispatchClaim,
     ActionReconciliation,
     ActionState,
+    ActorAuthorityProjection,
+    ActorAuthorityTransitionProjection,
     AffectBaselineProjection,
     AffectEpisodeProjection,
     AffectProposalProjection,
@@ -128,7 +132,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.7"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.8"
 INSTALLED_APPRAISAL_POLICY_REFS = ("policy:appraisal-v1",)
 INSTALLED_APPRAISAL_MATRIX_VERSION = "appraisal-matrix.1"
 INSTALLED_SOURCE_CLUSTERING_VERSION = "source-clustering.1"
@@ -147,6 +151,9 @@ class RevisionClass(StrEnum):
 
 
 class ReducerState(FrozenModel):
+    actor_authorities: tuple[ActorAuthorityProjection, ...] = ()
+    actor_authority_transitions: tuple[ActorAuthorityTransitionProjection, ...] = ()
+    consumed_actor_root_nonces: tuple[str, ...] = ()
     observation_refs: tuple[str, ...] = ()
     message_observations: tuple[MessageObservationRef, ...] = ()
     operator_observations: tuple[OperatorObservationRef, ...] = ()
@@ -197,6 +204,68 @@ class ReducerState(FrozenModel):
             raise ValueError("affect baseline dimensions must be unique")
         if len(self.relationship_states) > 1:
             raise ValueError("world v2.1 permits one primary relationship state")
+        authority_ids = tuple(item.authority_id for item in self.actor_authorities)
+        if len(authority_ids) != len(set(authority_ids)):
+            raise ValueError("actor authority ids must be unique")
+        active_principals = tuple(
+            item.values.principal_ref
+            for item in self.actor_authorities
+            if item.values.status == "active"
+        )
+        if len(active_principals) != len(set(active_principals)):
+            raise ValueError("active actor authority principals must be unique")
+        active_credentials = tuple(
+            item.values.credential_ref
+            for item in self.actor_authorities
+            if item.values.status == "active"
+        )
+        if len(active_credentials) != len(set(active_credentials)):
+            raise ValueError("active actor authority credentials must be unique")
+        transition_ids = tuple(
+            item.transition_id for item in self.actor_authority_transitions
+        )
+        if len(transition_ids) != len(set(transition_ids)):
+            raise ValueError("actor authority transition ids must be unique")
+        if len(self.consumed_actor_root_nonces) != len(
+            set(self.consumed_actor_root_nonces)
+        ):
+            raise ValueError("consumed actor root nonces must be unique")
+        if len(self.consumed_actor_root_nonces) != len(
+            self.actor_authority_transitions
+        ):
+            raise ValueError("actor authority transitions must consume one root nonce")
+        projected_ids = set(authority_ids)
+        if any(
+            item.authority_id not in projected_ids
+            for item in self.actor_authority_transitions
+        ):
+            raise ValueError("actor authority transition has no projected authority")
+        for authority in self.actor_authorities:
+            lineage = tuple(
+                item
+                for item in self.actor_authority_transitions
+                if item.authority_id == authority.authority_id
+            )
+            if not lineage or lineage[0].operation != "bootstrap":
+                raise ValueError("actor authority lineage must begin with bootstrap")
+            if tuple(item.authority_revision for item in lineage) != tuple(
+                range(1, len(lineage) + 1)
+            ):
+                raise ValueError("actor authority lineage revisions must be contiguous")
+            if lineage[0].values_before is not None:
+                raise ValueError("actor authority bootstrap lineage has prior values")
+            if any(
+                current.values_before != previous.values_after
+                for previous, current in zip(lineage, lineage[1:])
+            ):
+                raise ValueError("actor authority lineage before values are discontinuous")
+            latest = lineage[-1]
+            if (
+                authority.entity_revision != latest.authority_revision
+                or authority.values != latest.values_after
+                or authority.origin.transition_id != latest.transition_id
+            ):
+                raise ValueError("actor authority projection does not match lineage head")
         return self
 
     def semantic_payload(
@@ -211,6 +280,13 @@ class ReducerState(FrozenModel):
             "schema_version": "world-v2.1",
             "world_id": world_id,
             "world_revision": world_revision,
+            "actor_authorities": tuple(
+                item.model_dump(mode="json") for item in self.actor_authorities
+            ),
+            "actor_authority_transitions": tuple(
+                item.model_dump(mode="json") for item in self.actor_authority_transitions
+            ),
+            "consumed_actor_root_nonces": self.consumed_actor_root_nonces,
             "observation_refs": self.observation_refs,
             "message_observations": tuple(
                 item.model_dump(mode="json") for item in self.message_observations
@@ -397,6 +473,30 @@ _TYPED_PROPOSAL_REGISTRY = TypedProposalRegistry(
 
 def _audit_only(state: ReducerState, _event: WorldEvent) -> ReducerState:
     return state
+
+
+def _actor_authority_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    if state.logical_time is not None and event.logical_time != state.logical_time:
+        raise ValueError(
+            "actor authority transition must be pinned to current logical time"
+        )
+    logical_time = event.logical_time
+    payload = ActorAuthorityMutationPayload.model_validate_json(event.payload_json)
+    authorities, history, nonces = reduce_actor_authority(
+        state.actor_authorities,
+        state.actor_authority_transitions,
+        state.consumed_actor_root_nonces,
+        payload,
+        event=event,
+        logical_time=logical_time,
+    )
+    return state.model_copy(
+        update={
+            "actor_authorities": authorities,
+            "actor_authority_transitions": history,
+            "consumed_actor_root_nonces": nonces,
+        }
+    )
 
 
 def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -1971,6 +2071,14 @@ _EVENTS = {
     definition.event_type: definition
     for definition in (
         EventDefinition("WorldStarted", RevisionClass.WORLD, _world_started),
+        EventDefinition(
+            "ActorAuthorityBootstrapped", RevisionClass.WORLD, _actor_authority_changed
+        ),
+        EventDefinition("ActorAuthorityRotated", RevisionClass.WORLD, _actor_authority_changed),
+        EventDefinition("ActorAuthorityRevoked", RevisionClass.WORLD, _actor_authority_changed),
+        EventDefinition(
+            "ActorAuthorityCompensated", RevisionClass.WORLD, _actor_authority_changed
+        ),
         EventDefinition("ObservationRecorded", RevisionClass.WORLD, _observation_recorded),
         EventDefinition(
             "OperatorObservationRecorded",
@@ -2273,6 +2381,9 @@ def make_projection(
         deliberation_revision=deliberation_revision,
         ledger_sequence=ledger_sequence,
         logical_time=state.logical_time,
+        actor_authorities=state.actor_authorities,
+        actor_authority_transitions=state.actor_authority_transitions,
+        consumed_actor_root_nonces=state.consumed_actor_root_nonces,
         observation_refs=state.observation_refs,
         message_observations=state.message_observations,
         operator_observations=state.operator_observations,

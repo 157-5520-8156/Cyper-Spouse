@@ -58,6 +58,19 @@ def _life_identity_components(
         )
     if event_type == "NpcRegistered":
         return world_id, _nested(payload, "npc", "npc_id")
+    if event_type == "ActorAuthorityBootstrapped":
+        return world_id, payload.get("authority_id"), payload.get("transition_id")
+    if event_type in {
+        "ActorAuthorityRotated",
+        "ActorAuthorityRevoked",
+        "ActorAuthorityCompensated",
+    }:
+        return (
+            world_id,
+            payload.get("authority_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
     if (
         event_type == "ObservationRecorded"
         and payload.get("observation_kind") == "message"

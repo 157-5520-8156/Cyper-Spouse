@@ -1561,6 +1561,78 @@ class CapabilityStateProjection(FrozenModel):
     revoked_by_ref: str | None = None
 
 
+class ActorAuthorityValues(FrozenModel):
+    principal_ref: str = Field(min_length=1)
+    principal_kind: Literal["deployment_operator", "user_consent_principal", "service_operator"]
+    credential_ref: str = Field(min_length=1)
+    allowed_operations: tuple[
+        Literal[
+            "capability_grant",
+            "consent_grant",
+            "privacy_policy",
+            "actor_authority_rotation",
+        ],
+        ...,
+    ] = Field(min_length=1)
+    valid_from: datetime
+    expires_at: datetime | None = None
+    status: Literal["active", "revoked"]
+
+    @model_validator(mode="after")
+    def validity_and_operations_are_canonical(self) -> ActorAuthorityValues:
+        if self.valid_from.tzinfo is None or self.valid_from.utcoffset() is None:
+            raise ValueError("actor authority validity start must be timezone-aware")
+        if self.expires_at is not None and (
+            self.expires_at.tzinfo is None or self.expires_at.utcoffset() is None
+        ):
+            raise ValueError("actor authority expiry must be timezone-aware")
+        if self.expires_at is not None and self.expires_at <= self.valid_from:
+            raise ValueError("actor authority expiry must follow validity start")
+        if tuple(sorted(self.allowed_operations)) != self.allowed_operations:
+            raise ValueError("actor authority operations must be sorted")
+        if len(self.allowed_operations) != len(set(self.allowed_operations)):
+            raise ValueError("actor authority operations must be unique")
+        return self
+
+
+class ActorAuthorityOrigin(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    event_ref: str = Field(min_length=1)
+    root_key_id: str = Field(min_length=1)
+    root_keyset_version: str = Field(min_length=1)
+    root_keyset_digest: str = Field(min_length=64, max_length=64)
+    root_nonce_hash: str = Field(min_length=64, max_length=64)
+    root_proof_hash: str = Field(min_length=64, max_length=64)
+
+
+class ActorAuthorityProjection(FrozenModel):
+    authority_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    values: ActorAuthorityValues
+    policy_version: str = Field(min_length=1)
+    policy_digest: str = Field(min_length=64, max_length=64)
+    origin: ActorAuthorityOrigin
+    updated_at: datetime
+
+
+class ActorAuthorityTransitionProjection(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    authority_id: str = Field(min_length=1)
+    authority_revision: int = Field(ge=1)
+    operation: Literal["bootstrap", "rotate", "revoke", "compensate"]
+    values_before: ActorAuthorityValues | None = None
+    values_after: ActorAuthorityValues
+    policy_version: str = Field(min_length=1)
+    policy_digest: str = Field(min_length=64, max_length=64)
+    root_key_id: str = Field(min_length=1)
+    root_keyset_version: str = Field(min_length=1)
+    root_keyset_digest: str = Field(min_length=64, max_length=64)
+    root_nonce_hash: str = Field(min_length=64, max_length=64)
+    root_proof_hash: str = Field(min_length=64, max_length=64)
+    changed_at: datetime
+    compensates_transition_id: str | None = None
+
+
 class ConsentStateProjection(FrozenModel):
     consent_id: str = Field(min_length=1)
     grantor_ref: str = Field(min_length=1)
@@ -1729,12 +1801,15 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.7"
+    reducer_bundle_version: str = "world-v2-reducers.8"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
     ledger_sequence: int = Field(ge=0)
     logical_time: datetime | None = None
+    actor_authorities: tuple[ActorAuthorityProjection, ...] = ()
+    actor_authority_transitions: tuple[ActorAuthorityTransitionProjection, ...] = ()
+    consumed_actor_root_nonces: tuple[str, ...] = ()
     observation_refs: tuple[str, ...] = ()
     message_observations: tuple[MessageObservationRef, ...] = ()
     operator_observations: tuple[OperatorObservationRef, ...] = ()

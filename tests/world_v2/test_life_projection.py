@@ -973,6 +973,9 @@ def test_sqlite_migrates_a_real_v3_life_trigger_with_derived_provenance(
         legacy_payload.pop("boundaries")
         legacy_payload.pop("message_observations")
         legacy_payload.pop("operator_observations")
+        legacy_payload.pop("actor_authorities")
+        legacy_payload.pop("actor_authority_transitions")
+        legacy_payload.pop("consumed_actor_root_nonces")
         for ref in legacy_payload["committed_world_event_refs"]:
             ref.pop("continuation_refs", None)
         legacy_hash = hashlib.sha256(

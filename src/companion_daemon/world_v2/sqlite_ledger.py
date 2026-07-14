@@ -270,6 +270,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.3",
                 "world-v2-reducers.5",
                 "world-v2-reducers.6",
+                "world-v2-reducers.7",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -389,6 +390,17 @@ class SQLiteWorldLedger:
             "world-v2-reducers.1",
             "world-v2-reducers.2",
             "world-v2-reducers.3",
+            "world-v2-reducers.5",
+            "world-v2-reducers.6",
+            "world-v2-reducers.7",
+        }:
+            payload.pop("actor_authorities", None)
+            payload.pop("actor_authority_transitions", None)
+            payload.pop("consumed_actor_root_nonces", None)
+        if reducer_bundle_version in {
+            "world-v2-reducers.1",
+            "world-v2-reducers.2",
+            "world-v2-reducers.3",
         }:
             payload.pop("appraisals", None)
         encoded = json.dumps(
@@ -402,6 +414,9 @@ class SQLiteWorldLedger:
     @staticmethod
     def _state_from_projection(projection: LedgerProjection) -> ReducerState:
         return ReducerState(
+            actor_authorities=projection.actor_authorities,
+            actor_authority_transitions=projection.actor_authority_transitions,
+            consumed_actor_root_nonces=projection.consumed_actor_root_nonces,
             observation_refs=projection.observation_refs,
             message_observations=projection.message_observations,
             operator_observations=projection.operator_observations,

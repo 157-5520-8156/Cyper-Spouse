@@ -644,6 +644,9 @@ def test_sqlite_migrates_verified_v6_head_to_relationship_bundle(tmp_path) -> No
             "relationship_adjustments",
             "relationship_states",
             "boundaries",
+            "actor_authorities",
+            "actor_authority_transitions",
+            "consumed_actor_root_nonces",
         ):
             semantic.pop(key)
         legacy_hash = hashlib.sha256(canonical(semantic).encode("utf-8")).hexdigest()
@@ -654,7 +657,7 @@ def test_sqlite_migrates_verified_v6_head_to_relationship_bundle(tmp_path) -> No
         )
 
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert reopened.project().reducer_bundle_version == "world-v2-reducers.7"
+    assert reopened.project().reducer_bundle_version == "world-v2-reducers.8"
     assert reopened.project() == expected
     reopened.close()
 

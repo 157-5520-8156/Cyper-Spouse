@@ -18,6 +18,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 from .errors import UnknownEventType
 from .appraisal_events import APPRAISAL_PAYLOAD_MODELS
 from .affect_events import AFFECT_PAYLOAD_MODELS
+from .actor_authority_events import ACTOR_AUTHORITY_PAYLOAD_MODELS
 from .life_events import LIFE_PAYLOAD_MODELS
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .schemas import (
@@ -50,7 +51,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.7"
+    reducer_bundle: str = "world-v2-reducers.8"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -234,6 +235,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **APPRAISAL_PAYLOAD_MODELS,
         **AFFECT_PAYLOAD_MODELS,
         **RELATIONSHIP_PAYLOAD_MODELS,
+        **ACTOR_AUTHORITY_PAYLOAD_MODELS,
     }
 )
 
@@ -298,6 +300,10 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "RelationshipSignalAccepted": "world_id+signal_semantic_fingerprint",
         "RelationshipSlowVariableAdjusted": "relationship_id+expected_entity_revision+adjustment_id",
         "BoundaryChanged": "boundary_id+expected_entity_revision+transition_id",
+        "ActorAuthorityBootstrapped": "world_id+authority_id+transition_id",
+        "ActorAuthorityRotated": "world_id+authority_id+expected_entity_revision+transition_id",
+        "ActorAuthorityRevoked": "world_id+authority_id+expected_entity_revision+transition_id",
+        "ActorAuthorityCompensated": "world_id+authority_id+expected_entity_revision+transition_id",
     }
 )
 
@@ -341,6 +347,40 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
         contract.event_type: contract
         for contract in (
             _contract("WorldStarted", "world_bootstrap", "world", "WorldStartedPayload"),
+            _contract(
+                "ActorAuthorityBootstrapped",
+                "deployment_root",
+                "world",
+                "ActorAuthorityMutationPayload",
+                evidence_types=("deployment_root_signature",),
+                successors=("ActorAuthorityRotated", "ActorAuthorityRevoked"),
+            ),
+            _contract(
+                "ActorAuthorityRotated",
+                "deployment_root",
+                "world",
+                "ActorAuthorityMutationPayload",
+                allowed_predecessors=("ActorAuthorityBootstrapped", "ActorAuthorityRotated"),
+                evidence_types=("deployment_root_signature",),
+                successors=("ActorAuthorityRotated", "ActorAuthorityRevoked", "ActorAuthorityCompensated"),
+                compensations=("ActorAuthorityCompensated",),
+            ),
+            _contract(
+                "ActorAuthorityRevoked",
+                "deployment_root",
+                "world",
+                "ActorAuthorityMutationPayload",
+                allowed_predecessors=("ActorAuthorityBootstrapped", "ActorAuthorityRotated"),
+                evidence_types=("deployment_root_signature",),
+            ),
+            _contract(
+                "ActorAuthorityCompensated",
+                "deployment_root",
+                "world",
+                "ActorAuthorityMutationPayload",
+                allowed_predecessors=("ActorAuthorityRotated",),
+                evidence_types=("deployment_root_signature",),
+            ),
             _contract(
                 "ObservationRecorded",
                 "world_runtime",
