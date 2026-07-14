@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
+
 from companion_daemon.world_v2.ledger import WorldLedger
+from companion_daemon.world_v2.errors import IdempotencyConflict
 from companion_daemon.world_v2.schemas import WorldEvent
 
 
@@ -107,3 +110,100 @@ def test_acceptance_record_advances_the_world_revision() -> None:
 
     assert committed.world_revision == 1
     assert committed.deliberation_revision == 0
+
+
+def test_multi_event_unit_of_work_retry_joins_the_original_result() -> None:
+    ledger = WorldLedger.in_memory(world_id="world-v2-ledger-test")
+    events = [
+        event("event-observation-1", "ObservationRecorded", {"observation_id": "obs-1"}),
+        event("event-acceptance-1", "AcceptanceRecorded", {"status": "accepted"}),
+    ]
+
+    first = ledger.commit(
+        events,
+        commit_id="commit-trigger-1",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    retried = ledger.commit(
+        events,
+        commit_id="commit-trigger-1",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+
+    assert retried == first
+    assert first.event_ids == ("event-observation-1", "event-acceptance-1")
+    assert ledger.project().world_revision == 2
+
+
+def test_commit_rejects_reused_commit_or_in_batch_identity_atomically() -> None:
+    ledger = WorldLedger.in_memory(world_id="world-v2-ledger-test")
+    original = event(
+        "event-observation-1", "ObservationRecorded", {"observation_id": "obs-1"}
+    )
+    ledger.commit(
+        [original],
+        commit_id="commit-trigger-1",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+
+    with pytest.raises(IdempotencyConflict, match="commit_id"):
+        ledger.commit(
+            [event("event-observation-2", "ObservationRecorded", {"observation_id": "obs-2"})],
+            commit_id="commit-trigger-1",
+            expected_world_revision=1,
+            expected_deliberation_revision=0,
+        )
+
+    duplicate_key = original.model_copy(update={"event_id": "event-other"})
+    with pytest.raises(IdempotencyConflict):
+        ledger.commit(
+            [
+                event("event-observation-2", "ObservationRecorded", {"observation_id": "obs-2"}),
+                duplicate_key,
+            ],
+            commit_id="commit-trigger-2",
+            expected_world_revision=1,
+            expected_deliberation_revision=0,
+        )
+
+    assert ledger.project().world_revision == 1
+
+
+def test_late_observation_does_not_move_logical_time_backwards() -> None:
+    ledger = WorldLedger.in_memory(world_id="world-v2-ledger-test")
+    later = event("event-clock", "ClockAdvanced", {
+        "logical_time_from": NOW.isoformat(),
+        "logical_time_to": NOW.replace(hour=13).isoformat()
+    })
+    ledger.commit(
+        [later], expected_world_revision=0, expected_deliberation_revision=0
+    )
+    ledger.commit(
+        [event("event-late", "ObservationRecorded", {"observation_id": "obs-late"})],
+        expected_world_revision=1,
+        expected_deliberation_revision=0,
+    )
+
+    assert ledger.project().logical_time == NOW.replace(hour=13)
+
+
+def test_clock_from_must_match_the_current_logical_time() -> None:
+    ledger = WorldLedger.in_memory(world_id="world-v2-ledger-test")
+    ledger.commit(
+        [event("event-observation", "ObservationRecorded", {"observation_id": "obs-1"})],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    mismatched = event("event-clock", "ClockAdvanced", {
+        "logical_time_from": NOW.replace(hour=11).isoformat(),
+        "logical_time_to": NOW.replace(hour=13).isoformat(),
+    })
+
+    with pytest.raises(ValueError, match="logical_time_from"):
+        ledger.commit(
+            [mismatched], expected_world_revision=1, expected_deliberation_revision=0
+        )
+    assert ledger.project().world_revision == 1

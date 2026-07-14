@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from companion_daemon.world_v2 import Action, ActionIntent, AcceptanceErrorCode
+from companion_daemon.world_v2 import Action, ActionIntent, AcceptanceErrorCode, ReplayMode
 from companion_daemon.world_v2.schemas import WorldEvent
 
 
@@ -92,4 +92,53 @@ def test_event_rejects_payload_bytes_that_do_not_match_the_recorded_hash() -> No
     with pytest.raises(ValidationError, match="payload_hash"):
         WorldEvent.model_validate(
             {**valid.model_dump(), "payload_json": '{"observation_id":"tampered"}'}
+        )
+
+
+def test_replay_mode_forbids_live_models_randomness_and_side_effects() -> None:
+    mode = ReplayMode(
+        schema_version="world-v2.1",
+        request_id="replay-1",
+        world_id="world-v2-test",
+        from_revision=0,
+        expected_hash=None,
+        trace_id="trace-replay-1",
+    )
+    assert mode.model_result_policy == "recorded_only"
+    assert mode.random_policy == "recorded_only"
+    assert mode.side_effect_policy == "forbidden"
+
+    with pytest.raises(ValidationError):
+        ReplayMode.model_validate({**mode.model_dump(), "side_effect_policy": "allowed"})
+
+    with pytest.raises(ValidationError, match="to_revision"):
+        ReplayMode.model_validate(
+            {**mode.model_dump(), "from_revision": 10, "to_revision": 9}
+        )
+
+
+def test_world_contracts_reject_timezone_naive_datetimes() -> None:
+    with pytest.raises(ValidationError, match="timezone-aware"):
+        Action.model_validate(
+            {
+                "schema_version": "world-v2.1",
+                "action_id": "action-naive",
+                "world_id": "world-v2-test",
+                "logical_time": datetime(2026, 7, 14, 12, 0),
+                "created_at": NOW,
+                "trace_id": "trace-naive",
+                "causation_id": "cause-naive",
+                "correlation_id": "correlation-naive",
+                "kind": "reply",
+                "layer": "external_action",
+                "intent_ref": "intent-naive",
+                "actor": "companion:test",
+                "target": "user:test",
+                "payload_ref": "payload:naive",
+                "payload_hash": "sha256:naive",
+                "idempotency_key": "action:naive",
+                "budget_reservation_id": "budget:naive",
+                "state": "authorized",
+                "recovery_policy": "effect_once",
+            }
         )

@@ -18,6 +18,28 @@ RuntimeStatus = Literal[
     "deferred",
     "failed_safe",
 ]
+ActionState = Literal[
+    "authorized",
+    "scheduled",
+    "claimed",
+    "dispatch_started",
+    "provider_accepted",
+    "delivered",
+    "failed",
+    "unknown",
+    "cancelled",
+    "expired",
+]
+
+
+def _contains_naive_datetime(value: Any) -> bool:
+    if isinstance(value, datetime):
+        return value.tzinfo is None or value.utcoffset() is None
+    if isinstance(value, dict):
+        return any(_contains_naive_datetime(item) for item in value.values())
+    if isinstance(value, (tuple, list, set, frozenset)):
+        return any(_contains_naive_datetime(item) for item in value)
+    return False
 
 
 class AcceptanceErrorCode(StrEnum):
@@ -35,6 +57,13 @@ class AcceptanceErrorCode(StrEnum):
 
 class FrozenModel(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
+
+    @model_validator(mode="after")
+    def datetimes_are_timezone_aware(self) -> FrozenModel:
+        for name in type(self).model_fields:
+            if _contains_naive_datetime(getattr(self, name)):
+                raise ValueError(f"{name} must contain only timezone-aware datetimes")
+        return self
 
 
 class Observation(FrozenModel):
@@ -60,6 +89,87 @@ class Observation(FrozenModel):
     @property
     def idempotency_identity(self) -> tuple[str, str]:
         return (self.source, self.source_event_id)
+
+
+class ClockObservation(FrozenModel):
+    schema_version: SchemaVersion
+    tick_id: str = Field(min_length=1)
+    world_id: str = Field(min_length=1)
+    logical_time: datetime
+    created_at: datetime
+    trace_id: str = Field(min_length=1)
+    causation_id: str = Field(min_length=1)
+    correlation_id: str = Field(min_length=1)
+    logical_time_from: datetime
+    logical_time_to: datetime
+    reason: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def time_moves_forward(self) -> ClockObservation:
+        if self.logical_time_to <= self.logical_time_from:
+            raise ValueError("logical time must move forwards")
+        return self
+
+
+class ExternalObservation(FrozenModel):
+    schema_version: SchemaVersion
+    result_id: str = Field(min_length=1)
+    world_id: str = Field(min_length=1)
+    logical_time: datetime
+    created_at: datetime
+    trace_id: str = Field(min_length=1)
+    causation_id: str = Field(min_length=1)
+    correlation_id: str = Field(min_length=1)
+    kind: Literal[
+        "provider_ack",
+        "execution_receipt",
+        "tool_result",
+        "media_result",
+        "reconciliation_result",
+    ]
+    source: str = Field(min_length=1)
+    source_event_id: str = Field(min_length=1)
+    action_id: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    status: Literal[
+        "provider_accepted",
+        "delivered",
+        "failed",
+        "cancelled",
+        "expired",
+        "unknown",
+    ]
+    provider_ref: str = Field(min_length=1)
+    artifact_refs: tuple[str, ...] = ()
+    cost_actual: int = Field(ge=0)
+    observed_at: datetime
+    error_class: str | None = None
+    retryability: Literal["retryable", "not_retryable", "unknown"] | None = None
+    raw_payload_hash: str = Field(min_length=1)
+
+    @property
+    def idempotency_identity(self) -> tuple[str, str]:
+        return (self.source, self.source_event_id)
+
+
+class ReplayMode(FrozenModel):
+    schema_version: SchemaVersion
+    request_id: str = Field(min_length=1)
+    world_id: str = Field(min_length=1)
+    from_revision: int = Field(ge=0)
+    to_revision: int | None = Field(default=None, ge=0)
+    revision_axis: Literal["ledger_sequence"] = "ledger_sequence"
+    expected_hash: str | None = None
+    trace_id: str = Field(min_length=1)
+    model_result_policy: Literal["recorded_only"] = "recorded_only"
+    random_policy: Literal["recorded_only"] = "recorded_only"
+    side_effect_policy: Literal["forbidden"] = "forbidden"
+
+    @model_validator(mode="after")
+    def revision_range_moves_forward(self) -> ReplayMode:
+        if self.to_revision is not None and self.to_revision < self.from_revision:
+            raise ValueError("to_revision must be greater than or equal to from_revision")
+        return self
 
 
 class ProjectionRequest(FrozenModel):
@@ -131,18 +241,7 @@ class Action(FrozenModel):
     dependencies: tuple[str, ...] = ()
     budget_reservation_id: str = Field(min_length=1)
     claim_lease: dict[str, Any] | None = None
-    state: Literal[
-        "authorized",
-        "scheduled",
-        "claimed",
-        "dispatch_started",
-        "provider_accepted",
-        "delivered",
-        "failed",
-        "unknown",
-        "cancelled",
-        "expired",
-    ]
+    state: ActionState
     recovery_policy: str = Field(min_length=1)
 
 
@@ -226,4 +325,5 @@ class LedgerProjection(FrozenModel):
     ledger_sequence: int = Field(ge=0)
     logical_time: datetime | None = None
     observation_refs: tuple[str, ...] = ()
+    actions: tuple[Action, ...] = ()
     semantic_hash: str
