@@ -720,7 +720,8 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
   输出同时包含 first-visible/complete 延迟分位、cadence 分组、multi-segment/afterthought、
   selected affordance 分布、用户情绪/私密印象入账率、`evidence_status` 和隐私声明；
   热启动样本不足、缺 first-visible 计时或 hot P95 超过目标都会在报告中显式标出，不能把空
-  JSONL 当作真实平台通过；
+  JSONL 当作真实平台通过。需要把它作为验证门时，追加 `--assert-live-evidence`，证据不足或
+  latency watch 会非零退出；
 - 任何迁移阶段都不能只看测试通过而忽略 baseline 变差。
 
 已记录的实测证据（不纳入仓库，以避免把运行数据或环境细节提交）：

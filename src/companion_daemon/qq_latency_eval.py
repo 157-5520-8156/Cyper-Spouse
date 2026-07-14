@@ -250,7 +250,7 @@ async def run_synthetic_qq_latency_smoke() -> tuple[TurnRuntimeObservation, ...]
     return tuple(observations)
 
 
-def _main() -> int:
+def _main(argv: Iterable[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="QQ coalescer latency baseline utilities")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument(
@@ -266,7 +266,17 @@ def _main() -> int:
             "by QQ_TURN_OBSERVATION_PATH"
         ),
     )
-    args = parser.parse_args()
+    parser.add_argument(
+        "--assert-live-evidence",
+        action="store_true",
+        help=(
+            "when reading --observation-jsonl, exit non-zero unless evidence_status "
+            "is pass; useful for live QQ/NapCat validation gates"
+        ),
+    )
+    args = parser.parse_args(tuple(argv) if argv is not None else None)
+    if args.assert_live_evidence and args.observation_jsonl is None:
+        parser.error("--assert-live-evidence requires --observation-jsonl")
     if args.observation_jsonl is not None:
         report = qq_latency_observation_jsonl_report(args.observation_jsonl)
     else:
@@ -275,6 +285,8 @@ def _main() -> int:
     print(
         json.dumps(report, ensure_ascii=False, indent=2)
     )
+    if args.assert_live_evidence and report.get("evidence_status") != "pass":
+        return 1
     return 0
 
 

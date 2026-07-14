@@ -7,6 +7,7 @@ from companion_daemon.models import CompanionReply, IncomingMessage
 from companion_daemon.conversation_cadence import ConversationCadence
 from companion_daemon.qq_latency_eval import (
     QQLatencySummary,
+    _main,
     assess_live_qq_observation_evidence,
     qq_latency_observation_jsonl_report,
     qq_latency_report,
@@ -223,3 +224,36 @@ def test_live_qq_observation_evidence_status_requires_real_hot_sample_size() -> 
 
     assert latency_watch["status"] == "latency_watch"
     assert "exceeds" in str(latency_watch["reasons"])
+
+
+def test_live_qq_observation_cli_can_assert_evidence_status(tmp_path, capsys) -> None:
+    insufficient_path = tmp_path / "insufficient.jsonl"
+    insufficient_path.write_text("", encoding="utf-8")
+
+    assert _main(("--observation-jsonl", str(insufficient_path), "--assert-live-evidence")) == 1
+    insufficient_output = json.loads(capsys.readouterr().out)
+    assert insufficient_output["evidence_status"] == "insufficient_evidence"
+
+    passing_path = tmp_path / "passing.jsonl"
+    passing_path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "outcome": "reply_delivered",
+                    "cadence": "hot",
+                    "elapsed_ms": 1100 + index,
+                    "first_visible_elapsed_ms": 900 + index,
+                    "message_kinds": ["reply"],
+                    "segment_count": 1,
+                }
+            )
+            for index in range(8)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert _main(("--observation-jsonl", str(passing_path), "--assert-live-evidence")) == 0
+    passing_output = json.loads(capsys.readouterr().out)
+    assert passing_output["evidence_status"] == "pass"
