@@ -9,7 +9,9 @@ import hashlib
 import json
 from typing import Any
 
-from .action_lifecycle import transition_action
+from pydantic import model_validator
+
+from .action_lifecycle import TERMINAL_ACTION_STATES, transition_action
 from .errors import UnknownEventType
 from .event_catalog import event_contract
 from .schemas import (
@@ -30,7 +32,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.1"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.2"
 
 
 class RevisionClass(StrEnum):
@@ -42,6 +44,7 @@ class ReducerState(FrozenModel):
     observation_refs: tuple[str, ...] = ()
     logical_time: datetime | None = None
     actions: tuple[Action, ...] = ()
+    pending_actions: tuple[Action, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()
@@ -50,6 +53,17 @@ class ReducerState(FrozenModel):
     budget_settlements: tuple[BudgetSettlement, ...] = ()
     reconciliations: tuple[ActionReconciliation, ...] = ()
     completed_trigger_ids: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def pending_index_matches_actions(self) -> ReducerState:
+        expected = tuple(
+            action
+            for action in self.actions
+            if action.state not in TERMINAL_ACTION_STATES
+        )
+        if self.pending_actions != expected:
+            raise ValueError("pending_actions must equal the non-terminal action index")
+        return self
 
     def semantic_payload(
         self,
@@ -66,6 +80,9 @@ class ReducerState(FrozenModel):
             "observation_refs": self.observation_refs,
             "logical_time": self.logical_time.isoformat() if self.logical_time else None,
             "actions": tuple(action.model_dump(mode="json") for action in self.actions),
+            "pending_actions": tuple(
+                action.model_dump(mode="json") for action in self.pending_actions
+            ),
             "budget_reservations": tuple(
                 reservation.model_dump(mode="json")
                 for reservation in self.budget_reservations
@@ -165,7 +182,12 @@ def _action_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
         raise ValueError("ActionAuthorized requires its matching budget reservation")
     if reservation.state != "reserved":
         raise ValueError("ActionAuthorized budget reservation is not active")
-    return state.model_copy(update={"actions": (*state.actions, action)})
+    return state.model_copy(
+        update={
+            "actions": (*state.actions, action),
+            "pending_actions": (*state.pending_actions, action),
+        }
+    )
 
 
 def _budget_reserved(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -225,15 +247,7 @@ def _action_transitioned(
     for index, existing in enumerate(state.actions):
         if existing.action_id == action_id:
             transitioned = transition_action(existing, target)
-            return state.model_copy(
-                update={
-                    "actions": (
-                        *state.actions[:index],
-                        transitioned,
-                        *state.actions[index + 1 :],
-                    )
-                }
-            )
+            return _replace_action(state, index=index, action=transitioned)
     raise ValueError(f"action {action_id!r} does not exist")
 
 
@@ -322,13 +336,20 @@ def _required_action_id(event: WorldEvent) -> str:
 def _replace_action(
     state: ReducerState, *, index: int, action: Action
 ) -> ReducerState:
+    actions = (
+        *state.actions[:index],
+        action,
+        *state.actions[index + 1 :],
+    )
+    pending = tuple(
+        candidate
+        for candidate in actions
+        if candidate.state not in TERMINAL_ACTION_STATES
+    )
     return state.model_copy(
         update={
-            "actions": (
-                *state.actions[:index],
-                action,
-                *state.actions[index + 1 :],
-            )
+            "actions": actions,
+            "pending_actions": pending,
         }
     )
 
@@ -732,6 +753,7 @@ def make_projection(
         logical_time=state.logical_time,
         observation_refs=state.observation_refs,
         actions=state.actions,
+        pending_actions=state.pending_actions,
         budget_accounts=state.budget_accounts,
         budget_reservations=state.budget_reservations,
         trigger_processes=state.trigger_processes,

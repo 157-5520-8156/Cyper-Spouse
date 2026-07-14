@@ -5,6 +5,7 @@ behind :class:`WorldRuntime`.
 """
 
 from .runtime import WorldRuntime
+from .projection import ProjectionAuthority, ProjectionGrant
 from .matrix_catalog import (
     CandidateDistribution,
     ClassificationCandidate,
@@ -58,6 +59,8 @@ __all__ = [
     "MatrixSelection",
     "Observation",
     "ProjectionRequest",
+    "ProjectionAuthority",
+    "ProjectionGrant",
     "ReplayMode",
     "RuntimeOutcome",
     "TriggerProcess",

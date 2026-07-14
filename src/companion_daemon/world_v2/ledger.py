@@ -16,7 +16,7 @@ from .reducers import (
     reduce_event,
     require_reducer_bundle,
 )
-from .schemas import CommitResult, LedgerProjection, WorldEvent
+from .schemas import CommitResult, LedgerProjection, ProjectionCursor, WorldEvent
 
 
 class LedgerPort(Protocol):
@@ -38,6 +38,8 @@ class LedgerPort(Protocol):
     ) -> CommitResult: ...
 
     def project(self) -> LedgerProjection: ...
+
+    def project_at(self, cursor: ProjectionCursor) -> LedgerProjection: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -199,6 +201,42 @@ class WorldLedger:
             deliberation_revision=self._deliberation_revision,
             ledger_sequence=len(self._events),
             state=self._state,
+        )
+
+    def project_at(self, cursor: ProjectionCursor) -> LedgerProjection:
+        head_cursor = ProjectionCursor(
+            world_revision=self._world_revision,
+            deliberation_revision=self._deliberation_revision,
+            ledger_sequence=len(self._events),
+        )
+        if cursor.ledger_sequence > len(self._events):
+            raise ValueError("requested projection cursor is outside the ledger range")
+        if cursor == head_cursor:
+            return self.project()
+        state = ReducerState()
+        reached_world_revision = 0
+        reached_deliberation_revision = 0
+        ledger_sequence = 0
+        for stored in self._events:
+            if stored.ledger_sequence > cursor.ledger_sequence:
+                break
+            state = reduce_event(state, stored.event)
+            reached_world_revision = stored.world_revision
+            reached_deliberation_revision = stored.deliberation_revision
+            ledger_sequence = stored.ledger_sequence
+        reached = ProjectionCursor(
+            world_revision=reached_world_revision,
+            deliberation_revision=reached_deliberation_revision,
+            ledger_sequence=ledger_sequence,
+        )
+        if reached != cursor:
+            raise ValueError("requested projection cursor is not present in the ledger")
+        return make_projection(
+            world_id=self._world_id,
+            world_revision=reached_world_revision,
+            deliberation_revision=reached_deliberation_revision,
+            ledger_sequence=ledger_sequence,
+            state=state,
         )
 
     def rebuild(

@@ -46,7 +46,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.1"
+    reducer_bundle: str = "world-v2-reducers.2"
     upcaster: str = "world-v2-upcasters.1"
 
     @property

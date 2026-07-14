@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
 
 
 SchemaVersion = Literal["world-v2.1"]
@@ -172,16 +172,85 @@ class ReplayMode(FrozenModel):
         return self
 
 
+class ProjectionCursor(FrozenModel):
+    world_revision: int = Field(ge=0)
+    deliberation_revision: int = Field(ge=0)
+    ledger_sequence: int = Field(ge=0)
+
+
 class ProjectionRequest(FrozenModel):
     schema_version: SchemaVersion
     request_id: str = Field(min_length=1)
-    viewer_kind: str = Field(min_length=1)
+    world_id: str = Field(min_length=1)
+    viewer_kind: Literal[
+        "platform_adapter", "dashboard_operator", "room_renderer", "evaluator"
+    ]
     viewer_id: str = Field(min_length=1)
-    permissions: frozenset[str] = frozenset()
+    permissions: frozenset[
+        Literal[
+            "projection:actions:status",
+            "projection:actions:diagnostic",
+            "projection:diagnostics",
+            "projection:debug_refs",
+            "projection:internal_hash",
+            "projection:evaluator:trace",
+        ]
+    ] = frozenset()
     at_world_revision: int | None = Field(default=None, ge=0)
+    at_deliberation_revision: int | None = Field(default=None, ge=0)
+    at_ledger_sequence: int | None = Field(default=None, ge=0)
     trace_id: str = Field(min_length=1)
     include_debug_refs: bool = False
-    redaction_policy: str = Field(min_length=1)
+    authority_token: str | None = Field(
+        default=None,
+        min_length=64,
+        max_length=64,
+        repr=False,
+        exclude=True,
+    )
+    capability_issued_at: datetime | None = None
+    capability_expires_at: datetime | None = None
+    redaction_policy: Literal[
+        "platform-v1",
+        "operator-default-v1",
+        "room-public-v1",
+        "evaluator-redacted-v1",
+    ]
+
+    @model_validator(mode="after")
+    def historical_cursor_and_capability_are_complete(self) -> ProjectionRequest:
+        historical = (
+            self.at_world_revision,
+            self.at_deliberation_revision,
+            self.at_ledger_sequence,
+        )
+        if any(value is not None for value in historical) and not all(
+            value is not None for value in historical
+        ):
+            raise ValueError("historical projection requires a complete cursor")
+        if (self.capability_issued_at is None) != (
+            self.capability_expires_at is None
+        ):
+            raise ValueError("projection capability timestamps must be complete")
+        if (
+            self.capability_issued_at is not None
+            and self.capability_expires_at is not None
+            and self.capability_expires_at <= self.capability_issued_at
+        ):
+            raise ValueError("projection capability must expire after issuance")
+        return self
+
+    @property
+    def at_cursor(self) -> ProjectionCursor | None:
+        if self.at_world_revision is None:
+            return None
+        assert self.at_deliberation_revision is not None
+        assert self.at_ledger_sequence is not None
+        return ProjectionCursor(
+            world_revision=self.at_world_revision,
+            deliberation_revision=self.at_deliberation_revision,
+            ledger_sequence=self.at_ledger_sequence,
+        )
 
 
 class RuntimeOutcome(FrozenModel):
@@ -400,24 +469,405 @@ class ActionReconciliation(FrozenModel):
     raw_payload_hash: str = Field(min_length=1)
 
 
+class PendingActionSummary(FrozenModel):
+    action_id: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    layer: Literal["external_action", "media_action", "read_only_tool"]
+    state: ActionState
+    not_before: datetime | None = None
+    expires_at: datetime | None = None
+    dependencies: tuple[str, ...] = ()
+
+
+class PlatformActionStatusProjection(PendingActionSummary):
+    target: str = Field(min_length=1)
+
+
+class DiagnosticActionProjection(PendingActionSummary):
+    pass
+
+
+class ProjectionSystemHealth(FrozenModel):
+    status: Literal["ok", "degraded", "rebuilding"] = "ok"
+    reducer_bundle_version: str | None = None
+    deliberation_revision: int | None = Field(default=None, ge=0)
+    action_count: int | None = Field(default=None, ge=0)
+    pending_action_count: int | None = Field(default=None, ge=0)
+    budget_account_count: int | None = Field(default=None, ge=0)
+    reserved_budget: int | None = Field(default=None, ge=0)
+    spent_budget: int | None = Field(default=None, ge=0)
+    pending_external_result_count: int | None = Field(default=None, ge=0)
+    reconciliation_count: int | None = Field(default=None, ge=0)
+    unavailable_slices: tuple[str, ...] = ()
+
+
+class ProjectionSliceWindow(FrozenModel):
+    slice_name: str = Field(min_length=1)
+    total_active: int = Field(ge=0)
+    returned_count: int = Field(ge=0)
+    truncated: bool
+    availability: Literal["available", "unavailable"] = "available"
+    unavailable_reason: str | None = None
+    authority_query_ref: str | None = None
+    ordering_policy: str = Field(min_length=1)
+    retention_policy_version: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def returned_items_do_not_exceed_total(self) -> ProjectionSliceWindow:
+        if self.returned_count > self.total_active:
+            raise ValueError("returned_count cannot exceed total_active")
+        if self.truncated != (self.returned_count < self.total_active):
+            raise ValueError("truncated must describe the returned slice")
+        if self.availability == "unavailable" and not self.unavailable_reason:
+            raise ValueError("unavailable slice requires a reason")
+        if self.availability == "available" and self.unavailable_reason is not None:
+            raise ValueError("available slice cannot have an unavailable reason")
+        return self
+
+
+class PlatformProjectionView(FrozenModel):
+    view_kind: Literal["platform"] = "platform"
+    action_statuses: tuple[PlatformActionStatusProjection, ...] = ()
+    slice_windows: tuple[ProjectionSliceWindow, ...] = ()
+
+
+class OperatorProjectionView(FrozenModel):
+    view_kind: Literal["operator"] = "operator"
+    pending_actions: tuple[DiagnosticActionProjection, ...] = ()
+    system_health: ProjectionSystemHealth = Field(default_factory=ProjectionSystemHealth)
+    debug_observation_refs: tuple[str, ...] = ()
+    slice_windows: tuple[ProjectionSliceWindow, ...] = ()
+
+
+class PublicSituationProjection(FrozenModel):
+    location_ref: str | None = None
+    activity: str | None = None
+    activity_phase: str | None = None
+    attention: str | None = None
+    visible_status: str | None = None
+
+
+class PublicAffectProjection(FrozenModel):
+    display_state: str | None = None
+    intensity_band: Literal["subtle", "noticeable", "strong"] | None = None
+
+
+class RoomProjectionView(FrozenModel):
+    view_kind: Literal["room"] = "room"
+    situation: PublicSituationProjection = Field(default_factory=PublicSituationProjection)
+    affect_display: PublicAffectProjection = Field(default_factory=PublicAffectProjection)
+    approved_media_refs: tuple[str, ...] = ()
+
+
+class NamedCount(FrozenModel):
+    name: str = Field(min_length=1)
+    count: int = Field(ge=0)
+
+
+class EvaluatorProjectionView(FrozenModel):
+    view_kind: Literal["evaluator"] = "evaluator"
+    redacted_trace_refs: tuple[str, ...] = ()
+    action_state_counts: tuple[NamedCount, ...] = ()
+
+
+ViewerProjection = (
+    PlatformProjectionView
+    | OperatorProjectionView
+    | RoomProjectionView
+    | EvaluatorProjectionView
+)
+
+
 class WorldProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
     world_id: str
     world_revision: int = Field(ge=0)
     ledger_sequence: int = Field(ge=0)
+    viewer_kind: Literal[
+        "platform_adapter", "dashboard_operator", "room_renderer", "evaluator"
+    ]
+    redaction_policy: str = Field(min_length=1)
+    projection_policy_version: str = "world-v2-projection-policy.1"
+    reducer_bundle_version: str = Field(min_length=1)
+    projection_hash: str = Field(min_length=64, max_length=64)
+    semantic_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    logical_time: datetime | None = None
+    view: ViewerProjection = Field(discriminator="view_kind")
+
+
+PrivacyClass = Literal["public", "shareable", "personal", "private", "withhold"]
+
+
+class CharacterCoreProjection(FrozenModel):
+    core_revision: int = Field(default=0, ge=0)
+    identity_refs: tuple[str, ...] = ()
+    traits: tuple[str, ...] = ()
+    values: tuple[str, ...] = ()
+    preferences: tuple[str, ...] = ()
+    boundaries: tuple[str, ...] = ()
+
+
+class FactProjection(FrozenModel):
+    fact_id: str = Field(min_length=1)
+    subject_ref: str = Field(min_length=1)
+    predicate: str = Field(min_length=1)
+    value_ref: str = Field(min_length=1)
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    confidence_bp: int = Field(ge=0, le=10_000)
+    status: Literal["active", "corrected", "superseded", "expired"]
+    privacy_class: PrivacyClass
+    updated_at: datetime
+
+
+class ExperienceProjection(FrozenModel):
+    experience_id: str = Field(min_length=1)
+    summary_ref: str = Field(min_length=1)
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    occurred_at: datetime
+    participant_refs: tuple[str, ...] = ()
+    privacy_class: PrivacyClass
+    status: Literal["committed", "superseded"] = "committed"
+
+
+class SituationStateProjection(FrozenModel):
+    location_ref: str | None = None
+    activity: str | None = None
+    activity_phase: str | None = None
+    attention: str | None = None
+    energy: str | None = None
+    current_goal_ref: str | None = None
+    participant_refs: tuple[str, ...] = ()
+    visibility: PrivacyClass = "private"
+
+
+class PlanStateProjection(FrozenModel):
+    plan_id: str = Field(min_length=1)
+    goal_ref: str | None = None
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    status: Literal["planned", "active", "paused", "completed", "cancelled"]
+    importance_bp: int = Field(ge=0, le=10_000)
+    due_window: tuple[datetime, datetime] | None = None
+    privacy_class: PrivacyClass = "private"
+
+
+class CommitmentStateProjection(FrozenModel):
+    commitment_id: str = Field(min_length=1)
+    content_ref: str = Field(min_length=1)
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    importance_bp: int = Field(ge=0, le=10_000)
+    persistence_level: Literal["ephemeral", "turn", "session", "durable"]
+    due_window: tuple[datetime, datetime] | None = None
+    status: Literal["open", "fulfilled", "broken", "released"]
+    privacy_class: PrivacyClass = "private"
+
+
+class AffectDecayProfileProjection(FrozenModel):
+    kind: str = Field(min_length=1)
+    half_life_seconds: int = Field(gt=0)
+    floor_bp: int = Field(ge=0, le=10_000)
+    delay_seconds: int = Field(default=0, ge=0)
+    config_version: str = Field(min_length=1)
+
+
+class AffectComponentProjection(FrozenModel):
+    dimension: Literal[
+        "hurt", "anger", "sadness", "loneliness", "anxiety", "resentment", "warmth", "joy"
+    ]
+    intensity_bp: int = Field(ge=0, le=10_000)
+    baseline_bp: int = Field(ge=0, le=10_000)
+    source_cluster: str = Field(min_length=1)
+    opened_at: datetime
+    last_updated_at: datetime
+    decay_profile: AffectDecayProfileProjection
+    residue_bp: int = Field(ge=0, le=10_000)
+
+    @model_validator(mode="after")
+    def component_time_moves_forward(self) -> AffectComponentProjection:
+        if self.last_updated_at < self.opened_at:
+            raise ValueError("affect component update precedes opening")
+        return self
+
+
+class AffectEpisodeProjection(FrozenModel):
+    episode_id: str = Field(min_length=1)
+    components: tuple[AffectComponentProjection, ...] = Field(min_length=1)
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    appraisal_refs: tuple[str, ...] = ()
+    opened_at: datetime
+    updated_at: datetime
+    status: Literal["active", "resolved", "superseded"]
+    privacy_class: PrivacyClass = "private"
+    expression_history_refs: tuple[str, ...] = ()
+
+
+class PrivateImpressionProjection(FrozenModel):
+    impression_id: str = Field(min_length=1)
+    subject_ref: str = Field(min_length=1)
+    interpretation_refs: tuple[str, ...] = Field(min_length=1)
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    confidence_bp: int = Field(ge=0, le=10_000)
+    first_seen: datetime
+    last_supported: datetime
+    expiry_condition: str = Field(min_length=1)
+    contradiction_refs: tuple[str, ...] = ()
+    status: Literal["active", "contradicted", "expired", "superseded"]
+
+
+class RelationshipVariablesProjection(FrozenModel):
+    trust_bp: int = Field(default=0, ge=0, le=10_000)
+    closeness_bp: int = Field(default=0, ge=0, le=10_000)
+    respect_bp: int = Field(default=0, ge=0, le=10_000)
+    reliability_bp: int = Field(default=0, ge=0, le=10_000)
+    mutuality_bp: int = Field(default=0, ge=0, le=10_000)
+    repair_confidence_bp: int = Field(default=0, ge=0, le=10_000)
+
+
+class RelationshipStateProjection(FrozenModel):
+    subject_ref: str = Field(min_length=1)
+    stage: Literal[
+        "stranger", "acquaintance", "friend", "close_friend", "ambiguous", "lover"
+    ] = "stranger"
+    variables: RelationshipVariablesProjection = Field(
+        default_factory=RelationshipVariablesProjection
+    )
+    temperature: str = "ordinary"
+    boundary_refs: tuple[str, ...] = ()
+    policy_revision: int = Field(default=0, ge=0)
+    last_adjusted_at: datetime | None = None
+
+
+class ConversationThreadProjection(FrozenModel):
+    thread_id: str = Field(min_length=1)
+    kind: str = Field(min_length=1)
+    opened_by_ref: str = Field(min_length=1)
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    importance_bp: int = Field(ge=0, le=10_000)
+    due_window: tuple[datetime, datetime] | None = None
+    expected_response_ref: str | None = None
+    status: Literal["open", "answered", "skipped", "superseded", "cancelled", "expired"]
+    resolution_ref: str | None = None
+
+
+class CapabilityStateProjection(FrozenModel):
+    grant_id: str = Field(min_length=1)
+    capability_kind: str = Field(min_length=1)
+    actor_ref: str = Field(min_length=1)
+    target_scope_refs: tuple[str, ...] = Field(min_length=1)
+    constraint_refs: tuple[str, ...] = ()
+    valid_from: datetime
+    evidence_refs: tuple[str, ...] = Field(min_length=1)
+    state: Literal["active", "revoked", "expired"]
+    policy_revision: int = Field(ge=0)
+    expires_at: datetime | None = None
+    revoked_by_ref: str | None = None
+
+
+class ConsentStateProjection(FrozenModel):
+    consent_id: str = Field(min_length=1)
+    grantor_ref: str = Field(min_length=1)
+    grantee_ref: str = Field(min_length=1)
+    action_scope_refs: tuple[str, ...] = Field(min_length=1)
+    data_scope_refs: tuple[str, ...] = ()
+    channel_scope_refs: tuple[str, ...] = ()
+    valid_from: datetime
+    expires_at: datetime | None = None
+    revocable: bool
+    status: Literal["active", "revoked", "expired"]
+    evidence_refs: tuple[str, ...] = Field(min_length=1)
+
+
+class NamedPolicyRef(FrozenModel):
+    name: str = Field(min_length=1)
+    value_ref: str = Field(min_length=1)
+
+
+class PrivacyPolicyProjection(FrozenModel):
+    policy_revision: int = Field(ge=0)
+    subject_ref: str = Field(min_length=1)
+    data_classes: tuple[NamedPolicyRef, ...] = ()
+    viewer_rules: tuple[NamedPolicyRef, ...] = ()
+    media_rules: tuple[NamedPolicyRef, ...] = ()
+    retention_rules: tuple[NamedPolicyRef, ...] = ()
+    effective_at: datetime
+    evidence_refs: tuple[str, ...] = Field(min_length=1)
+
+
+class MediaCandidateProjection(FrozenModel):
+    candidate_id: str = Field(min_length=1)
+    experience_ref: str = Field(min_length=1)
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    privacy_class: PrivacyClass
+    status: Literal["candidate", "selected", "dismissed", "expired"]
+
+
+class VersionRef(FrozenModel):
+    name: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+
+
+class ActionAuthorityPage(FrozenModel):
+    world_id: str = Field(min_length=1)
+    cursor: ProjectionCursor
+    actions: tuple[Action, ...]
+    next_after_action_id: str | None = None
+    complete: bool
+
+    @model_validator(mode="after")
+    def continuation_matches_completeness(self) -> ActionAuthorityPage:
+        if self.complete and self.next_after_action_id is not None:
+            raise ValueError("complete authority page cannot have a continuation")
+        if not self.complete and self.next_after_action_id is None:
+            raise ValueError("incomplete authority page requires a continuation")
+        return self
+
+
+class InternalWorldSnapshot(FrozenModel):
+    schema_version: SchemaVersion = "world-v2.1"
+    snapshot_id: str = Field(min_length=1)
+    snapshot_hash: str = Field(min_length=64, max_length=64)
+    world_id: str = Field(min_length=1)
+    cursor: ProjectionCursor
     semantic_hash: str = Field(min_length=64, max_length=64)
     logical_time: datetime | None = None
-    character_public: dict[str, Any] = Field(default_factory=dict)
-    current_situation: dict[str, Any] = Field(default_factory=dict)
-    relationship_public: dict[str, Any] = Field(default_factory=dict)
-    affect_summary: dict[str, Any] = Field(default_factory=dict)
-    open_threads_summary: tuple[dict[str, Any], ...] = ()
-    plans: tuple[dict[str, Any], ...] = ()
-    recent_experiences: tuple[dict[str, Any], ...] = ()
-    pending_actions: tuple[dict[str, Any], ...] = ()
-    media_candidates: tuple[dict[str, Any], ...] = ()
-    system_health: dict[str, Any] = Field(default_factory=lambda: {"status": "ok"})
-    debug_observation_refs: tuple[str, ...] = ()
+    updated_at: datetime
+    snapshot_purpose: Literal["situation_context"] = "situation_context"
+    projection_policy_version: str = Field(min_length=1)
+    character_core: CharacterCoreProjection | None = None
+    facts: tuple[FactProjection, ...] = ()
+    experiences: tuple[ExperienceProjection, ...] = ()
+    current_situation: SituationStateProjection | None = None
+    plans: tuple[PlanStateProjection, ...] = ()
+    commitments: tuple[CommitmentStateProjection, ...] = ()
+    affect_episodes: tuple[AffectEpisodeProjection, ...] = ()
+    private_impressions: tuple[PrivateImpressionProjection, ...] = ()
+    relationship_state: RelationshipStateProjection | None = None
+    conversation_threads: tuple[ConversationThreadProjection, ...] = ()
+    capabilities: tuple[CapabilityStateProjection, ...] = ()
+    consents: tuple[ConsentStateProjection, ...] = ()
+    privacy_policy: PrivacyPolicyProjection | None = None
+    pending_actions: tuple[Action, ...] = ()
+    budget_accounts: tuple[BudgetAccount, ...] = ()
+    budget_reservations: tuple[BudgetReservation, ...] = ()
+    pending_external_observations: tuple[ExternalObservation, ...] = ()
+    media_candidates: tuple[MediaCandidateProjection, ...] = ()
+    reducer_versions: tuple[VersionRef, ...]
+    slice_windows: tuple[ProjectionSliceWindow, ...] = ()
+    system_health: ProjectionSystemHealth = Field(default_factory=ProjectionSystemHealth)
+
+    @computed_field
+    @property
+    def world_revision(self) -> int:
+        return self.cursor.world_revision
+
+    @computed_field
+    @property
+    def deliberation_revision(self) -> int:
+        return self.cursor.deliberation_revision
+
+    @computed_field
+    @property
+    def ledger_sequence(self) -> int:
+        return self.cursor.ledger_sequence
 
 
 class WorldEvent(FrozenModel):
@@ -473,7 +923,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.1"
+    reducer_bundle_version: str = "world-v2-reducers.2"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -481,6 +931,7 @@ class LedgerProjection(FrozenModel):
     logical_time: datetime | None = None
     observation_refs: tuple[str, ...] = ()
     actions: tuple[Action, ...] = ()
+    pending_actions: tuple[Action, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()
@@ -490,3 +941,13 @@ class LedgerProjection(FrozenModel):
     reconciliations: tuple[ActionReconciliation, ...] = ()
     completed_trigger_ids: tuple[str, ...] = ()
     semantic_hash: str
+
+    @model_validator(mode="after")
+    def pending_index_matches_actions(self) -> LedgerProjection:
+        terminal = {"delivered", "failed", "unknown", "cancelled", "expired"}
+        expected = tuple(
+            action for action in self.actions if action.state not in terminal
+        )
+        if self.pending_actions != expected:
+            raise ValueError("pending_actions must equal the non-terminal action index")
+        return self

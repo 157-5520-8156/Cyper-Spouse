@@ -13,9 +13,55 @@ from companion_daemon.world_v2 import (
     WorldRuntime,
 )
 from companion_daemon.world_v2.errors import IdempotencyConflict
+from companion_daemon.world_v2.projection import (
+    AuthenticatedProjectionPrincipal,
+    ProjectionAuthority,
+    ProjectionCapabilityIssuer,
+    ProjectionGrant,
+)
 
 
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+
+
+def operator_authority() -> ProjectionAuthority:
+    return ProjectionAuthority(
+        grants=(
+            ProjectionGrant(
+                world_id="world-v2-test",
+                viewer_id="operator:test",
+                viewer_kind="dashboard_operator",
+                permissions=frozenset({"projection:debug_refs"}),
+                redaction_policy="operator-default-v1",
+            ),
+        )
+    )
+
+
+class StaticPrincipalVerifier:
+    def __init__(self, principal_id: str) -> None:
+        self._principal_id = principal_id
+
+    def authenticate(self, credential: object) -> AuthenticatedProjectionPrincipal:
+        if credential is not TEST_CREDENTIAL:
+            raise PermissionError("invalid test credential")
+        return AuthenticatedProjectionPrincipal(
+            principal_id=self._principal_id,
+            world_id="world-v2-test",
+            authentication_context="test-fixture",
+        )
+
+
+TEST_CREDENTIAL = object()
+
+
+def bind_operator(
+    access: ProjectionAuthority, request: ProjectionRequest
+) -> ProjectionRequest:
+    return ProjectionCapabilityIssuer(
+        authority=access,
+        principal_verifier=StaticPrincipalVerifier("operator:test"),
+    ).bind(request, credential=TEST_CREDENTIAL)
 
 
 def observation() -> Observation:
@@ -40,7 +86,10 @@ def observation() -> Observation:
 
 @pytest.mark.asyncio
 async def test_duplicate_ingest_joins_one_trigger_and_advances_world_once() -> None:
-    runtime = WorldRuntime.in_memory(world_id="world-v2-test")
+    access = operator_authority()
+    runtime = WorldRuntime.in_memory(
+        world_id="world-v2-test", projection_authority=access
+    )
     incoming = observation()
 
     first, duplicate = await asyncio.gather(
@@ -54,20 +103,21 @@ async def test_duplicate_ingest_joins_one_trigger_and_advances_world_once() -> N
     assert first.committed_world_revision == 1
 
     projection = runtime.project(
-        ProjectionRequest(
+        bind_operator(access, ProjectionRequest(
             schema_version="world-v2.1",
             request_id="projection-request-1",
-            viewer_kind="operator_debug",
+            world_id="world-v2-test",
+            viewer_kind="dashboard_operator",
             viewer_id="operator:test",
-            permissions=frozenset({"world:debug"}),
+            permissions=frozenset({"projection:debug_refs"}),
             trace_id="trace-project-1",
             include_debug_refs=True,
-            redaction_policy="operator_debug",
-        )
+            redaction_policy="operator-default-v1",
+        ))
     )
     assert projection.world_revision == 1
-    assert projection.debug_observation_refs == ("obs-http-message-1",)
-    assert len(projection.semantic_hash) == 64
+    assert projection.view.debug_observation_refs == ("obs-http-message-1",)
+    assert len(projection.projection_hash) == 64
 
 
 @pytest.mark.asyncio
@@ -89,7 +139,20 @@ async def test_same_source_event_with_different_payload_is_an_idempotency_confli
 
 @pytest.mark.asyncio
 async def test_clock_advance_is_effect_once_and_rejects_time_reversal() -> None:
-    runtime = WorldRuntime.in_memory(world_id="world-v2-test")
+    access = ProjectionAuthority(
+        grants=(
+            ProjectionGrant(
+                world_id="world-v2-test",
+                viewer_id="room:test",
+                viewer_kind="room_renderer",
+                permissions=frozenset(),
+                redaction_policy="room-public-v1",
+            ),
+        )
+    )
+    runtime = WorldRuntime.in_memory(
+        world_id="world-v2-test", projection_authority=access
+    )
     clock = ClockObservation(
         schema_version="world-v2.1",
         tick_id="tick-1",
@@ -108,15 +171,19 @@ async def test_clock_advance_is_effect_once_and_rejects_time_reversal() -> None:
     assert first == duplicate
     assert first.committed_world_revision == 1
     assert runtime.project(
-        ProjectionRequest(
+        ProjectionCapabilityIssuer(
+            authority=access,
+            principal_verifier=StaticPrincipalVerifier("room:test"),
+        ).bind(ProjectionRequest(
             schema_version="world-v2.1",
             request_id="projection-clock",
-            viewer_kind="operator_debug",
-            viewer_id="operator:test",
+            world_id="world-v2-test",
+            viewer_kind="room_renderer",
+            viewer_id="room:test",
             permissions=frozenset(),
             trace_id="trace-projection-clock",
-            redaction_policy="operator_debug",
-        )
+            redaction_policy="room-public-v1",
+        ), credential=TEST_CREDENTIAL)
     ).logical_time == NOW.replace(hour=13)
 
     reversed_clock = clock.model_copy(

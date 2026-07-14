@@ -15,6 +15,7 @@ from companion_daemon.world_v2.schemas import (
     BudgetSettlement,
     WorldEvent,
 )
+from companion_daemon.world_v2.reducers import ReducerState
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
 
@@ -156,13 +157,72 @@ def test_sqlite_rebuild_selects_only_installed_replay_artifacts(tmp_path) -> Non
 
     assert ledger.rebuild(
         target_schema_version="world-v2.1",
-        reducer_bundle_version="world-v2-reducers.1",
+        reducer_bundle_version="world-v2-reducers.2",
     ) == ledger.project()
     with pytest.raises(ValueError, match="not installed"):
         ledger.rebuild(reducer_bundle_version="world-v1-reducers.9")
     with pytest.raises(ValueError, match="target schema.*not installed"):
         ledger.rebuild(target_schema_version="world-v3.0")
     ledger.close()
+
+
+def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) -> None:
+    path = tmp_path / "world-v2-v1-head.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [event("event-v1-migration", "obs-v1-migration")],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    expected = ledger.project()
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        head = connection.execute(
+            "SELECT state_json FROM world_v2_heads WHERE world_id = ?",
+            ("world-sqlite-test",),
+        ).fetchone()
+        assert head is not None
+        current_state = ReducerState.model_validate_json(head[0])
+        legacy_payload = current_state.semantic_payload(
+            world_id="world-sqlite-test",
+            world_revision=1,
+            reducer_bundle_version="world-v2-reducers.1",
+        )
+        legacy_payload.pop("pending_actions")
+        legacy_hash = hashlib.sha256(
+            json.dumps(
+                legacy_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        legacy_state = current_state.model_dump(mode="json")
+        legacy_state.pop("pending_actions")
+        connection.execute(
+            "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?",
+            (
+                json.dumps(legacy_state, separators=(",", ":")),
+                legacy_hash,
+            ),
+        )
+        connection.execute(
+            "ALTER TABLE world_v2_heads DROP COLUMN reducer_bundle_version"
+        )
+
+    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    assert reopened.project() == expected
+    assert reopened.rebuild() == expected
+    reopened.close()
+
+    with sqlite3.connect(path) as connection:
+        migrated = connection.execute(
+            "SELECT reducer_bundle_version, state_json FROM world_v2_heads"
+        ).fetchone()
+        assert migrated is not None
+        assert migrated[0] == "world-v2-reducers.2"
+        assert "pending_actions" in json.loads(migrated[1])
 
 
 def test_sqlite_project_normalizes_malformed_head_as_integrity_error(tmp_path) -> None:

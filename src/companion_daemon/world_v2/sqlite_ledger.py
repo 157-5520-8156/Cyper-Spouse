@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import hashlib
+import hmac
 import json
 from pathlib import Path
 import sqlite3
@@ -18,7 +19,7 @@ from .reducers import (
     reduce_event,
     require_reducer_bundle,
 )
-from .schemas import CommitResult, LedgerProjection, WorldEvent
+from .schemas import CommitResult, LedgerProjection, ProjectionCursor, WorldEvent
 from .upcasting import CURRENT_SCHEMA_VERSION, require_target_schema, upcast_event
 
 
@@ -40,6 +41,7 @@ class SQLiteWorldLedger:
             self._connection = connection
             self._create_schema()
             self._ensure_head()
+            self._migrate_head_bundle()
         except Exception:
             connection.close()
             raise
@@ -71,7 +73,8 @@ class SQLiteWorldLedger:
                 deliberation_revision INTEGER NOT NULL,
                 ledger_sequence INTEGER NOT NULL,
                 state_json TEXT NOT NULL,
-                semantic_hash TEXT NOT NULL
+                semantic_hash TEXT NOT NULL,
+                reducer_bundle_version TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS world_v2_commits (
                 world_id TEXT NOT NULL,
@@ -100,6 +103,15 @@ class SQLiteWorldLedger:
             );
             """
         )
+        columns = {
+            str(row["name"])
+            for row in self._connection.execute("PRAGMA table_info(world_v2_heads)")
+        }
+        if "reducer_bundle_version" not in columns:
+            self._connection.execute(
+                "ALTER TABLE world_v2_heads ADD COLUMN reducer_bundle_version "
+                "TEXT NOT NULL DEFAULT 'world-v2-reducers.1'"
+            )
 
     @staticmethod
     def _encode_state(state: ReducerState) -> str:
@@ -126,10 +138,126 @@ class SQLiteWorldLedger:
             """
             INSERT OR IGNORE INTO world_v2_heads
                 (world_id, world_revision, deliberation_revision, ledger_sequence,
-                 state_json, semantic_hash)
-            VALUES (?, 0, 0, 0, ?, ?)
+                 state_json, semantic_hash, reducer_bundle_version)
+            VALUES (?, 0, 0, 0, ?, ?, ?)
             """,
-            (self._world_id, self._encode_state(ReducerState()), initial.semantic_hash),
+            (
+                self._world_id,
+                self._encode_state(ReducerState()),
+                initial.semantic_hash,
+                REDUCER_BUNDLE_VERSION,
+            ),
+        )
+
+    def _migrate_head_bundle(self) -> None:
+        """Atomically rebuild a verified v1 checkpoint from immutable event bytes."""
+
+        connection = self._connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            head = connection.execute(
+                "SELECT * FROM world_v2_heads WHERE world_id = ?", (self._world_id,)
+            ).fetchone()
+            if head is None:
+                raise LedgerIntegrityError("world head disappeared during migration")
+            installed = str(head["reducer_bundle_version"])
+            if installed == REDUCER_BUNDLE_VERSION:
+                connection.commit()
+                return
+            if installed != "world-v2-reducers.1":
+                raise LedgerIntegrityError(
+                    f"head reducer bundle {installed!r} has no migration path"
+                )
+            world_revision = int(head["world_revision"])
+            cursor = ProjectionCursor(
+                world_revision=world_revision,
+                deliberation_revision=int(head["deliberation_revision"]),
+                ledger_sequence=int(head["ledger_sequence"]),
+            )
+            legacy_hash = self._legacy_v1_semantic_hash(
+                state_json=str(head["state_json"]),
+                world_revision=world_revision,
+            )
+            if not hmac.compare_digest(legacy_hash, str(head["semantic_hash"])):
+                raise LedgerIntegrityError("legacy head semantic hash is invalid")
+            rebuilt = self._replay_locked(
+                target_cursor=cursor,
+                target_schema_version=CURRENT_SCHEMA_VERSION,
+                reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+            )
+            rebuilt_state = self._state_from_projection(rebuilt)
+            updated = connection.execute(
+                """UPDATE world_v2_heads
+                   SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?
+                   WHERE world_id = ? AND world_revision = ?
+                     AND deliberation_revision = ? AND ledger_sequence = ?
+                     AND reducer_bundle_version = 'world-v2-reducers.1'""",
+                (
+                    self._encode_state(rebuilt_state),
+                    rebuilt.semantic_hash,
+                    REDUCER_BUNDLE_VERSION,
+                    self._world_id,
+                    cursor.world_revision,
+                    cursor.deliberation_revision,
+                    cursor.ledger_sequence,
+                ),
+            )
+            if updated.rowcount != 1:
+                raise ConcurrencyConflict("world head changed during bundle migration")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def _legacy_v1_semantic_hash(
+        self, *, state_json: str, world_revision: int
+    ) -> str:
+        try:
+            raw_state = json.loads(state_json)
+            if not isinstance(raw_state, dict):
+                raise ValueError("legacy state is not an object")
+            raw_state = dict(raw_state)
+            actions = raw_state.get("actions", [])
+            terminal = {"delivered", "failed", "unknown", "cancelled", "expired"}
+            raw_state["pending_actions"] = [
+                action
+                for action in actions
+                if isinstance(action, dict) and action.get("state") not in terminal
+            ]
+            state = ReducerState.model_validate_json(
+                json.dumps(raw_state, ensure_ascii=False, separators=(",", ":"))
+            )
+        except Exception as exc:
+            raise LedgerIntegrityError("legacy head state is invalid") from exc
+        payload = state.semantic_payload(
+            world_id=self._world_id,
+            world_revision=world_revision,
+            reducer_bundle_version="world-v2-reducers.1",
+        )
+        payload.pop("pending_actions", None)
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _state_from_projection(projection: LedgerProjection) -> ReducerState:
+        return ReducerState(
+            observation_refs=projection.observation_refs,
+            logical_time=projection.logical_time,
+            actions=projection.actions,
+            pending_actions=projection.pending_actions,
+            budget_accounts=projection.budget_accounts,
+            budget_reservations=projection.budget_reservations,
+            trigger_processes=projection.trigger_processes,
+            pending_external_observations=projection.pending_external_observations,
+            execution_receipts=projection.execution_receipts,
+            budget_settlements=projection.budget_settlements,
+            reconciliations=projection.reconciliations,
+            completed_trigger_ids=projection.completed_trigger_ids,
         )
 
     def commit(
@@ -287,7 +415,7 @@ class SQLiteWorldLedger:
             updated = connection.execute(
                 """UPDATE world_v2_heads
                    SET world_revision = ?, deliberation_revision = ?, ledger_sequence = ?,
-                       state_json = ?, semantic_hash = ?
+                       state_json = ?, semantic_hash = ?, reducer_bundle_version = ?
                    WHERE world_id = ? AND world_revision = ?
                      AND deliberation_revision = ? AND ledger_sequence = ?""",
                 (
@@ -296,6 +424,7 @@ class SQLiteWorldLedger:
                     ledger_sequence,
                     self._encode_state(state),
                     projection.semantic_hash,
+                    REDUCER_BUNDLE_VERSION,
                     self._world_id,
                     head["world_revision"],
                     head["deliberation_revision"],
@@ -317,6 +446,24 @@ class SQLiteWorldLedger:
         with self._thread_lock:
             return self._project_locked()
 
+    def project_at(self, cursor: ProjectionCursor) -> LedgerProjection:
+        with self._thread_lock:
+            head = self._project_locked()
+            head_cursor = ProjectionCursor(
+                world_revision=head.world_revision,
+                deliberation_revision=head.deliberation_revision,
+                ledger_sequence=head.ledger_sequence,
+            )
+            if cursor.ledger_sequence > head.ledger_sequence:
+                raise ValueError("requested projection cursor is outside the ledger range")
+            if cursor == head_cursor:
+                return head
+            return self._replay_locked(
+                target_cursor=cursor,
+                target_schema_version=CURRENT_SCHEMA_VERSION,
+                reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+            )
+
     def _project_locked(self) -> LedgerProjection:
         try:
             head = self._connection.execute(
@@ -324,6 +471,8 @@ class SQLiteWorldLedger:
             ).fetchone()
             if head is None:
                 raise LedgerIntegrityError("world head disappeared")
+            if head["reducer_bundle_version"] != REDUCER_BUNDLE_VERSION:
+                raise LedgerIntegrityError("world head reducer bundle is not installed")
             projection = make_projection(
                 world_id=self._world_id,
                 world_revision=int(head["world_revision"]),
@@ -359,6 +508,22 @@ class SQLiteWorldLedger:
         target_schema_version: str = CURRENT_SCHEMA_VERSION,
         reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
     ) -> LedgerProjection:
+        rebuilt = self._replay_locked(
+            target_cursor=None,
+            target_schema_version=target_schema_version,
+            reducer_bundle_version=reducer_bundle_version,
+        )
+        if rebuilt != self._project_locked():
+            raise LedgerIntegrityError("rebuilt projection does not match persisted head")
+        return rebuilt
+
+    def _replay_locked(
+        self,
+        *,
+        target_cursor: ProjectionCursor | None,
+        target_schema_version: str,
+        reducer_bundle_version: str,
+    ) -> LedgerProjection:
         require_reducer_bundle(reducer_bundle_version)
         require_target_schema(target_schema_version)
         state = ReducerState()
@@ -371,6 +536,11 @@ class SQLiteWorldLedger:
             (self._world_id,),
         )
         for row in rows:
+            if (
+                target_cursor is not None
+                and int(row["ledger_sequence"]) > target_cursor.ledger_sequence
+            ):
+                break
             event_json = row["event_json"]
             if not isinstance(event_json, str):
                 raise LedgerIntegrityError("persisted event bytes are invalid")
@@ -405,7 +575,17 @@ class SQLiteWorldLedger:
                 state = reduce_event(state, event)
             except Exception as exc:
                 raise LedgerIntegrityError("persisted event cannot be reduced") from exc
-        rebuilt = make_projection(
+        if (
+            target_cursor is not None
+            and ProjectionCursor(
+                world_revision=world_revision,
+                deliberation_revision=deliberation_revision,
+                ledger_sequence=ledger_sequence,
+            )
+            != target_cursor
+        ):
+            raise ValueError("requested projection cursor is not present in the ledger")
+        return make_projection(
             world_id=self._world_id,
             world_revision=world_revision,
             deliberation_revision=deliberation_revision,
@@ -413,6 +593,3 @@ class SQLiteWorldLedger:
             state=state,
             reducer_bundle_version=reducer_bundle_version,
         )
-        if rebuilt != self.project():
-            raise LedgerIntegrityError("rebuilt projection does not match persisted head")
-        return rebuilt

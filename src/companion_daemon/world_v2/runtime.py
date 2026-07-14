@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from .ledger import LedgerPort, WorldLedger
+from .projection import ProjectionAuthority, ProjectionCompiler
 from .settlement import SettlementPlanner
 from .schemas import (
     ClockObservation,
@@ -22,7 +23,13 @@ class WorldRuntime:
     and projection authority.
     """
 
-    def __init__(self, *, world_id: str, ledger: LedgerPort | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        world_id: str,
+        ledger: LedgerPort | None = None,
+        projection_authority: ProjectionAuthority | None = None,
+    ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
         if ledger is not None and ledger.world_id != world_id:
@@ -30,11 +37,17 @@ class WorldRuntime:
         self._world_id = world_id
         self._ledger = ledger or WorldLedger.in_memory(world_id=world_id)
         self._settlement = SettlementPlanner(world_id=world_id)
+        self._projection = ProjectionCompiler(authority=projection_authority)
         self._lock = asyncio.Lock()
 
     @classmethod
-    def in_memory(cls, *, world_id: str) -> WorldRuntime:
-        return cls(world_id=world_id)
+    def in_memory(
+        cls,
+        *,
+        world_id: str,
+        projection_authority: ProjectionAuthority | None = None,
+    ) -> WorldRuntime:
+        return cls(world_id=world_id, projection_authority=projection_authority)
 
     async def _project_for_write(self):
         if self._ledger.blocks_event_loop:
@@ -177,17 +190,12 @@ class WorldRuntime:
         )
 
     def project(self, viewer: ProjectionRequest) -> WorldProjection:
-        projection = self._ledger.project()
-        if viewer.at_world_revision not in (None, projection.world_revision):
-            raise ValueError("historical projection is not implemented in this vertical slice")
-        debug_refs: tuple[str, ...] = ()
-        if viewer.include_debug_refs and "world:debug" in viewer.permissions:
-            debug_refs = projection.observation_refs
-        return WorldProjection(
-            world_id=self._world_id,
-            world_revision=projection.world_revision,
-            ledger_sequence=projection.ledger_sequence,
-            semantic_hash=projection.semantic_hash,
-            logical_time=projection.logical_time,
-            debug_observation_refs=debug_refs,
+        if viewer.world_id != self._world_id:
+            raise PermissionError("projection request belongs to another world")
+        self._projection.authorize(viewer)
+        projection = (
+            self._ledger.project()
+            if viewer.at_cursor is None
+            else self._ledger.project_at(viewer.at_cursor)
         )
+        return self._projection.compile(projection, viewer)

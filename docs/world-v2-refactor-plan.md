@@ -693,7 +693,9 @@ InternalWorldSnapshot
   media_candidates[], reducer_versions{}
 ```
 
-`InternalWorldSnapshot` 是 Reducer 生成的只读深投影，不是第二套真相；只有 WorldRuntime 内部的 SituationCompiler、Acceptance 和 recovery 可获得。外部 viewer 永远走 `project(ProjectionRequest)` 的裁剪/脱敏结果。
+`InternalWorldSnapshot` 是 Reducer 生成的只读深投影，不是第二套真相；只有 WorldRuntime 内部的 SituationCompiler 可获得。外部 viewer 永远走 `project(ProjectionRequest)` 的裁剪/脱敏结果。
+
+实现约束进一步收紧为两个用途不同的内部读取面：`InternalProjectionReader.snapshot(cursor?)` 只给 SituationCompiler 生成有界、可降级的 `situation_context`；每个可变长 slice 必须携带 availability、窗口和截断信息，未实现 reducer 时必须显式 `unavailable`，不能以空数组冒充“真实为空”。Acceptance 与 recovery 不得消费该有界快照，而使用 `InternalAuthorityReader` 的 revision-pinned 按 ID 查询和稳定分页（Action、预算、回执等）；分页必须遍历到 `complete=true` 或 fail closed，不能因 Context 上限漏掉旧 Action。两者读取同一 Reducer projection，不形成第二套写权威。
 
 ### 4B.6 NPC 与自主世界对象
 
