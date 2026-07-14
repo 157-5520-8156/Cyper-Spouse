@@ -271,6 +271,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.5",
                 "world-v2-reducers.6",
                 "world-v2-reducers.7",
+                "world-v2-reducers.8",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -401,6 +402,24 @@ class SQLiteWorldLedger:
             "world-v2-reducers.1",
             "world-v2-reducers.2",
             "world-v2-reducers.3",
+            "world-v2-reducers.5",
+            "world-v2-reducers.6",
+            "world-v2-reducers.7",
+            "world-v2-reducers.8",
+        }:
+            payload.pop("capability_grants", None)
+            payload.pop("capability_transitions", None)
+            payload.pop("consent_grants", None)
+            payload.pop("consent_transitions", None)
+            payload.pop("privacy_policies", None)
+            payload.pop("privacy_transitions", None)
+            payload.pop("consumed_authorization_root_nonces", None)
+            payload.pop("consumed_authorization_challenge_ids", None)
+            payload.pop("consumed_authorization_source_ids", None)
+        if reducer_bundle_version in {
+            "world-v2-reducers.1",
+            "world-v2-reducers.2",
+            "world-v2-reducers.3",
         }:
             payload.pop("appraisals", None)
         encoded = json.dumps(
@@ -417,6 +436,15 @@ class SQLiteWorldLedger:
             actor_authorities=projection.actor_authorities,
             actor_authority_transitions=projection.actor_authority_transitions,
             consumed_actor_root_nonces=projection.consumed_actor_root_nonces,
+            capability_grants=projection.capability_grants,
+            capability_transitions=projection.capability_transitions,
+            consent_grants=projection.consent_grants,
+            consent_transitions=projection.consent_transitions,
+            privacy_policies=projection.privacy_policies,
+            privacy_transitions=projection.privacy_transitions,
+            consumed_authorization_root_nonces=projection.consumed_authorization_root_nonces,
+            consumed_authorization_challenge_ids=projection.consumed_authorization_challenge_ids,
+            consumed_authorization_source_ids=projection.consumed_authorization_source_ids,
             observation_refs=projection.observation_refs,
             message_observations=projection.message_observations,
             operator_observations=projection.operator_observations,

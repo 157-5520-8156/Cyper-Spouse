@@ -19,6 +19,7 @@ from .errors import UnknownEventType
 from .appraisal_events import APPRAISAL_PAYLOAD_MODELS
 from .affect_events import AFFECT_PAYLOAD_MODELS
 from .actor_authority_events import ACTOR_AUTHORITY_PAYLOAD_MODELS
+from .authorization_events import AUTHORIZATION_PAYLOAD_MODELS
 from .life_events import LIFE_PAYLOAD_MODELS
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .schemas import (
@@ -51,7 +52,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.8"
+    reducer_bundle: str = "world-v2-reducers.9"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -236,6 +237,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **AFFECT_PAYLOAD_MODELS,
         **RELATIONSHIP_PAYLOAD_MODELS,
         **ACTOR_AUTHORITY_PAYLOAD_MODELS,
+        **AUTHORIZATION_PAYLOAD_MODELS,
     }
 )
 
@@ -304,6 +306,10 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ActorAuthorityRotated": "world_id+authority_id+expected_entity_revision+transition_id",
         "ActorAuthorityRevoked": "world_id+authority_id+expected_entity_revision+transition_id",
         "ActorAuthorityCompensated": "world_id+authority_id+expected_entity_revision+transition_id",
+        **{
+            event_type: "world_id+entity_id+expected_entity_revision+transition_id"
+            for event_type in AUTHORIZATION_PAYLOAD_MODELS
+        },
     }
 )
 
@@ -380,6 +386,24 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "ActorAuthorityMutationPayload",
                 allowed_predecessors=("ActorAuthorityRotated",),
                 evidence_types=("deployment_root_signature",),
+            ),
+            *(
+                _contract(
+                    event_type,
+                    "deployment_root_shadow_attestor",
+                    "world",
+                    payload_model.__name__,
+                    evidence_types=(
+                        "deployment_root_signature",
+                        "external_principal_action_evidence",
+                    ),
+                    compensations=(
+                        (event_type.removesuffix("Revised") + "Compensated",)
+                        if event_type.endswith("Revised")
+                        else ()
+                    ),
+                )
+                for event_type, payload_model in AUTHORIZATION_PAYLOAD_MODELS.items()
             ),
             _contract(
                 "ObservationRecorded",

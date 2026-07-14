@@ -228,7 +228,7 @@ def test_sqlite_rebuild_selects_only_installed_replay_artifacts(tmp_path) -> Non
     assert (
         ledger.rebuild(
             target_schema_version="world-v2.1",
-            reducer_bundle_version="world-v2-reducers.8",
+            reducer_bundle_version="world-v2-reducers.9",
         )
         == ledger.project()
     )
@@ -282,6 +282,15 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             "actor_authorities",
             "actor_authority_transitions",
             "consumed_actor_root_nonces",
+            "capability_grants",
+            "capability_transitions",
+            "consent_grants",
+            "consent_transitions",
+            "privacy_policies",
+            "privacy_transitions",
+            "consumed_authorization_root_nonces",
+            "consumed_authorization_challenge_ids",
+            "consumed_authorization_source_ids",
         ):
             legacy_payload.pop(key)
         legacy_hash = hashlib.sha256(
@@ -313,7 +322,7 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             "SELECT reducer_bundle_version, state_json FROM world_v2_heads"
         ).fetchone()
         assert migrated is not None
-        assert migrated[0] == "world-v2-reducers.8"
+        assert migrated[0] == "world-v2-reducers.9"
         assert "pending_actions" in json.loads(migrated[1])
 
 
@@ -359,6 +368,15 @@ def test_sqlite_atomically_migrates_verified_v2_head_to_life_bundle(tmp_path) ->
             "actor_authorities",
             "actor_authority_transitions",
             "consumed_actor_root_nonces",
+            "capability_grants",
+            "capability_transitions",
+            "consent_grants",
+            "consent_transitions",
+            "privacy_policies",
+            "privacy_transitions",
+            "consumed_authorization_root_nonces",
+            "consumed_authorization_challenge_ids",
+            "consumed_authorization_source_ids",
         ):
             legacy_payload.pop(key)
         legacy_hash = hashlib.sha256(
@@ -416,6 +434,13 @@ def test_sqlite_atomically_migrates_verified_v3_head_to_appraisal_bundle(tmp_pat
         payload.pop("actor_authorities")
         payload.pop("actor_authority_transitions")
         payload.pop("consumed_actor_root_nonces")
+        for key in (
+            "capability_grants", "capability_transitions", "consent_grants",
+            "consent_transitions", "privacy_policies", "privacy_transitions",
+            "consumed_authorization_root_nonces", "consumed_authorization_challenge_ids",
+            "consumed_authorization_source_ids",
+        ):
+            payload.pop(key)
         for ref in payload["committed_world_event_refs"]:
             ref.pop("continuation_refs", None)
         legacy_hash = hashlib.sha256(
@@ -488,6 +513,13 @@ def test_sqlite_migrates_v5_head_without_affect_projection_fields(tmp_path) -> N
         semantic.pop("actor_authorities")
         semantic.pop("actor_authority_transitions")
         semantic.pop("consumed_actor_root_nonces")
+        for key in (
+            "capability_grants", "capability_transitions", "consent_grants",
+            "consent_transitions", "privacy_policies", "privacy_transitions",
+            "consumed_authorization_root_nonces", "consumed_authorization_challenge_ids",
+            "consumed_authorization_source_ids",
+        ):
+            semantic.pop(key)
         legacy_hash = hashlib.sha256(
             json.dumps(
                 semantic,
@@ -660,6 +692,13 @@ def test_sqlite_isolates_legacy_v3_unbound_acceptance_audit(
         semantic.pop("actor_authorities")
         semantic.pop("actor_authority_transitions")
         semantic.pop("consumed_actor_root_nonces")
+        for key in (
+            "capability_grants", "capability_transitions", "consent_grants",
+            "consent_transitions", "privacy_policies", "privacy_transitions",
+            "consumed_authorization_root_nonces", "consumed_authorization_challenge_ids",
+            "consumed_authorization_source_ids",
+        ):
+            semantic.pop(key)
         for ref in semantic["committed_world_event_refs"]:
             ref.pop("continuation_refs", None)
         legacy_hash = hashlib.sha256(

@@ -71,6 +71,25 @@ def _life_identity_components(
             payload.get("expected_entity_revision"),
             payload.get("transition_id"),
         )
+    if event_type in {
+        "CapabilityGranted",
+        "CapabilityRevised",
+        "CapabilityRevoked",
+        "CapabilityCompensated",
+        "ConsentGranted",
+        "ConsentRevised",
+        "ConsentRevoked",
+        "ConsentCompensated",
+        "PrivacyPolicyRevised",
+        "PrivacyPolicyRevoked",
+        "PrivacyPolicyCompensated",
+    }:
+        return (
+            world_id,
+            payload.get("entity_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
     if (
         event_type == "ObservationRecorded"
         and payload.get("observation_kind") == "message"

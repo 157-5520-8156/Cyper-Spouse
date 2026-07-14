@@ -44,6 +44,8 @@ from .appraisal_reducers import (
 )
 from .actor_authority_events import ActorAuthorityMutationPayload
 from .actor_authority_reducers import reduce_actor_authority
+from .authorization_events import AUTHORIZATION_PAYLOAD_MODELS, authorization_domain
+from .authorization_reducers import reduce_authorization
 from .batch_invariants import interaction_appraisal_trigger_identity
 from .errors import UnknownEventType
 from .event_catalog import event_contract
@@ -95,6 +97,10 @@ from .schemas import (
     ActionState,
     ActorAuthorityProjection,
     ActorAuthorityTransitionProjection,
+    CapabilityStateProjection,
+    CapabilityTransitionProjection,
+    ConsentStateProjection,
+    ConsentTransitionProjection,
     AffectBaselineProjection,
     AffectEpisodeProjection,
     AffectProposalProjection,
@@ -118,6 +124,8 @@ from .schemas import (
     NpcProjection,
     Observation,
     OutcomeObservationProjection,
+    PrivacyPolicyProjection,
+    PrivacyTransitionProjection,
     OutcomeProposalProjection,
     OperatorObservationRef,
     PlanStateProjection,
@@ -132,7 +140,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.8"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.9"
 INSTALLED_APPRAISAL_POLICY_REFS = ("policy:appraisal-v1",)
 INSTALLED_APPRAISAL_MATRIX_VERSION = "appraisal-matrix.1"
 INSTALLED_SOURCE_CLUSTERING_VERSION = "source-clustering.1"
@@ -154,6 +162,15 @@ class ReducerState(FrozenModel):
     actor_authorities: tuple[ActorAuthorityProjection, ...] = ()
     actor_authority_transitions: tuple[ActorAuthorityTransitionProjection, ...] = ()
     consumed_actor_root_nonces: tuple[str, ...] = ()
+    capability_grants: tuple[CapabilityStateProjection, ...] = ()
+    capability_transitions: tuple[CapabilityTransitionProjection, ...] = ()
+    consent_grants: tuple[ConsentStateProjection, ...] = ()
+    consent_transitions: tuple[ConsentTransitionProjection, ...] = ()
+    privacy_policies: tuple[PrivacyPolicyProjection, ...] = ()
+    privacy_transitions: tuple[PrivacyTransitionProjection, ...] = ()
+    consumed_authorization_root_nonces: tuple[str, ...] = ()
+    consumed_authorization_challenge_ids: tuple[str, ...] = ()
+    consumed_authorization_source_ids: tuple[str, ...] = ()
     observation_refs: tuple[str, ...] = ()
     message_observations: tuple[MessageObservationRef, ...] = ()
     operator_observations: tuple[OperatorObservationRef, ...] = ()
@@ -266,6 +283,72 @@ class ReducerState(FrozenModel):
                 or authority.origin.transition_id != latest.transition_id
             ):
                 raise ValueError("actor authority projection does not match lineage head")
+        authorization_transitions = (
+            *self.capability_transitions,
+            *self.consent_transitions,
+            *self.privacy_transitions,
+        )
+        if len(self.consumed_authorization_root_nonces) != len(
+            authorization_transitions
+        ) or len(self.consumed_authorization_challenge_ids) != len(
+            authorization_transitions
+        ) or len(self.consumed_authorization_source_ids) != len(
+            authorization_transitions
+        ):
+            raise ValueError(
+                "authorization transitions require one root nonce and evidence identity"
+            )
+        if len(self.consumed_authorization_root_nonces) != len(
+            set(self.consumed_authorization_root_nonces)
+        ) or len(self.consumed_authorization_challenge_ids) != len(
+            set(self.consumed_authorization_challenge_ids)
+        ) or len(self.consumed_authorization_source_ids) != len(
+            set(self.consumed_authorization_source_ids)
+        ):
+            raise ValueError("authorization nonce and evidence identities must be unique")
+        transition_ids = tuple(item.transition_id for item in authorization_transitions)
+        if len(transition_ids) != len(set(transition_ids)):
+            raise ValueError("authorization transition ids must be unique")
+        for projections, transitions, id_field, create_operation in (
+            (
+                self.capability_grants,
+                self.capability_transitions,
+                "grant_id",
+                "grant",
+            ),
+            (self.consent_grants, self.consent_transitions, "consent_id", "grant"),
+            (self.privacy_policies, self.privacy_transitions, "policy_id", "revise"),
+        ):
+            entity_ids = tuple(getattr(item, id_field) for item in projections)
+            if len(entity_ids) != len(set(entity_ids)):
+                raise ValueError("authorization projection ids must be unique")
+            if any(getattr(item, id_field) not in set(entity_ids) for item in transitions):
+                raise ValueError("authorization transition has no projection")
+            for projection in projections:
+                entity_id = getattr(projection, id_field)
+                lineage = tuple(
+                    item
+                    for item in transitions
+                    if getattr(item, id_field) == entity_id
+                )
+                if not lineage or lineage[0].operation != create_operation:
+                    raise ValueError("authorization lineage has invalid origin")
+                if tuple(item.entity_revision for item in lineage) != tuple(
+                    range(1, len(lineage) + 1)
+                ):
+                    raise ValueError("authorization lineage revisions must be contiguous")
+                if any(
+                    current.values_before != previous.values_after
+                    for previous, current in zip(lineage, lineage[1:])
+                ):
+                    raise ValueError("authorization lineage values are discontinuous")
+                latest = lineage[-1]
+                if (
+                    projection.entity_revision != latest.entity_revision
+                    or projection.values != latest.values_after
+                    or projection.origin.transition_id != latest.transition_id
+                ):
+                    raise ValueError("authorization projection does not match lineage head")
         return self
 
     def semantic_payload(
@@ -287,6 +370,27 @@ class ReducerState(FrozenModel):
                 item.model_dump(mode="json") for item in self.actor_authority_transitions
             ),
             "consumed_actor_root_nonces": self.consumed_actor_root_nonces,
+            "capability_grants": tuple(
+                item.model_dump(mode="json") for item in self.capability_grants
+            ),
+            "capability_transitions": tuple(
+                item.model_dump(mode="json") for item in self.capability_transitions
+            ),
+            "consent_grants": tuple(
+                item.model_dump(mode="json") for item in self.consent_grants
+            ),
+            "consent_transitions": tuple(
+                item.model_dump(mode="json") for item in self.consent_transitions
+            ),
+            "privacy_policies": tuple(
+                item.model_dump(mode="json") for item in self.privacy_policies
+            ),
+            "privacy_transitions": tuple(
+                item.model_dump(mode="json") for item in self.privacy_transitions
+            ),
+            "consumed_authorization_root_nonces": self.consumed_authorization_root_nonces,
+            "consumed_authorization_challenge_ids": self.consumed_authorization_challenge_ids,
+            "consumed_authorization_source_ids": self.consumed_authorization_source_ids,
             "observation_refs": self.observation_refs,
             "message_observations": tuple(
                 item.model_dump(mode="json") for item in self.message_observations
@@ -495,6 +599,43 @@ def _actor_authority_changed(state: ReducerState, event: WorldEvent) -> ReducerS
             "actor_authorities": authorities,
             "actor_authority_transitions": history,
             "consumed_actor_root_nonces": nonces,
+        }
+    )
+
+
+def _authorization_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    if state.logical_time is not None and event.logical_time != state.logical_time:
+        raise ValueError("authorization transition must be pinned to current logical time")
+    model = AUTHORIZATION_PAYLOAD_MODELS[event.event_type]
+    payload = model.model_validate_json(event.payload_json)
+    domain = authorization_domain(event.event_type)
+    if domain == "capability":
+        projections, history = state.capability_grants, state.capability_transitions
+        projection_field, history_field = "capability_grants", "capability_transitions"
+    elif domain == "consent":
+        projections, history = state.consent_grants, state.consent_transitions
+        projection_field, history_field = "consent_grants", "consent_transitions"
+    else:
+        projections, history = state.privacy_policies, state.privacy_transitions
+        projection_field, history_field = "privacy_policies", "privacy_transitions"
+    updated, transitions, nonces, challenges, sources = reduce_authorization(
+        projections,
+        history,
+        state.consumed_authorization_root_nonces,
+        state.consumed_authorization_challenge_ids,
+        state.consumed_authorization_source_ids,
+        state.actor_authorities,
+        payload,
+        event=event,
+        logical_time=event.logical_time,
+    )
+    return state.model_copy(
+        update={
+            projection_field: updated,
+            history_field: transitions,
+            "consumed_authorization_root_nonces": nonces,
+            "consumed_authorization_challenge_ids": challenges,
+            "consumed_authorization_source_ids": sources,
         }
     )
 
@@ -2079,6 +2220,17 @@ _EVENTS = {
         EventDefinition(
             "ActorAuthorityCompensated", RevisionClass.WORLD, _actor_authority_changed
         ),
+        EventDefinition("CapabilityGranted", RevisionClass.WORLD, _authorization_changed),
+        EventDefinition("CapabilityRevised", RevisionClass.WORLD, _authorization_changed),
+        EventDefinition("CapabilityRevoked", RevisionClass.WORLD, _authorization_changed),
+        EventDefinition("CapabilityCompensated", RevisionClass.WORLD, _authorization_changed),
+        EventDefinition("ConsentGranted", RevisionClass.WORLD, _authorization_changed),
+        EventDefinition("ConsentRevised", RevisionClass.WORLD, _authorization_changed),
+        EventDefinition("ConsentRevoked", RevisionClass.WORLD, _authorization_changed),
+        EventDefinition("ConsentCompensated", RevisionClass.WORLD, _authorization_changed),
+        EventDefinition("PrivacyPolicyRevised", RevisionClass.WORLD, _authorization_changed),
+        EventDefinition("PrivacyPolicyRevoked", RevisionClass.WORLD, _authorization_changed),
+        EventDefinition("PrivacyPolicyCompensated", RevisionClass.WORLD, _authorization_changed),
         EventDefinition("ObservationRecorded", RevisionClass.WORLD, _observation_recorded),
         EventDefinition(
             "OperatorObservationRecorded",
@@ -2384,6 +2536,15 @@ def make_projection(
         actor_authorities=state.actor_authorities,
         actor_authority_transitions=state.actor_authority_transitions,
         consumed_actor_root_nonces=state.consumed_actor_root_nonces,
+        capability_grants=state.capability_grants,
+        capability_transitions=state.capability_transitions,
+        consent_grants=state.consent_grants,
+        consent_transitions=state.consent_transitions,
+        privacy_policies=state.privacy_policies,
+        privacy_transitions=state.privacy_transitions,
+        consumed_authorization_root_nonces=state.consumed_authorization_root_nonces,
+        consumed_authorization_challenge_ids=state.consumed_authorization_challenge_ids,
+        consumed_authorization_source_ids=state.consumed_authorization_source_ids,
         observation_refs=state.observation_refs,
         message_observations=state.message_observations,
         operator_observations=state.operator_observations,

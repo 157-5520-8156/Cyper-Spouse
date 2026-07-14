@@ -960,6 +960,13 @@ def test_sqlite_migrates_verified_v7_head_to_actor_authority_bundle(tmp_path) ->
         semantic.pop("actor_authorities")
         semantic.pop("actor_authority_transitions")
         semantic.pop("consumed_actor_root_nonces")
+        for key in (
+            "capability_grants", "capability_transitions", "consent_grants",
+            "consent_transitions", "privacy_policies", "privacy_transitions",
+            "consumed_authorization_root_nonces", "consumed_authorization_challenge_ids",
+            "consumed_authorization_source_ids",
+        ):
+            semantic.pop(key)
         legacy_hash = hashlib.sha256(
             json.dumps(
                 semantic,
@@ -975,7 +982,7 @@ def test_sqlite_migrates_verified_v7_head_to_actor_authority_bundle(tmp_path) ->
         )
 
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert reopened.project().reducer_bundle_version == "world-v2-reducers.8"
+    assert reopened.project().reducer_bundle_version == "world-v2-reducers.9"
     assert reopened.project() == expected
     assert reopened.rebuild() == expected
     reopened.close()

@@ -1547,18 +1547,90 @@ class ConversationThreadProjection(FrozenModel):
     resolution_ref: str | None = None
 
 
+class PrincipalActionEvidence(FrozenModel):
+    source_event_ref: str = Field(min_length=1)
+    payload_hash: str = Field(min_length=64, max_length=64)
+    authenticated_principal_ref: str = Field(min_length=1)
+    action_ref: str = Field(min_length=1)
+    scope_hash: str = Field(min_length=64, max_length=64)
+    intent_hash: str = Field(min_length=64, max_length=64)
+    challenge_ref: str = Field(min_length=16)
+    observed_at: datetime
+    expires_at: datetime
+    authentication_policy_version: str = Field(min_length=1)
+    authentication_policy_digest: str = Field(min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def evidence_window_is_bounded(self) -> PrincipalActionEvidence:
+        if self.observed_at.tzinfo is None or self.expires_at.tzinfo is None:
+            raise ValueError("principal action evidence time must be timezone-aware")
+        if self.expires_at <= self.observed_at:
+            raise ValueError("principal action evidence expiry must follow observation")
+        return self
+
+
+class AuthorizationOrigin(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    event_ref: str = Field(min_length=1)
+    authority_id: str = Field(min_length=1)
+    authority_revision: int = Field(ge=1)
+    attested_principal_ref: str = Field(min_length=1)
+    attestation_mode: Literal["root_attested_external_principal_action.1"]
+    attestation_environment: Literal["shadow"]
+    root_attestation_verified: Literal[True] = True
+    external_action_asserted: Literal[True] = True
+    principal_possession_status: Literal["not_evaluated"] = "not_evaluated"
+    enforcement_eligible: Literal[False] = False
+    evidence_hash: str = Field(min_length=64, max_length=64)
+    root_key_id: str = Field(min_length=1)
+    root_keyset_digest: str = Field(min_length=64, max_length=64)
+    root_nonce_hash: str = Field(min_length=64, max_length=64)
+    root_proof_hash: str = Field(min_length=64, max_length=64)
+
+
+class CapabilityGrantValues(FrozenModel):
+    capability_kind: Literal["message_send", "media_send", "reaction_send", "read_only_tool"]
+    actor_ref: str = Field(min_length=1)
+    target_scope_refs: tuple[
+        Literal[
+            "channel:qq",
+            "channel:wechat",
+            "channel:http",
+            "tool:weather",
+            "tool:web_search",
+            "tool:calendar_read",
+        ],
+        ...,
+    ] = Field(min_length=1)
+    constraint_refs: tuple[
+        Literal["constraint:text-only", "constraint:read-only", "constraint:no-third-party"],
+        ...,
+    ] = ()
+    valid_from: datetime
+    expires_at: datetime | None = None
+    state: Literal["active", "revoked", "expired"]
+
+
 class CapabilityStateProjection(FrozenModel):
     grant_id: str = Field(min_length=1)
-    capability_kind: str = Field(min_length=1)
-    actor_ref: str = Field(min_length=1)
-    target_scope_refs: tuple[str, ...] = Field(min_length=1)
-    constraint_refs: tuple[str, ...] = ()
-    valid_from: datetime
-    evidence_refs: tuple[str, ...] = Field(min_length=1)
-    state: Literal["active", "revoked", "expired"]
-    policy_revision: int = Field(ge=0)
-    expires_at: datetime | None = None
-    revoked_by_ref: str | None = None
+    entity_revision: int = Field(ge=1)
+    values: CapabilityGrantValues
+    policy_version: str = Field(min_length=1)
+    policy_digest: str = Field(min_length=64, max_length=64)
+    origin: AuthorizationOrigin
+    updated_at: datetime
+
+
+class CapabilityTransitionProjection(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    grant_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    operation: Literal["grant", "revise", "revoke", "compensate"]
+    values_before: CapabilityGrantValues | None = None
+    values_after: CapabilityGrantValues
+    origin: AuthorizationOrigin
+    changed_at: datetime
+    compensates_transition_id: str | None = None
 
 
 class ActorAuthorityValues(FrozenModel):
@@ -1633,18 +1705,45 @@ class ActorAuthorityTransitionProjection(FrozenModel):
     compensates_transition_id: str | None = None
 
 
-class ConsentStateProjection(FrozenModel):
-    consent_id: str = Field(min_length=1)
+class ConsentGrantValues(FrozenModel):
     grantor_ref: str = Field(min_length=1)
     grantee_ref: str = Field(min_length=1)
-    action_scope_refs: tuple[str, ...] = Field(min_length=1)
-    data_scope_refs: tuple[str, ...] = ()
-    channel_scope_refs: tuple[str, ...] = ()
+    action_scope_refs: tuple[
+        Literal["message_send", "media_send", "reaction_send", "read_only_tool"], ...
+    ] = Field(min_length=1)
+    data_scope_refs: tuple[
+        Literal["data:message_content", "data:user_profile", "data:attachment", "data:location"],
+        ...,
+    ] = ()
+    channel_scope_refs: tuple[
+        Literal["channel:qq", "channel:wechat", "channel:http"], ...
+    ] = ()
     valid_from: datetime
     expires_at: datetime | None = None
     revocable: bool
     status: Literal["active", "revoked", "expired"]
-    evidence_refs: tuple[str, ...] = Field(min_length=1)
+
+
+class ConsentStateProjection(FrozenModel):
+    consent_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    values: ConsentGrantValues
+    policy_version: str = Field(min_length=1)
+    policy_digest: str = Field(min_length=64, max_length=64)
+    origin: AuthorizationOrigin
+    updated_at: datetime
+
+
+class ConsentTransitionProjection(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    consent_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    operation: Literal["grant", "revise", "revoke", "compensate"]
+    values_before: ConsentGrantValues | None = None
+    values_after: ConsentGrantValues
+    origin: AuthorizationOrigin
+    changed_at: datetime
+    compensates_transition_id: str | None = None
 
 
 class NamedPolicyRef(FrozenModel):
@@ -1652,15 +1751,48 @@ class NamedPolicyRef(FrozenModel):
     value_ref: str = Field(min_length=1)
 
 
-class PrivacyPolicyProjection(FrozenModel):
-    policy_revision: int = Field(ge=0)
+class PrivacyPolicyValues(FrozenModel):
     subject_ref: str = Field(min_length=1)
-    data_classes: tuple[NamedPolicyRef, ...] = ()
-    viewer_rules: tuple[NamedPolicyRef, ...] = ()
-    media_rules: tuple[NamedPolicyRef, ...] = ()
-    retention_rules: tuple[NamedPolicyRef, ...] = ()
+    data_class_refs: tuple[
+        Literal["data:message_content", "data:user_profile", "data:attachment", "data:location"],
+        ...,
+    ] = ()
+    viewer_rule_refs: tuple[
+        Literal["viewer:companion", "viewer:operator", "viewer:room_renderer", "viewer:platform_adapter"],
+        ...,
+    ] = ()
+    media_rule_refs: tuple[
+        Literal["media:private_only", "media:share_allowed", "media:auto_delivery_allowed"],
+        ...,
+    ] = ()
+    retention_rule_refs: tuple[
+        Literal["retention:session", "retention:30d", "retention:persistent"], ...
+    ] = ()
     effective_at: datetime
-    evidence_refs: tuple[str, ...] = Field(min_length=1)
+    expires_at: datetime | None = None
+    status: Literal["active", "revoked", "expired"]
+
+
+class PrivacyPolicyProjection(FrozenModel):
+    policy_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    values: PrivacyPolicyValues
+    policy_version: str = Field(min_length=1)
+    policy_digest: str = Field(min_length=64, max_length=64)
+    origin: AuthorizationOrigin
+    updated_at: datetime
+
+
+class PrivacyTransitionProjection(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    policy_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    operation: Literal["revise", "revoke", "compensate"]
+    values_before: PrivacyPolicyValues | None = None
+    values_after: PrivacyPolicyValues
+    origin: AuthorizationOrigin
+    changed_at: datetime
+    compensates_transition_id: str | None = None
 
 
 class MediaCandidateProjection(FrozenModel):
@@ -1801,7 +1933,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.8"
+    reducer_bundle_version: str = "world-v2-reducers.9"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -1810,6 +1942,15 @@ class LedgerProjection(FrozenModel):
     actor_authorities: tuple[ActorAuthorityProjection, ...] = ()
     actor_authority_transitions: tuple[ActorAuthorityTransitionProjection, ...] = ()
     consumed_actor_root_nonces: tuple[str, ...] = ()
+    capability_grants: tuple[CapabilityStateProjection, ...] = ()
+    capability_transitions: tuple[CapabilityTransitionProjection, ...] = ()
+    consent_grants: tuple[ConsentStateProjection, ...] = ()
+    consent_transitions: tuple[ConsentTransitionProjection, ...] = ()
+    privacy_policies: tuple[PrivacyPolicyProjection, ...] = ()
+    privacy_transitions: tuple[PrivacyTransitionProjection, ...] = ()
+    consumed_authorization_root_nonces: tuple[str, ...] = ()
+    consumed_authorization_challenge_ids: tuple[str, ...] = ()
+    consumed_authorization_source_ids: tuple[str, ...] = ()
     observation_refs: tuple[str, ...] = ()
     message_observations: tuple[MessageObservationRef, ...] = ()
     operator_observations: tuple[OperatorObservationRef, ...] = ()

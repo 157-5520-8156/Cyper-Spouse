@@ -5,19 +5,14 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
-import os
 
-from nacl.exceptions import BadSignatureError
-from nacl.signing import VerifyKey
-
-from . import actor_authority_events as actor_authority_contracts
 from .actor_authority_events import (
     ActorAuthorityMutationPayload,
     ROOT_KEYSET_DIGEST,
     ROOT_KEYSET_VERSION,
     actor_authority_mutation_hash,
-    root_envelope_signature_message,
     validate_actor_authority_event_operation,
+    verify_deployment_root_attestation,
 )
 from .schemas import (
     ActorAuthorityOrigin,
@@ -242,35 +237,7 @@ def _require_active_window(
 
 
 def _verify_root_proof(payload: ActorAuthorityMutationPayload, event: WorldEvent) -> None:
-    proof = payload.root_proof
-    public_key = actor_authority_contracts.installed_root_verify_key(
-        root_key_id=proof.root_key_id,
-        claimed_keyset_digest=proof.keyset_digest,
-    )
-    if proof.keyset_version != ROOT_KEYSET_VERSION or public_key is None:
-        raise ValueError("deployment root anchor is not installed")
-    if (
-        proof.root_key_id.startswith("test-only:")
-        and os.environ.get("WORLD_V2_ENABLE_INSECURE_TEST_ROOT") != "1"
-    ):
-        raise ValueError("test-only deployment root is disabled")
     mutation_hash = actor_authority_mutation_hash(payload)
-    message = root_envelope_signature_message(
-        schema_version=event.schema_version,
-        world_id=event.world_id,
-        event_type=event.event_type,
-        event_id=event.event_id,
-        actor=event.actor,
-        source=event.source,
-        logical_time=event.logical_time,
-        created_at=event.created_at,
-        trace_id=event.trace_id,
-        causation_id=event.causation_id,
-        correlation_id=event.correlation_id,
-        idempotency_key=event.idempotency_key,
-        mutation_hash=mutation_hash,
+    verify_deployment_root_attestation(
+        proof=payload.root_proof, event=event, mutation_hash=mutation_hash
     )
-    try:
-        VerifyKey(bytes.fromhex(public_key)).verify(message, bytes.fromhex(proof.signature_hex))
-    except (BadSignatureError, ValueError) as exc:
-        raise ValueError("deployment root signature is invalid") from exc

@@ -6,13 +6,16 @@ from collections.abc import Mapping
 from datetime import datetime
 import hashlib
 import json
+import os
 from types import MappingProxyType
 from typing import Any, Literal
 
 from pydantic import Field, model_validator
 from pydantic_core import to_jsonable_python
+from nacl.exceptions import BadSignatureError
+from nacl.signing import VerifyKey
 
-from .schemas import ActorAuthorityValues, FrozenModel
+from .schemas import ActorAuthorityValues, FrozenModel, WorldEvent
 
 
 ROOT_KEYSET_VERSION = "deployment-root-keyset.1"
@@ -52,6 +55,51 @@ def installed_root_verify_key(
     if claimed_keyset_digest != installed_root_keyset_digest():
         return None
     return ROOT_PUBLIC_KEYS.get(root_key_id)
+
+
+def verify_deployment_root_attestation(
+    *, proof: DeploymentRootProof, event: WorldEvent, mutation_hash: str
+) -> tuple[str, str]:
+    """Verify the one frozen deployment-root envelope attestation scheme."""
+
+    if proof.signed_mutation_hash != mutation_hash:
+        raise ValueError("deployment root proof hash does not match mutation")
+    public_key = installed_root_verify_key(
+        root_key_id=proof.root_key_id,
+        claimed_keyset_digest=proof.keyset_digest,
+    )
+    if proof.keyset_version != ROOT_KEYSET_VERSION or public_key is None:
+        raise ValueError("deployment root anchor is not installed")
+    if (
+        proof.root_key_id.startswith("test-only:")
+        and os.environ.get("WORLD_V2_ENABLE_INSECURE_TEST_ROOT") != "1"
+    ):
+        raise ValueError("test-only deployment root is disabled")
+    message = root_envelope_signature_message(
+        schema_version=event.schema_version,
+        world_id=event.world_id,
+        event_type=event.event_type,
+        event_id=event.event_id,
+        actor=event.actor,
+        source=event.source,
+        logical_time=event.logical_time,
+        created_at=event.created_at,
+        trace_id=event.trace_id,
+        causation_id=event.causation_id,
+        correlation_id=event.correlation_id,
+        idempotency_key=event.idempotency_key,
+        mutation_hash=mutation_hash,
+    )
+    try:
+        VerifyKey(bytes.fromhex(public_key)).verify(
+            message, bytes.fromhex(proof.signature_hex)
+        )
+    except (BadSignatureError, ValueError) as exc:
+        raise ValueError("deployment root signature is invalid") from exc
+    return (
+        hashlib.sha256(bytes.fromhex(proof.signature_hex)).hexdigest(),
+        hashlib.sha256(proof.nonce.encode("utf-8")).hexdigest(),
+    )
 
 
 class DeploymentRootProof(FrozenModel):
