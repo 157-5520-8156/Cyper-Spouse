@@ -4,4 +4,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+: "${QQ_TURN_OBSERVATION_PATH:=data/private/qq-turns.jsonl}"
+export QQ_TURN_OBSERVATION_PATH
+
 exec .venv/bin/python -m companion_daemon.napcat_cli --adapter napcat --host 127.0.0.1 --port 8787
