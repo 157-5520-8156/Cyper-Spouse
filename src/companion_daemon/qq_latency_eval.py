@@ -12,10 +12,15 @@ import argparse
 import asyncio
 from dataclasses import asdict, dataclass
 import json
-from typing import Iterable
+from pathlib import Path
+from collections.abc import Iterable, Mapping
 
 from companion_daemon.conversation_cadence import ConversationCadence
 from companion_daemon.models import CompanionReply, IncomingMessage
+from companion_daemon.qq_runtime_observations import (
+    load_qq_turn_observation_jsonl,
+    summarize_qq_turn_experience,
+)
 from companion_daemon.qq_websocket import QQMessageCoalescer, TurnRuntimeObservation
 from companion_daemon.turn_taking import TurnTakingPolicy
 from companion_daemon.usage_metrics import nearest_rank
@@ -97,6 +102,69 @@ def qq_latency_report(observations: Iterable[TurnRuntimeObservation]) -> dict[st
     }
 
 
+def summarize_qq_latency_observation_rows(
+    rows: Iterable[Mapping[str, object]],
+) -> tuple[QQLatencySummary, ...]:
+    """Summarize already-redacted live QQ/NapCat observation rows.
+
+    The JSONL exporter stores millisecond fields rather than raw message
+    content.  This helper keeps the same cadence buckets as the synthetic
+    coalescer report, but it never requires reconstructing a
+    ``TurnRuntimeObservation`` or touching private identifiers.
+    """
+    materialized = tuple(rows)
+    summaries: list[QQLatencySummary] = []
+    for cadence in CADENCES:
+        selected = (
+            materialized
+            if cadence == "all"
+            else tuple(row for row in materialized if row.get("cadence") == cadence)
+        )
+        visible = sorted(
+            int(value)
+            for row in selected
+            if isinstance(value := row.get("first_visible_elapsed_ms"), int)
+        )
+        complete = sorted(
+            int(value)
+            for row in selected
+            if isinstance(value := row.get("elapsed_ms"), int)
+        )
+        summaries.append(
+            QQLatencySummary(
+                cadence=cadence,
+                sample_count=len(selected),
+                visible_count=len(visible),
+                p50_first_visible_ms=nearest_rank(visible, 0.50) if visible else None,
+                p95_first_visible_ms=nearest_rank(visible, 0.95) if visible else None,
+                p50_complete_ms=nearest_rank(complete, 0.50) if complete else None,
+                p95_complete_ms=nearest_rank(complete, 0.95) if complete else None,
+            )
+        )
+    return tuple(summaries)
+
+
+def qq_latency_observation_jsonl_report(path: Path) -> dict[str, object]:
+    """Build a JSON-safe live QQ/NapCat baseline report from redacted JSONL."""
+    rows = load_qq_turn_observation_jsonl(path)
+    return {
+        "live": True,
+        "source": "redacted_qq_turn_observation_jsonl",
+        "path": str(path),
+        "definition": qq_latency_definition(),
+        "summaries": [
+            asdict(row) for row in summarize_qq_latency_observation_rows(rows)
+        ],
+        "experience_summary": summarize_qq_turn_experience(rows),
+        "privacy": {
+            "contains_message_text": False,
+            "contains_user_or_platform_identifier": False,
+            "contains_external_receipts": False,
+            "contains_free_form_failure_reason": False,
+        },
+    }
+
+
 async def run_synthetic_qq_latency_smoke() -> tuple[TurnRuntimeObservation, ...]:
     """Exercise the actual QQ coalescer seam without a provider or QQ account.
 
@@ -141,17 +209,28 @@ async def run_synthetic_qq_latency_smoke() -> tuple[TurnRuntimeObservation, ...]
 
 def _main() -> int:
     parser = argparse.ArgumentParser(description="QQ coalescer latency baseline utilities")
-    parser.add_argument(
+    mode = parser.add_mutually_exclusive_group(required=True)
+    mode.add_argument(
         "--synthetic",
         action="store_true",
         help="run an in-process instrumentation smoke test; not live latency evidence",
     )
+    mode.add_argument(
+        "--observation-jsonl",
+        type=Path,
+        help=(
+            "summarize a redacted live QQ/NapCat observation JSONL file created "
+            "by QQ_TURN_OBSERVATION_PATH"
+        ),
+    )
     args = parser.parse_args()
-    if not args.synthetic:
-        parser.error("pass --synthetic to run the instrumentation smoke test")
-    observations = asyncio.run(run_synthetic_qq_latency_smoke())
+    if args.observation_jsonl is not None:
+        report = qq_latency_observation_jsonl_report(args.observation_jsonl)
+    else:
+        observations = asyncio.run(run_synthetic_qq_latency_smoke())
+        report = qq_latency_report(observations)
     print(
-        json.dumps(qq_latency_report(observations), ensure_ascii=False, indent=2)
+        json.dumps(report, ensure_ascii=False, indent=2)
     )
     return 0
 

@@ -6,9 +6,11 @@ import pytest
 from companion_daemon.models import CompanionReply, IncomingMessage
 from companion_daemon.conversation_cadence import ConversationCadence
 from companion_daemon.qq_latency_eval import (
+    qq_latency_observation_jsonl_report,
     qq_latency_report,
     run_synthetic_qq_latency_smoke,
     summarize_qq_latency,
+    summarize_qq_latency_observation_rows,
 )
 from companion_daemon.qq_websocket import QQMessageCoalescer, TurnRuntimeObservation
 from companion_daemon.turn_taking import TurnTakingPolicy
@@ -100,3 +102,89 @@ async def test_qq_latency_starts_at_first_input_when_a_new_message_resets_deboun
     assert observation.input_count == 2
     assert observation.coalescing_wait_seconds == pytest.approx(0.5)
     assert observation.first_visible_elapsed_seconds == pytest.approx(0.5)
+
+
+def test_live_observation_jsonl_latency_report_reuses_redacted_rows(tmp_path) -> None:
+    report_path = tmp_path / "qq-turns.jsonl"
+    report_path.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "outcome": "reply_delivered",
+                        "cadence": "hot",
+                        "elapsed_ms": 900,
+                        "first_visible_elapsed_ms": 500,
+                        "message_kinds": ["reply"],
+                        "segment_count": 1,
+                        "selected_affordance_kind": "soft_repair",
+                        "user_affect_kinds": ["disappointment"],
+                        "user_affect_recorded": True,
+                        "private_impression_recorded": True,
+                    }
+                ),
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "outcome": "reply_delivered",
+                        "cadence": "hot",
+                        "elapsed_ms": 1200,
+                        "first_visible_elapsed_ms": 800,
+                        "message_kinds": ["reply", "afterthought"],
+                        "segment_count": 2,
+                        "multi_segment": True,
+                        "selected_affordance_kind": "delayed_afterthought",
+                        "user_affect_kinds": [],
+                    }
+                ),
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "outcome": "reply_delivered",
+                        "cadence": "cold",
+                        "elapsed_ms": 3000,
+                        "first_visible_elapsed_ms": 2400,
+                        "message_kinds": ["reply"],
+                        "segment_count": 1,
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    row_summary = {
+        item.cadence: item
+        for item in summarize_qq_latency_observation_rows(
+            [
+                {"cadence": "hot", "elapsed_ms": 900, "first_visible_elapsed_ms": 500},
+                {"cadence": "hot", "elapsed_ms": 1200, "first_visible_elapsed_ms": 800},
+                {"cadence": "cold", "elapsed_ms": 3000, "first_visible_elapsed_ms": 2400},
+            ]
+        )
+    }
+    assert row_summary["all"].sample_count == 3
+    assert row_summary["hot"].p50_first_visible_ms == 500
+    assert row_summary["hot"].p95_complete_ms == 1200
+    assert row_summary["cold"].p50_complete_ms == 3000
+
+    report = qq_latency_observation_jsonl_report(report_path)
+
+    assert report["live"] is True
+    assert report["source"] == "redacted_qq_turn_observation_jsonl"
+    summaries = {item["cadence"]: item for item in report["summaries"]}  # type: ignore[index]
+    assert summaries["hot"]["sample_count"] == 2
+    assert summaries["hot"]["p95_first_visible_ms"] == 800
+    experience = report["experience_summary"]  # type: ignore[assignment]
+    assert experience["sample_count"] == 3  # type: ignore[index]
+    assert experience["multi_segment_count"] == 1  # type: ignore[index]
+    assert experience["afterthought_count"] == 1  # type: ignore[index]
+    assert experience["user_affect_recorded_count"] == 1  # type: ignore[index]
+    assert report["privacy"] == {
+        "contains_message_text": False,
+        "contains_user_or_platform_identifier": False,
+        "contains_external_receipts": False,
+        "contains_free_form_failure_reason": False,
+    }
