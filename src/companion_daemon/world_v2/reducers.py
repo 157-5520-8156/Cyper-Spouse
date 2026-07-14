@@ -11,13 +11,16 @@ from typing import Any
 
 from .action_lifecycle import transition_action
 from .errors import UnknownEventType
+from .event_catalog import event_contract
 from .schemas import (
     Action,
+    ActionDispatchClaim,
     ActionReconciliation,
     ActionState,
     BudgetAccount,
     BudgetReservation,
     BudgetSettlement,
+    ClaimLease,
     ExecutionReceipt,
     ExternalObservation,
     FrozenModel,
@@ -48,9 +51,15 @@ class ReducerState(FrozenModel):
     reconciliations: tuple[ActionReconciliation, ...] = ()
     completed_trigger_ids: tuple[str, ...] = ()
 
-    def semantic_payload(self, *, world_id: str, world_revision: int) -> dict[str, Any]:
+    def semantic_payload(
+        self,
+        *,
+        world_id: str,
+        world_revision: int,
+        reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
+    ) -> dict[str, Any]:
         return {
-            "reducer_bundle_version": REDUCER_BUNDLE_VERSION,
+            "reducer_bundle_version": reducer_bundle_version,
             "schema_version": "world-v2.1",
             "world_id": world_id,
             "world_revision": world_revision,
@@ -226,6 +235,102 @@ def _action_transitioned(
                 }
             )
     raise ValueError(f"action {action_id!r} does not exist")
+
+
+def _action_claimed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    action_id = _required_action_id(event)
+    if "claim_lease" not in event.payload():
+        raise ValueError("ActionClaimed requires claim_lease")
+    lease = _model_from_payload(event, "claim_lease", ClaimLease)
+    if lease.acquired_at != event.created_at:
+        raise ValueError("claim lease acquired_at must equal event created_at")
+    for index, existing in enumerate(state.actions):
+        if existing.action_id != action_id:
+            continue
+        transitioned = transition_action(existing, "claimed")
+        transitioned = transitioned.model_copy(update={"claim_lease": lease})
+        return _replace_action(state, index=index, action=transitioned)
+    raise ValueError(f"action {action_id!r} does not exist")
+
+
+def _action_reclaimed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    action_id = _required_action_id(event)
+    if "claim_lease" not in event.payload():
+        raise ValueError("ActionReclaimed requires claim_lease")
+    lease = _model_from_payload(event, "claim_lease", ClaimLease)
+    if lease.acquired_at != event.created_at:
+        raise ValueError("claim lease acquired_at must equal event created_at")
+    for index, existing in enumerate(state.actions):
+        if existing.action_id != action_id:
+            continue
+        if existing.state != "claimed" or existing.claim_lease is None:
+            raise ValueError(f"action {action_id!r} has no reclaimable claim lease")
+        if lease.attempt_id == existing.claim_lease.attempt_id:
+            raise ValueError("reclaimed action requires a new attempt_id")
+        if lease.acquired_at < existing.claim_lease.expires_at:
+            raise ValueError(f"action {action_id!r} claim lease has not expired")
+        return _replace_action(
+            state,
+            index=index,
+            action=existing.model_copy(update={"claim_lease": lease}),
+        )
+    raise ValueError(f"action {action_id!r} does not exist")
+
+
+def _action_dispatch_started(state: ReducerState, event: WorldEvent) -> ReducerState:
+    action_id = _required_action_id(event)
+    payload = event.payload()
+    proof = ActionDispatchClaim.model_validate_json(
+        json.dumps(
+            {
+                "owner_id": payload.get("owner_id"),
+                "attempt_id": payload.get("attempt_id"),
+                "started_at": payload.get("started_at"),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
+    if proof.started_at != event.created_at:
+        raise ValueError("dispatch started_at must equal event created_at")
+    for index, existing in enumerate(state.actions):
+        if existing.action_id != action_id:
+            continue
+        lease = existing.claim_lease
+        if lease is None or (lease.owner_id, lease.attempt_id) != (
+            proof.owner_id,
+            proof.attempt_id,
+        ):
+            raise ValueError("ActionDispatchStarted requires the active claim lease")
+        if proof.started_at < lease.acquired_at:
+            raise ValueError("dispatch cannot start before the claim lease is acquired")
+        if proof.started_at >= lease.expires_at:
+            raise ValueError("dispatch cannot start after the claim lease expired")
+        transitioned = transition_action(existing, "dispatch_started")
+        return _replace_action(state, index=index, action=transitioned)
+    raise ValueError(f"action {action_id!r} does not exist")
+
+
+def _required_action_id(event: WorldEvent) -> str:
+    action_id = event.payload().get("action_id")
+    if not isinstance(action_id, str) or not action_id:
+        raise ValueError(f"{event.event_type} requires action_id")
+    return action_id
+
+
+def _replace_action(
+    state: ReducerState, *, index: int, action: Action
+) -> ReducerState:
+    return state.model_copy(
+        update={
+            "actions": (
+                *state.actions[:index],
+                action,
+                *state.actions[index + 1 :],
+            )
+        }
+    )
 
 
 def _model_from_payload(event: WorldEvent, key: str, model_type: type[Any]) -> Any:
@@ -515,12 +620,17 @@ _EVENTS = {
         EventDefinition(
             "ActionClaimed",
             RevisionClass.WORLD,
-            partial(_action_transitioned, target="claimed"),
+            _action_claimed,
+        ),
+        EventDefinition(
+            "ActionReclaimed",
+            RevisionClass.WORLD,
+            _action_reclaimed,
         ),
         EventDefinition(
             "ActionDispatchStarted",
             RevisionClass.WORLD,
-            partial(_action_transitioned, target="dispatch_started"),
+            _action_dispatch_started,
         ),
         EventDefinition(
             "ActionProviderAccepted",
@@ -565,13 +675,36 @@ def event_definition(event_type: str) -> EventDefinition:
         raise UnknownEventType(f"event type {event_type!r} is not registered") from exc
 
 
+def event_types() -> frozenset[str]:
+    """Return reducer event types for machine contract coverage checks."""
+
+    return frozenset(_EVENTS)
+
+
 def reduce_event(state: ReducerState, event: WorldEvent) -> ReducerState:
+    event_contract(event.event_type).validate_payload(event.payload())
     return event_definition(event.event_type).reducer(state, event)
 
 
-def semantic_hash(*, world_id: str, world_revision: int, state: ReducerState) -> str:
+def require_reducer_bundle(version: str) -> None:
+    """Select an installed immutable reducer artifact or fail closed."""
+
+    if version != REDUCER_BUNDLE_VERSION:
+        raise ValueError(f"reducer bundle {version!r} is not installed")
+
+
+def semantic_hash(
+    *,
+    world_id: str,
+    world_revision: int,
+    state: ReducerState,
+    reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
+) -> str:
+    require_reducer_bundle(reducer_bundle_version)
     semantic_projection = state.semantic_payload(
-        world_id=world_id, world_revision=world_revision
+        world_id=world_id,
+        world_revision=world_revision,
+        reducer_bundle_version=reducer_bundle_version,
     )
     encoded = json.dumps(
         semantic_projection,
@@ -589,6 +722,7 @@ def make_projection(
     deliberation_revision: int,
     ledger_sequence: int,
     state: ReducerState,
+    reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
 ) -> LedgerProjection:
     return LedgerProjection(
         world_id=world_id,
@@ -610,5 +744,6 @@ def make_projection(
             world_id=world_id,
             world_revision=world_revision,
             state=state,
+            reducer_bundle_version=reducer_bundle_version,
         ),
     )

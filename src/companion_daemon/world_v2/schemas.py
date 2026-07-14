@@ -219,6 +219,25 @@ class ActionIntent(FrozenModel):
     due_window: tuple[datetime, datetime] | None = None
 
 
+class ClaimLease(FrozenModel):
+    owner_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
+    acquired_at: datetime
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def expires_after_acquisition(self) -> ClaimLease:
+        if self.expires_at <= self.acquired_at:
+            raise ValueError("claim lease must expire after acquisition")
+        return self
+
+
+class ActionDispatchClaim(FrozenModel):
+    owner_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
+    started_at: datetime
+
+
 class Action(FrozenModel):
     schema_version: SchemaVersion
     action_id: str = Field(min_length=1)
@@ -240,21 +259,24 @@ class Action(FrozenModel):
     expires_at: datetime | None = None
     dependencies: tuple[str, ...] = ()
     budget_reservation_id: str = Field(min_length=1)
-    claim_lease: dict[str, Any] | None = None
+    claim_lease: ClaimLease | None = None
     state: ActionState
     recovery_policy: str = Field(min_length=1)
 
-
-class ClaimLease(FrozenModel):
-    owner_id: str = Field(min_length=1)
-    attempt_id: str = Field(min_length=1)
-    acquired_at: datetime
-    expires_at: datetime
-
     @model_validator(mode="after")
-    def expires_after_acquisition(self) -> ClaimLease:
-        if self.expires_at <= self.acquired_at:
-            raise ValueError("claim lease must expire after acquisition")
+    def claimed_action_has_a_lease(self) -> Action:
+        lease_required_states: frozenset[ActionState] = frozenset(
+            {
+                "claimed",
+                "dispatch_started",
+                "provider_accepted",
+                "delivered",
+                "failed",
+                "unknown",
+            }
+        )
+        if self.state in lease_required_states and self.claim_lease is None:
+            raise ValueError(f"action state {self.state!r} requires claim_lease")
         return self
 
 

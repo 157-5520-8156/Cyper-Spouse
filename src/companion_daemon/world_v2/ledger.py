@@ -7,7 +7,15 @@ import json
 from typing import Protocol
 
 from .errors import ConcurrencyConflict, IdempotencyConflict
-from .reducers import RevisionClass, ReducerState, event_definition, make_projection, reduce_event
+from .reducers import (
+    REDUCER_BUNDLE_VERSION,
+    RevisionClass,
+    ReducerState,
+    event_definition,
+    make_projection,
+    reduce_event,
+    require_reducer_bundle,
+)
 from .schemas import CommitResult, LedgerProjection, WorldEvent
 
 
@@ -193,7 +201,10 @@ class WorldLedger:
             state=self._state,
         )
 
-    def rebuild(self) -> LedgerProjection:
+    def rebuild(
+        self, *, reducer_bundle_version: str = REDUCER_BUNDLE_VERSION
+    ) -> LedgerProjection:
+        require_reducer_bundle(reducer_bundle_version)
         state = ReducerState()
         world_revision = 0
         deliberation_revision = 0
@@ -210,4 +221,5 @@ class WorldLedger:
             deliberation_revision=deliberation_revision,
             ledger_sequence=len(self._events),
             state=state,
+            reducer_bundle_version=reducer_bundle_version,
         )

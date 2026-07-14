@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import hashlib
+import json
 import sqlite3
 
 import pytest
@@ -104,6 +106,63 @@ def test_sqlite_rebuild_detects_tampered_event_envelope(tmp_path) -> None:
     with pytest.raises(LedgerIntegrityError):
         reopened.rebuild()
     reopened.close()
+
+
+def test_sqlite_rebuild_upcasts_verified_legacy_event_bytes(tmp_path) -> None:
+    path = tmp_path / "world-v2-legacy.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [event("event-legacy", "obs-legacy")],
+        commit_id="commit-legacy",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    expected = ledger.project()
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        current_json = connection.execute(
+            "SELECT event_json FROM world_v2_events WHERE event_id = 'event-legacy'"
+        ).fetchone()[0]
+        legacy = json.loads(current_json)
+        legacy["schema_version"] = "world-v2.0"
+        legacy_payload = json.dumps(
+            {"observation_ref": "obs-legacy"},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        legacy["payload_json"] = legacy_payload
+        legacy["payload_hash"] = hashlib.sha256(legacy_payload.encode()).hexdigest()
+        legacy_json = json.dumps(legacy, sort_keys=True, separators=(",", ":"))
+        connection.execute(
+            "UPDATE world_v2_events SET event_json = ?, event_hash = ? "
+            "WHERE event_id = 'event-legacy'",
+            (legacy_json, hashlib.sha256(legacy_json.encode()).hexdigest()),
+        )
+
+    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    assert reopened.rebuild() == expected
+    reopened.close()
+
+
+def test_sqlite_rebuild_selects_only_installed_replay_artifacts(tmp_path) -> None:
+    path = tmp_path / "world-v2-replay-target.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [event("event-replay-target", "obs-replay-target")],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+
+    assert ledger.rebuild(
+        target_schema_version="world-v2.1",
+        reducer_bundle_version="world-v2-reducers.1",
+    ) == ledger.project()
+    with pytest.raises(ValueError, match="not installed"):
+        ledger.rebuild(reducer_bundle_version="world-v1-reducers.9")
+    with pytest.raises(ValueError, match="target schema.*not installed"):
+        ledger.rebuild(target_schema_version="world-v3.0")
+    ledger.close()
 
 
 def test_sqlite_project_normalizes_malformed_head_as_integrity_error(tmp_path) -> None:

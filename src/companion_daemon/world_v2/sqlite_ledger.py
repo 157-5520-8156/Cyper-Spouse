@@ -2,14 +2,24 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 import hashlib
+import json
 from pathlib import Path
 import sqlite3
 from threading import RLock
 
 from .errors import ConcurrencyConflict, IdempotencyConflict, LedgerIntegrityError
 from .ledger import canonical_event_json, commit_request_hash, derived_commit_id
-from .reducers import ReducerState, RevisionClass, event_definition, make_projection, reduce_event
+from .reducers import (
+    REDUCER_BUNDLE_VERSION,
+    ReducerState,
+    RevisionClass,
+    event_definition,
+    make_projection,
+    reduce_event,
+    require_reducer_bundle,
+)
 from .schemas import CommitResult, LedgerProjection, WorldEvent
+from .upcasting import CURRENT_SCHEMA_VERSION, require_target_schema, upcast_event
 
 
 class SQLiteWorldLedger:
@@ -331,11 +341,26 @@ class SQLiteWorldLedger:
         except Exception as exc:
             raise LedgerIntegrityError("persisted world head is invalid") from exc
 
-    def rebuild(self) -> LedgerProjection:
+    def rebuild(
+        self,
+        *,
+        target_schema_version: str = CURRENT_SCHEMA_VERSION,
+        reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
+    ) -> LedgerProjection:
         with self._thread_lock:
-            return self._rebuild_locked()
+            return self._rebuild_locked(
+                target_schema_version=target_schema_version,
+                reducer_bundle_version=reducer_bundle_version,
+            )
 
-    def _rebuild_locked(self) -> LedgerProjection:
+    def _rebuild_locked(
+        self,
+        *,
+        target_schema_version: str = CURRENT_SCHEMA_VERSION,
+        reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
+    ) -> LedgerProjection:
+        require_reducer_bundle(reducer_bundle_version)
+        require_target_schema(target_schema_version)
         state = ReducerState()
         world_revision = 0
         deliberation_revision = 0
@@ -353,7 +378,12 @@ class SQLiteWorldLedger:
             if actual_hash != row["event_hash"]:
                 raise LedgerIntegrityError("event envelope hash mismatch")
             try:
-                event = WorldEvent.model_validate_json(event_json)
+                raw_event = json.loads(event_json)
+                if not isinstance(raw_event, dict):
+                    raise ValueError("event envelope must be an object")
+                event = upcast_event(
+                    raw_event, target_schema_version=target_schema_version
+                )
             except Exception as exc:
                 raise LedgerIntegrityError("persisted event is invalid") from exc
             ledger_sequence += 1
@@ -381,6 +411,7 @@ class SQLiteWorldLedger:
             deliberation_revision=deliberation_revision,
             ledger_sequence=ledger_sequence,
             state=state,
+            reducer_bundle_version=reducer_bundle_version,
         )
         if rebuilt != self.project():
             raise LedgerIntegrityError("rebuilt projection does not match persisted head")
