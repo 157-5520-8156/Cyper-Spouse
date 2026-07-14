@@ -8,6 +8,10 @@ import json
 
 from .experience_events import ExperienceCommittedPayload
 from .life_events import WorldOccurrenceSettledPayload
+from .proposal_audit_schemas import (
+    ModelResultRecordedPayload,
+    ProposalRecordedV2Payload,
+)
 from .appraisal_events import (
     AppraisalAcceptedPayload,
     AppraisalContradictedPayload,
@@ -22,6 +26,8 @@ from .typed_proposal_families import (
 
 def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revision: int) -> None:
     """Require every settled lived-world occurrence to schedule its appraisal."""
+
+    _validate_deliberation_audit_transaction(events)
 
     appraisal_triggers: dict[str, list[tuple[str, str, str | None]]] = {}
     experiences: list[ExperienceCommittedPayload] = []
@@ -223,6 +229,69 @@ def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revisi
                 "typed proposal mutation requires one adjacent revision-pinned "
                 "AcceptanceRecorded"
             )
+
+
+def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> None:
+    """Keep Phase-4A provider lineage and its optional Proposal indivisible."""
+
+    model_indexes = [
+        index for index, event in enumerate(events) if event.event_type == "ModelResultRecorded"
+    ]
+    v2_proposal_indexes = [
+        index
+        for index, event in enumerate(events)
+        if event.event_type == "ProposalRecorded"
+        and event.payload().get("audit_contract") == "proposal-envelope-audit.1"
+    ]
+    if not model_indexes:
+        if v2_proposal_indexes:
+            raise ValueError("ProposalRecorded v2 requires its complete model audit transaction")
+        return
+    if model_indexes[0] != 0:
+        raise ValueError("model audit transaction must start the commit")
+
+    first = ModelResultRecordedPayload.model_validate_json(events[0].payload_json)
+    expected_model_indexes = list(range(first.attempt_count))
+    if model_indexes != expected_model_indexes:
+        raise ValueError("model attempts must be complete and contiguous in one commit")
+    attempts = [
+        ModelResultRecordedPayload.model_validate_json(events[index].payload_json)
+        for index in expected_model_indexes
+    ]
+    for index, attempt in enumerate(attempts):
+        if (
+            attempt.attempt_index != index
+            or attempt.attempt_count != first.attempt_count
+            or attempt.deliberation_result_id != first.deliberation_result_id
+            or attempt.attempt_id != first.attempt_id
+            or attempt.capsule_id != first.capsule_id
+            or attempt.trigger_ref != first.trigger_ref
+            or attempt.evaluated_world_revision != first.evaluated_world_revision
+            or attempt.proposal_hash != first.proposal_hash
+        ):
+            raise ValueError("model attempts have mixed or out-of-order lineage")
+
+    if first.proposal_hash is None:
+        if len(events) != first.attempt_count or v2_proposal_indexes:
+            raise ValueError("failed recovery audit transaction cannot contain a Proposal")
+        return
+
+    proposal_index = first.attempt_count
+    if len(events) != proposal_index + 1 or v2_proposal_indexes != [proposal_index]:
+        raise ValueError("validated model audit transaction requires one adjacent Proposal")
+    proposal = ProposalRecordedV2Payload.model_validate_json(events[proposal_index].payload_json)
+    final = attempts[-1]
+    if (
+        proposal.model_result_ref != final.model_result_ref
+        or proposal.model_call_id != final.model_call_id
+        or proposal.deliberation_result_id != final.deliberation_result_id
+        or proposal.attempt_id != final.attempt_id
+        or proposal.capsule_id != final.capsule_id
+        or proposal.trigger_ref != final.trigger_ref
+        or proposal.evaluated_world_revision != final.evaluated_world_revision
+        or proposal.proposal_hash != final.proposal_hash
+    ):
+        raise ValueError("ProposalRecorded v2 does not bind the final model attempt")
 
 
 def appraisal_trigger_identity(occurrence_id: str, result_id: str) -> str:

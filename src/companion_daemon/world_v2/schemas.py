@@ -39,6 +39,7 @@ from .resource_authority_schemas import (
     V2ResourceTransitionProjection,
     validate_v2_resource_authority_state,
 )
+from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditProjection
 from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
 
 
@@ -3741,7 +3742,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.16"
+    reducer_bundle_version: str = "world-v2-reducers.17"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -3833,6 +3834,8 @@ class LedgerProjection(FrozenModel):
     fact_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
+    model_result_audits: tuple[ModelResultAuditProjection, ...] = ()
+    proposal_audits: tuple[ProposalAuditProjection, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
     outcome_proposals: tuple[OutcomeProposalProjection, ...] = ()
     semantic_hash: str

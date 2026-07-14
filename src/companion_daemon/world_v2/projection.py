@@ -14,6 +14,7 @@ from typing import Protocol
 from .affect_math import relative_baseline_saturation_bp
 
 from .ledger import LedgerPort
+from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditProjection
 from .schemas import (
     Action,
     AffectAggregateProjection,
@@ -587,6 +588,40 @@ class InternalAuthorityReader:
     def current_cursor(self, *, world_id: str) -> ProjectionCursor:
         projection = self._current(world_id=world_id)
         return self._cursor(projection)
+
+    def model_result_audit_by_ref(
+        self,
+        *,
+        world_id: str,
+        cursor: ProjectionCursor,
+        model_result_ref: str,
+    ) -> ModelResultAuditProjection | None:
+        if not model_result_ref:
+            raise ValueError("model_result_ref must not be empty")
+        projection = self._at(world_id=world_id, cursor=cursor)
+        return next(
+            (
+                audit
+                for audit in projection.model_result_audits
+                if audit.model_result_ref == model_result_ref
+            ),
+            None,
+        )
+
+    def proposal_audit_by_id(
+        self,
+        *,
+        world_id: str,
+        cursor: ProjectionCursor,
+        proposal_id: str,
+    ) -> ProposalAuditProjection | None:
+        if not proposal_id:
+            raise ValueError("proposal_id must not be empty")
+        projection = self._at(world_id=world_id, cursor=cursor)
+        return next(
+            (audit for audit in projection.proposal_audits if audit.proposal_id == proposal_id),
+            None,
+        )
 
     def action_by_id(
         self,

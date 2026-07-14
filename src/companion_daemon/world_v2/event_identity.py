@@ -122,6 +122,17 @@ def _life_identity_components(
     if event_type == "OutcomeObservationRecorded":
         return world_id, _nested(payload, "observation", "observation_id")
     if (
+        event_type == "ModelResultRecorded"
+        and payload.get("model_call_id") is not None
+        and payload.get("model_result_ref") is not None
+    ):
+        return world_id, payload.get("model_call_id"), payload.get("model_result_ref")
+    if (
+        event_type == "ProposalRecorded"
+        and payload.get("audit_contract") == "proposal-envelope-audit.1"
+    ):
+        return world_id, payload.get("trigger_ref"), payload.get("proposal_id")
+    if (
         event_type == "AcceptanceRecorded"
         and payload.get("proposal_id") is not None
         and payload.get("evaluated_world_revision") is not None

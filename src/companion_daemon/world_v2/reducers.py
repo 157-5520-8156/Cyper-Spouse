@@ -148,6 +148,14 @@ from .memory_events import (
     MemoryEvidenceForgetAuthority,
 )
 from .memory_reducers import MEMORY_POLICY_REFS, reduce_memory_candidate
+from .proposal_audit_schemas import (
+    ModelResultAuditProjection,
+    ModelResultRecordedPayload,
+    ProposalAuditProjection,
+    ProposalRecordedV2Payload,
+    RecordedModelResultAudit,
+    validate_recorded_attempt_lineage,
+)
 from .relationship_events import (
     RELATIONSHIP_PAYLOAD_MODELS,
     BoundaryChangedPayload,
@@ -245,7 +253,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.16"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.17"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -278,6 +286,7 @@ def _experience_semantic_dump(
             "world-v2-reducers.13",
             "world-v2-reducers.14",
             "world-v2-reducers.15",
+            "world-v2-reducers.16",
             REDUCER_BUNDLE_VERSION,
         }
         and isinstance(experience, LegacyExperienceProjection)
@@ -293,7 +302,7 @@ def _actor_authority_transition_semantic_dump(
     reducer_bundle_version: str,
 ) -> dict[str, Any]:
     dumped = transition.model_dump(mode="json")
-    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+    if reducer_bundle_version not in {"world-v2-reducers.16", REDUCER_BUNDLE_VERSION}:
         dumped.pop("accepted_event_ref", None)
         dumped.pop("accepted_world_revision", None)
         dumped.pop("accepted_payload_hash", None)
@@ -394,6 +403,8 @@ class ReducerState(FrozenModel):
     character_core_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
+    model_result_audits: tuple[ModelResultAuditProjection, ...] = ()
+    proposal_audits: tuple[ProposalAuditProjection, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
 
     @model_validator(mode="after")
@@ -973,6 +984,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.13",
                         "world-v2-reducers.14",
                         "world-v2-reducers.15",
+                        "world-v2-reducers.16",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else item.model_dump(
@@ -1011,7 +1023,8 @@ class ReducerState(FrozenModel):
             "plans": tuple(
                 (
                     plan.model_dump(mode="json")
-                    if reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                    if reducer_bundle_version
+                    in {"world-v2-reducers.16", REDUCER_BUNDLE_VERSION}
                     else plan.model_dump(
                         mode="json", exclude={"owner_actor_ref", "authority_origin"}
                     )
@@ -1021,7 +1034,8 @@ class ReducerState(FrozenModel):
             "world_occurrences": tuple(
                 (
                     occurrence.model_dump(mode="json")
-                    if reducer_bundle_version == "world-v2-reducers.16"
+                    if reducer_bundle_version
+                    in {"world-v2-reducers.16", REDUCER_BUNDLE_VERSION}
                     else occurrence.model_dump(
                         mode="json", exclude={"settled_outcome_ref"}
                     )
@@ -1077,6 +1091,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.13",
             "world-v2-reducers.14",
             "world-v2-reducers.15",
+            "world-v2-reducers.16",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["threads"] = tuple(item.model_dump(mode="json") for item in self.threads)
@@ -1089,6 +1104,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.13",
             "world-v2-reducers.14",
             "world-v2-reducers.15",
+            "world-v2-reducers.16",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["commitments"] = tuple(
@@ -1102,6 +1118,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.13",
             "world-v2-reducers.14",
             "world-v2-reducers.15",
+            "world-v2-reducers.16",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["facts"] = tuple(item.model_dump(mode="json") for item in self.facts)
@@ -1112,6 +1129,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.13",
             "world-v2-reducers.14",
             "world-v2-reducers.15",
+            "world-v2-reducers.16",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["experience_transitions"] = tuple(
@@ -1120,6 +1138,7 @@ class ReducerState(FrozenModel):
         if reducer_bundle_version in {
             "world-v2-reducers.14",
             "world-v2-reducers.15",
+            "world-v2-reducers.16",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["memory_candidates"] = tuple(
@@ -1131,6 +1150,7 @@ class ReducerState(FrozenModel):
             )
         if reducer_bundle_version in {
             "world-v2-reducers.15",
+            "world-v2-reducers.16",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["character_core"] = (
@@ -1141,7 +1161,7 @@ class ReducerState(FrozenModel):
             payload["character_core_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.character_core_transitions
             )
-        if reducer_bundle_version == "world-v2-reducers.16":
+        if reducer_bundle_version in {"world-v2-reducers.16", REDUCER_BUNDLE_VERSION}:
             payload["clock_transition_history"] = tuple(
                 item.model_dump(mode="json")
                 for item in self.clock_transition_history
@@ -1665,8 +1685,99 @@ def _authorization_changed(state: ReducerState, event: WorldEvent) -> ReducerSta
     )
 
 
+def _model_result_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = ModelResultRecordedPayload.model_validate(event.payload())
+    if payload.evaluated_world_revision > len(state.committed_world_event_refs):
+        raise ValueError("model result cannot evaluate a future world revision")
+    if any(
+        value.model_result_ref == payload.model_result_ref
+        or value.model_call_id == payload.model_call_id
+        for value in state.model_result_audits
+    ):
+        raise ValueError("model result identity is already registered")
+    prior = tuple(
+        value
+        for value in state.model_result_audits
+        if value.deliberation_result_id == payload.deliberation_result_id
+    )
+    if len(prior) != payload.attempt_index:
+        raise ValueError("model attempt audit is not contiguous")
+    if prior and any(
+        value.attempt_id != payload.attempt_id
+        or value.capsule_id != payload.capsule_id
+        or value.trigger_ref != payload.trigger_ref
+        or value.evaluated_world_revision != payload.evaluated_world_revision
+        or value.attempt_count != payload.attempt_count
+        or value.proposal_hash != payload.proposal_hash
+        for value in prior
+    ):
+        raise ValueError("model attempt audit lineage changed")
+    if payload.attempt_index == payload.attempt_count - 1:
+        audits = tuple(
+            RecordedModelResultAudit.model_validate_json(value.audit_json)
+            for value in (*prior, payload)
+        )
+        validate_recorded_attempt_lineage(
+            audits,
+            capsule_id=payload.capsule_id,
+            proposal_hash=payload.proposal_hash,
+            deliberation_result_id=payload.deliberation_result_id,
+        )
+    projection = ModelResultAuditProjection(
+        **payload.model_dump(mode="json"),
+        event_ref=event.event_id,
+        event_payload_hash=event.payload_hash,
+    )
+    return state.model_copy(
+        update={"model_result_audits": (*state.model_result_audits, projection)}
+    )
+
+
 def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     raw = event.payload()
+    if raw.get("audit_contract") == "proposal-envelope-audit.1":
+        payload = ProposalRecordedV2Payload.model_validate(raw)
+        if payload.proposal_id in state.proposal_ids:
+            raise ValueError("proposal identity is already registered")
+        matching = next(
+            (
+                value
+                for value in state.model_result_audits
+                if value.model_result_ref == payload.model_result_ref
+            ),
+            None,
+        )
+        if matching is None or (
+            matching.model_call_id != payload.model_call_id
+            or matching.attempt_id != payload.attempt_id
+            or matching.capsule_id != payload.capsule_id
+            or matching.trigger_ref != payload.trigger_ref
+            or matching.evaluated_world_revision != payload.evaluated_world_revision
+            or matching.deliberation_result_id != payload.deliberation_result_id
+            or matching.attempt_index != matching.attempt_count - 1
+            or matching.proposal_hash != payload.proposal_hash
+        ):
+            raise ValueError("proposal does not bind the final recorded model result")
+        if payload.evaluated_world_revision > len(state.committed_world_event_refs):
+            raise ValueError("proposal cannot evaluate a future world revision")
+        projection = ProposalAuditProjection(
+            **payload.model_dump(mode="json"),
+            event_ref=event.event_id,
+            event_payload_hash=event.payload_hash,
+        )
+        return state.model_copy(
+            update={
+                "proposal_ids": (*state.proposal_ids, payload.proposal_id),
+                "proposal_revisions": (
+                    *state.proposal_revisions,
+                    ProposalRevisionRef(
+                        proposal_id=payload.proposal_id,
+                        evaluated_world_revision=payload.evaluated_world_revision,
+                    ),
+                ),
+                "proposal_audits": (*state.proposal_audits, projection),
+            }
+        )
     proposal_id = raw.get("proposal_id")
     if not isinstance(proposal_id, str) or not proposal_id:
         raise ValueError("ProposalRecorded requires proposal_id")
@@ -5004,6 +5115,9 @@ _EVENTS = {
             RevisionClass.WORLD,
             partial(_action_transitioned, target="expired"),
         ),
+        EventDefinition(
+            "ModelResultRecorded", RevisionClass.DELIBERATION, _model_result_recorded
+        ),
         EventDefinition("ProposalRecorded", RevisionClass.DELIBERATION, _proposal_recorded),
         EventDefinition("AcceptanceRecorded", RevisionClass.WORLD, _acceptance_recorded),
         EventDefinition("LegacyAcceptanceAuditRecorded", RevisionClass.WORLD, _audit_only),
@@ -5364,6 +5478,8 @@ def make_projection(
         fact_proposal_ids=state.fact_proposal_ids,
         proposal_ids=state.proposal_ids,
         proposal_revisions=state.proposal_revisions,
+        model_result_audits=state.model_result_audits,
+        proposal_audits=state.proposal_audits,
         acceptance_decisions=state.acceptance_decisions,
         outcome_proposals=state.outcome_proposals,
         semantic_hash=semantic_hash(

@@ -39,6 +39,7 @@ from .experience_events import (
 )
 from .life_events import LIFE_PAYLOAD_MODELS
 from .memory_events import MEMORY_CANDIDATE_PAYLOAD_MODELS
+from .proposal_audit_schemas import ModelResultRecordedPayload, ProposalRecordedV2Payload
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .thread_events import THREAD_MECHANICAL_PAYLOAD_MODELS, THREAD_PAYLOAD_MODELS
 from .schemas import (
@@ -71,7 +72,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.16"
+    reducer_bundle: str = "world-v2-reducers.17"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -104,7 +105,13 @@ class EventContract:
         return schema
 
     def validate_payload(self, payload: Mapping[str, object]) -> None:
-        self.payload_model.model_validate_json(
+        model = (
+            ProposalRecordedV2Payload
+            if self.event_type == "ProposalRecorded"
+            and payload.get("audit_contract") == "proposal-envelope-audit.1"
+            else self.payload_model
+        )
+        model.model_validate_json(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         )
 
@@ -193,6 +200,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "ProposalRecorded": _payload_model(
             "ProposalRecordedPayload", {"proposal_id": _ID}, allow_audit_extensions=True
         ),
+        "ModelResultRecorded": ModelResultRecordedPayload,
         "AcceptanceRecorded": _payload_model(
             "AcceptanceRecordedPayload",
             {
@@ -287,6 +295,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "TriggerProcessReclaimed": "world_id+trigger_id+attempt_id+reclaimed",
         "TriggerProcessCompleted": "world_id+trigger_id+attempt_id+completed",
         "ProposalRecorded": "world_id+trigger_id+proposal_id",
+        "ModelResultRecorded": "world_id+model_call_id+model_result_ref",
         "AcceptanceRecorded": "world_id+proposal_id+evaluated_world_revision",
         "LegacyAcceptanceAuditRecorded": "migration-only:original-event-id",
         "AffectEpisodeOpened": "world_id+episode_id+transition_id",
@@ -558,7 +567,10 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "world_runtime",
                 "deliberation",
                 "TriggerProcessReclaimedPayload",
-                allowed_predecessors=("TriggerProcessClaimed", "TriggerProcessReclaimed"),
+                allowed_predecessors=(
+                    "TriggerProcessClaimed",
+                    "TriggerProcessReclaimed",
+                ),
                 evidence_types=("expired_claim_lease",),
                 successors=("ProposalRecorded", "TriggerProcessCompleted"),
             ),
@@ -575,11 +587,28 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 evidence_types=("runtime_outcome",),
             ),
             _contract(
+                "ModelResultRecorded",
+                "deliberation",
+                "deliberation",
+                "ModelResultRecordedPayload",
+                allowed_predecessors=(
+                    "TriggerProcessClaimed",
+                    "TriggerProcessReclaimed",
+                    "ModelResultRecorded",
+                ),
+                evidence_types=("model_result", "context_capsule"),
+                successors=("ModelResultRecorded", "ProposalRecorded"),
+            ),
+            _contract(
                 "ProposalRecorded",
                 "deliberation",
                 "deliberation",
                 "ProposalRecordedPayload",
-                allowed_predecessors=("TriggerProcessClaimed", "TriggerProcessReclaimed"),
+                allowed_predecessors=(
+                    "TriggerProcessClaimed",
+                    "TriggerProcessReclaimed",
+                    "ModelResultRecorded",
+                ),
                 evidence_types=("model_result", "context_capsule"),
                 successors=("AcceptanceRecorded",),
             ),

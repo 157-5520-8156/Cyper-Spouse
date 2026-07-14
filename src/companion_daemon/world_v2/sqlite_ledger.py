@@ -52,6 +52,7 @@ _V16_ONLY_STATE_KEYS = frozenset(
         "attention_proposal_ids",
     }
 )
+_V17_ONLY_STATE_KEYS = frozenset({"model_result_audits", "proposal_audits"})
 
 
 def _upcast_legacy_appraisal_trigger(
@@ -350,6 +351,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.13",
                 "world-v2-reducers.14",
                 "world-v2-reducers.15",
+                "world-v2-reducers.16",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -458,8 +460,19 @@ class SQLiteWorldLedger:
             if not isinstance(raw_state, dict):
                 raise ValueError("legacy state is not an object")
             raw_state = dict(raw_state)
+            injected_v17_keys = tuple(
+                sorted(
+                    key
+                    for key in _V17_ONLY_STATE_KEYS.intersection(raw_state)
+                    if raw_state.get(key) not in (None, [], {})
+                )
+            )
+            if injected_v17_keys:
+                raise ValueError(
+                    f"legacy head cannot claim v17 audit fields {injected_v17_keys!r}"
+                )
             injected_v16_keys = tuple(sorted(_V16_ONLY_STATE_KEYS.intersection(raw_state)))
-            if injected_v16_keys:
+            if injected_v16_keys and reducer_bundle_version != "world-v2-reducers.16":
                 raise ValueError(
                     f"legacy head cannot claim v16 authority fields {injected_v16_keys!r}"
                 )
@@ -469,26 +482,38 @@ class SQLiteWorldLedger:
                 "accepted_world_revision",
                 "accepted_payload_hash",
             }
-            if isinstance(actor_transitions, list) and any(
+            if (
+                reducer_bundle_version != "world-v2-reducers.16"
+                and isinstance(actor_transitions, list)
+                and any(
                 isinstance(transition, dict)
                 and actor_binding_keys.intersection(transition)
                 for transition in actor_transitions
+                )
             ):
                 raise ValueError(
                     "legacy ActorAuthority transition cannot claim a v16 event binding"
                 )
             plans = raw_state.get("plans", [])
             plan_authority_keys = {"owner_actor_ref", "authority_origin"}
-            if isinstance(plans, list) and any(
-                isinstance(plan, dict) and plan_authority_keys.intersection(plan)
-                for plan in plans
+            if (
+                reducer_bundle_version != "world-v2-reducers.16"
+                and isinstance(plans, list)
+                and any(
+                    isinstance(plan, dict) and plan_authority_keys.intersection(plan)
+                    for plan in plans
+                )
             ):
                 raise ValueError("legacy Plan cannot claim v16 owner authority")
             occurrences = raw_state.get("world_occurrences", [])
-            if isinstance(occurrences, list) and any(
-                isinstance(occurrence, dict)
-                and "settled_outcome_ref" in occurrence
-                for occurrence in occurrences
+            if (
+                reducer_bundle_version != "world-v2-reducers.16"
+                and isinstance(occurrences, list)
+                and any(
+                    isinstance(occurrence, dict)
+                    and "settled_outcome_ref" in occurrence
+                    for occurrence in occurrences
+                )
             ):
                 raise ValueError(
                     "legacy world occurrence cannot claim a v16 settled outcome"
@@ -618,6 +643,7 @@ class SQLiteWorldLedger:
             "world-v2-reducers.13",
             "world-v2-reducers.14",
             "world-v2-reducers.15",
+            "world-v2-reducers.16",
             REDUCER_BUNDLE_VERSION,
         }:
             payload.pop("commitments", None)
@@ -720,6 +746,8 @@ class SQLiteWorldLedger:
             fact_proposal_ids=projection.fact_proposal_ids,
             proposal_ids=projection.proposal_ids,
             proposal_revisions=projection.proposal_revisions,
+            model_result_audits=projection.model_result_audits,
+            proposal_audits=projection.proposal_audits,
             acceptance_decisions=projection.acceptance_decisions,
             outcome_proposals=projection.outcome_proposals,
         )
