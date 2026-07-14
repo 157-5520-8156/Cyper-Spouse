@@ -76,6 +76,17 @@ def _life_identity_components(
     if event_type == "ProposalRecorded" and payload.get("proposal_kind") == "appraisal_transition":
         return world_id, payload.get("proposal_id"), payload.get("change_id")
     if (
+        event_type == "ProposalRecorded"
+        and payload.get("proposal_kind") == "relationship_transition"
+        and payload.get("proposal_encoding") == "typed-authority-v1"
+    ):
+        return (
+            world_id,
+            payload.get("proposal_id"),
+            payload.get("change_id"),
+            payload.get("authority_contract_ref"),
+        )
+    if (
         event_type == "AcceptanceRecorded"
         and payload.get("proposal_id") is not None
         and payload.get("evaluated_world_revision") is not None
@@ -125,6 +136,20 @@ def _life_identity_components(
         return (
             world_id,
             payload.get("dimension"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
+    if event_type == "RelationshipSignalAccepted":
+        return world_id, _nested(payload, "signal", "semantic_fingerprint")
+    if event_type == "RelationshipSlowVariableAdjusted":
+        return (
+            payload.get("relationship_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("adjustment_id"),
+        )
+    if event_type == "BoundaryChanged":
+        return (
+            _nested(payload, "boundary", "boundary_id"),
             payload.get("expected_entity_revision"),
             payload.get("transition_id"),
         )

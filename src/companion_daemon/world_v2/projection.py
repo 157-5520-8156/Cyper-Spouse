@@ -54,6 +54,7 @@ class ProjectionLimits:
     experiences: int = 128
     appraisals: int = 128
     affect_episodes: int = 128
+    relationship_boundaries: int = 128
 
     def __post_init__(self) -> None:
         if any(
@@ -71,6 +72,7 @@ class ProjectionLimits:
                 self.experiences,
                 self.appraisals,
                 self.affect_episodes,
+                self.relationship_boundaries,
             )
         ):
             raise ValueError("projection limits must be positive")
@@ -334,6 +336,21 @@ class InternalProjectionReader:
             item for item in projection.affect_episodes if item.status == "active"
         )
         affect_episodes = active_affect_episodes[-self._limits.affect_episodes :]
+        relationship_state = (
+            projection.relationship_states[0] if projection.relationship_states else None
+        )
+        active_relationship_boundaries = tuple(
+            item
+            for item in projection.boundaries
+            if item.status == "active"
+            and (
+                relationship_state is None
+                or item.subject_ref == relationship_state.subject_ref
+            )
+        )
+        relationship_boundaries = active_relationship_boundaries[
+            -self._limits.relationship_boundaries :
+        ]
         baseline_by_dimension = {
             item.dimension: item.baseline_bp for item in projection.affect_baselines
         }
@@ -430,6 +447,18 @@ class InternalProjectionReader:
                 returned=len(affect_episodes),
                 ordering_policy="active-first-then-ledger-recency-v1",
             ),
+            self._window(
+                "relationship_state",
+                total=len(projection.relationship_states),
+                returned=1 if relationship_state is not None else 0,
+                ordering_policy="ledger-recency-v1",
+            ),
+            self._window(
+                "relationship_boundaries",
+                total=len(active_relationship_boundaries),
+                returned=len(relationship_boundaries),
+                ordering_policy="active-ledger-recency-v1",
+            ),
             *(self._unavailable_window(name) for name in self._UNAVAILABLE_SLICES),
         )
         updated_at = projection.logical_time or datetime(1970, 1, 1, tzinfo=UTC)
@@ -465,6 +494,8 @@ class InternalProjectionReader:
             affect_episodes=affect_episodes,
             affect_baselines=projection.affect_baselines,
             affect_aggregates=affect_aggregates,
+            relationship_state=relationship_state,
+            relationship_boundaries=relationship_boundaries,
             reducer_versions=(
                 VersionRef(name="schema", version=projection.schema_version),
                 VersionRef(
@@ -500,7 +531,6 @@ class InternalProjectionReader:
         "current_situation",
         "commitments",
         "private_impressions",
-        "relationship_state",
         "conversation_threads",
         "capabilities",
         "consents",

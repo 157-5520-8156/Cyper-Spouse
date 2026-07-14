@@ -20,7 +20,7 @@ def test_catalog_covers_every_reducer_event_with_stable_revision_metadata() -> N
         assert contract.producer
         assert contract.payload_contract
         assert contract.schema_version == "world-v2.1"
-        assert contract.reducer_bundle == "world-v2-reducers.6"
+        assert contract.reducer_bundle == "world-v2-reducers.7"
         assert contract.upcaster == "world-v2-upcasters.1"
         assert contract.idempotency_identity
         schema = contract.json_schema()
@@ -79,6 +79,30 @@ def test_affect_baseline_catalog_matches_installed_evidence_resolvers() -> None:
         "operator_observation",
         "clock_observation",
     )
+
+
+def test_relationship_catalog_matches_resolvers_and_never_implies_acceptance_bypass() -> None:
+    expected_evidence = (
+        "observed_message",
+        "committed_world_event",
+        "committed_experience",
+        "settled_world_event",
+        "settled_external_result",
+        "active_plan",
+        "operator_observation",
+    )
+    signal = event_contract("RelationshipSignalAccepted")
+    adjustment = event_contract("RelationshipSlowVariableAdjusted")
+    boundary = event_contract("BoundaryChanged")
+
+    assert signal.evidence_types == expected_evidence
+    assert adjustment.evidence_types == expected_evidence
+    assert boundary.evidence_types == expected_evidence
+    assert "clock_observation" not in expected_evidence
+    assert "committed_fact" not in expected_evidence
+    assert signal.successors == ()
+    assert adjustment.allowed_predecessors == ("AcceptanceRecorded",)
+    assert boundary.allowed_predecessors == ("AcceptanceRecorded",)
 
 
 def test_machine_payload_contract_rejects_missing_required_fields() -> None:

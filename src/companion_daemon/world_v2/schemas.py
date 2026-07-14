@@ -1305,17 +1305,233 @@ class RelationshipVariablesProjection(FrozenModel):
     repair_confidence_bp: int = Field(default=0, ge=0, le=10_000)
 
 
-class RelationshipStateProjection(FrozenModel):
+class RelationshipVariableDeltas(FrozenModel):
+    trust_bp: int = Field(default=0, ge=-10_000, le=10_000)
+    closeness_bp: int = Field(default=0, ge=-10_000, le=10_000)
+    respect_bp: int = Field(default=0, ge=-10_000, le=10_000)
+    reliability_bp: int = Field(default=0, ge=-10_000, le=10_000)
+    mutuality_bp: int = Field(default=0, ge=-10_000, le=10_000)
+    repair_confidence_bp: int = Field(default=0, ge=-10_000, le=10_000)
+
+
+RelationshipStage = Literal[
+    "stranger", "acquaintance", "friend", "close_friend", "ambiguous", "lover"
+]
+
+
+class RelationshipHysteresisProjection(FrozenModel):
+    candidate_stage: Literal["stranger", "acquaintance", "friend", "close_friend"] | None = None
+    direction: Literal["promote", "demote"] | None = None
+    candidate_since: datetime | None = None
+    confirming_adjustment_count: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def candidate_state_is_complete(self) -> RelationshipHysteresisProjection:
+        values = (self.candidate_stage, self.direction, self.candidate_since)
+        if any(item is None for item in values) != all(item is None for item in values):
+            raise ValueError("relationship hysteresis candidate must be complete")
+        if self.candidate_stage is None and self.confirming_adjustment_count != 0:
+            raise ValueError("empty relationship hysteresis cannot have confirmations")
+        if self.candidate_stage is not None and self.confirming_adjustment_count < 1:
+            raise ValueError("relationship hysteresis candidate requires confirmation")
+        if self.candidate_since is not None and (
+            self.candidate_since.tzinfo is None
+            or self.candidate_since.utcoffset() is None
+        ):
+            raise ValueError("relationship hysteresis time must be timezone-aware")
+        return self
+
+
+class RelationshipSignalOrigin(FrozenModel):
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+
+
+def relationship_signal_fingerprint(
+    *,
+    subject_ref: str,
+    signal_code: str,
+    evidence_refs: tuple[EvidenceRef, ...],
+    policy_refs: tuple[str, ...],
+) -> str:
+    material = {
+        "subject_ref": subject_ref,
+        "signal_code": signal_code,
+        "evidence_refs": sorted(
+            (
+                {
+                    "evidence_type": item.evidence_type,
+                    "ref_id": item.ref_id,
+                    "source_world_revision": item.source_world_revision,
+                    "immutable_hash": item.immutable_hash,
+                }
+                for item in evidence_refs
+            ),
+            key=lambda item: (str(item.get("ref_id")), json.dumps(item, sort_keys=True)),
+        ),
+        "policy_refs": sorted(policy_refs),
+    }
+    encoded = json.dumps(
+        material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+class RelationshipSignalProjection(FrozenModel):
+    signal_id: str = Field(min_length=1)
+    semantic_fingerprint: str = Field(min_length=64, max_length=64)
+    entity_revision: int = Field(ge=1)
     subject_ref: str = Field(min_length=1)
-    stage: Literal["stranger", "acquaintance", "friend", "close_friend", "ambiguous", "lover"] = (
-        "stranger"
-    )
+    signal_code: str = Field(min_length=1)
+    confidence_bp: int = Field(ge=1, le=10_000)
+    persistence: Literal["session", "durable"]
+    contradiction_group_ref: str | None = None
+    rationale_code: str = Field(min_length=1)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    origin: RelationshipSignalOrigin
+    accepted_at: datetime
+
+    @model_validator(mode="after")
+    def fingerprint_matches_semantic_evidence(self) -> RelationshipSignalProjection:
+        expected = relationship_signal_fingerprint(
+            subject_ref=self.subject_ref,
+            signal_code=self.signal_code,
+            evidence_refs=self.evidence_refs,
+            policy_refs=self.origin.policy_refs,
+        )
+        if self.semantic_fingerprint != expected:
+            raise ValueError("relationship signal semantic fingerprint does not match authority")
+        return self
+
+
+class RelationshipProposedMutation(FrozenModel):
+    event_type: Literal[
+        "RelationshipSignalAccepted",
+        "RelationshipSlowVariableAdjusted",
+        "BoundaryChanged",
+    ]
+    payload_json: str = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def payload_is_canonical(self) -> RelationshipProposedMutation:
+        decoded = json.loads(self.payload_json)
+        if not isinstance(decoded, dict):
+            raise ValueError("relationship mutation payload must be an object")
+        canonical = json.dumps(decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if canonical != self.payload_json:
+            raise ValueError("relationship mutation payload must use canonical JSON")
+        return self
+
+
+class RelationshipProposalProjection(FrozenModel):
+    proposal_id: str = Field(min_length=1)
+    proposal_kind: Literal["relationship_transition"] = "relationship_transition"
+    proposal_encoding: Literal["typed-authority-v1"]
+    authority_contract_ref: Literal["proposal-contract:relationship.1"]
+    transition_kind: Literal[
+        "signal",
+        "adjust",
+        "compensate",
+        "boundary_open",
+        "boundary_revise",
+        "boundary_close",
+    ]
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    expected_entity_revision: int = Field(ge=0)
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    proposed_mutation: RelationshipProposedMutation
+
+    @model_validator(mode="after")
+    def transition_matches_event(self) -> RelationshipProposalProjection:
+        expected = {
+            "signal": "RelationshipSignalAccepted",
+            "adjust": "RelationshipSlowVariableAdjusted",
+            "compensate": "RelationshipSlowVariableAdjusted",
+            "boundary_open": "BoundaryChanged",
+            "boundary_revise": "BoundaryChanged",
+            "boundary_close": "BoundaryChanged",
+        }[self.transition_kind]
+        if self.proposed_mutation.event_type != expected:
+            raise ValueError("relationship proposal transition does not match event")
+        return self
+
+
+class RelationshipAdjustmentProjection(FrozenModel):
+    adjustment_id: str = Field(min_length=1)
+    subject_ref: str = Field(min_length=1)
+    relationship_revision: int = Field(ge=1)
+    operation: Literal["adjust", "compensate"]
+    signal_refs: tuple[str, ...] = Field(min_length=1)
+    proposed_deltas: RelationshipVariableDeltas
+    accepted_deltas: RelationshipVariableDeltas
+    variables_before: RelationshipVariablesProjection
+    variables_after: RelationshipVariablesProjection
+    stage_before: RelationshipStage
+    stage_after: RelationshipStage
+    hysteresis_before: RelationshipHysteresisProjection
+    hysteresis_after: RelationshipHysteresisProjection
+    commitment_refs: tuple[str, ...] = ()
+    confidence_bp: int = Field(ge=1, le=10_000)
+    persistence: Literal["session", "durable"]
+    contradiction_group_ref: str | None = None
+    rationale_code: str = Field(min_length=1)
+    policy_version: str = Field(min_length=1)
+    policy_digest: str = Field(min_length=64, max_length=64)
+    adjusted_at: datetime
+    compensates_adjustment_id: str | None = None
+
+
+class RelationshipBoundaryOrigin(FrozenModel):
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+
+
+class BoundaryProjection(FrozenModel):
+    boundary_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    subject_ref: str = Field(min_length=1)
+    scope_ref: str = Field(min_length=1)
+    strength_bp: int = Field(ge=0, le=10_000)
+    status: Literal["active", "closed"]
+    expires_at: datetime | None = None
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    origin: RelationshipBoundaryOrigin
+    policy_version: str = Field(min_length=1)
+    opened_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def boundary_time_is_ordered(self) -> BoundaryProjection:
+        if self.updated_at < self.opened_at:
+            raise ValueError("boundary update precedes opening")
+        if self.expires_at is not None and self.expires_at <= self.opened_at:
+            raise ValueError("boundary expiry must follow opening")
+        return self
+
+
+class RelationshipStateProjection(FrozenModel):
+    relationship_id: str = Field(min_length=1)
+    subject_ref: str = Field(min_length=1)
+    entity_revision: int = Field(default=1, ge=1)
+    stage: RelationshipStage = "stranger"
     variables: RelationshipVariablesProjection = Field(
         default_factory=RelationshipVariablesProjection
     )
     temperature: str = "ordinary"
-    boundary_refs: tuple[str, ...] = ()
-    policy_revision: int = Field(default=0, ge=0)
+    policy_version: str = "relationship-policy.1"
+    policy_digest: str = Field(min_length=64, max_length=64)
+    hysteresis: RelationshipHysteresisProjection = Field(
+        default_factory=RelationshipHysteresisProjection
+    )
+    commitment_refs: tuple[str, ...] = ()
     last_adjusted_at: datetime | None = None
 
 
@@ -1430,6 +1646,7 @@ class InternalWorldSnapshot(FrozenModel):
     affect_aggregates: tuple[AffectAggregateProjection, ...] = ()
     private_impressions: tuple[PrivateImpressionProjection, ...] = ()
     relationship_state: RelationshipStateProjection | None = None
+    relationship_boundaries: tuple[BoundaryProjection, ...] = ()
     conversation_threads: tuple[ConversationThreadProjection, ...] = ()
     capabilities: tuple[CapabilityStateProjection, ...] = ()
     consents: tuple[ConsentStateProjection, ...] = ()
@@ -1512,7 +1729,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.6"
+    reducer_bundle_version: str = "world-v2-reducers.7"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -1544,6 +1761,12 @@ class LedgerProjection(FrozenModel):
     appraisal_proposal_ids: tuple[str, ...] = ()
     affect_proposals: tuple[AffectProposalProjection, ...] = ()
     affect_proposal_ids: tuple[str, ...] = ()
+    relationship_signals: tuple[RelationshipSignalProjection, ...] = ()
+    relationship_adjustments: tuple[RelationshipAdjustmentProjection, ...] = ()
+    relationship_states: tuple[RelationshipStateProjection, ...] = ()
+    boundaries: tuple[BoundaryProjection, ...] = ()
+    relationship_proposals: tuple[RelationshipProposalProjection, ...] = ()
+    relationship_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()

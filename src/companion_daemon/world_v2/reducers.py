@@ -69,6 +69,24 @@ from .life_reducers import (
     terminate_occurrence,
     transition_activity,
 )
+from .relationship_events import (
+    RELATIONSHIP_PAYLOAD_MODELS,
+    BoundaryChangedPayload,
+    RelationshipAuthorizedMutationPayload,
+    RelationshipSignalAcceptedPayload,
+    RelationshipSlowVariableAdjustedPayload,
+)
+from .relationship_reducers import (
+    accept_relationship_signal,
+    adjust_relationship_slow_variables,
+    change_boundary,
+)
+from .typed_proposals import (
+    ProposalAuthorityBinding,
+    RecordSelector,
+    TypedProposalRegistration,
+    TypedProposalRegistry,
+)
 from .schemas import (
     Action,
     ActionDispatchClaim,
@@ -77,6 +95,7 @@ from .schemas import (
     AffectBaselineProjection,
     AffectEpisodeProjection,
     AffectProposalProjection,
+    BoundaryProjection,
     AppraisalProjection,
     AppraisalMeaningRef,
     AppraisalProposalProjection,
@@ -100,13 +119,17 @@ from .schemas import (
     OperatorObservationRef,
     PlanStateProjection,
     ProposalRevisionRef,
+    RelationshipAdjustmentProjection,
+    RelationshipProposalProjection,
+    RelationshipSignalProjection,
+    RelationshipStateProjection,
     TriggerProcess,
     WorldOccurrenceProjection,
     WorldEvent,
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.6"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.7"
 INSTALLED_APPRAISAL_POLICY_REFS = ("policy:appraisal-v1",)
 INSTALLED_APPRAISAL_MATRIX_VERSION = "appraisal-matrix.1"
 INSTALLED_SOURCE_CLUSTERING_VERSION = "source-clustering.1"
@@ -114,6 +137,9 @@ INSTALLED_AFFECT_POLICY_REFS = ("policy:affect-v1",)
 INSTALLED_AFFECT_BASELINE_POLICY_REFS = ("policy:affect-baseline-v1",)
 INSTALLED_AFFECT_MATRIX_VERSION = "affect-matrix.1"
 INSTALLED_AFFECT_MERGE_WINDOW_SECONDS = 900
+INSTALLED_RELATIONSHIP_SIGNAL_POLICY_REFS = ("policy:relationship-signal-v1",)
+INSTALLED_RELATIONSHIP_POLICY_REFS = ("policy:relationship-v1",)
+INSTALLED_BOUNDARY_POLICY_REFS = ("policy:boundary-v1",)
 
 
 class RevisionClass(StrEnum):
@@ -150,6 +176,12 @@ class ReducerState(FrozenModel):
     appraisal_proposal_ids: tuple[str, ...] = ()
     affect_proposals: tuple[AffectProposalProjection, ...] = ()
     affect_proposal_ids: tuple[str, ...] = ()
+    relationship_signals: tuple[RelationshipSignalProjection, ...] = ()
+    relationship_adjustments: tuple[RelationshipAdjustmentProjection, ...] = ()
+    relationship_states: tuple[RelationshipStateProjection, ...] = ()
+    boundaries: tuple[BoundaryProjection, ...] = ()
+    relationship_proposals: tuple[RelationshipProposalProjection, ...] = ()
+    relationship_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
@@ -164,6 +196,8 @@ class ReducerState(FrozenModel):
         dimensions = tuple(item.dimension for item in self.affect_baselines)
         if len(dimensions) != len(set(dimensions)):
             raise ValueError("affect baseline dimensions must be unique")
+        if len(self.relationship_states) > 1:
+            raise ValueError("world v2.1 permits one primary relationship state")
         return self
 
     def semantic_payload(
@@ -226,6 +260,16 @@ class ReducerState(FrozenModel):
             "affect_episodes": tuple(
                 episode.model_dump(mode="json") for episode in self.affect_episodes
             ),
+            "relationship_signals": tuple(
+                item.model_dump(mode="json") for item in self.relationship_signals
+            ),
+            "relationship_adjustments": tuple(
+                item.model_dump(mode="json") for item in self.relationship_adjustments
+            ),
+            "relationship_states": tuple(
+                item.model_dump(mode="json") for item in self.relationship_states
+            ),
+            "boundaries": tuple(item.model_dump(mode="json") for item in self.boundaries),
         }
 
 
@@ -239,6 +283,252 @@ class EventDefinition:
     reducer: Reducer
 
 
+class _LegacyAppraisalProposalCodec:
+    def decode_record(
+        self, *, event_type: str, payload: dict[str, object]
+    ) -> AppraisalProposalProjection:
+        if event_type != "ProposalRecorded":
+            raise ValueError("appraisal codec only accepts ProposalRecorded")
+        return AppraisalProposalProjection.model_validate(payload)
+
+    def bind(self, proposal: AppraisalProposalProjection) -> ProposalAuthorityBinding:
+        return ProposalAuthorityBinding(
+            proposal_id=proposal.proposal_id,
+            proposal_kind=proposal.proposal_kind,
+            authority_contract_ref="proposal-contract:appraisal-legacy.1",
+            change_id=proposal.change_id,
+            proposed_change_hash=proposal.proposed_change_hash,
+            evaluated_world_revision=proposal.evaluated_world_revision,
+            expected_entity_revision=proposal.expected_entity_revision,
+            mutation_event_type=proposal.proposed_mutation.event_type,
+        )
+
+    def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
+        model = {
+            "AppraisalAccepted": AppraisalAcceptedPayload,
+            "AppraisalContradicted": AppraisalContradictedPayload,
+            "AppraisalSuperseded": AppraisalSupersededPayload,
+        }[event_type]
+        return model.model_validate(payload)
+
+
+class _LegacyAppraisalProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        raise NotImplementedError("legacy appraisal record dispatch is not registry-routed")
+
+    def find(self, state: ReducerState, proposal_id: str) -> AppraisalProposalProjection | None:
+        return next(
+            (item for item in state.appraisal_proposals if item.proposal_id == proposal_id),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        return state.model_copy(
+            update={
+                "appraisal_proposals": tuple(
+                    item for item in state.appraisal_proposals if item.proposal_id != proposal_id
+                )
+            }
+        )
+
+
+class _LegacyAffectProposalCodec:
+    def decode_record(
+        self, *, event_type: str, payload: dict[str, object]
+    ) -> AffectProposalProjection:
+        if event_type != "ProposalRecorded":
+            raise ValueError("affect codec only accepts ProposalRecorded")
+        return AffectProposalProjection.model_validate(payload)
+
+    def bind(self, proposal: AffectProposalProjection) -> ProposalAuthorityBinding:
+        return ProposalAuthorityBinding(
+            proposal_id=proposal.proposal_id,
+            proposal_kind=proposal.proposal_kind,
+            authority_contract_ref="proposal-contract:affect-legacy.1",
+            change_id=proposal.change_id,
+            proposed_change_hash=proposal.proposed_change_hash,
+            evaluated_world_revision=proposal.evaluated_world_revision,
+            expected_entity_revision=proposal.expected_entity_revision,
+            mutation_event_type=proposal.proposed_mutation.event_type,
+        )
+
+    def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
+        return AFFECT_PAYLOAD_MODELS[event_type].model_validate(payload)
+
+
+class _LegacyAffectProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        raise NotImplementedError("legacy affect record dispatch is not registry-routed")
+
+    def find(self, state: ReducerState, proposal_id: str) -> AffectProposalProjection | None:
+        return next(
+            (item for item in state.affect_proposals if item.proposal_id == proposal_id),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        return state.model_copy(
+            update={
+                "affect_proposals": tuple(
+                    item for item in state.affect_proposals if item.proposal_id != proposal_id
+                )
+            }
+        )
+
+
+class _LegacyOutcomeProposalCodec:
+    def decode_record(
+        self, *, event_type: str, payload: dict[str, object]
+    ) -> OutcomeProposalProjection:
+        if event_type != "OutcomeProposalRecorded":
+            raise ValueError("outcome codec only accepts OutcomeProposalRecorded")
+        recorded = OutcomeProposalRecordedPayload.model_validate(payload)
+        return OutcomeProposalProjection.model_validate(recorded.model_dump())
+
+    def bind(self, proposal: OutcomeProposalProjection) -> ProposalAuthorityBinding:
+        return ProposalAuthorityBinding(
+            proposal_id=proposal.outcome_proposal_id,
+            proposal_kind="outcome_transition",
+            authority_contract_ref="proposal-contract:outcome-legacy.1",
+            change_id=proposal.change_id,
+            proposed_change_hash=proposal.proposed_change_hash,
+            evaluated_world_revision=proposal.evaluated_world_revision,
+            expected_entity_revision=proposal.evaluated_entity_revision,
+            mutation_event_type="WorldOccurrenceSettled",
+        )
+
+    def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
+        if event_type != "WorldOccurrenceSettled":
+            raise ValueError("outcome codec only owns WorldOccurrenceSettled")
+        return WorldOccurrenceSettledPayload.model_validate(payload)
+
+
+class _LegacyOutcomeProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        raise NotImplementedError("legacy outcome record dispatch is not registry-routed")
+
+    def find(self, state: ReducerState, proposal_id: str) -> OutcomeProposalProjection | None:
+        return next(
+            (
+                item
+                for item in state.outcome_proposals
+                if item.outcome_proposal_id == proposal_id
+            ),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        # Outcome proposals are a durable deliberation audit used to explain a
+        # later settlement or rejection; deciding one does not erase that audit.
+        return state
+
+
+class _RelationshipProposalCodec:
+    def decode_record(
+        self, *, event_type: str, payload: dict[str, object]
+    ) -> RelationshipProposalProjection:
+        if event_type != "ProposalRecorded":
+            raise ValueError("relationship codec only accepts ProposalRecorded")
+        return RelationshipProposalProjection.model_validate_json(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
+
+    def bind(self, proposal: RelationshipProposalProjection) -> ProposalAuthorityBinding:
+        return ProposalAuthorityBinding(
+            proposal_id=proposal.proposal_id,
+            proposal_kind=proposal.proposal_kind,
+            authority_contract_ref=proposal.authority_contract_ref,
+            change_id=proposal.change_id,
+            proposed_change_hash=proposal.proposed_change_hash,
+            evaluated_world_revision=proposal.evaluated_world_revision,
+            expected_entity_revision=proposal.expected_entity_revision,
+            mutation_event_type=proposal.proposed_mutation.event_type,
+        )
+
+    def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
+        return RELATIONSHIP_PAYLOAD_MODELS[event_type].model_validate_json(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
+
+
+class _RelationshipProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        if not isinstance(event, WorldEvent) or not isinstance(
+            proposal, RelationshipProposalProjection
+        ):
+            raise TypeError("relationship proposal adapter received incompatible values")
+        return _relationship_proposal_recorded(state, event, proposal=proposal)
+
+    def find(self, state: ReducerState, proposal_id: str) -> RelationshipProposalProjection | None:
+        return next(
+            (item for item in state.relationship_proposals if item.proposal_id == proposal_id),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        return state.model_copy(
+            update={
+                "relationship_proposals": tuple(
+                    item for item in state.relationship_proposals if item.proposal_id != proposal_id
+                )
+            }
+        )
+
+
+_TYPED_PROPOSAL_REGISTRY = TypedProposalRegistry(
+    (
+        TypedProposalRegistration(
+            contract_ref="proposal-contract:appraisal-legacy.1",
+            selector=RecordSelector(
+                event_type="ProposalRecorded", proposal_kind="appraisal_transition"
+            ),
+            mutation_event_types=(
+                "AppraisalAccepted",
+                "AppraisalContradicted",
+                "AppraisalSuperseded",
+            ),
+            codec=_LegacyAppraisalProposalCodec(),
+            store=_LegacyAppraisalProposalStore(),
+        ),
+        TypedProposalRegistration(
+            contract_ref="proposal-contract:affect-legacy.1",
+            selector=RecordSelector(
+                event_type="ProposalRecorded", proposal_kind="affect_transition"
+            ),
+            mutation_event_types=tuple(AFFECT_PAYLOAD_MODELS),
+            codec=_LegacyAffectProposalCodec(),
+            store=_LegacyAffectProposalStore(),
+        ),
+        TypedProposalRegistration(
+            contract_ref="proposal-contract:outcome-legacy.1",
+            selector=RecordSelector(
+                event_type="OutcomeProposalRecorded", proposal_kind="outcome_transition"
+            ),
+            mutation_event_types=("WorldOccurrenceSettled",),
+            codec=_LegacyOutcomeProposalCodec(),
+            store=_LegacyOutcomeProposalStore(),
+        ),
+        TypedProposalRegistration(
+            contract_ref="proposal-contract:relationship.1",
+            selector=RecordSelector(
+                event_type="ProposalRecorded", proposal_kind="relationship_transition"
+            ),
+            mutation_event_types=tuple(RELATIONSHIP_PAYLOAD_MODELS),
+            codec=_RelationshipProposalCodec(),
+            store=_RelationshipProposalStore(),
+        ),
+    )
+)
+
+
 def _audit_only(state: ReducerState, _event: WorldEvent) -> ReducerState:
     return state
 
@@ -250,6 +540,12 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
         raise ValueError("ProposalRecorded requires proposal_id")
     if proposal_id in state.proposal_ids:
         raise ValueError("proposal identity is already registered")
+    registration = _TYPED_PROPOSAL_REGISTRY.registration_for_record(
+        event.event_type, raw
+    )
+    if registration is not None:
+        proposal = registration.codec.decode_record(event_type=event.event_type, payload=raw)
+        return registration.store.validate_and_store(state, event, proposal)
     if raw.get("proposal_kind") not in {
         "appraisal_transition",
         "affect_transition",
@@ -330,6 +626,72 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
                 *state.appraisal_proposal_ids,
                 proposal.proposal_id,
             ),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
+def _relationship_proposal_recorded(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    proposal: RelationshipProposalProjection | None = None,
+) -> ReducerState:
+    proposal = proposal or RelationshipProposalProjection.model_validate_json(event.payload_json)
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("relationship proposal must evaluate the current world revision")
+    if proposal.proposal_id in state.relationship_proposal_ids:
+        raise ValueError("relationship proposal identity is already registered")
+    proposed_model = RELATIONSHIP_PAYLOAD_MODELS[proposal.proposed_mutation.event_type]
+    proposed_payload = proposed_model.model_validate_json(proposal.proposed_mutation.payload_json)
+    if not isinstance(proposed_payload, RelationshipAuthorizedMutationPayload):
+        raise ValueError("relationship proposal does not contain an authorized mutation")
+    if (
+        proposed_payload.proposal_id != proposal.proposal_id
+        or proposed_payload.change_id != proposal.change_id
+        or proposed_payload.transition_id != proposal.transition_id
+        or proposed_payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or proposed_payload.expected_entity_revision != proposal.expected_entity_revision
+        or proposed_payload.accepted_change_hash != proposal.proposed_change_hash
+        or proposed_payload.evidence_refs != proposal.evidence_refs
+        or proposed_payload.policy_refs != proposal.policy_refs
+    ):
+        raise ValueError("persisted relationship proposal body does not match its index")
+    installed_policy = {
+        "signal": INSTALLED_RELATIONSHIP_SIGNAL_POLICY_REFS,
+        "adjust": INSTALLED_RELATIONSHIP_POLICY_REFS,
+        "compensate": INSTALLED_RELATIONSHIP_POLICY_REFS,
+        "boundary_open": INSTALLED_BOUNDARY_POLICY_REFS,
+        "boundary_revise": INSTALLED_BOUNDARY_POLICY_REFS,
+        "boundary_close": INSTALLED_BOUNDARY_POLICY_REFS,
+    }[proposal.transition_kind]
+    if proposal.policy_refs != installed_policy:
+        raise ValueError("relationship proposal references an uninstalled policy")
+    _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
+    logical_time = _require_life_time(state, event)
+    if isinstance(proposed_payload, RelationshipSignalAcceptedPayload):
+        accept_relationship_signal(state.relationship_signals, proposed_payload, logical_time=logical_time)
+    elif isinstance(proposed_payload, RelationshipSlowVariableAdjustedPayload):
+        adjust_relationship_slow_variables(
+            state.relationship_states,
+            state.relationship_adjustments,
+            state.relationship_signals,
+            proposed_payload,
+            logical_time=logical_time,
+        )
+    elif isinstance(proposed_payload, BoundaryChangedPayload):
+        change_boundary(state.boundaries, proposed_payload, logical_time=logical_time)
+    return state.model_copy(
+        update={
+            "relationship_proposals": (*state.relationship_proposals, proposal),
+            "relationship_proposal_ids": (*state.relationship_proposal_ids, proposal.proposal_id),
             "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
             "proposal_revisions": (
                 *state.proposal_revisions,
@@ -436,22 +798,11 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         raise ValueError("accepted or rejected decision must evaluate the current world")
     if status == "stale" and evaluated_world_revision >= current_world_revision:
         raise ValueError("stale decision must evaluate an older world revision")
-    appraisal = next(
-        (item for item in state.appraisal_proposals if item.proposal_id == proposal_id),
-        None,
-    )
-    outcome = next(
-        (item for item in state.outcome_proposals if item.outcome_proposal_id == proposal_id),
-        None,
-    )
-    affect = next(
-        (item for item in state.affect_proposals if item.proposal_id == proposal_id),
-        None,
-    )
+    typed_authority = _TYPED_PROPOSAL_REGISTRY.authority_for(state, proposal_id)
     if status == "accepted":
-        authority = appraisal or outcome or affect
-        if authority is None:
+        if typed_authority is None:
             raise ValueError("accepted decision requires a typed proposal")
+        authority = typed_authority[1]
         if (
             raw.get("accepted_change_id") != authority.change_id
             or raw.get("accepted_change_hash") != authority.proposed_change_hash
@@ -466,21 +817,17 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         accepted_change_id=raw.get("accepted_change_id"),
         accepted_change_hash=raw.get("accepted_change_hash"),
     )
-    return state.model_copy(
+    decided_state = state.model_copy(
         update={
             "acceptance_decisions": (*state.acceptance_decisions, decision),
-            "appraisal_proposals": (
-                tuple(item for item in state.appraisal_proposals if item.proposal_id != proposal_id)
-                if status in {"rejected", "stale"}
-                else state.appraisal_proposals
-            ),
-            "affect_proposals": (
-                tuple(item for item in state.affect_proposals if item.proposal_id != proposal_id)
-                if status in {"rejected", "stale"}
-                else state.affect_proposals
-            ),
         }
     )
+    if status in {"rejected", "stale"}:
+        discarded = _TYPED_PROPOSAL_REGISTRY.discard_decided(decided_state, proposal_id)
+        if not isinstance(discarded, ReducerState):
+            raise TypeError("typed proposal registry returned an incompatible state")
+        return discarded
+    return decided_state
 
 
 def _world_started(state: ReducerState, _event: WorldEvent) -> ReducerState:
@@ -1529,6 +1876,116 @@ def _affect_baseline_adjusted(state: ReducerState, event: WorldEvent) -> Reducer
     )
 
 
+def _relationship_signal_accepted(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = RelationshipSignalAcceptedPayload.model_validate_json(event.payload_json)
+    if payload.policy_refs != INSTALLED_RELATIONSHIP_SIGNAL_POLICY_REFS:
+        raise ValueError("relationship signal references an uninstalled policy")
+    if payload.signal.origin.accepted_event_ref != event.event_id:
+        raise ValueError("relationship signal origin does not identify its mutation event")
+    proposal = _require_authorized_relationship(state, payload, transition_kind="signal")
+    return state.model_copy(
+        update={
+            "relationship_signals": accept_relationship_signal(
+                state.relationship_signals, payload, logical_time=logical_time
+            ),
+            "relationship_proposals": tuple(
+                item for item in state.relationship_proposals if item != proposal
+            ),
+        }
+    )
+
+
+def _relationship_slow_variable_adjusted(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = RelationshipSlowVariableAdjustedPayload.model_validate_json(event.payload_json)
+    if payload.policy_refs != INSTALLED_RELATIONSHIP_POLICY_REFS:
+        raise ValueError("relationship adjustment references an uninstalled policy")
+    transition_kind = "compensate" if payload.operation == "compensate" else "adjust"
+    proposal = _require_authorized_relationship(
+        state, payload, transition_kind=transition_kind
+    )
+    states, history = adjust_relationship_slow_variables(
+        state.relationship_states,
+        state.relationship_adjustments,
+        state.relationship_signals,
+        payload,
+        logical_time=logical_time,
+    )
+    return state.model_copy(
+        update={
+            "relationship_states": states,
+            "relationship_adjustments": history,
+            "relationship_proposals": tuple(
+                item for item in state.relationship_proposals if item != proposal
+            ),
+        }
+    )
+
+
+def _boundary_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = BoundaryChangedPayload.model_validate_json(event.payload_json)
+    if payload.policy_refs != INSTALLED_BOUNDARY_POLICY_REFS:
+        raise ValueError("boundary transition references an uninstalled policy")
+    if payload.boundary.origin.accepted_event_ref != event.event_id:
+        raise ValueError("boundary origin does not identify its mutation event")
+    transition_kind = f"boundary_{payload.operation}"
+    proposal = _require_authorized_relationship(
+        state, payload, transition_kind=transition_kind
+    )
+    return state.model_copy(
+        update={
+            "boundaries": change_boundary(state.boundaries, payload, logical_time=logical_time),
+            "relationship_proposals": tuple(
+                item for item in state.relationship_proposals if item != proposal
+            ),
+        }
+    )
+
+
+def _require_authorized_relationship(
+    state: ReducerState,
+    payload: RelationshipAuthorizedMutationPayload,
+    *,
+    transition_kind: str,
+) -> RelationshipProposalProjection:
+    proposal = next(
+        (item for item in state.relationship_proposals if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    decision = next(
+        (item for item in state.acceptance_decisions if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    if proposal is None:
+        raise ValueError("relationship transition requires a persisted typed proposal")
+    if (
+        decision is None
+        or decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+    ):
+        raise ValueError("relationship transition requires its accepted decision")
+    if (
+        proposal.transition_kind != transition_kind
+        or proposal.change_id != payload.change_id
+        or proposal.transition_id != payload.transition_id
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.expected_entity_revision != payload.expected_entity_revision
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or proposal.evidence_refs != payload.evidence_refs
+        or json.loads(proposal.proposed_mutation.payload_json) != payload.model_dump(mode="json")
+    ):
+        raise ValueError("accepted relationship transition does not match its proposal")
+    return proposal
+
+
 def _require_authorized_affect(
     state: ReducerState,
     payload: AffectAuthorizedMutationPayload,
@@ -1851,6 +2308,17 @@ _EVENTS = {
             _affect_episode_superseded,
         ),
         EventDefinition("AffectBaselineAdjusted", RevisionClass.WORLD, _affect_baseline_adjusted),
+        EventDefinition(
+            "RelationshipSignalAccepted",
+            RevisionClass.WORLD,
+            _relationship_signal_accepted,
+        ),
+        EventDefinition(
+            "RelationshipSlowVariableAdjusted",
+            RevisionClass.WORLD,
+            _relationship_slow_variable_adjusted,
+        ),
+        EventDefinition("BoundaryChanged", RevisionClass.WORLD, _boundary_changed),
     )
 }
 
@@ -1965,6 +2433,12 @@ def make_projection(
         appraisal_proposal_ids=state.appraisal_proposal_ids,
         affect_proposals=state.affect_proposals,
         affect_proposal_ids=state.affect_proposal_ids,
+        relationship_signals=state.relationship_signals,
+        relationship_adjustments=state.relationship_adjustments,
+        relationship_states=state.relationship_states,
+        boundaries=state.boundaries,
+        relationship_proposals=state.relationship_proposals,
+        relationship_proposal_ids=state.relationship_proposal_ids,
         proposal_ids=state.proposal_ids,
         proposal_revisions=state.proposal_revisions,
         acceptance_decisions=state.acceptance_decisions,

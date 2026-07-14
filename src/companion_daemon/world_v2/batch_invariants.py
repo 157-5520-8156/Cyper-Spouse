@@ -19,7 +19,8 @@ from .affect_events import (
     AffectEpisodeSupersededPayload,
     AffectEpisodeUpdatedPayload,
 )
-from .schemas import AppraisalProposalProjection, WorldEvent
+from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
+from .schemas import AppraisalProposalProjection, RelationshipProposalProjection, WorldEvent
 
 
 def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revision: int) -> None:
@@ -66,6 +67,21 @@ def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revisi
         raise ValueError("affect proposal must be pinned to the current world revision")
     if affect_proposals and any(event.event_type != "ProposalRecorded" for event in events):
         raise ValueError("affect ProposalRecorded requires a separate deliberation commit")
+    relationship_proposals = [
+        RelationshipProposalProjection.model_validate_json(event.payload_json)
+        for event in events
+        if event.event_type == "ProposalRecorded"
+        and event.payload().get("proposal_encoding") == "typed-authority-v1"
+        and event.payload().get("authority_contract_ref")
+        == "proposal-contract:relationship.1"
+    ]
+    if any(
+        item.evaluated_world_revision != expected_world_revision
+        for item in relationship_proposals
+    ):
+        raise ValueError("relationship proposal must be pinned to the current world revision")
+    if relationship_proposals and any(event.event_type != "ProposalRecorded" for event in events):
+        raise ValueError("relationship ProposalRecorded requires a separate deliberation commit")
     authorized_appraisal_models = {
         "AppraisalAccepted": AppraisalAcceptedPayload,
         "AppraisalContradicted": AppraisalContradictedPayload,
@@ -78,6 +94,7 @@ def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revisi
         "AffectEpisodeResolved": AffectEpisodeResolvedPayload,
         "AffectEpisodeSuperseded": AffectEpisodeSupersededPayload,
     }
+    authorized_relationship_models = dict(RELATIONSHIP_PAYLOAD_MODELS)
     for mutation_index, event in enumerate(events):
         model = authorized_affect_models.get(event.event_type)
         if model is None:
@@ -142,6 +159,7 @@ def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revisi
             model = {
                 **authorized_appraisal_models,
                 **authorized_affect_models,
+                **authorized_relationship_models,
             }.get(event.event_type)
             if model is None or mutation_index <= acceptance_index:
                 continue

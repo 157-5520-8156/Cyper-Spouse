@@ -19,6 +19,7 @@ from .errors import UnknownEventType
 from .appraisal_events import APPRAISAL_PAYLOAD_MODELS
 from .affect_events import AFFECT_PAYLOAD_MODELS
 from .life_events import LIFE_PAYLOAD_MODELS
+from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .schemas import (
     Action,
     ActionReconciliation,
@@ -49,7 +50,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.6"
+    reducer_bundle: str = "world-v2-reducers.7"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -232,6 +233,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **LIFE_PAYLOAD_MODELS,
         **APPRAISAL_PAYLOAD_MODELS,
         **AFFECT_PAYLOAD_MODELS,
+        **RELATIONSHIP_PAYLOAD_MODELS,
     }
 )
 
@@ -293,7 +295,20 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "AppraisalContradicted": "appraisal_id+transition_id",
         "AppraisalExpired": "appraisal_id+transition_id",
         "AppraisalSuperseded": "appraisal_id+transition_id",
+        "RelationshipSignalAccepted": "world_id+signal_semantic_fingerprint",
+        "RelationshipSlowVariableAdjusted": "relationship_id+expected_entity_revision+adjustment_id",
+        "BoundaryChanged": "boundary_id+expected_entity_revision+transition_id",
     }
+)
+
+_RELATIONSHIP_EVIDENCE_TYPES = (
+    "observed_message",
+    "committed_world_event",
+    "committed_experience",
+    "settled_world_event",
+    "settled_external_result",
+    "active_plan",
+    "operator_observation",
 )
 
 
@@ -856,6 +871,32 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     "operator_observation",
                     "clock_observation",
                 ),
+            ),
+            _contract(
+                "RelationshipSignalAccepted",
+                "proposal_acceptance",
+                "world",
+                "RelationshipSignalAcceptedPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=_RELATIONSHIP_EVIDENCE_TYPES,
+            ),
+            _contract(
+                "RelationshipSlowVariableAdjusted",
+                "proposal_acceptance",
+                "world",
+                "RelationshipSlowVariableAdjustedPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=_RELATIONSHIP_EVIDENCE_TYPES,
+                compensations=("RelationshipSlowVariableAdjusted",),
+            ),
+            _contract(
+                "BoundaryChanged",
+                "proposal_acceptance",
+                "world",
+                "BoundaryChangedPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=_RELATIONSHIP_EVIDENCE_TYPES,
+                compensations=("BoundaryChanged",),
             ),
         )
     }

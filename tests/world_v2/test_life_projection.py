@@ -16,7 +16,7 @@ from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.ledger import LedgerPort, WorldLedger
 from companion_daemon.world_v2.life_events import outcome_mutation_hash
 from companion_daemon.world_v2.projection import InternalProjectionReader
-from companion_daemon.world_v2.reducers import ReducerState
+from companion_daemon.world_v2.reducers import ReducerState, reduce_event
 from companion_daemon.world_v2.schemas import (
     AppraisalHypothesis,
     AppraisalOrigin,
@@ -27,13 +27,18 @@ from companion_daemon.world_v2.schemas import (
     ExperienceProjection,
     NpcProjection,
     OutcomeObservationProjection,
+    OutcomeProposalProjection,
     PlanStateProjection,
     ProjectionCursor,
+    ProposalRevisionRef,
+    RelationshipProposalProjection,
+    RelationshipProposedMutation,
     TriggerProcess,
     WorldEvent,
     WorldOccurrenceProjection,
 )
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
+from companion_daemon.world_v2.typed_proposals import AmbiguousTypedProposalAuthority
 
 
 WORLD_ID = "world-v2-life-test"
@@ -404,6 +409,83 @@ def seed_through_proposal(ledger: LedgerPort) -> str:
     )
     assert ledger.project().semantic_hash == semantic_hash_before_proposal
     return semantic_hash_before_proposal
+
+
+def test_rejected_outcome_proposal_remains_as_deliberation_audit() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    seed_through_proposal(ledger)
+
+    commit(
+        ledger,
+        [
+            event(
+                "outcome-rejected",
+                "AcceptanceRecorded",
+                {
+                    "status": "rejected",
+                    "acceptance_id": "acceptance:outcome-proposal-tea:rejected",
+                    "proposal_id": "outcome-proposal-tea",
+                    "evaluated_world_revision": 7,
+                },
+            )
+        ],
+    )
+
+    projection = ledger.project()
+    assert projection.acceptance_decisions[-1].status == "rejected"
+    assert tuple(item.outcome_proposal_id for item in projection.outcome_proposals) == (
+        "outcome-proposal-tea",
+    )
+
+
+def test_acceptance_fails_closed_when_legacy_and_registered_stores_claim_one_id() -> None:
+    proposal_id = "proposal:authority-collision"
+    relationship = RelationshipProposalProjection.model_construct(
+        proposal_id=proposal_id,
+        proposal_kind="relationship_transition",
+        proposal_encoding="typed-authority-v1",
+        authority_contract_ref="proposal-contract:relationship.1",
+        change_id="change:relationship",
+        evaluated_world_revision=0,
+        expected_entity_revision=0,
+        proposed_change_hash="a" * 64,
+        proposed_mutation=RelationshipProposedMutation.model_construct(
+            event_type="BoundaryChanged",
+            payload_json="{}",
+        ),
+    )
+    outcome = OutcomeProposalProjection.model_construct(
+        outcome_proposal_id=proposal_id,
+        change_id="change:outcome",
+        evaluated_entity_revision=1,
+        evaluated_world_revision=0,
+        proposed_change_hash="b" * 64,
+    )
+    state = ReducerState.model_construct(
+        relationship_proposals=(relationship,),
+        outcome_proposals=(outcome,),
+        proposal_ids=(proposal_id,),
+        proposal_revisions=(
+            ProposalRevisionRef(proposal_id=proposal_id, evaluated_world_revision=0),
+        ),
+    )
+
+    with pytest.raises(AmbiguousTypedProposalAuthority, match="multiple typed stores"):
+        reduce_event(
+            state,
+            event(
+                "acceptance:authority-collision",
+                "AcceptanceRecorded",
+                {
+                    "status": "accepted",
+                    "acceptance_id": "acceptance:authority-collision",
+                    "proposal_id": proposal_id,
+                    "evaluated_world_revision": 0,
+                    "accepted_change_id": "change:relationship",
+                    "accepted_change_hash": "a" * 64,
+                },
+            ),
+        )
 
 
 def settlement_batch() -> list[WorldEvent]:
@@ -885,6 +967,10 @@ def test_sqlite_migrates_a_real_v3_life_trigger_with_derived_provenance(
         legacy_payload.pop("appraisals")
         legacy_payload.pop("affect_baselines")
         legacy_payload.pop("affect_episodes")
+        legacy_payload.pop("relationship_signals")
+        legacy_payload.pop("relationship_adjustments")
+        legacy_payload.pop("relationship_states")
+        legacy_payload.pop("boundaries")
         legacy_payload.pop("message_observations")
         legacy_payload.pop("operator_observations")
         for ref in legacy_payload["committed_world_event_refs"]:

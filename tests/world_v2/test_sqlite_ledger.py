@@ -228,7 +228,7 @@ def test_sqlite_rebuild_selects_only_installed_replay_artifacts(tmp_path) -> Non
     assert (
         ledger.rebuild(
             target_schema_version="world-v2.1",
-            reducer_bundle_version="world-v2-reducers.6",
+            reducer_bundle_version="world-v2-reducers.7",
         )
         == ledger.project()
     )
@@ -273,6 +273,10 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             "appraisals",
             "affect_baselines",
             "affect_episodes",
+            "relationship_signals",
+            "relationship_adjustments",
+            "relationship_states",
+            "boundaries",
             "message_observations",
             "operator_observations",
         ):
@@ -306,7 +310,7 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             "SELECT reducer_bundle_version, state_json FROM world_v2_heads"
         ).fetchone()
         assert migrated is not None
-        assert migrated[0] == "world-v2-reducers.6"
+        assert migrated[0] == "world-v2-reducers.7"
         assert "pending_actions" in json.loads(migrated[1])
 
 
@@ -343,6 +347,10 @@ def test_sqlite_atomically_migrates_verified_v2_head_to_life_bundle(tmp_path) ->
             "appraisals",
             "affect_baselines",
             "affect_episodes",
+            "relationship_signals",
+            "relationship_adjustments",
+            "relationship_states",
+            "boundaries",
             "message_observations",
             "operator_observations",
         ):
@@ -393,6 +401,10 @@ def test_sqlite_atomically_migrates_verified_v3_head_to_appraisal_bundle(tmp_pat
         payload.pop("appraisals")
         payload.pop("affect_baselines")
         payload.pop("affect_episodes")
+        payload.pop("relationship_signals")
+        payload.pop("relationship_adjustments")
+        payload.pop("relationship_states")
+        payload.pop("boundaries")
         payload.pop("message_observations")
         payload.pop("operator_observations")
         for ref in payload["committed_world_event_refs"]:
@@ -460,6 +472,10 @@ def test_sqlite_migrates_v5_head_without_affect_projection_fields(tmp_path) -> N
         )
         semantic.pop("affect_baselines")
         semantic.pop("affect_episodes")
+        semantic.pop("relationship_signals")
+        semantic.pop("relationship_adjustments")
+        semantic.pop("relationship_states")
+        semantic.pop("boundaries")
         legacy_hash = hashlib.sha256(
             json.dumps(
                 semantic,
@@ -623,6 +639,10 @@ def test_sqlite_isolates_legacy_v3_unbound_acceptance_audit(
         semantic.pop("appraisals")
         semantic.pop("affect_baselines")
         semantic.pop("affect_episodes")
+        semantic.pop("relationship_signals")
+        semantic.pop("relationship_adjustments")
+        semantic.pop("relationship_states")
+        semantic.pop("boundaries")
         semantic.pop("message_observations")
         semantic.pop("operator_observations")
         for ref in semantic["committed_world_event_refs"]:
