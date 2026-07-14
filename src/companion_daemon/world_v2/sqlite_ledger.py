@@ -32,6 +32,10 @@ _V16_ONLY_STATE_KEYS = frozenset(
         "goal_transitions",
         "goal_proposals",
         "goal_proposal_ids",
+        "locations",
+        "location_transitions",
+        "location_proposals",
+        "location_proposal_ids",
     }
 )
 
@@ -555,6 +559,10 @@ class SQLiteWorldLedger:
             goal_transitions=projection.goal_transitions,
             goal_proposals=projection.goal_proposals,
             goal_proposal_ids=projection.goal_proposal_ids,
+            locations=projection.locations,
+            location_transitions=projection.location_transitions,
+            location_proposals=projection.location_proposals,
+            location_proposal_ids=projection.location_proposal_ids,
             logical_time=projection.logical_time,
             actions=projection.actions,
             pending_actions=projection.pending_actions,

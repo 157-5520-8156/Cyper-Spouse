@@ -11,6 +11,10 @@ V16_ONLY_STATE_FIELDS = (
     "goal_transitions",
     "goal_proposals",
     "goal_proposal_ids",
+    "locations",
+    "location_transitions",
+    "location_proposals",
+    "location_proposal_ids",
 )
 
 

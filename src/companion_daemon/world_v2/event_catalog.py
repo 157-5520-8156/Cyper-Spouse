@@ -27,6 +27,7 @@ from .goal_authority_events import (
     V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
     V2_GOAL_PAYLOAD_MODELS,
 )
+from .location_authority_events import V2_LOCATION_PAYLOAD_MODELS
 from .experience_events import (
     EXPERIENCE_PAYLOAD_MODELS,
     LegacyExperienceCommittedPayload,
@@ -257,6 +258,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **CHARACTER_CORE_PAYLOAD_MODELS,
         **V2_GOAL_PAYLOAD_MODELS,
         **V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
+        **V2_LOCATION_PAYLOAD_MODELS,
         "LegacyExperienceCommitted": LegacyExperienceCommittedPayload,
         **THREAD_MECHANICAL_PAYLOAD_MODELS,
         **ACTOR_AUTHORITY_PAYLOAD_MODELS,
@@ -350,6 +352,10 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         **{
             event_type: "world_id+goal_id+expected_entity_revision+transition_id"
             for event_type in V2_GOAL_PAYLOAD_MODELS
+        },
+        **{
+            event_type: "world_id+actor_ref+expected_entity_revision+transition_id"
+            for event_type in V2_LOCATION_PAYLOAD_MODELS
         },
         "V2GoalExpired": (
             "world_id+operation+goal_id+expected_entity_revision+"
@@ -964,6 +970,18 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     compensations=("V2GoalTransitionCompensated",),
                 )
                 for event_type, payload_model in V2_GOAL_PAYLOAD_MODELS.items()
+            ),
+            *(
+                _contract(
+                    event_type,
+                    "proposal_acceptance",
+                    "world",
+                    payload_model.__name__,
+                    allowed_predecessors=("AcceptanceRecorded",),
+                    evidence_types=("committed_world_event",),
+                    compensations=("V2LocationChangeCompensated",),
+                )
+                for event_type, payload_model in V2_LOCATION_PAYLOAD_MODELS.items()
             ),
             _contract(
                 "V2GoalExpired",

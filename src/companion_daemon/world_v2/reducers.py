@@ -79,6 +79,15 @@ from .goal_situation_schemas import (
     V2GoalTransitionProjection,
     validate_v2_goal_authority_state,
 )
+from .location_authority_contract import V2_LOCATION_MUTATION_EVENT_TYPES
+from .location_authority_events import V2LocationChangedPayload
+from .location_authority_reducers import V2_LOCATION_POLICY_REFS, reduce_v2_location
+from .location_authority_schemas import (
+    V2LocationProjection,
+    V2LocationProposalProjection,
+    V2LocationTransitionProjection,
+    validate_v2_location_authority_state,
+)
 from .experience_events import (
     ExperienceAuthorizedMutationPayload,
     ExperienceCommittedPayload,
@@ -277,6 +286,10 @@ class ReducerState(FrozenModel):
     goal_transitions: tuple[V2GoalTransitionProjection, ...] = ()
     goal_proposals: tuple[V2GoalProposalProjection, ...] = ()
     goal_proposal_ids: tuple[str, ...] = ()
+    locations: tuple[V2LocationProjection, ...] = ()
+    location_transitions: tuple[V2LocationTransitionProjection, ...] = ()
+    location_proposals: tuple[V2LocationProposalProjection, ...] = ()
+    location_proposal_ids: tuple[str, ...] = ()
     logical_time: datetime | None = None
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
@@ -351,6 +364,16 @@ class ReducerState(FrozenModel):
             self.goal_proposals,
             self.goal_proposal_ids,
             global_proposal_ids=self.proposal_ids,
+        )
+        validate_v2_location_authority_state(
+            self.locations,
+            self.location_transitions,
+            self.location_proposals,
+            self.location_proposal_ids,
+            global_proposal_ids=self.proposal_ids,
+            actor_authority_transitions=self.actor_authority_transitions,
+            committed_events=self.committed_world_event_refs,
+            logical_time=self.logical_time,
         )
         dimensions = tuple(item.dimension for item in self.affect_baselines)
         if len(dimensions) != len(set(dimensions)):
@@ -1032,6 +1055,12 @@ class ReducerState(FrozenModel):
             payload["goal_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.goal_transitions
             )
+            payload["locations"] = tuple(
+                item.model_dump(mode="json") for item in self.locations
+            )
+            payload["location_transitions"] = tuple(
+                item.model_dump(mode="json") for item in self.location_transitions
+            )
         return payload
 
 
@@ -1342,6 +1371,36 @@ class _V2GoalProposalStore:
             }
         )
 
+
+class _V2LocationProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        if not isinstance(event, WorldEvent) or not isinstance(
+            proposal, V2LocationProposalProjection
+        ):
+            raise TypeError("Location proposal adapter received incompatible values")
+        return _v2_location_proposal_recorded(state, event, proposal=proposal)
+
+    def find(
+        self, state: ReducerState, proposal_id: str
+    ) -> V2LocationProposalProjection | None:
+        return next(
+            (item for item in state.location_proposals if item.proposal_id == proposal_id),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        remaining = tuple(
+            item for item in state.location_proposals if item.proposal_id != proposal_id
+        )
+        return state.model_copy(
+            update={
+                "location_proposals": remaining,
+                "location_proposal_ids": tuple(item.proposal_id for item in remaining),
+            }
+        )
+
 _TYPED_PROPOSAL_STORES = {
     "proposal-contract:appraisal-legacy.1": _LegacyAppraisalProposalStore(),
     "proposal-contract:affect-legacy.1": _LegacyAffectProposalStore(),
@@ -1354,6 +1413,7 @@ _TYPED_PROPOSAL_STORES = {
     "proposal-contract:memory-candidate.1": _MemoryCandidateProposalStore(),
     "proposal-contract:character-core.1": _CharacterCoreProposalStore(),
     "proposal-contract:v2-goal.1": _V2GoalProposalStore(),
+    "proposal-contract:v2-location.1": _V2LocationProposalStore(),
 }
 
 _TYPED_PROPOSAL_REGISTRY = TypedProposalRegistry(
@@ -2011,6 +2071,68 @@ def _v2_goal_proposal_recorded(
         update={
             "goal_proposals": (*state.goal_proposals, proposal),
             "goal_proposal_ids": (*state.goal_proposal_ids, proposal.proposal_id),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
+def _v2_location_proposal_recorded(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    proposal: V2LocationProposalProjection | None = None,
+) -> ReducerState:
+    proposal = proposal or V2LocationProposalProjection.model_validate_json(
+        event.payload_json
+    )
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("Location proposal must evaluate the current world revision")
+    if proposal.proposal_id in state.location_proposal_ids:
+        raise ValueError("Location proposal identity is already registered")
+    payload = V2LocationChangedPayload.model_validate_json(
+        proposal.proposed_mutation.payload_json
+    )
+    if (
+        payload.proposal_id != proposal.proposal_id
+        or payload.change_id != proposal.change_id
+        or payload.transition_id != proposal.transition_id
+        or payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or payload.expected_entity_revision != proposal.expected_entity_revision
+        or payload.accepted_change_hash != proposal.proposed_change_hash
+        or payload.evidence_refs != proposal.evidence_refs
+        or payload.policy_refs != proposal.policy_refs
+        or payload.operation != proposal.transition_kind
+        or payload.model_dump(mode="json")
+        != json.loads(proposal.proposed_mutation.payload_json)
+    ):
+        raise ValueError("persisted Location proposal body does not match its index")
+    if proposal.policy_refs != V2_LOCATION_POLICY_REFS:
+        raise ValueError("Location proposal references an uninstalled policy")
+    _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
+    reduce_v2_location(
+        state.locations,
+        state.location_transitions,
+        payload,
+        event_type=proposal.proposed_mutation.event_type,
+        event_id=payload.location_after.origin.accepted_event_ref,
+        logical_time=_require_life_time(state, event),
+        actor_authorities=state.actor_authorities,
+        committed_events=state.committed_world_event_refs,
+    )
+    return state.model_copy(
+        update={
+            "location_proposals": (*state.location_proposals, proposal),
+            "location_proposal_ids": (
+                *state.location_proposal_ids,
+                proposal.proposal_id,
+            ),
             "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
             "proposal_revisions": (
                 *state.proposal_revisions,
@@ -3860,6 +3982,80 @@ def _v2_goal_expired(state: ReducerState, event: WorldEvent) -> ReducerState:
     )
 
 
+def _v2_location_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = V2LocationChangedPayload.model_validate_json(event.payload_json)
+    proposal = _require_authorized_v2_location(state, payload)
+    locations, transitions = reduce_v2_location(
+        state.locations,
+        state.location_transitions,
+        payload,
+        event_type=event.event_type,
+        event_id=event.event_id,
+        logical_time=logical_time,
+        actor_authorities=state.actor_authorities,
+        committed_events=state.committed_world_event_refs,
+    )
+    remaining = tuple(item for item in state.location_proposals if item != proposal)
+    return state.model_copy(
+        update={
+            "locations": locations,
+            "location_transitions": transitions,
+            "location_proposals": remaining,
+            "location_proposal_ids": tuple(item.proposal_id for item in remaining),
+        }
+    )
+
+
+def _require_authorized_v2_location(
+    state: ReducerState,
+    payload: V2LocationChangedPayload,
+) -> V2LocationProposalProjection:
+    proposal = next(
+        (item for item in state.location_proposals if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    decision = next(
+        (
+            item
+            for item in state.acceptance_decisions
+            if item.proposal_id == payload.proposal_id
+        ),
+        None,
+    )
+    if proposal is None:
+        raise ValueError("Location transition requires a persisted typed proposal")
+    if (
+        decision is None
+        or decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+    ):
+        raise ValueError("Location transition requires its accepted decision")
+    if (
+        not state.committed_world_event_refs
+        or state.committed_world_event_refs[-1].event_type != "AcceptanceRecorded"
+        or not state.acceptance_decisions
+        or state.acceptance_decisions[-1] != decision
+    ):
+        raise ValueError("Location transition requires adjacent AcceptanceRecorded authority")
+    if (
+        proposal.transition_kind != payload.operation
+        or proposal.change_id != payload.change_id
+        or proposal.transition_id != payload.transition_id
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.expected_entity_revision != payload.expected_entity_revision
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or proposal.evidence_refs != payload.evidence_refs
+        or proposal.policy_refs != payload.policy_refs
+        or json.loads(proposal.proposed_mutation.payload_json)
+        != payload.model_dump(mode="json")
+    ):
+        raise ValueError("accepted Location transition does not match its proposal")
+    return proposal
+
+
 def _require_authorized_v2_goal(
     state: ReducerState,
     payload: V2GoalChangedPayload,
@@ -4465,6 +4661,10 @@ _EVENTS = {
             for event_type in V2_GOAL_MECHANICAL_PAYLOAD_MODELS
         ),
         *(
+            EventDefinition(event_type, RevisionClass.WORLD, _v2_location_changed)
+            for event_type in V2_LOCATION_MUTATION_EVENT_TYPES
+        ),
+        *(
             EventDefinition(event_type, RevisionClass.WORLD, _fact_changed)
             for event_type in FACT_PAYLOAD_MODELS
         ),
@@ -4585,6 +4785,10 @@ def make_projection(
         goal_transitions=state.goal_transitions,
         goal_proposals=state.goal_proposals,
         goal_proposal_ids=state.goal_proposal_ids,
+        locations=state.locations,
+        location_transitions=state.location_transitions,
+        location_proposals=state.location_proposals,
+        location_proposal_ids=state.location_proposal_ids,
         actions=state.actions,
         pending_actions=state.pending_actions,
         budget_accounts=state.budget_accounts,

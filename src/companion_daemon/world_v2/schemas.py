@@ -20,6 +20,12 @@ from .goal_situation_schemas import (
     V2GoalTransitionProjection,
     validate_v2_goal_authority_state,
 )
+from .location_authority_schemas import (
+    V2LocationProjection,
+    V2LocationProposalProjection,
+    V2LocationTransitionProjection,
+    validate_v2_location_authority_state,
+)
 from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
 
 
@@ -3544,6 +3550,10 @@ class LedgerProjection(FrozenModel):
     goal_transitions: tuple[V2GoalTransitionProjection, ...] = ()
     goal_proposals: tuple[V2GoalProposalProjection, ...] = ()
     goal_proposal_ids: tuple[str, ...] = ()
+    locations: tuple[V2LocationProjection, ...] = ()
+    location_transitions: tuple[V2LocationTransitionProjection, ...] = ()
+    location_proposals: tuple[V2LocationProposalProjection, ...] = ()
+    location_proposal_ids: tuple[str, ...] = ()
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
@@ -3616,5 +3626,15 @@ class LedgerProjection(FrozenModel):
             self.goal_proposals,
             self.goal_proposal_ids,
             global_proposal_ids=self.proposal_ids,
+        )
+        validate_v2_location_authority_state(
+            self.locations,
+            self.location_transitions,
+            self.location_proposals,
+            self.location_proposal_ids,
+            global_proposal_ids=self.proposal_ids,
+            actor_authority_transitions=self.actor_authority_transitions,
+            committed_events=self.committed_world_event_refs,
+            logical_time=self.logical_time,
         )
         return self
