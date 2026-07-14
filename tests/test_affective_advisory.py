@@ -79,6 +79,35 @@ def test_control_pressure_shifts_toward_dignity_and_boundary() -> None:
     assert advisory.drive_deltas["autonomy"] > 0
 
 
+def test_companion_targeted_degradation_creates_hurt_boundary_affordances() -> None:
+    advisory = _run(_frame(text="滚，你就是个废物。"))
+
+    readings = {item.kind: item for item in advisory.readings}
+    assert "companion_targeted_degradation" in readings
+    assert readings["companion_targeted_degradation"].target == "companion"
+    assert advisory.drive_deltas["hurt"] > 0
+    assert advisory.drive_deltas["anger"] > 0
+    assert advisory.drive_deltas["dignity"] > advisory.drive_deltas.get("care", 0)
+    kinds = {item.kind for item in advisory.expression_affordances}
+    assert "set_boundary" in kinds
+    assert "withdraw_slightly" in kinds
+    assert "care_despite_hurt" in kinds
+    assert "approach" not in kinds
+
+
+def test_quoted_or_self_targeted_degradation_is_not_treated_as_attack_on_companion() -> None:
+    quoted = _run(_frame(text="他说我蠢，我听完挺难受的。"))
+    self_blame = _run(_frame(text="我真蠢，居然又忘记保存了。"))
+
+    assert "companion_targeted_degradation" not in {
+        item.kind for item in quoted.readings
+    }
+    assert "companion_targeted_degradation" not in {
+        item.kind for item in self_blame.readings
+    }
+    assert "warmth_received" in {item.kind for item in quoted.readings}
+
+
 def test_world_stress_can_modulate_expression_without_user_blame() -> None:
     advisory = _run(
         _frame(

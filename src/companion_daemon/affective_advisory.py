@@ -406,9 +406,57 @@ class AffectiveAdvisoryEngine:
                 )
             )
 
+        degradation = self._read_companion_targeted_degradation(text)
+        if degradation is not None:
+            readings.append(degradation)
+            self._add_drive(drives, "hurt", 0.34)
+            self._add_drive(drives, "anger", 0.22)
+            self._add_drive(drives, "dignity", 0.36)
+            self._add_drive(drives, "autonomy", 0.24)
+            self._add_drive(drives, "care", -0.08)
+            affordances.extend(
+                (
+                    ExpressionAffordance(
+                        "set_boundary",
+                        0.34,
+                        "companion-targeted degradation makes a clear boundary available",
+                        {"reply_length": "short", "question_pressure": -3},
+                    ),
+                    ExpressionAffordance(
+                        "withdraw_slightly",
+                        0.2,
+                        "being hurt can reduce warmth without becoming punitive",
+                        {"reply_length": "short"},
+                    ),
+                    ExpressionAffordance(
+                        "concise_refusal",
+                        0.16,
+                        "direct contempt should not be rewarded with eager compliance",
+                        {"reply_length": "short"},
+                    ),
+                    ExpressionAffordance(
+                        "care_despite_hurt",
+                        0.1,
+                        "a hurt companion may still choose care if the relationship context warrants it",
+                        {"erase_hurt": False, "max_beats": 2},
+                    ),
+                    ExpressionAffordance(
+                        "let_it_pass",
+                        0.08,
+                        "a low-context or ambiguous insult can be bracketed instead of over-escalated",
+                        {"question_pressure": -2},
+                    ),
+                )
+            )
+
         has_negative_or_repair_reading = any(
             item.kind
-            in {"possible_disappointment", "withdrawal_detected", "control_pressure"}
+            in {
+                "possible_disappointment",
+                "withdrawal_detected",
+                "control_pressure",
+                "companion_targeted_degradation",
+            }
             for item in readings
         )
         warmth = None if has_negative_or_repair_reading else self._read_warmth(frame, text)
@@ -597,6 +645,48 @@ class AffectiveAdvisoryEngine:
             uncertainty="imperative may be roleplay, but autonomy pressure is present",
             ownership="user_pressure",
             stakes={"dignity": 0.75, "autonomy": 0.8, "relationship": 0.35},
+        )
+
+    @staticmethod
+    def _read_companion_targeted_degradation(text: str) -> AffectiveReading | None:
+        compact = re.sub(r"\s+", "", text)
+        if not compact:
+            return None
+        if re.search(r"(?:我|自己)(?:真|太)?(?:蠢|笨|废物|垃圾|恶心|丑)", compact):
+            return None
+        if re.search(
+            r"(?:他说|她说|别人说|朋友说|被人说|骂我|叫我).{0,10}(?:蠢|废物|垃圾|恶心|脑残)",
+            compact,
+        ):
+            return None
+        match = re.search(
+            r"(?:"
+            r"你(?:就是|真|太|也)?(?:个)?(?:废物|垃圾|脑残|蠢货|狗东西)"
+            r"|你(?:真|太|也)?(?:蠢|笨|恶心|丑)"
+            r"|滚(?:开|蛋)?"
+            r"|闭嘴"
+            r"|去死吧?"
+            r"|操你妈"
+            r"|你配吗"
+            r")",
+            compact,
+        )
+        if not match:
+            return None
+        cue = match.group(0)
+        intensity = 4 if cue in {"去死", "去死吧", "操你妈"} else 3
+        return AffectiveReading(
+            "companion_targeted_degradation",
+            "companion",
+            intensity,
+            0.88,
+            (cue,),
+            uncertainty=(
+                "direct target is likely companion, but quoting and self-reference "
+                "are excluded conservatively"
+            ),
+            ownership="user_attack",
+            stakes={"dignity": 0.82, "hurt": 0.74, "relationship": 0.5},
         )
 
     def _read_warmth(self, frame: TurnFrame, text: str) -> AffectiveReading | None:
