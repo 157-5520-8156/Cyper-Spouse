@@ -1,0 +1,756 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+import json
+from pathlib import Path
+import sqlite3
+
+import pytest
+
+from companion_daemon.world_v2.batch_invariants import appraisal_trigger_identity
+from companion_daemon.world_v2.event_identity import domain_idempotency_key
+from companion_daemon.world_v2.errors import IdempotencyConflict
+from companion_daemon.world_v2.errors import LedgerIntegrityError
+from companion_daemon.world_v2.ledger import LedgerPort, WorldLedger
+from companion_daemon.world_v2.life_events import outcome_mutation_hash
+from companion_daemon.world_v2.projection import InternalProjectionReader
+from companion_daemon.world_v2.schemas import (
+    ClaimLease,
+    DueWindow,
+    EvidenceRef,
+    ExperienceProjection,
+    NpcProjection,
+    OutcomeObservationProjection,
+    PlanStateProjection,
+    ProjectionCursor,
+    TriggerProcess,
+    WorldEvent,
+    WorldOccurrenceProjection,
+)
+from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
+
+
+WORLD_ID = "world-v2-life-test"
+NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+LIFE_TIME = NOW + timedelta(minutes=5)
+
+
+def evidence(
+    ref_id: str,
+    evidence_type: str,
+    claim_purpose: str,
+) -> dict[str, object]:
+    return EvidenceRef(
+        ref_id=ref_id,
+        evidence_type=evidence_type,
+        claim_purpose=claim_purpose,
+    ).model_dump(mode="json")
+
+
+def world_evidence(
+    ledger: LedgerPort, event_id: str, claim_purpose: str
+) -> dict[str, object]:
+    committed = next(
+        ref
+        for ref in ledger.project().committed_world_event_refs
+        if ref.event_id == event_id
+    )
+    return EvidenceRef(
+        ref_id=event_id,
+        evidence_type="committed_world_event",
+        claim_purpose=claim_purpose,
+        source_world_revision=committed.world_revision,
+        immutable_hash=committed.payload_hash,
+    ).model_dump(mode="json")
+
+
+def event(
+    event_id: str,
+    event_type: str,
+    payload: dict[str, object],
+    *,
+    at: datetime = LIFE_TIME,
+) -> WorldEvent:
+    idempotency_key = domain_idempotency_key(
+        event_type=event_type,
+        world_id=WORLD_ID,
+        payload=payload,
+    )
+    return WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id=event_id,
+        world_id=WORLD_ID,
+        event_type=event_type,
+        logical_time=at,
+        created_at=at,
+        actor="system:life-test",
+        source="life-test",
+        trace_id="trace:life",
+        causation_id=f"cause:{event_id}",
+        correlation_id="correlation:life",
+        idempotency_key=idempotency_key or f"identity:{event_id}",
+        payload=payload,
+    )
+
+
+def mutation(
+    event_id: str,
+    *,
+    expected_revision: int,
+    evidence_refs: list[dict[str, object]],
+) -> dict[str, object]:
+    return {
+        "change_id": f"change:{event_id}",
+        "transition_id": f"transition:{event_id}",
+        "expected_entity_revision": expected_revision,
+        "evidence_refs": evidence_refs,
+        "policy_refs": ["policy:life-v1"],
+    }
+
+
+def commit(
+    ledger: LedgerPort,
+    events: list[WorldEvent],
+) -> None:
+    projection = ledger.project()
+    ledger.commit(
+        events,
+        expected_world_revision=projection.world_revision,
+        expected_deliberation_revision=projection.deliberation_revision,
+    )
+
+
+def advance_life_clock(ledger: LedgerPort) -> None:
+    commit(
+        ledger,
+        [
+            event(
+                "clock-life",
+                "ClockAdvanced",
+                {
+                    "logical_time_from": (NOW - timedelta(seconds=1)).isoformat(),
+                    "logical_time_to": LIFE_TIME.isoformat(),
+                },
+            )
+        ],
+    )
+
+
+def seed_through_proposal(ledger: LedgerPort) -> str:
+    advance_life_clock(ledger)
+    npc = NpcProjection(
+        npc_id="lin",
+        entity_revision=1,
+        stable_identity_ref="identity:npc:lin",
+        known_trait_refs=("trait:quiet",),
+        privacy_class="private",
+    )
+    commit(
+        ledger,
+        [
+            event(
+                "npc-registered",
+                "NpcRegistered",
+                {
+                    **mutation(
+                        "npc-registered",
+                        expected_revision=0,
+                        evidence_refs=[
+                            evidence(
+                                "operator:npc-lin",
+                                "operator_observation",
+                                "current_fact",
+                            )
+                        ],
+                    ),
+                    "npc": npc.model_dump(mode="json"),
+                },
+            )
+        ],
+    )
+
+    plan_evidence = EvidenceRef(
+        ref_id="message:plan-tea",
+        evidence_type="observed_message",
+        claim_purpose="future_plan",
+    )
+    plan = PlanStateProjection(
+        plan_id="plan-tea",
+        activity_id="activity-tea",
+        entity_revision=1,
+        activity_kind="make_tea",
+        evidence_refs=(plan_evidence,),
+        status="planned",
+        importance_bp=4_000,
+        scheduled_window=DueWindow(
+            opens_at=NOW + timedelta(minutes=1),
+            closes_at=NOW + timedelta(minutes=30),
+        ),
+        participant_refs=("npc:lin",),
+        location_ref="room:kitchen",
+    )
+    commit(
+        ledger,
+        [
+            event(
+                "activity-planned",
+                "ActivityPlanned",
+                {
+                    **mutation(
+                        "activity-planned",
+                        expected_revision=0,
+                        evidence_refs=[plan_evidence.model_dump(mode="json")],
+                    ),
+                    "plan": plan.model_dump(mode="json"),
+                },
+            )
+        ],
+    )
+
+    occurrence_evidence = evidence(
+        "plan:plan-tea", "active_plan", "future_plan"
+    )
+    occurrence = WorldOccurrenceProjection(
+        occurrence_id="occurrence-tea",
+        entity_revision=1,
+        trigger_ref="trigger:tea-time",
+        participant_refs=("npc:lin",),
+        location_ref="room:kitchen",
+        time_window=DueWindow(
+            opens_at=NOW + timedelta(minutes=1),
+            closes_at=NOW + timedelta(minutes=10),
+        ),
+        precondition_refs=("plan:plan-tea",),
+        candidate_outcome_refs=("result:tea-good", "result:tea-spilled"),
+        visibility="private",
+        status="committed",
+    )
+    commit(
+        ledger,
+        [
+            event(
+                "occurrence-committed",
+                "WorldOccurrenceCommitted",
+                {
+                    **mutation(
+                        "occurrence-committed",
+                        expected_revision=0,
+                        evidence_refs=[occurrence_evidence],
+                    ),
+                    "occurrence": occurrence.model_dump(mode="json"),
+                },
+            )
+        ],
+    )
+
+    commit(
+        ledger,
+        [
+            event(
+                "occurrence-activated",
+                "WorldOccurrenceActivated",
+                {
+                    **mutation(
+                        "occurrence-activated",
+                        expected_revision=1,
+                        evidence_refs=[occurrence_evidence],
+                    ),
+                    "occurrence_id": "occurrence-tea",
+                    "activated_at": (NOW + timedelta(minutes=2)).isoformat(),
+                    "satisfied_precondition_refs": ["plan:plan-tea"],
+                },
+                at=LIFE_TIME,
+            )
+        ],
+    )
+
+    observation = OutcomeObservationProjection(
+        observation_id="observation-tea",
+        occurrence_id="occurrence-tea",
+        source_kind="committed_world_event",
+        source_refs=("occurrence-activated",),
+        observed_payload_ref="payload:tea-brewed",
+        observed_payload_hash="sha256:tea-brewed",
+        observed_at=NOW + timedelta(minutes=3),
+        confidence_bp=9_000,
+    )
+    observation_evidence = world_evidence(
+        ledger, "occurrence-activated", "current_fact"
+    )
+    commit(
+        ledger,
+        [
+            event(
+                "outcome-observed",
+                "OutcomeObservationRecorded",
+                {
+                    **mutation(
+                        "outcome-observed",
+                        expected_revision=2,
+                        evidence_refs=[observation_evidence],
+                    ),
+                    "observation": observation.model_dump(mode="json"),
+                },
+                at=LIFE_TIME,
+            )
+        ],
+    )
+
+    semantic_hash_before_proposal = ledger.project().semantic_hash
+    proposed_change_hash = outcome_mutation_hash(
+        change_id="change:outcome-proposed",
+        occurrence_id="occurrence-tea",
+        evaluated_entity_revision=3,
+        evaluated_world_revision=6,
+        candidate_result_ref="result:tea-good",
+        result_id="result-tea-good",
+        result_payload_ref="payload:tea-good",
+        result_payload_hash="sha256:tea-good",
+        observation_refs=("observation-tea",),
+    )
+    commit(
+        ledger,
+        [
+            event(
+                "outcome-proposed",
+                "OutcomeProposalRecorded",
+                {
+                    "outcome_proposal_id": "outcome-proposal-tea",
+                    "decision_proposal_id": "decision-proposal-tea",
+                    "change_id": "change:outcome-proposed",
+                    "occurrence_id": "occurrence-tea",
+                    "evaluated_entity_revision": 3,
+                    "evaluated_world_revision": 6,
+                    "trigger_ref": "trigger:tea-time",
+                    "candidate_result_ref": "result:tea-good",
+                    "proposed_result_id": "result-tea-good",
+                    "proposed_result_payload_ref": "payload:tea-good",
+                    "proposed_result_payload_hash": "sha256:tea-good",
+                    "proposed_change_hash": proposed_change_hash,
+                    "observation_refs": ["observation-tea"],
+                    "precondition_refs": ["plan:plan-tea"],
+                    "evidence_refs": [observation_evidence],
+                    "confidence_bp": 8_500,
+                    "expires_at": (NOW + timedelta(minutes=8)).isoformat(),
+                },
+                at=LIFE_TIME,
+            )
+        ],
+    )
+    assert ledger.project().semantic_hash == semantic_hash_before_proposal
+    return semantic_hash_before_proposal
+
+
+def settlement_batch() -> list[WorldEvent]:
+    settled_at = NOW + timedelta(minutes=5)
+    settled_evidence = evidence(
+        "operator:tea-good", "operator_observation", "past_experience"
+    )
+    accepted_change_hash = outcome_mutation_hash(
+        change_id="change:outcome-proposed",
+        occurrence_id="occurrence-tea",
+        evaluated_entity_revision=3,
+        evaluated_world_revision=6,
+        candidate_result_ref="result:tea-good",
+        result_id="result-tea-good",
+        result_payload_ref="payload:tea-good",
+        result_payload_hash="sha256:tea-good",
+        observation_refs=("observation-tea",),
+    )
+    experience = ExperienceProjection(
+        experience_id="experience-tea",
+        entity_revision=1,
+        summary_ref="summary:tea-good",
+        evidence_refs=(EvidenceRef.model_validate(settled_evidence),),
+        occurred_from=NOW + timedelta(minutes=2),
+        occurred_to=settled_at,
+        participant_refs=("npc:lin",),
+        occurrence_refs=("occurrence-tea",),
+        result_refs=("result-tea-good",),
+        privacy_class="private",
+    )
+    trigger = TriggerProcess(
+        trigger_id=appraisal_trigger_identity("occurrence-tea", "result-tea-good"),
+        trigger_ref=appraisal_trigger_identity("occurrence-tea", "result-tea-good"),
+        process_kind="npc_world_appraisal",
+        state="open",
+    )
+    return [
+        event(
+            "outcome-accepted",
+            "AcceptanceRecorded",
+            {
+                "status": "accepted",
+                "acceptance_id": "acceptance:outcome-proposal-tea",
+                "proposal_id": "outcome-proposal-tea",
+                "evaluated_world_revision": 6,
+                "acceptance_kind": "world_occurrence_settlement",
+                "accepted_change_id": "change:outcome-proposed",
+                "accepted_change_hash": accepted_change_hash,
+            },
+            at=settled_at,
+        ),
+        event(
+            "occurrence-settled",
+            "WorldOccurrenceSettled",
+            {
+                **mutation(
+                    "occurrence-settled",
+                    expected_revision=3,
+                    evidence_refs=[settled_evidence],
+                ),
+                "change_id": "change:outcome-proposed",
+                "acceptance_id": "acceptance:outcome-proposal-tea",
+                "evaluated_world_revision": 6,
+                "accepted_change_hash": accepted_change_hash,
+                "occurrence_id": "occurrence-tea",
+                "outcome_proposal_id": "outcome-proposal-tea",
+                "candidate_result_ref": "result:tea-good",
+                "result_id": "result-tea-good",
+                "observation_refs": ["observation-tea"],
+                "result_payload_ref": "payload:tea-good",
+                "result_payload_hash": "sha256:tea-good",
+                "settled_at": settled_at.isoformat(),
+                "appraisal_trigger_ref": appraisal_trigger_identity(
+                    "occurrence-tea", "result-tea-good"
+                ),
+            },
+            at=settled_at,
+        ),
+        event(
+            "experience-committed",
+            "ExperienceCommitted",
+            {
+                **mutation(
+                    "experience-committed",
+                    expected_revision=0,
+                    evidence_refs=[settled_evidence],
+                ),
+                "experience": experience.model_dump(mode="json"),
+            },
+            at=settled_at,
+        ),
+        event(
+            "appraisal-triggered",
+            "TriggerProcessOpened",
+            {"process": trigger.model_dump(mode="json")},
+            at=settled_at,
+        ),
+    ]
+
+
+def assert_completed_vertical(ledger: LedgerPort) -> None:
+    projection = ledger.project()
+    assert projection.world_occurrences[0].status == "settled"
+    assert projection.world_occurrences[0].result_id == "result-tea-good"
+    assert projection.experiences[0].experience_id == "experience-tea"
+    assert projection.trigger_processes[0].process_kind == "npc_world_appraisal"
+    assert ledger.project_at(
+        ProjectionCursor(
+            world_revision=6,
+            deliberation_revision=1,
+            ledger_sequence=7,
+        )
+    ).world_occurrences[0].status == "active"
+    snapshot = InternalProjectionReader(ledger=ledger).snapshot(world_id=WORLD_ID)
+    assert snapshot.npcs[0].npc_id == "lin"
+    assert snapshot.plans[0].plan_id == "plan-tea"
+    assert snapshot.world_occurrences[0].status == "settled"
+    assert snapshot.outcome_observations[0].observation_id == "observation-tea"
+    assert snapshot.experiences[0].experience_id == "experience-tea"
+    available = {window.slice_name for window in snapshot.slice_windows}
+    assert {
+        "npcs",
+        "plans",
+        "world_occurrences",
+        "outcome_observations",
+        "experiences",
+    } <= available
+
+
+def test_lived_world_settlement_creates_experience_and_appraisal_atomically() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    seed_through_proposal(ledger)
+    commit(ledger, settlement_batch())
+    assert_completed_vertical(ledger)
+    assert ledger.rebuild() == ledger.project()
+
+
+def test_lived_world_vertical_replays_identically_after_sqlite_restart(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "life.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
+    seed_through_proposal(ledger)
+    commit(ledger, settlement_batch())
+    expected = ledger.project()
+    assert ledger.rebuild() == expected
+    ledger.close()
+
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
+    assert reopened.project() == expected
+    assert_completed_vertical(reopened)
+    reopened.close()
+
+
+def test_sqlite_state_hash_rejects_tampered_proposal_audit(tmp_path: Path) -> None:
+    path = tmp_path / "life-tampered.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
+    seed_through_proposal(ledger)
+    semantic_hash = ledger.project().semantic_hash
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        row = connection.execute(
+            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
+        ).fetchone()
+        assert row is not None
+        state = json.loads(row[0])
+        state["outcome_proposals"][0]["candidate_result_ref"] = "result:forged"
+        connection.execute(
+            "UPDATE world_v2_heads SET state_json = ? WHERE world_id = ?",
+            (json.dumps(state, separators=(",", ":")), WORLD_ID),
+        )
+
+    with pytest.raises(LedgerIntegrityError, match="state hash"):
+        SQLiteWorldLedger(path=path, world_id=WORLD_ID)
+    with sqlite3.connect(path) as connection:
+        assert connection.execute(
+            "SELECT semantic_hash FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
+        ).fetchone()[0] == semantic_hash
+
+
+def test_occurrence_cannot_settle_without_matching_appraisal_trigger() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    seed_through_proposal(ledger)
+
+    with pytest.raises(ValueError, match="exactly one matching"):
+        commit(ledger, settlement_batch()[:3])
+
+    assert ledger.project().world_occurrences[0].status == "active"
+    assert ledger.project().experiences == ()
+
+
+def test_occurrence_cannot_settle_without_revision_pinned_acceptance() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    seed_through_proposal(ledger)
+    batch = settlement_batch()
+
+    with pytest.raises(ValueError, match="revision-pinned accepted"):
+        commit(ledger, batch[1:])
+
+    assert ledger.project().world_occurrences[0].status == "active"
+
+
+def test_occurrence_can_settle_without_materializing_optional_experience() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    seed_through_proposal(ledger)
+    batch = settlement_batch()
+
+    commit(ledger, [batch[0], batch[1], batch[3]])
+    assert ledger.project().world_occurrences[0].status == "settled"
+    assert ledger.project().experiences == ()
+
+
+def test_appraisal_worker_claims_only_after_settlement_opened_trigger() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    seed_through_proposal(ledger)
+    commit(ledger, settlement_batch())
+    opened = ledger.project().trigger_processes[0]
+    assert opened.state == "open"
+
+    claimed = opened.model_copy(
+        update={
+            "state": "claimed",
+            "claim_lease": ClaimLease(
+                owner_id="worker:appraisal",
+                attempt_id="attempt:appraisal:1",
+                acquired_at=LIFE_TIME,
+                expires_at=LIFE_TIME + timedelta(minutes=2),
+            ),
+            "attempt_ids": ("attempt:appraisal:1",),
+        }
+    )
+    commit(
+        ledger,
+        [
+            event(
+                "appraisal-claimed",
+                "TriggerProcessClaimed",
+                {"process": claimed.model_dump(mode="json")},
+            )
+        ],
+    )
+    assert ledger.project().trigger_processes[0].state == "claimed"
+
+
+def test_outcome_proposal_cannot_escape_committed_candidate_matrix() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    seed_through_proposal(ledger)
+    projection = ledger.project()
+    invalid = event(
+        "invalid-outcome-proposed",
+        "OutcomeProposalRecorded",
+        {
+            "outcome_proposal_id": "outcome-proposal-impossible",
+            "decision_proposal_id": "decision-proposal-impossible",
+            "change_id": "change:invalid-outcome-proposed",
+            "occurrence_id": "occurrence-tea",
+            "evaluated_entity_revision": 3,
+            "evaluated_world_revision": 6,
+            "trigger_ref": "trigger:tea-time",
+            "candidate_result_ref": "result:not-committed",
+            "proposed_result_id": "result-tea-good",
+            "proposed_result_payload_ref": "payload:tea-good",
+            "proposed_result_payload_hash": "sha256:tea-good",
+            "proposed_change_hash": outcome_mutation_hash(
+                change_id="change:invalid-outcome-proposed",
+                occurrence_id="occurrence-tea",
+                evaluated_entity_revision=3,
+                evaluated_world_revision=6,
+                candidate_result_ref="result:not-committed",
+                result_id="result-tea-good",
+                result_payload_ref="payload:tea-good",
+                result_payload_hash="sha256:tea-good",
+                observation_refs=("observation-tea",),
+            ),
+            "observation_refs": ["observation-tea"],
+            "evidence_refs": [
+                    world_evidence(
+                        ledger,
+                        "occurrence-activated",
+                        "current_fact",
+                    )
+            ],
+            "confidence_bp": 8_500,
+            "expires_at": (NOW + timedelta(minutes=8)).isoformat(),
+        },
+    )
+    ledger.commit(
+        [invalid],
+        expected_world_revision=projection.world_revision,
+        expected_deliberation_revision=projection.deliberation_revision,
+    )
+    batch = settlement_batch()
+    acceptance_payload = batch[0].payload()
+    acceptance_payload.update(
+        {
+            "acceptance_id": "acceptance:outcome-proposal-impossible",
+            "proposal_id": "outcome-proposal-impossible",
+            "accepted_change_id": "change:invalid-outcome-proposed",
+            "accepted_change_hash": invalid.payload()["proposed_change_hash"],
+        }
+    )
+    settlement_payload = batch[1].payload()
+    settlement_payload.update(
+        {
+            "acceptance_id": "acceptance:outcome-proposal-impossible",
+            "outcome_proposal_id": "outcome-proposal-impossible",
+            "candidate_result_ref": "result:not-committed",
+            "change_id": "change:invalid-outcome-proposed",
+            "accepted_change_hash": invalid.payload()["proposed_change_hash"],
+        }
+    )
+    rejected_batch = [
+        event("invalid-outcome-accepted", "AcceptanceRecorded", acceptance_payload),
+        event("invalid-occurrence-settled", "WorldOccurrenceSettled", settlement_payload),
+        batch[3],
+    ]
+    projection = ledger.project()
+    with pytest.raises(ValueError, match="outside committed candidates"):
+        ledger.commit(
+            rejected_batch,
+            expected_world_revision=projection.world_revision,
+            expected_deliberation_revision=projection.deliberation_revision,
+        )
+    assert any(
+        proposal.outcome_proposal_id == "outcome-proposal-impossible"
+        for proposal in ledger.project().outcome_proposals
+    )
+
+
+def test_life_event_cannot_forge_a_second_domain_identity() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    npc = NpcProjection(
+        npc_id="lin",
+        entity_revision=1,
+        stable_identity_ref="identity:npc:lin",
+        privacy_class="private",
+    )
+    payload = {
+        **mutation(
+            "npc-forged",
+            expected_revision=0,
+            evidence_refs=[
+                evidence(
+                    "operator:npc-lin",
+                    "operator_observation",
+                    "current_fact",
+                )
+            ],
+        ),
+        "npc": npc.model_dump(mode="json"),
+    }
+    forged = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="npc-forged",
+        world_id=WORLD_ID,
+        event_type="NpcRegistered",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="system:life-test",
+        source="life-test",
+        trace_id="trace:life",
+        causation_id="cause:npc-forged",
+        correlation_id="correlation:life",
+        idempotency_key="caller-chosen-key",
+        payload=payload,
+    )
+
+    with pytest.raises(ValueError, match="does not match its domain identity"):
+        ledger.commit(
+            [forged],
+            expected_world_revision=0,
+            expected_deliberation_revision=0,
+        )
+
+
+def test_same_life_identity_with_different_bytes_conflicts() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    advance_life_clock(ledger)
+
+    def registration(event_id: str, trait: str) -> WorldEvent:
+        npc = NpcProjection(
+            npc_id="lin",
+            entity_revision=1,
+            stable_identity_ref="identity:npc:lin",
+            known_trait_refs=(trait,),
+            privacy_class="private",
+        )
+        return event(
+            event_id,
+            "NpcRegistered",
+            {
+                **mutation(
+                    event_id,
+                    expected_revision=0,
+                    evidence_refs=[
+                        evidence(
+                            "operator:npc-lin",
+                            "operator_observation",
+                            "current_fact",
+                        )
+                    ],
+                ),
+                "npc": npc.model_dump(mode="json"),
+            },
+        )
+
+    commit(ledger, [registration("npc-first", "trait:quiet")])
+    projection = ledger.project()
+    with pytest.raises(IdempotencyConflict, match="idempotency key"):
+        ledger.commit(
+            [registration("npc-second", "trait:loud")],
+            expected_world_revision=projection.world_revision,
+            expected_deliberation_revision=projection.deliberation_revision,
+        )

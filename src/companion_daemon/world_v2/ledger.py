@@ -6,7 +6,9 @@ import hashlib
 import json
 from typing import Protocol
 
+from .batch_invariants import validate_commit_batch
 from .errors import ConcurrencyConflict, IdempotencyConflict
+from .event_identity import validate_event_identity
 from .reducers import (
     REDUCER_BUNDLE_VERSION,
     RevisionClass,
@@ -124,6 +126,10 @@ class WorldLedger:
                 raise IdempotencyConflict(f"commit_id {commit_id!r} has different content")
             return existing_commit.result
 
+        validate_commit_batch(
+            events, expected_world_revision=expected_world_revision
+        )
+
         event_ids = [event.event_id for event in events]
         idempotency_keys = [event.idempotency_key for event in events]
         if len(set(event_ids)) != len(event_ids):
@@ -135,6 +141,7 @@ class WorldLedger:
         for event in events:
             if event.world_id != self._world_id:
                 raise ValueError("event belongs to another world")
+            validate_event_identity(event)
             definitions.append(event_definition(event.event_type))
             existing_by_id = self._by_event_id.get(event.event_id)
             if existing_by_id is not None:

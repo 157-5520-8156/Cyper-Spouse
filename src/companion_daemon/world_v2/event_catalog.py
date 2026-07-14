@@ -16,6 +16,7 @@ from typing import Any, Literal, Mapping
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from .errors import UnknownEventType
+from .life_events import LIFE_PAYLOAD_MODELS
 from .schemas import (
     Action,
     ActionReconciliation,
@@ -46,7 +47,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.2"
+    reducer_bundle: str = "world-v2-reducers.3"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -145,6 +146,9 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "TriggerProcessClaimed": _payload_model(
             "TriggerProcessClaimedPayload", {"process": (TriggerProcess, ...)}
         ),
+        "TriggerProcessOpened": _payload_model(
+            "TriggerProcessOpenedPayload", {"process": (TriggerProcess, ...)}
+        ),
         "TriggerProcessReclaimed": _payload_model(
             "TriggerProcessReclaimedPayload", {"process": (TriggerProcess, ...)}
         ),
@@ -206,6 +210,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "ActionReconciliationRequired": _payload_model(
             "ActionReconciliationPayload", {"reconciliation": (ActionReconciliation, ...)}
         ),
+        **LIFE_PAYLOAD_MODELS,
     }
 )
 
@@ -217,6 +222,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ExternalObservationRecorded": "source+source_event_id",
         "ExternalObservationProcessed": "source+source_event_id+processed",
         "TriggerProcessClaimed": "world_id+trigger_id+attempt_id+claimed",
+        "TriggerProcessOpened": "world_id+trigger_id+opened",
         "TriggerProcessReclaimed": "world_id+trigger_id+attempt_id+reclaimed",
         "TriggerProcessCompleted": "world_id+trigger_id+attempt_id+completed",
         "ProposalRecorded": "world_id+trigger_id+proposal_id",
@@ -239,6 +245,14 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ActionExpired": "action_id+expiry_boundary",
         "ExecutionReceiptRecorded": "provider+source_event_id+raw_payload_hash",
         "ActionReconciliationRequired": "result_id+reason+observed_state",
+        "NpcRegistered": "world_id+npc_id",
+        "ActivityPlanned": "plan_id+transition_id",
+        "WorldOccurrenceCommitted": "occurrence_id+transition_id",
+        "WorldOccurrenceActivated": "occurrence_id+transition_id",
+        "OutcomeObservationRecorded": "world_id+outcome_observation_id",
+        "OutcomeProposalRecorded": "world_id+outcome_proposal_id",
+        "WorldOccurrenceSettled": "occurrence_id+result_id+expected_entity_revision",
+        "ExperienceCommitted": "world_id+experience_id",
     }
 )
 
@@ -306,6 +320,14 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 successors=("TriggerProcessCompleted",),
             ),
             _contract(
+                "TriggerProcessOpened",
+                "world_runtime",
+                "deliberation",
+                "TriggerProcessOpenedPayload",
+                evidence_types=("settled_world_event",),
+                successors=("TriggerProcessClaimed",),
+            ),
+            _contract(
                 "TriggerProcessClaimed",
                 "world_runtime",
                 "deliberation",
@@ -350,7 +372,11 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "AcceptanceRecordedPayload",
                 allowed_predecessors=("ProposalRecorded",),
                 evidence_types=("decision_proposal", "evaluated_world_revision"),
-                successors=("BudgetReserved", "ActionAuthorized"),
+                successors=(
+                    "BudgetReserved",
+                    "ActionAuthorized",
+                    "WorldOccurrenceSettled",
+                ),
             ),
             _contract(
                 "BudgetAccountConfigured",
@@ -543,6 +569,82 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 ),
                 evidence_types=("conflicting_receipt", "unknown_outcome"),
                 successors=("BudgetAdjusted",),
+            ),
+            _contract(
+                "NpcRegistered",
+                "proposal_acceptance",
+                "world",
+                "NpcRegisteredPayload",
+                evidence_types=("committed_world_event", "operator_observation"),
+                successors=("WorldOccurrenceCommitted",),
+            ),
+            _contract(
+                "ActivityPlanned",
+                "proposal_acceptance",
+                "world",
+                "ActivityPlannedPayload",
+                evidence_types=("observed_message", "active_plan"),
+                successors=("WorldOccurrenceCommitted",),
+            ),
+            _contract(
+                "WorldOccurrenceCommitted",
+                "proposal_acceptance",
+                "world",
+                "WorldOccurrenceCommittedPayload",
+                evidence_types=("active_plan", "committed_world_event"),
+                successors=("WorldOccurrenceActivated",),
+            ),
+            _contract(
+                "WorldOccurrenceActivated",
+                "proposal_acceptance",
+                "world",
+                "WorldOccurrenceActivatedPayload",
+                allowed_predecessors=("WorldOccurrenceCommitted",),
+                evidence_types=("active_plan", "committed_world_event"),
+                successors=("OutcomeObservationRecorded",),
+            ),
+            _contract(
+                "OutcomeObservationRecorded",
+                "world_runtime",
+                "world",
+                "OutcomeObservationRecordedPayload",
+                allowed_predecessors=("WorldOccurrenceActivated",),
+                evidence_types=(
+                    "settled_external_result",
+                    "operator_observation",
+                    "committed_world_event",
+                ),
+                successors=("OutcomeProposalRecorded",),
+            ),
+            _contract(
+                "OutcomeProposalRecorded",
+                "deliberation",
+                "deliberation",
+                "OutcomeProposalRecordedPayload",
+                allowed_predecessors=("OutcomeObservationRecorded",),
+                evidence_types=("committed_world_event",),
+                successors=("AcceptanceRecorded",),
+            ),
+            _contract(
+                "WorldOccurrenceSettled",
+                "proposal_acceptance",
+                "world",
+                "WorldOccurrenceSettledPayload",
+                allowed_predecessors=(
+                    "WorldOccurrenceActivated",
+                    "OutcomeObservationRecorded",
+                    "OutcomeProposalRecorded",
+                ),
+                evidence_types=("settled_world_event", "operator_observation"),
+                successors=("ExperienceCommitted", "TriggerProcessOpened"),
+            ),
+            _contract(
+                "ExperienceCommitted",
+                "proposal_acceptance",
+                "world",
+                "ExperienceCommittedPayload",
+                allowed_predecessors=("WorldOccurrenceSettled",),
+                evidence_types=("settled_world_event", "settled_external_result"),
             ),
         )
     }

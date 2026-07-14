@@ -353,14 +353,22 @@ class TriggerProcess(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
     trigger_id: str = Field(min_length=1)
     trigger_ref: str = Field(min_length=1)
-    process_kind: Literal["observation", "clock", "settlement", "recovery"]
-    state: Literal["claimed", "terminal"]
-    claim_lease: ClaimLease
-    attempt_ids: tuple[str, ...] = Field(min_length=1)
+    process_kind: Literal[
+        "observation", "clock", "settlement", "recovery", "npc_world_appraisal"
+    ]
+    state: Literal["open", "claimed", "terminal"]
+    claim_lease: ClaimLease | None = None
+    attempt_ids: tuple[str, ...] = ()
     runtime_outcome_ref: str | None = None
 
     @model_validator(mode="after")
     def active_attempt_matches_lease(self) -> TriggerProcess:
+        if self.state == "open":
+            if self.claim_lease is not None or self.attempt_ids:
+                raise ValueError("open trigger cannot already own an attempt lease")
+            return self
+        if self.claim_lease is None or not self.attempt_ids:
+            raise ValueError("claimed or terminal trigger requires an attempt lease")
         if len(set(self.attempt_ids)) != len(self.attempt_ids):
             raise ValueError("trigger attempt_ids must be unique")
         if self.attempt_ids[-1] != self.claim_lease.attempt_id:
@@ -598,6 +606,57 @@ class WorldProjection(FrozenModel):
 PrivacyClass = Literal["public", "shareable", "personal", "private", "withhold"]
 
 
+class EvidenceRef(FrozenModel):
+    ref_id: str = Field(min_length=1)
+    evidence_type: Literal[
+        "committed_fact",
+        "committed_experience",
+        "committed_world_event",
+        "settled_world_event",
+        "settled_external_result",
+        "observed_message",
+        "active_plan",
+        "operator_observation",
+    ]
+    claim_purpose: Literal[
+        "current_fact",
+        "past_experience",
+        "future_plan",
+        "private_hypothesis",
+        "action_authorization",
+    ]
+    source_world_revision: int | None = Field(default=None, ge=1)
+    immutable_hash: str | None = Field(default=None, min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def committed_world_evidence_is_revision_pinned(self) -> EvidenceRef:
+        if self.evidence_type in {"committed_world_event", "settled_world_event"}:
+            if self.source_world_revision is None or self.immutable_hash is None:
+                raise ValueError(
+                    "world-event evidence requires revision and immutable hash"
+                )
+        return self
+
+
+class CommittedWorldEventRef(FrozenModel):
+    event_id: str = Field(min_length=1)
+    event_type: str = Field(min_length=1)
+    world_revision: int = Field(ge=1)
+    payload_hash: str = Field(min_length=64, max_length=64)
+    logical_time: datetime
+
+
+class DueWindow(FrozenModel):
+    opens_at: datetime
+    closes_at: datetime
+
+    @model_validator(mode="after")
+    def closes_after_opening(self) -> DueWindow:
+        if self.closes_at <= self.opens_at:
+            raise ValueError("due window must close after it opens")
+        return self
+
+
 class CharacterCoreProjection(FrozenModel):
     core_revision: int = Field(default=0, ge=0)
     identity_refs: tuple[str, ...] = ()
@@ -621,12 +680,37 @@ class FactProjection(FrozenModel):
 
 class ExperienceProjection(FrozenModel):
     experience_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
     summary_ref: str = Field(min_length=1)
-    source_refs: tuple[str, ...] = Field(min_length=1)
-    occurred_at: datetime
-    participant_refs: tuple[str, ...] = ()
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    occurred_from: datetime
+    occurred_to: datetime
+    participant_refs: tuple[str, ...] = Field(min_length=1)
+    occurrence_refs: tuple[str, ...] = ()
+    result_refs: tuple[str, ...] = ()
     privacy_class: PrivacyClass
     status: Literal["committed", "superseded"] = "committed"
+
+    @model_validator(mode="after")
+    def experience_has_settled_origin(self) -> ExperienceProjection:
+        if self.occurred_to < self.occurred_from:
+            raise ValueError("experience occurrence window is reversed")
+        if not self.occurrence_refs and not self.result_refs:
+            raise ValueError("experience requires an occurrence or settled result")
+        if not any(
+            evidence.claim_purpose == "past_experience"
+            and evidence.evidence_type
+            in {
+                "committed_experience",
+                "committed_world_event",
+                "settled_world_event",
+                "settled_external_result",
+                "operator_observation",
+            }
+            for evidence in self.evidence_refs
+        ):
+            raise ValueError("experience requires evidence of something that occurred")
+        return self
 
 
 class SituationStateProjection(FrozenModel):
@@ -642,12 +726,84 @@ class SituationStateProjection(FrozenModel):
 
 class PlanStateProjection(FrozenModel):
     plan_id: str = Field(min_length=1)
+    activity_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    activity_kind: str = Field(min_length=1)
     goal_ref: str | None = None
-    source_refs: tuple[str, ...] = Field(min_length=1)
-    status: Literal["planned", "active", "paused", "completed", "cancelled"]
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    status: Literal["planned", "active", "paused", "completed", "abandoned"]
     importance_bp: int = Field(ge=0, le=10_000)
-    due_window: tuple[datetime, datetime] | None = None
+    scheduled_window: DueWindow | None = None
+    participant_refs: tuple[str, ...] = ()
+    location_ref: str | None = None
+    supersedes_plan_id: str | None = None
     privacy_class: PrivacyClass = "private"
+
+
+class NpcProjection(FrozenModel):
+    npc_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    stable_identity_ref: str = Field(min_length=1)
+    known_trait_refs: tuple[str, ...] = ()
+    privacy_class: PrivacyClass
+    current_location_ref: str | None = None
+    status: Literal["active", "retired"] = "active"
+
+
+class OutcomeObservationProjection(FrozenModel):
+    observation_id: str = Field(min_length=1)
+    occurrence_id: str = Field(min_length=1)
+    source_kind: Literal[
+        "settled_external_result",
+        "clock_plan_precondition",
+        "operator_observation",
+        "committed_world_event",
+    ]
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    observed_payload_ref: str = Field(min_length=1)
+    observed_payload_hash: str = Field(min_length=1)
+    observed_at: datetime
+    confidence_bp: int = Field(ge=0, le=10_000)
+
+
+class OutcomeProposalProjection(FrozenModel):
+    outcome_proposal_id: str = Field(min_length=1)
+    decision_proposal_id: str = Field(min_length=1)
+    change_id: str = Field(min_length=1)
+    occurrence_id: str = Field(min_length=1)
+    evaluated_entity_revision: int = Field(ge=1)
+    evaluated_world_revision: int = Field(ge=0)
+    trigger_ref: str = Field(min_length=1)
+    candidate_result_ref: str = Field(min_length=1)
+    proposed_result_id: str = Field(min_length=1)
+    proposed_result_payload_ref: str = Field(min_length=1)
+    proposed_result_payload_hash: str = Field(min_length=1)
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
+    observation_refs: tuple[str, ...] = Field(min_length=1)
+    precondition_refs: tuple[str, ...] = ()
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    confidence_bp: int = Field(ge=0, le=10_000)
+    expires_at: datetime
+
+
+class WorldOccurrenceProjection(FrozenModel):
+    occurrence_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    trigger_ref: str = Field(min_length=1)
+    participant_refs: tuple[str, ...] = Field(min_length=1)
+    location_ref: str = Field(min_length=1)
+    time_window: DueWindow
+    precondition_refs: tuple[str, ...] = ()
+    satisfied_precondition_refs: tuple[str, ...] = ()
+    candidate_outcome_refs: tuple[str, ...] = Field(min_length=1)
+    observation_refs: tuple[str, ...] = ()
+    visibility: PrivacyClass
+    status: Literal["committed", "active", "settled", "cancelled", "expired"]
+    activated_at: datetime | None = None
+    result_id: str | None = None
+    result_payload_ref: str | None = None
+    result_payload_hash: str | None = None
+    settled_at: datetime | None = None
 
 
 class CommitmentStateProjection(FrozenModel):
@@ -835,6 +991,9 @@ class InternalWorldSnapshot(FrozenModel):
     character_core: CharacterCoreProjection | None = None
     facts: tuple[FactProjection, ...] = ()
     experiences: tuple[ExperienceProjection, ...] = ()
+    npcs: tuple[NpcProjection, ...] = ()
+    world_occurrences: tuple[WorldOccurrenceProjection, ...] = ()
+    outcome_observations: tuple[OutcomeObservationProjection, ...] = ()
     current_situation: SituationStateProjection | None = None
     plans: tuple[PlanStateProjection, ...] = ()
     commitments: tuple[CommitmentStateProjection, ...] = ()
@@ -923,13 +1082,14 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.2"
+    reducer_bundle_version: str = "world-v2-reducers.3"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
     ledger_sequence: int = Field(ge=0)
     logical_time: datetime | None = None
     observation_refs: tuple[str, ...] = ()
+    committed_world_event_refs: tuple[CommittedWorldEventRef, ...] = ()
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
@@ -940,6 +1100,12 @@ class LedgerProjection(FrozenModel):
     budget_settlements: tuple[BudgetSettlement, ...] = ()
     reconciliations: tuple[ActionReconciliation, ...] = ()
     completed_trigger_ids: tuple[str, ...] = ()
+    npcs: tuple[NpcProjection, ...] = ()
+    plans: tuple[PlanStateProjection, ...] = ()
+    world_occurrences: tuple[WorldOccurrenceProjection, ...] = ()
+    outcome_observations: tuple[OutcomeObservationProjection, ...] = ()
+    experiences: tuple[ExperienceProjection, ...] = ()
+    outcome_proposals: tuple[OutcomeProposalProjection, ...] = ()
     semantic_hash: str
 
     @model_validator(mode="after")

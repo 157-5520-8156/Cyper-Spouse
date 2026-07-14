@@ -14,6 +14,26 @@ from pydantic import model_validator
 from .action_lifecycle import TERMINAL_ACTION_STATES, transition_action
 from .errors import UnknownEventType
 from .event_catalog import event_contract
+from .life_events import (
+    ActivityPlannedPayload,
+    ExperienceCommittedPayload,
+    NpcRegisteredPayload,
+    OutcomeObservationRecordedPayload,
+    OutcomeProposalRecordedPayload,
+    WorldOccurrenceActivatedPayload,
+    WorldOccurrenceCommittedPayload,
+    WorldOccurrenceSettledPayload,
+)
+from .life_reducers import (
+    activate_occurrence,
+    commit_experience,
+    commit_occurrence,
+    plan_activity,
+    record_outcome_observation,
+    record_outcome_proposal,
+    register_npc,
+    settle_occurrence,
+)
 from .schemas import (
     Action,
     ActionDispatchClaim,
@@ -23,16 +43,23 @@ from .schemas import (
     BudgetReservation,
     BudgetSettlement,
     ClaimLease,
+    CommittedWorldEventRef,
     ExecutionReceipt,
     ExternalObservation,
     FrozenModel,
+    ExperienceProjection,
     LedgerProjection,
+    NpcProjection,
+    OutcomeObservationProjection,
+    OutcomeProposalProjection,
+    PlanStateProjection,
     TriggerProcess,
+    WorldOccurrenceProjection,
     WorldEvent,
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.2"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.3"
 
 
 class RevisionClass(StrEnum):
@@ -42,6 +69,7 @@ class RevisionClass(StrEnum):
 
 class ReducerState(FrozenModel):
     observation_refs: tuple[str, ...] = ()
+    committed_world_event_refs: tuple[CommittedWorldEventRef, ...] = ()
     logical_time: datetime | None = None
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
@@ -53,6 +81,12 @@ class ReducerState(FrozenModel):
     budget_settlements: tuple[BudgetSettlement, ...] = ()
     reconciliations: tuple[ActionReconciliation, ...] = ()
     completed_trigger_ids: tuple[str, ...] = ()
+    npcs: tuple[NpcProjection, ...] = ()
+    plans: tuple[PlanStateProjection, ...] = ()
+    world_occurrences: tuple[WorldOccurrenceProjection, ...] = ()
+    outcome_observations: tuple[OutcomeObservationProjection, ...] = ()
+    experiences: tuple[ExperienceProjection, ...] = ()
+    outcome_proposals: tuple[OutcomeProposalProjection, ...] = ()
 
     @model_validator(mode="after")
     def pending_index_matches_actions(self) -> ReducerState:
@@ -78,6 +112,10 @@ class ReducerState(FrozenModel):
             "world_id": world_id,
             "world_revision": world_revision,
             "observation_refs": self.observation_refs,
+            "committed_world_event_refs": tuple(
+                ref.model_dump(mode="json")
+                for ref in self.committed_world_event_refs
+            ),
             "logical_time": self.logical_time.isoformat() if self.logical_time else None,
             "actions": tuple(action.model_dump(mode="json") for action in self.actions),
             "pending_actions": tuple(
@@ -99,6 +137,20 @@ class ReducerState(FrozenModel):
             "reconciliations": tuple(
                 reconciliation.model_dump(mode="json")
                 for reconciliation in self.reconciliations
+            ),
+            "npcs": tuple(npc.model_dump(mode="json") for npc in self.npcs),
+            "plans": tuple(plan.model_dump(mode="json") for plan in self.plans),
+            "world_occurrences": tuple(
+                occurrence.model_dump(mode="json")
+                for occurrence in self.world_occurrences
+            ),
+            "outcome_observations": tuple(
+                observation.model_dump(mode="json")
+                for observation in self.outcome_observations
+            ),
+            "experiences": tuple(
+                experience.model_dump(mode="json")
+                for experience in self.experiences
             ),
         }
 
@@ -571,10 +623,204 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
     process = _model_from_payload(event, "process", TriggerProcess)
     if process.state != "claimed":
         raise ValueError("TriggerProcessClaimed requires claimed state")
+    if process.process_kind == "npc_world_appraisal":
+        if (
+            state.logical_time is None
+            or event.logical_time != state.logical_time
+            or process.claim_lease is None
+            or process.claim_lease.acquired_at != state.logical_time
+        ):
+            raise ValueError("npc appraisal claim lease must start at logical time")
+    existing_index = next(
+        (
+            index
+            for index, item in enumerate(state.trigger_processes)
+            if item.trigger_id == process.trigger_id
+        ),
+        None,
+    )
+    if existing_index is not None:
+        existing = state.trigger_processes[existing_index]
+        if existing.state != "open":
+            raise ValueError(f"trigger {process.trigger_id!r} is not open")
+        if (
+            existing.trigger_ref != process.trigger_ref
+            or existing.process_kind != process.process_kind
+        ):
+            raise ValueError("claim cannot change opened trigger identity")
+        return state.model_copy(
+            update={
+                "trigger_processes": (
+                    *state.trigger_processes[:existing_index],
+                    process,
+                    *state.trigger_processes[existing_index + 1 :],
+                )
+            }
+        )
+    if process.process_kind == "npc_world_appraisal":
+        raise ValueError("npc world appraisal must be opened before it is claimed")
+    return state.model_copy(
+        update={"trigger_processes": (*state.trigger_processes, process)}
+    )
+
+
+def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerState:
+    process = _model_from_payload(event, "process", TriggerProcess)
+    if process.state != "open":
+        raise ValueError("TriggerProcessOpened requires open state")
     if any(item.trigger_id == process.trigger_id for item in state.trigger_processes):
         raise ValueError(f"trigger {process.trigger_id!r} already exists")
     return state.model_copy(
         update={"trigger_processes": (*state.trigger_processes, process)}
+    )
+
+
+def _life_payload(event: WorldEvent, model_type):
+    return model_type.model_validate_json(event.payload_json)
+
+
+def _validated_life_payload(state: ReducerState, event: WorldEvent, model_type):
+    payload = _life_payload(event, model_type)
+    authority = {ref.event_id: ref for ref in state.committed_world_event_refs}
+    for evidence in payload.evidence_refs:
+        if evidence.evidence_type not in {
+            "committed_world_event",
+            "settled_world_event",
+        }:
+            continue
+        committed = authority.get(evidence.ref_id)
+        if (
+            committed is None
+            or evidence.source_world_revision != committed.world_revision
+            or evidence.immutable_hash != committed.payload_hash
+        ):
+            raise ValueError("world-event evidence does not resolve to ledger authority")
+        if (
+            evidence.evidence_type == "settled_world_event"
+            and committed.event_type != "WorldOccurrenceSettled"
+        ):
+            raise ValueError("settled-world evidence is not a settlement event")
+    return payload
+
+
+def _require_life_time(state: ReducerState, event: WorldEvent) -> datetime:
+    if state.logical_time is None:
+        raise ValueError("lived-world mutation requires authoritative logical time")
+    if event.logical_time != state.logical_time:
+        raise ValueError("lived-world event must be pinned to current logical time")
+    return state.logical_time
+
+
+def _npc_registered(state: ReducerState, event: WorldEvent) -> ReducerState:
+    _require_life_time(state, event)
+    payload = _validated_life_payload(state, event, NpcRegisteredPayload)
+    return state.model_copy(update={"npcs": register_npc(state.npcs, payload)})
+
+
+def _activity_planned(state: ReducerState, event: WorldEvent) -> ReducerState:
+    _require_life_time(state, event)
+    payload = _validated_life_payload(state, event, ActivityPlannedPayload)
+    return state.model_copy(
+        update={"plans": plan_activity(state.plans, state.npcs, payload)}
+    )
+
+
+def _world_occurrence_committed(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    _require_life_time(state, event)
+    payload = _validated_life_payload(state, event, WorldOccurrenceCommittedPayload)
+    return state.model_copy(
+        update={
+            "world_occurrences": commit_occurrence(
+                state.world_occurrences,
+                state.npcs,
+                state.plans,
+                payload,
+            )
+        }
+    )
+
+
+def _world_occurrence_activated(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    _require_life_time(state, event)
+    payload = _validated_life_payload(state, event, WorldOccurrenceActivatedPayload)
+    return state.model_copy(
+        update={
+            "world_occurrences": activate_occurrence(
+                state.world_occurrences, payload
+            )
+        }
+    )
+
+
+def _outcome_observation_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    payload = _validated_life_payload(
+        state, event, OutcomeObservationRecordedPayload
+    )
+    occurrences, observations = record_outcome_observation(
+        state.world_occurrences,
+        state.outcome_observations,
+        state.committed_world_event_refs,
+        payload,
+        logical_time=_require_life_time(state, event),
+    )
+    return state.model_copy(
+        update={
+            "world_occurrences": occurrences,
+            "outcome_observations": observations,
+        }
+    )
+
+
+def _world_occurrence_settled(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    payload = _validated_life_payload(state, event, WorldOccurrenceSettledPayload)
+    return state.model_copy(
+        update={
+            "world_occurrences": settle_occurrence(
+                state.world_occurrences,
+                state.outcome_observations,
+                state.outcome_proposals,
+                payload,
+                logical_time=_require_life_time(state, event),
+            )
+        }
+    )
+
+
+def _outcome_proposal_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    _require_life_time(state, event)
+    payload = _validated_life_payload(state, event, OutcomeProposalRecordedPayload)
+    return state.model_copy(
+        update={
+            "outcome_proposals": record_outcome_proposal(
+                state.outcome_proposals,
+                payload,
+            )
+        }
+    )
+
+
+def _experience_committed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = _validated_life_payload(state, event, ExperienceCommittedPayload)
+    return state.model_copy(
+        update={
+            "experiences": commit_experience(
+                state.experiences,
+                state.world_occurrences,
+                state.execution_receipts,
+                payload,
+                logical_time=_require_life_time(state, event),
+            )
+        }
     )
 
 
@@ -593,6 +839,11 @@ _EVENTS = {
             "ExternalObservationProcessed",
             RevisionClass.DELIBERATION,
             _external_observation_processed,
+        ),
+        EventDefinition(
+            "TriggerProcessOpened",
+            RevisionClass.DELIBERATION,
+            _trigger_process_opened,
         ),
         EventDefinition(
             "TriggerProcessClaimed",
@@ -685,6 +936,36 @@ _EVENTS = {
         ),
         EventDefinition("ProposalRecorded", RevisionClass.DELIBERATION, _audit_only),
         EventDefinition("AcceptanceRecorded", RevisionClass.WORLD, _audit_only),
+        EventDefinition("NpcRegistered", RevisionClass.WORLD, _npc_registered),
+        EventDefinition("ActivityPlanned", RevisionClass.WORLD, _activity_planned),
+        EventDefinition(
+            "WorldOccurrenceCommitted",
+            RevisionClass.WORLD,
+            _world_occurrence_committed,
+        ),
+        EventDefinition(
+            "WorldOccurrenceActivated",
+            RevisionClass.WORLD,
+            _world_occurrence_activated,
+        ),
+        EventDefinition(
+            "OutcomeObservationRecorded",
+            RevisionClass.WORLD,
+            _outcome_observation_recorded,
+        ),
+        EventDefinition(
+            "OutcomeProposalRecorded",
+            RevisionClass.DELIBERATION,
+            _outcome_proposal_recorded,
+        ),
+        EventDefinition(
+            "WorldOccurrenceSettled",
+            RevisionClass.WORLD,
+            _world_occurrence_settled,
+        ),
+        EventDefinition(
+            "ExperienceCommitted", RevisionClass.WORLD, _experience_committed
+        ),
     )
 }
 
@@ -704,7 +985,24 @@ def event_types() -> frozenset[str]:
 
 def reduce_event(state: ReducerState, event: WorldEvent) -> ReducerState:
     event_contract(event.event_type).validate_payload(event.payload())
-    return event_definition(event.event_type).reducer(state, event)
+    definition = event_definition(event.event_type)
+    reduced = definition.reducer(state, event)
+    if definition.revision_class is RevisionClass.WORLD:
+        return reduced.model_copy(
+            update={
+                "committed_world_event_refs": (
+                    *reduced.committed_world_event_refs,
+                    CommittedWorldEventRef(
+                        event_id=event.event_id,
+                        event_type=event.event_type,
+                        world_revision=len(reduced.committed_world_event_refs) + 1,
+                        payload_hash=event.payload_hash,
+                        logical_time=event.logical_time,
+                    ),
+                )
+            }
+        )
+    return reduced
 
 
 def require_reducer_bundle(version: str) -> None:
@@ -752,6 +1050,7 @@ def make_projection(
         ledger_sequence=ledger_sequence,
         logical_time=state.logical_time,
         observation_refs=state.observation_refs,
+        committed_world_event_refs=state.committed_world_event_refs,
         actions=state.actions,
         pending_actions=state.pending_actions,
         budget_accounts=state.budget_accounts,
@@ -762,6 +1061,12 @@ def make_projection(
         budget_settlements=state.budget_settlements,
         reconciliations=state.reconciliations,
         completed_trigger_ids=state.completed_trigger_ids,
+        npcs=state.npcs,
+        plans=state.plans,
+        world_occurrences=state.world_occurrences,
+        outcome_observations=state.outcome_observations,
+        experiences=state.experiences,
+        outcome_proposals=state.outcome_proposals,
         semantic_hash=semantic_hash(
             world_id=world_id,
             world_revision=world_revision,

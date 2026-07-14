@@ -8,7 +8,9 @@ from pathlib import Path
 import sqlite3
 from threading import RLock
 
+from .batch_invariants import validate_commit_batch
 from .errors import ConcurrencyConflict, IdempotencyConflict, LedgerIntegrityError
+from .event_identity import validate_event_identity
 from .ledger import canonical_event_json, commit_request_hash, derived_commit_id
 from .reducers import (
     REDUCER_BUNDLE_VERSION,
@@ -74,7 +76,8 @@ class SQLiteWorldLedger:
                 ledger_sequence INTEGER NOT NULL,
                 state_json TEXT NOT NULL,
                 semantic_hash TEXT NOT NULL,
-                reducer_bundle_version TEXT NOT NULL
+                reducer_bundle_version TEXT NOT NULL,
+                state_hash TEXT NOT NULL
             );
             CREATE TABLE IF NOT EXISTS world_v2_commits (
                 world_id TEXT NOT NULL,
@@ -112,10 +115,30 @@ class SQLiteWorldLedger:
                 "ALTER TABLE world_v2_heads ADD COLUMN reducer_bundle_version "
                 "TEXT NOT NULL DEFAULT 'world-v2-reducers.1'"
             )
+        if "state_hash" not in columns:
+            self._connection.execute(
+                "ALTER TABLE world_v2_heads ADD COLUMN state_hash TEXT"
+            )
 
     @staticmethod
     def _encode_state(state: ReducerState) -> str:
         return state.model_dump_json()
+
+    def _state_hash(
+        self, state: ReducerState, cursor: ProjectionCursor
+    ) -> str:
+        encoded = json.dumps(
+            {
+                "cursor": cursor.model_dump(mode="json"),
+                "reducer_bundle_version": REDUCER_BUNDLE_VERSION,
+                "state": state.model_dump(mode="json"),
+                "world_id": self._world_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     @staticmethod
     def _decode_state(value: str) -> ReducerState:
@@ -138,19 +161,27 @@ class SQLiteWorldLedger:
             """
             INSERT OR IGNORE INTO world_v2_heads
                 (world_id, world_revision, deliberation_revision, ledger_sequence,
-                 state_json, semantic_hash, reducer_bundle_version)
-            VALUES (?, 0, 0, 0, ?, ?, ?)
+                 state_json, semantic_hash, reducer_bundle_version, state_hash)
+            VALUES (?, 0, 0, 0, ?, ?, ?, ?)
             """,
             (
                 self._world_id,
                 self._encode_state(ReducerState()),
                 initial.semantic_hash,
                 REDUCER_BUNDLE_VERSION,
+                self._state_hash(
+                    ReducerState(),
+                    ProjectionCursor(
+                        world_revision=0,
+                        deliberation_revision=0,
+                        ledger_sequence=0,
+                    ),
+                ),
             ),
         )
 
     def _migrate_head_bundle(self) -> None:
-        """Atomically rebuild a verified v1 checkpoint from immutable event bytes."""
+        """Atomically rebuild a verified legacy checkpoint from immutable events."""
 
         connection = self._connection
         connection.execute("BEGIN IMMEDIATE")
@@ -161,25 +192,42 @@ class SQLiteWorldLedger:
             if head is None:
                 raise LedgerIntegrityError("world head disappeared during migration")
             installed = str(head["reducer_bundle_version"])
-            if installed == REDUCER_BUNDLE_VERSION:
+            try:
+                world_revision = int(head["world_revision"])
+                cursor = ProjectionCursor(
+                    world_revision=world_revision,
+                    deliberation_revision=int(head["deliberation_revision"]),
+                    ledger_sequence=int(head["ledger_sequence"]),
+                )
+            except Exception as exc:
+                raise LedgerIntegrityError("head cursor is invalid") from exc
+            persisted_state_hash = head["state_hash"]
+            if installed == REDUCER_BUNDLE_VERSION and persisted_state_hash:
+                state = self._decode_state(str(head["state_json"]))
+                if not hmac.compare_digest(
+                    self._state_hash(state, cursor), str(persisted_state_hash)
+                ):
+                    raise LedgerIntegrityError("head state hash is invalid")
                 connection.commit()
                 return
-            if installed != "world-v2-reducers.1":
+            if installed not in {
+                "world-v2-reducers.1",
+                "world-v2-reducers.2",
+                REDUCER_BUNDLE_VERSION,
+            }:
                 raise LedgerIntegrityError(
                     f"head reducer bundle {installed!r} has no migration path"
                 )
-            world_revision = int(head["world_revision"])
-            cursor = ProjectionCursor(
-                world_revision=world_revision,
-                deliberation_revision=int(head["deliberation_revision"]),
-                ledger_sequence=int(head["ledger_sequence"]),
-            )
-            legacy_hash = self._legacy_v1_semantic_hash(
-                state_json=str(head["state_json"]),
-                world_revision=world_revision,
-            )
-            if not hmac.compare_digest(legacy_hash, str(head["semantic_hash"])):
-                raise LedgerIntegrityError("legacy head semantic hash is invalid")
+            if installed != REDUCER_BUNDLE_VERSION:
+                legacy_hash = self._legacy_semantic_hash(
+                    state_json=str(head["state_json"]),
+                    world_revision=world_revision,
+                    reducer_bundle_version=installed,
+                )
+                if not hmac.compare_digest(
+                    legacy_hash, str(head["semantic_hash"])
+                ):
+                    raise LedgerIntegrityError("legacy head semantic hash is invalid")
             rebuilt = self._replay_locked(
                 target_cursor=cursor,
                 target_schema_version=CURRENT_SCHEMA_VERSION,
@@ -188,18 +236,21 @@ class SQLiteWorldLedger:
             rebuilt_state = self._state_from_projection(rebuilt)
             updated = connection.execute(
                 """UPDATE world_v2_heads
-                   SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?
+                   SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?,
+                       state_hash = ?
                    WHERE world_id = ? AND world_revision = ?
                      AND deliberation_revision = ? AND ledger_sequence = ?
-                     AND reducer_bundle_version = 'world-v2-reducers.1'""",
+                     AND reducer_bundle_version = ?""",
                 (
                     self._encode_state(rebuilt_state),
                     rebuilt.semantic_hash,
                     REDUCER_BUNDLE_VERSION,
+                    self._state_hash(rebuilt_state, cursor),
                     self._world_id,
                     cursor.world_revision,
                     cursor.deliberation_revision,
                     cursor.ledger_sequence,
+                    installed,
                 ),
             )
             if updated.rowcount != 1:
@@ -209,8 +260,12 @@ class SQLiteWorldLedger:
             connection.rollback()
             raise
 
-    def _legacy_v1_semantic_hash(
-        self, *, state_json: str, world_revision: int
+    def _legacy_semantic_hash(
+        self,
+        *,
+        state_json: str,
+        world_revision: int,
+        reducer_bundle_version: str,
     ) -> str:
         try:
             raw_state = json.loads(state_json)
@@ -232,9 +287,19 @@ class SQLiteWorldLedger:
         payload = state.semantic_payload(
             world_id=self._world_id,
             world_revision=world_revision,
-            reducer_bundle_version="world-v2-reducers.1",
+            reducer_bundle_version=reducer_bundle_version,
         )
-        payload.pop("pending_actions", None)
+        if reducer_bundle_version == "world-v2-reducers.1":
+            payload.pop("pending_actions", None)
+        for key in (
+            "npcs",
+            "plans",
+            "world_occurrences",
+            "outcome_observations",
+            "experiences",
+            "committed_world_event_refs",
+        ):
+            payload.pop(key, None)
         encoded = json.dumps(
             payload,
             ensure_ascii=False,
@@ -247,6 +312,7 @@ class SQLiteWorldLedger:
     def _state_from_projection(projection: LedgerProjection) -> ReducerState:
         return ReducerState(
             observation_refs=projection.observation_refs,
+            committed_world_event_refs=projection.committed_world_event_refs,
             logical_time=projection.logical_time,
             actions=projection.actions,
             pending_actions=projection.pending_actions,
@@ -258,6 +324,12 @@ class SQLiteWorldLedger:
             budget_settlements=projection.budget_settlements,
             reconciliations=projection.reconciliations,
             completed_trigger_ids=projection.completed_trigger_ids,
+            npcs=projection.npcs,
+            plans=projection.plans,
+            world_occurrences=projection.world_occurrences,
+            outcome_observations=projection.outcome_observations,
+            experiences=projection.experiences,
+            outcome_proposals=projection.outcome_proposals,
         )
 
     def commit(
@@ -299,6 +371,7 @@ class SQLiteWorldLedger:
         for event in events:
             if event.world_id != self._world_id:
                 raise ValueError("event belongs to another world")
+            validate_event_identity(event)
 
         connection = self._connection
         connection.execute("BEGIN IMMEDIATE")
@@ -316,6 +389,10 @@ class SQLiteWorldLedger:
                 result = CommitResult.model_validate_json(existing["result_json"])
                 connection.commit()
                 return result
+
+            validate_commit_batch(
+                events, expected_world_revision=expected_world_revision
+            )
 
             placeholders = ",".join("?" for _ in events)
             duplicate = connection.execute(
@@ -415,7 +492,8 @@ class SQLiteWorldLedger:
             updated = connection.execute(
                 """UPDATE world_v2_heads
                    SET world_revision = ?, deliberation_revision = ?, ledger_sequence = ?,
-                       state_json = ?, semantic_hash = ?, reducer_bundle_version = ?
+                       state_json = ?, semantic_hash = ?, reducer_bundle_version = ?,
+                       state_hash = ?
                    WHERE world_id = ? AND world_revision = ?
                      AND deliberation_revision = ? AND ledger_sequence = ?""",
                 (
@@ -425,6 +503,14 @@ class SQLiteWorldLedger:
                     self._encode_state(state),
                     projection.semantic_hash,
                     REDUCER_BUNDLE_VERSION,
+                    self._state_hash(
+                        state,
+                        ProjectionCursor(
+                            world_revision=world_revision,
+                            deliberation_revision=deliberation_revision,
+                            ledger_sequence=ledger_sequence,
+                        ),
+                    ),
                     self._world_id,
                     head["world_revision"],
                     head["deliberation_revision"],
@@ -473,12 +559,23 @@ class SQLiteWorldLedger:
                 raise LedgerIntegrityError("world head disappeared")
             if head["reducer_bundle_version"] != REDUCER_BUNDLE_VERSION:
                 raise LedgerIntegrityError("world head reducer bundle is not installed")
+            state = self._decode_state(head["state_json"])
+            cursor = ProjectionCursor(
+                world_revision=int(head["world_revision"]),
+                deliberation_revision=int(head["deliberation_revision"]),
+                ledger_sequence=int(head["ledger_sequence"]),
+            )
+            persisted_state_hash = head["state_hash"]
+            if not persisted_state_hash or not hmac.compare_digest(
+                self._state_hash(state, cursor), str(persisted_state_hash)
+            ):
+                raise LedgerIntegrityError("head state hash does not match persisted state")
             projection = make_projection(
                 world_id=self._world_id,
                 world_revision=int(head["world_revision"]),
                 deliberation_revision=int(head["deliberation_revision"]),
                 ledger_sequence=int(head["ledger_sequence"]),
-                state=self._decode_state(head["state_json"]),
+                state=state,
             )
             if projection.semantic_hash != head["semantic_hash"]:
                 raise LedgerIntegrityError(

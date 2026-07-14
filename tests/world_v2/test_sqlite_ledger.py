@@ -157,7 +157,7 @@ def test_sqlite_rebuild_selects_only_installed_replay_artifacts(tmp_path) -> Non
 
     assert ledger.rebuild(
         target_schema_version="world-v2.1",
-        reducer_bundle_version="world-v2-reducers.2",
+        reducer_bundle_version="world-v2-reducers.3",
     ) == ledger.project()
     with pytest.raises(ValueError, match="not installed"):
         ledger.rebuild(reducer_bundle_version="world-v1-reducers.9")
@@ -190,6 +190,15 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             reducer_bundle_version="world-v2-reducers.1",
         )
         legacy_payload.pop("pending_actions")
+        for key in (
+            "npcs",
+            "plans",
+            "world_occurrences",
+            "outcome_observations",
+            "experiences",
+            "committed_world_event_refs",
+        ):
+            legacy_payload.pop(key)
         legacy_hash = hashlib.sha256(
             json.dumps(
                 legacy_payload,
@@ -221,8 +230,61 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             "SELECT reducer_bundle_version, state_json FROM world_v2_heads"
         ).fetchone()
         assert migrated is not None
-        assert migrated[0] == "world-v2-reducers.2"
+        assert migrated[0] == "world-v2-reducers.3"
         assert "pending_actions" in json.loads(migrated[1])
+
+
+def test_sqlite_atomically_migrates_verified_v2_head_to_life_bundle(tmp_path) -> None:
+    path = tmp_path / "world-v2-v2-head.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [event("event-v2-migration", "obs-v2-migration")],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    expected = ledger.project()
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        head = connection.execute(
+            "SELECT state_json FROM world_v2_heads WHERE world_id = ?",
+            ("world-sqlite-test",),
+        ).fetchone()
+        assert head is not None
+        state = ReducerState.model_validate_json(head[0])
+        legacy_payload = state.semantic_payload(
+            world_id="world-sqlite-test",
+            world_revision=1,
+            reducer_bundle_version="world-v2-reducers.2",
+        )
+        for key in (
+            "npcs",
+            "plans",
+            "world_occurrences",
+            "outcome_observations",
+            "experiences",
+            "committed_world_event_refs",
+        ):
+            legacy_payload.pop(key)
+        legacy_hash = hashlib.sha256(
+            json.dumps(
+                legacy_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        connection.execute(
+            """UPDATE world_v2_heads
+               SET semantic_hash = ?, reducer_bundle_version = ?
+               WHERE world_id = ?""",
+            (legacy_hash, "world-v2-reducers.2", "world-sqlite-test"),
+        )
+
+    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    assert reopened.project() == expected
+    assert reopened.rebuild() == expected
+    reopened.close()
 
 
 def test_sqlite_project_normalizes_malformed_head_as_integrity_error(tmp_path) -> None:
@@ -234,10 +296,26 @@ def test_sqlite_project_normalizes_malformed_head_as_integrity_error(tmp_path) -
             "UPDATE world_v2_heads SET world_revision = 'not-an-integer'"
         )
 
-    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
-    with pytest.raises(LedgerIntegrityError):
-        reopened.project()
-    reopened.close()
+    with pytest.raises(LedgerIntegrityError, match="cursor"):
+        SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+
+
+def test_sqlite_checkpoint_hash_binds_full_projection_cursor(tmp_path) -> None:
+    path = tmp_path / "world-v2-cursor-tamper.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [event("event-cursor", "obs-cursor")],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    ledger.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE world_v2_heads SET deliberation_revision = 9, ledger_sequence = 9"
+        )
+
+    with pytest.raises(LedgerIntegrityError, match="state hash"):
+        SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
 
 
 def test_sqlite_head_preserves_authorized_actions_across_restart(tmp_path) -> None:

@@ -44,6 +44,11 @@ class ProjectionLimits:
     budget_accounts: int = 32
     budget_reservations: int = 128
     pending_external_observations: int = 128
+    npcs: int = 128
+    plans: int = 64
+    world_occurrences: int = 128
+    outcome_observations: int = 128
+    experiences: int = 128
 
     def __post_init__(self) -> None:
         if any(
@@ -54,6 +59,11 @@ class ProjectionLimits:
                 self.budget_accounts,
                 self.budget_reservations,
                 self.pending_external_observations,
+                self.npcs,
+                self.plans,
+                self.world_occurrences,
+                self.outcome_observations,
+                self.experiences,
             )
         ):
             raise ValueError("projection limits must be positive")
@@ -317,6 +327,25 @@ class InternalProjectionReader:
         pending_external = projection.pending_external_observations[
             -self._limits.pending_external_observations :
         ]
+        npcs = self._bounded_relevant(
+            projection.npcs,
+            limit=self._limits.npcs,
+            is_relevant=lambda item: item.status == "active",
+        )
+        plans = self._bounded_relevant(
+            projection.plans,
+            limit=self._limits.plans,
+            is_relevant=lambda item: item.status in {"planned", "active", "paused"},
+        )
+        occurrences = self._bounded_relevant(
+            projection.world_occurrences,
+            limit=self._limits.world_occurrences,
+            is_relevant=lambda item: item.status in {"committed", "active"},
+        )
+        outcome_observations = projection.outcome_observations[
+            -self._limits.outcome_observations :
+        ]
+        experiences = projection.experiences[-self._limits.experiences :]
         slice_windows = (
             self._window(
                 "pending_actions",
@@ -340,6 +369,34 @@ class InternalProjectionReader:
                 "pending_external_observations",
                 total=len(projection.pending_external_observations),
                 returned=len(pending_external),
+            ),
+            self._window(
+                "npcs",
+                total=len(projection.npcs),
+                returned=len(npcs),
+                ordering_policy="active-first-then-ledger-recency-v1",
+            ),
+            self._window(
+                "plans",
+                total=len(projection.plans),
+                returned=len(plans),
+                ordering_policy="open-first-then-ledger-recency-v1",
+            ),
+            self._window(
+                "world_occurrences",
+                total=len(projection.world_occurrences),
+                returned=len(occurrences),
+                ordering_policy="unsettled-first-then-ledger-recency-v1",
+            ),
+            self._window(
+                "outcome_observations",
+                total=len(projection.outcome_observations),
+                returned=len(outcome_observations),
+            ),
+            self._window(
+                "experiences",
+                total=len(projection.experiences),
+                returned=len(experiences),
             ),
             *(self._unavailable_window(name) for name in self._UNAVAILABLE_SLICES),
         )
@@ -367,6 +424,11 @@ class InternalProjectionReader:
             budget_accounts=budget_accounts,
             budget_reservations=active_reservations,
             pending_external_observations=pending_external,
+            npcs=npcs,
+            plans=plans,
+            world_occurrences=occurrences,
+            outcome_observations=outcome_observations,
+            experiences=experiences,
             reducer_versions=(
                 VersionRef(name="schema", version=projection.schema_version),
                 VersionRef(
@@ -401,9 +463,7 @@ class InternalProjectionReader:
     _UNAVAILABLE_SLICES = (
         "character_core",
         "facts",
-        "experiences",
         "current_situation",
-        "plans",
         "commitments",
         "affect_episodes",
         "private_impressions",
@@ -417,17 +477,29 @@ class InternalProjectionReader:
 
     @staticmethod
     def _window(
-        slice_name: str, *, total: int, returned: int
+        slice_name: str,
+        *,
+        total: int,
+        returned: int,
+        ordering_policy: str = "ledger-identity-order-v1",
     ) -> ProjectionSliceWindow:
         return ProjectionSliceWindow(
             slice_name=slice_name,
             total_active=total,
             returned_count=returned,
             truncated=returned < total,
-            ordering_policy="ledger-identity-order-v1",
+            ordering_policy=ordering_policy,
             retention_policy_version="world-v2-retention.1",
             authority_query_ref=f"internal-authority:{slice_name}",
         )
+
+    @staticmethod
+    def _bounded_relevant(values, *, limit: int, is_relevant):
+        relevant = tuple(value for value in values if is_relevant(value))
+        if len(relevant) >= limit:
+            return relevant[-limit:]
+        remaining = tuple(value for value in values if not is_relevant(value))
+        return (*relevant, *remaining[-(limit - len(relevant)) :])
 
     @staticmethod
     def _unavailable_window(slice_name: str) -> ProjectionSliceWindow:
