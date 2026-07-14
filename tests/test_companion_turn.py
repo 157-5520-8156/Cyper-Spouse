@@ -268,6 +268,51 @@ async def test_world_engine_rejects_direct_reply_without_turn_delivery_seam(
 
 
 @pytest.mark.asyncio
+async def test_world_input_advances_realtime_clock_before_turn_frame(
+    tmp_path: Path,
+) -> None:
+    runtime, world, world_id = _turn_runtime(
+        tmp_path,
+        RecordingTransport(
+            DispatchAcceptance(status="delivered", external_receipt="qq:receipt:clock")
+        ),
+        cadence_delay_seconds=0,
+    )
+    before = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
+    world.submit(
+        {
+            "type": "set_clock_mode",
+            "world_id": world_id,
+            "mode": "realtime",
+            "rate": 1,
+            "idempotency_key": "test:clock:realtime",
+        },
+        expected_revision=world.revision(world_id),
+    )
+    message = IncomingMessage(
+        platform="qq",
+        platform_user_id="geoff",
+        message_id="clock-advances-before-frame",
+        text="我隔了一会儿又回来了。",
+        sent_at=datetime.now(UTC) + timedelta(minutes=15),
+    )
+
+    await runtime.respond(
+        TurnEnvelope.from_message(
+            message,
+            idempotency_key="qq:geoff:clock-advances-before-frame",
+            world_id=world_id,
+            canonical_user_id="geoff",
+            frozen_cadence="hot",
+        ),
+        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
+    )
+
+    after = datetime.fromisoformat(str(world.snapshot(world_id)["clock"]["logical_at"]))
+    assert after >= before + timedelta(minutes=14)
+
+
+@pytest.mark.asyncio
 async def test_respond_owns_world_action_dispatch_and_synchronous_receipt_settlement(
     tmp_path: Path,
 ) -> None:

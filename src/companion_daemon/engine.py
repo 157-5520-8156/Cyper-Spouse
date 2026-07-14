@@ -154,6 +154,7 @@ from companion_daemon.world import (
     WorldKernel,
     parse_reply_candidate,
 )
+from companion_daemon.world_clock import WorldClockDriver
 from companion_daemon.world_affect import public_mood
 from companion_daemon.world_behavior import WorldBehaviorPolicy
 from companion_daemon.world_interaction_rules import (
@@ -886,6 +887,7 @@ class CompanionEngine:
     def _record_world_input(self, message: IncomingMessage, canonical_user_id: str) -> None:
         if not self.world_kernel or not self.world_id:
             return
+        self._advance_world_clock_to_observation(message.sent_at)
         user_id = self._ensure_world_user(canonical_user_id)
         key = self._world_message_id(message)
         self._submit_world_with_retry(
@@ -1265,6 +1267,23 @@ class CompanionEngine:
         return datetime.fromisoformat(
             str(self.world_kernel.snapshot(self.world_id)["clock"]["logical_at"])
         )
+
+    def _advance_world_clock_to_observation(self, observed_now: datetime) -> None:
+        if not self.world_kernel or not self.world_id:
+            return
+        if observed_now.tzinfo is None:
+            return
+        for _ in range(3):
+            try:
+                WorldClockDriver(self.world_kernel).tick(
+                    self.world_id,
+                    observed_now=observed_now,
+                    expected_revision=self.world_kernel.revision(self.world_id),
+                )
+                return
+            except ConcurrencyConflict:
+                continue
+        logger.warning("world clock tick conflicted repeatedly; continuing without clock advance")
 
     async def _maybe_generate_world_image(
         self, *, user_id: str, message: IncomingMessage, _background: bool = False
