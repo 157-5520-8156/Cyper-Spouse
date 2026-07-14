@@ -20,6 +20,7 @@ from .appraisal_events import APPRAISAL_PAYLOAD_MODELS
 from .affect_events import AFFECT_PAYLOAD_MODELS
 from .actor_authority_events import ACTOR_AUTHORITY_PAYLOAD_MODELS
 from .authorization_events import AUTHORIZATION_PAYLOAD_MODELS
+from .commitment_events import COMMITMENT_PAYLOAD_MODELS
 from .life_events import LIFE_PAYLOAD_MODELS
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .thread_events import THREAD_MECHANICAL_PAYLOAD_MODELS, THREAD_PAYLOAD_MODELS
@@ -53,7 +54,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.10"
+    reducer_bundle: str = "world-v2-reducers.11"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -238,6 +239,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **AFFECT_PAYLOAD_MODELS,
         **RELATIONSHIP_PAYLOAD_MODELS,
         **THREAD_PAYLOAD_MODELS,
+        **COMMITMENT_PAYLOAD_MODELS,
         **THREAD_MECHANICAL_PAYLOAD_MODELS,
         **ACTOR_AUTHORITY_PAYLOAD_MODELS,
         **AUTHORIZATION_PAYLOAD_MODELS,
@@ -310,6 +312,10 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
             for event_type in THREAD_PAYLOAD_MODELS
         },
         "ThreadExpired": "world_id+thread_id+expected_entity_revision+transition_id",
+        **{
+            event_type: "world_id+commitment_id+expected_entity_revision+transition_id"
+            for event_type in COMMITMENT_PAYLOAD_MODELS
+        },
         "ActorAuthorityBootstrapped": "world_id+authority_id+transition_id",
         "ActorAuthorityRotated": "world_id+authority_id+expected_entity_revision+transition_id",
         "ActorAuthorityRevoked": "world_id+authority_id+expected_entity_revision+transition_id",
@@ -991,6 +997,34 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     ),
                 )
                 for event_type, payload_model in THREAD_PAYLOAD_MODELS.items()
+            ),
+            *(
+                _contract(
+                    event_type,
+                    (
+                        "logical_clock"
+                        if event_type in {
+                            "PrivateCommitmentDue",
+                            "PrivateCommitmentDeadlineBroken",
+                        }
+                        else "proposal_acceptance"
+                    ),
+                    "world",
+                    payload_model.__name__,
+                    allowed_predecessors=(
+                        ("ClockAdvanced", "PrivateCommitmentDue")
+                        if event_type == "PrivateCommitmentDue"
+                        else (
+                            "ClockAdvanced",
+                            "PrivateCommitmentDue",
+                            "PrivateCommitmentDeadlineBroken",
+                        )
+                        if event_type == "PrivateCommitmentDeadlineBroken"
+                        else ("AcceptanceRecorded",)
+                    ),
+                    evidence_types=_RELATIONSHIP_EVIDENCE_TYPES,
+                )
+                for event_type, payload_model in COMMITMENT_PAYLOAD_MODELS.items()
             ),
         )
     }

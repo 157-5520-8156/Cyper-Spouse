@@ -25,6 +25,7 @@ def test_installed_family_manifest_owns_all_current_typed_proposals() -> None:
     assert tuple(item.contract_ref for item in INSTALLED_TYPED_PROPOSAL_FAMILIES) == (
         "proposal-contract:affect-legacy.1",
         "proposal-contract:appraisal-legacy.1",
+        "proposal-contract:commitment.1",
         "proposal-contract:outcome-legacy.1",
         "proposal-contract:relationship.1",
         "proposal-contract:thread.1",
@@ -36,6 +37,10 @@ def test_installed_family_manifest_owns_all_current_typed_proposals() -> None:
     assert family_for_mutation("BoundaryChanged").contract_ref == (
         "proposal-contract:relationship.1"
     )
+    assert family_for_mutation("PrivateCommitmentBroken").contract_ref == (
+        "proposal-contract:commitment.1"
+    )
+    assert family_for_mutation("PrivateCommitmentDeadlineBroken") is None
 
 
 def test_record_routing_preserves_legacy_and_generic_boundaries() -> None:

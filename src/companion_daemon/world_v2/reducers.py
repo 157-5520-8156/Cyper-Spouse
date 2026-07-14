@@ -47,6 +47,13 @@ from .actor_authority_reducers import reduce_actor_authority
 from .authorization_events import AUTHORIZATION_PAYLOAD_MODELS, authorization_domain
 from .authorization_reducers import reduce_authorization
 from .batch_invariants import interaction_appraisal_trigger_identity
+from .commitment_events import (
+    COMMITMENT_ACCEPTED_PAYLOAD_MODELS,
+    CommitmentAuthorizedMutationPayload,
+    CommitmentChangedPayload,
+    CommitmentClockTransitionPayload,
+)
+from .commitment_reducers import reduce_commitment, reduce_commitment_clock
 from .errors import UnknownEventType
 from .event_catalog import event_contract
 from .life_events import (
@@ -121,6 +128,9 @@ from .schemas import (
     BudgetSettlement,
     ClaimLease,
     CommittedWorldEventRef,
+    CommitmentProjection,
+    CommitmentProposalProjection,
+    CommitmentTransitionProjection,
     ExecutionReceipt,
     EvidenceRef,
     ExternalObservation,
@@ -150,7 +160,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.10"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.11"
 INSTALLED_APPRAISAL_POLICY_REFS = ("policy:appraisal-v1",)
 INSTALLED_APPRAISAL_MATRIX_VERSION = "appraisal-matrix.1"
 INSTALLED_SOURCE_CLUSTERING_VERSION = "source-clustering.1"
@@ -162,6 +172,7 @@ INSTALLED_RELATIONSHIP_SIGNAL_POLICY_REFS = ("policy:relationship-signal-v1",)
 INSTALLED_RELATIONSHIP_POLICY_REFS = ("policy:relationship-v1",)
 INSTALLED_BOUNDARY_POLICY_REFS = ("policy:boundary-v1",)
 INSTALLED_THREAD_POLICY_REFS = ("policy:thread-v1",)
+INSTALLED_COMMITMENT_POLICY_REFS = ("policy:commitment-v1",)
 
 
 class RevisionClass(StrEnum):
@@ -220,6 +231,10 @@ class ReducerState(FrozenModel):
     thread_transitions: tuple[ThreadTransitionProjection, ...] = ()
     thread_proposals: tuple[ThreadProposalProjection, ...] = ()
     thread_proposal_ids: tuple[str, ...] = ()
+    commitments: tuple[CommitmentProjection, ...] = ()
+    commitment_transitions: tuple[CommitmentTransitionProjection, ...] = ()
+    commitment_proposals: tuple[CommitmentProposalProjection, ...] = ()
+    commitment_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
@@ -418,6 +433,70 @@ class ReducerState(FrozenModel):
                 or thread.origin.transition_id != latest.transition_id
             ):
                 raise ValueError("thread projection does not match lineage head")
+        commitment_ids = tuple(item.commitment_id for item in self.commitments)
+        if len(commitment_ids) != len(set(commitment_ids)):
+            raise ValueError("commitment ids must be unique")
+        transition_ids = tuple(item.transition_id for item in self.commitment_transitions)
+        if len(transition_ids) != len(set(transition_ids)):
+            raise ValueError("commitment transition ids must be unique")
+        if any(
+            item.commitment_id not in set(commitment_ids)
+            for item in self.commitment_transitions
+        ):
+            raise ValueError("commitment transition has no projected commitment")
+        if len(self.commitment_proposal_ids) != len(set(self.commitment_proposal_ids)):
+            raise ValueError("commitment proposal ids must be unique")
+        active = tuple(
+            item.semantic_fingerprint
+            for item in self.commitments
+            if item.values.status in {"open", "due"}
+        )
+        if len(active) != len(set(active)):
+            raise ValueError("active commitment semantic fingerprints must be unique")
+        for commitment in self.commitments:
+            lineage = tuple(
+                item
+                for item in self.commitment_transitions
+                if item.commitment_id == commitment.commitment_id
+            )
+            if not lineage or lineage[0].operation != "open":
+                raise ValueError("commitment lineage must begin with open")
+            if tuple(item.entity_revision for item in lineage) != tuple(
+                range(1, len(lineage) + 1)
+            ):
+                raise ValueError("commitment lineage revisions must be contiguous")
+            if lineage[0].values_before is not None or any(
+                current.values_before != previous.values_after
+                for previous, current in zip(lineage, lineage[1:])
+            ):
+                raise ValueError("commitment lineage values are discontinuous")
+            latest = lineage[-1]
+            if (
+                commitment.entity_revision != latest.entity_revision
+                or commitment.values != latest.values_after
+                or commitment.origin.transition_id != latest.transition_id
+            ):
+                raise ValueError("commitment projection does not match lineage head")
+            predecessor_ref = commitment.values.predecessor_commitment_ref
+            if predecessor_ref is not None and predecessor_ref not in set(commitment_ids):
+                raise ValueError("commitment predecessor is absent from authority")
+            visited: set[str] = set()
+            cursor = commitment
+            while cursor.values.predecessor_commitment_ref is not None:
+                if cursor.commitment_id in visited:
+                    raise ValueError("commitment predecessor cycle is forbidden")
+                visited.add(cursor.commitment_id)
+                next_item = next(
+                    (
+                        item
+                        for item in self.commitments
+                        if item.commitment_id == cursor.values.predecessor_commitment_ref
+                    ),
+                    None,
+                )
+                if next_item is None:
+                    break
+                cursor = next_item
         return self
 
     def semantic_payload(
@@ -519,10 +598,17 @@ class ReducerState(FrozenModel):
             ),
             "boundaries": tuple(item.model_dump(mode="json") for item in self.boundaries),
         }
-        if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+        if reducer_bundle_version in {"world-v2-reducers.10", REDUCER_BUNDLE_VERSION}:
             payload["threads"] = tuple(item.model_dump(mode="json") for item in self.threads)
             payload["thread_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.thread_transitions
+            )
+        if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            payload["commitments"] = tuple(
+                item.model_dump(mode="json") for item in self.commitments
+            )
+            payload["commitment_transitions"] = tuple(
+                item.model_dump(mode="json") for item in self.commitment_transitions
             )
         return payload
 
@@ -654,12 +740,41 @@ class _ThreadProposalStore:
             }
         )
 
+
+class _CommitmentProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        if not isinstance(event, WorldEvent) or not isinstance(
+            proposal, CommitmentProposalProjection
+        ):
+            raise TypeError("commitment proposal adapter received incompatible values")
+        return _commitment_proposal_recorded(state, event, proposal=proposal)
+
+    def find(self, state: ReducerState, proposal_id: str) -> CommitmentProposalProjection | None:
+        return next(
+            (item for item in state.commitment_proposals if item.proposal_id == proposal_id),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        return state.model_copy(
+            update={
+                "commitment_proposals": tuple(
+                    item
+                    for item in state.commitment_proposals
+                    if item.proposal_id != proposal_id
+                )
+            }
+        )
+
 _TYPED_PROPOSAL_STORES = {
     "proposal-contract:appraisal-legacy.1": _LegacyAppraisalProposalStore(),
     "proposal-contract:affect-legacy.1": _LegacyAffectProposalStore(),
     "proposal-contract:outcome-legacy.1": _LegacyOutcomeProposalStore(),
     "proposal-contract:relationship.1": _RelationshipProposalStore(),
     "proposal-contract:thread.1": _ThreadProposalStore(),
+    "proposal-contract:commitment.1": _CommitmentProposalStore(),
 }
 
 _TYPED_PROPOSAL_REGISTRY = TypedProposalRegistry(
@@ -954,6 +1069,72 @@ def _thread_proposal_recorded(
         update={
             "thread_proposals": (*state.thread_proposals, proposal),
             "thread_proposal_ids": (*state.thread_proposal_ids, proposal.proposal_id),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
+def _commitment_proposal_recorded(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    proposal: CommitmentProposalProjection | None = None,
+) -> ReducerState:
+    proposal = proposal or CommitmentProposalProjection.model_validate_json(event.payload_json)
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("commitment proposal must evaluate the current world revision")
+    if proposal.proposal_id in state.commitment_proposal_ids:
+        raise ValueError("commitment proposal identity is already registered")
+    proposed_model = COMMITMENT_ACCEPTED_PAYLOAD_MODELS.get(
+        proposal.proposed_mutation.event_type, CommitmentChangedPayload
+    )
+    proposed_payload = proposed_model.model_validate_json(
+        proposal.proposed_mutation.payload_json
+    )
+    if not isinstance(proposed_payload, CommitmentAuthorizedMutationPayload):
+        raise ValueError("commitment proposal does not contain accepted authority")
+    if (
+        proposed_payload.proposal_id != proposal.proposal_id
+        or proposed_payload.change_id != proposal.change_id
+        or proposed_payload.transition_id != proposal.transition_id
+        or proposed_payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or proposed_payload.expected_entity_revision != proposal.expected_entity_revision
+        or proposed_payload.accepted_change_hash != proposal.proposed_change_hash
+        or proposed_payload.evidence_refs != proposal.evidence_refs
+        or proposed_payload.policy_refs != proposal.policy_refs
+    ):
+        raise ValueError("persisted commitment proposal body does not match its index")
+    if proposal.policy_refs != INSTALLED_COMMITMENT_POLICY_REFS:
+        raise ValueError("commitment proposal references an uninstalled policy")
+    _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
+    logical_time = _require_life_time(state, event)
+    reduce_commitment(
+        state.commitments,
+        state.commitment_transitions,
+        proposed_payload,
+        event_type=proposal.proposed_mutation.event_type,
+        logical_time=logical_time,
+        committed_events=state.committed_world_event_refs,
+        execution_receipts=state.execution_receipts,
+        actions=state.actions,
+        threads=state.threads,
+        thread_history=state.thread_transitions,
+        message_observations=state.message_observations,
+    )
+    return state.model_copy(
+        update={
+            "commitment_proposals": (*state.commitment_proposals, proposal),
+            "commitment_proposal_ids": (
+                *state.commitment_proposal_ids,
+                proposal.proposal_id,
+            ),
             "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
             "proposal_revisions": (
                 *state.proposal_revisions,
@@ -2266,6 +2447,127 @@ def _thread_expired(state: ReducerState, event: WorldEvent) -> ReducerState:
     return state.model_copy(update={"threads": threads, "thread_transitions": transitions})
 
 
+def _commitment_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = CommitmentChangedPayload.model_validate_json(event.payload_json)
+    if payload.policy_refs != INSTALLED_COMMITMENT_POLICY_REFS:
+        raise ValueError("commitment transition references an uninstalled policy")
+    if payload.commitment_after.origin.accepted_event_ref != event.event_id:
+        raise ValueError("commitment origin does not identify its mutation event")
+    proposal = _require_authorized_commitment(state, payload)
+    commitments, transitions = reduce_commitment(
+        state.commitments,
+        state.commitment_transitions,
+        payload,
+        event_type=event.event_type,
+        logical_time=logical_time,
+        committed_events=state.committed_world_event_refs,
+        execution_receipts=state.execution_receipts,
+        actions=state.actions,
+        threads=state.threads,
+        thread_history=state.thread_transitions,
+        message_observations=state.message_observations,
+    )
+    return state.model_copy(
+        update={
+            "commitments": commitments,
+            "commitment_transitions": transitions,
+            "commitment_proposals": tuple(
+                item for item in state.commitment_proposals if item != proposal
+            ),
+        }
+    )
+
+
+def _commitment_clock_changed(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    payload: CommitmentClockTransitionPayload | None = None,
+) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = payload or CommitmentClockTransitionPayload.model_validate_json(event.payload_json)
+    _validate_evidence_authority(state, (payload.clock_evidence_ref,), require_all=True)
+    clock = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == payload.clock_event_ref
+        ),
+        None,
+    )
+    if (
+        clock is None
+        or clock.event_type != "ClockAdvanced"
+        or clock.logical_time != logical_time
+        or clock.payload_hash != payload.clock_event_payload_hash
+    ):
+        raise ValueError("commitment clock transition requires its committed ClockAdvanced")
+    if payload.commitment_after.origin.accepted_event_ref != event.event_id:
+        raise ValueError("commitment clock origin does not identify its mutation event")
+    commitments, transitions = reduce_commitment_clock(
+        state.commitments,
+        state.commitment_transitions,
+        payload,
+        logical_time=logical_time,
+    )
+    return state.model_copy(
+        update={"commitments": commitments, "commitment_transitions": transitions}
+    )
+
+
+def _require_authorized_commitment(
+    state: ReducerState,
+    payload: CommitmentAuthorizedMutationPayload,
+) -> CommitmentProposalProjection:
+    proposal = next(
+        (
+            item
+            for item in state.commitment_proposals
+            if item.proposal_id == payload.proposal_id
+        ),
+        None,
+    )
+    decision = next(
+        (
+            item
+            for item in state.acceptance_decisions
+            if item.proposal_id == payload.proposal_id
+        ),
+        None,
+    )
+    if proposal is None:
+        raise ValueError("commitment transition requires a persisted typed proposal")
+    if (
+        decision is None
+        or decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+    ):
+        raise ValueError("commitment transition requires its accepted decision")
+    if (
+        not state.committed_world_event_refs
+        or state.committed_world_event_refs[-1].event_type != "AcceptanceRecorded"
+        or not state.acceptance_decisions
+        or state.acceptance_decisions[-1] != decision
+    ):
+        raise ValueError("commitment transition requires adjacent AcceptanceRecorded authority")
+    if (
+        proposal.transition_kind != getattr(payload, "operation", None)
+        or proposal.change_id != payload.change_id
+        or proposal.transition_id != payload.transition_id
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.expected_entity_revision != payload.expected_entity_revision
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or proposal.evidence_refs != payload.evidence_refs
+        or json.loads(proposal.proposed_mutation.payload_json)
+        != payload.model_dump(mode="json")
+    ):
+        raise ValueError("accepted commitment transition does not match its proposal")
+    return proposal
+
+
 def _require_authorized_thread(
     state: ReducerState,
     payload: ThreadAuthorizedMutationPayload,
@@ -2705,6 +3007,14 @@ _EVENTS = {
             for event_type in THREAD_PAYLOAD_MODELS
         ),
         EventDefinition("ThreadExpired", RevisionClass.WORLD, _thread_expired),
+        EventDefinition("PrivateCommitmentOpened", RevisionClass.WORLD, _commitment_changed),
+        EventDefinition("PrivateCommitmentDue", RevisionClass.WORLD, _commitment_clock_changed),
+        EventDefinition("PrivateCommitmentFulfilled", RevisionClass.WORLD, _commitment_changed),
+        EventDefinition("PrivateCommitmentBroken", RevisionClass.WORLD, _commitment_changed),
+        EventDefinition(
+            "PrivateCommitmentDeadlineBroken", RevisionClass.WORLD, _commitment_clock_changed
+        ),
+        EventDefinition("PrivateCommitmentReleased", RevisionClass.WORLD, _commitment_changed),
     )
 }
 
@@ -2841,6 +3151,10 @@ def make_projection(
         thread_transitions=state.thread_transitions,
         thread_proposals=state.thread_proposals,
         thread_proposal_ids=state.thread_proposal_ids,
+        commitments=state.commitments,
+        commitment_transitions=state.commitment_transitions,
+        commitment_proposals=state.commitment_proposals,
+        commitment_proposal_ids=state.commitment_proposal_ids,
         proposal_ids=state.proposal_ids,
         proposal_revisions=state.proposal_revisions,
         acceptance_decisions=state.acceptance_decisions,

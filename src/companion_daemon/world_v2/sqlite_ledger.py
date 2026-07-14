@@ -273,6 +273,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.7",
                 "world-v2-reducers.8",
                 "world-v2-reducers.9",
+                "world-v2-reducers.10",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -423,9 +424,21 @@ class SQLiteWorldLedger:
             "world-v2-reducers.3",
         }:
             payload.pop("appraisals", None)
-        if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+        if reducer_bundle_version in {
+            "world-v2-reducers.1",
+            "world-v2-reducers.2",
+            "world-v2-reducers.3",
+            "world-v2-reducers.5",
+            "world-v2-reducers.6",
+            "world-v2-reducers.7",
+            "world-v2-reducers.8",
+            "world-v2-reducers.9",
+        }:
             payload.pop("threads", None)
             payload.pop("thread_transitions", None)
+        if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+            payload.pop("commitments", None)
+            payload.pop("commitment_transitions", None)
         encoded = json.dumps(
             payload,
             ensure_ascii=False,
@@ -486,6 +499,10 @@ class SQLiteWorldLedger:
             thread_transitions=projection.thread_transitions,
             thread_proposals=projection.thread_proposals,
             thread_proposal_ids=projection.thread_proposal_ids,
+            commitments=projection.commitments,
+            commitment_transitions=projection.commitment_transitions,
+            commitment_proposals=projection.commitment_proposals,
+            commitment_proposal_ids=projection.commitment_proposal_ids,
             proposal_ids=projection.proposal_ids,
             proposal_revisions=projection.proposal_revisions,
             acceptance_decisions=projection.acceptance_decisions,

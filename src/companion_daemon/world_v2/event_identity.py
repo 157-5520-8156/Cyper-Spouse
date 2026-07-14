@@ -150,6 +150,13 @@ def _life_identity_components(
             payload.get("expected_entity_revision"),
             payload.get("transition_id"),
         )
+    if event_type in {"PrivateCommitmentDue", "PrivateCommitmentDeadlineBroken"}:
+        return (
+            world_id,
+            _nested(payload, "commitment_after", "commitment_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
     if event_type == "TriggerProcessOpened":
         return world_id, _nested(payload, "process", "trigger_id"), "opened"
     if event_type in {"TriggerProcessClaimed", "TriggerProcessReclaimed"}:

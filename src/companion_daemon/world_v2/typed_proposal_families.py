@@ -18,6 +18,7 @@ from .appraisal_events import (
     AppraisalContradictedPayload,
     AppraisalSupersededPayload,
 )
+from .commitment_events import CommitmentChangedPayload
 from .life_events import OutcomeProposalRecordedPayload, WorldOccurrenceSettledPayload
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .thread_events import THREAD_PAYLOAD_MODELS
@@ -25,6 +26,7 @@ from .schemas import (
     AffectProposalProjection,
     AppraisalProposalProjection,
     OutcomeProposalProjection,
+    CommitmentProposalProjection,
     RelationshipProposalProjection,
     ThreadProposalProjection,
 )
@@ -360,6 +362,54 @@ class _ThreadFamilyCodec:
         )
 
 
+class _CommitmentFamilyCodec:
+    def decode_record(
+        self, *, event_type: str, payload: dict[str, object]
+    ) -> CommitmentProposalProjection:
+        if event_type != "ProposalRecorded":
+            raise ValueError("commitment codec only accepts ProposalRecorded")
+        return _validate_json(CommitmentProposalProjection, payload)  # type: ignore[return-value]
+
+    def bind(self, proposal: object) -> ProposalAuthorityBinding:
+        if not isinstance(proposal, CommitmentProposalProjection):
+            raise TypeError("commitment codec received an incompatible proposal")
+        return ProposalAuthorityBinding(
+            proposal_id=proposal.proposal_id,
+            proposal_kind=proposal.proposal_kind,
+            authority_contract_ref=proposal.authority_contract_ref,
+            change_id=proposal.change_id,
+            proposed_change_hash=proposal.proposed_change_hash,
+            evaluated_world_revision=proposal.evaluated_world_revision,
+            expected_entity_revision=proposal.expected_entity_revision,
+            mutation_event_type=proposal.proposed_mutation.event_type,
+        )
+
+    def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
+        return _validate_json(CommitmentChangedPayload, payload)
+
+    def bind_mutation(self, mutation: object) -> AcceptedMutationBinding:
+        return _accepted_binding(mutation)
+
+    def record_identity(
+        self, *, world_id: str, event_type: str, payload: dict[str, object]
+    ) -> IdentityComponents:
+        return (
+            world_id,
+            payload.get("proposal_id"),
+            payload.get("change_id"),
+            payload.get("authority_contract_ref"),
+        )
+
+    def mutation_identity(
+        self, *, world_id: str, event_type: str, payload: dict[str, object]
+    ) -> IdentityComponents:
+        return (
+            world_id,
+            _nested(payload, "commitment_after", "commitment_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
+
 INSTALLED_TYPED_PROPOSAL_FAMILIES = tuple(
     sorted(
         (
@@ -406,6 +456,19 @@ INSTALLED_TYPED_PROPOSAL_FAMILIES = tuple(
                 requires_separate_deliberation_commit=True,
                 mutation_event_types=tuple(THREAD_PAYLOAD_MODELS),
                 codec=_ThreadFamilyCodec(),
+            ),
+            TypedProposalFamily(
+                contract_ref="proposal-contract:commitment.1",
+                selector=RecordSelector("ProposalRecorded", "commitment_transition"),
+                record_mode="explicit_contract",
+                requires_separate_deliberation_commit=True,
+                mutation_event_types=(
+                    "PrivateCommitmentOpened",
+                    "PrivateCommitmentFulfilled",
+                    "PrivateCommitmentBroken",
+                    "PrivateCommitmentReleased",
+                ),
+                codec=_CommitmentFamilyCodec(),
             ),
         ),
         key=lambda item: item.contract_ref,

@@ -706,7 +706,7 @@ def test_multiple_threads_can_share_one_clock_but_not_one_transition_id() -> Non
     assert len(history) == 2
 
 
-def test_sqlite_verified_v9_head_migrates_to_v10(tmp_path) -> None:
+def test_sqlite_verified_v9_head_migrates_to_v11(tmp_path) -> None:
     path = tmp_path / "thread-v9.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
     ledger.commit([event("world:v9", "WorldStarted", {})],
@@ -730,7 +730,50 @@ def test_sqlite_verified_v9_head_migrates_to_v10(tmp_path) -> None:
             (legacy_hash, "world-v2-reducers.9", WORLD),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.10"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.11"
     assert migrated.project().threads == ()
+    assert migrated.rebuild() == migrated.project()
+    migrated.close()
+
+
+def test_sqlite_verified_v10_head_with_thread_authority_migrates_to_v11(tmp_path) -> None:
+    path = tmp_path / "thread-v10.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    ledger.commit([event("world:v10", "WorldStarted", {})],
+                  expected_world_revision=0, expected_deliberation_revision=0)
+    ledger.commit([event("clock:v10", "ClockAdvanced", {
+        "logical_time_from": "2026-07-15T09:59:00+00:00",
+        "logical_time_to": NOW.isoformat(),
+    })], expected_world_revision=1, expected_deliberation_revision=0)
+    ledger.commit([event("operator:v10", "OperatorObservationRecorded", {
+        "observation_id": "operator:thread", "observation_hash": "a" * 64,
+    })], expected_world_revision=2, expected_deliberation_revision=0)
+    value = payload(operation="open", before=None, after=thread(), expected=0,
+                    proposal_id="proposal:v10-thread")
+    record_accept_mutate(ledger, value)
+    expected_thread = ledger.project().threads
+    ledger.close()
+    with sqlite3.connect(path) as connection:
+        state_json, world_revision = connection.execute(
+            "SELECT state_json, world_revision FROM world_v2_heads WHERE world_id = ?",
+            (WORLD,),
+        ).fetchone()
+        state = ReducerState.model_validate_json(state_json)
+        semantic = state.semantic_payload(
+            world_id=WORLD, world_revision=world_revision,
+            reducer_bundle_version="world-v2-reducers.10",
+        )
+        legacy_hash = hashlib.sha256(json.dumps(
+            semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()).hexdigest()
+        connection.execute(
+            "UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ? "
+            "WHERE world_id = ?",
+            (legacy_hash, "world-v2-reducers.10", WORLD),
+        )
+    migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.11"
+    assert migrated.project().threads == expected_thread
+    assert migrated.project().commitments == ()
     assert migrated.rebuild() == migrated.project()
     migrated.close()

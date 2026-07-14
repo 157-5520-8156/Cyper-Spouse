@@ -1025,15 +1025,252 @@ class AppraisalProposedMutation(FrozenModel):
 AppraisalProposalProjection.model_rebuild()
 
 
-class CommitmentStateProjection(FrozenModel):
-    commitment_id: str = Field(min_length=1)
+class CommitmentFulfillmentContract(FrozenModel):
+    """Frozen, target-bound proof required to settle a private commitment."""
+
+    contract_kind: Literal["thread_resolution", "execution_receipt"]
+    evidence_type: Literal["committed_world_event", "settled_external_result"]
+    expected_ref_id: str | None = None
+    expected_immutable_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_world_revision: int | None = Field(default=None, ge=1)
+    expected_event_type: str | None = None
+    expected_action_id: str | None = None
+    expected_action_payload_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    expected_result_id: str | None = None
+    expected_result_status: Literal["delivered"] | None = None
+    expected_thread_id: str | None = None
+    contract_version: Literal["commitment-fulfillment-contract.1"]
+
+    @model_validator(mode="after")
+    def contract_is_exact_and_supported(self) -> CommitmentFulfillmentContract:
+        expected_evidence = {
+            "thread_resolution": "committed_world_event",
+            "execution_receipt": "settled_external_result",
+        }[self.contract_kind]
+        if self.evidence_type != expected_evidence:
+            raise ValueError("commitment fulfillment contract evidence type is inconsistent")
+        if self.contract_kind == "thread_resolution":
+            if self.expected_event_type != "ThreadResolved" or not self.expected_thread_id:
+                raise ValueError("thread fulfillment contract must pin ThreadResolved target")
+            if any(
+                item is not None
+                for item in (
+                    self.expected_ref_id,
+                    self.expected_immutable_hash,
+                    self.expected_world_revision,
+                    self.expected_action_id,
+                    self.expected_action_payload_hash,
+                    self.expected_result_id,
+                    self.expected_result_status,
+                )
+            ):
+                raise ValueError("thread fulfillment contract has receipt constraints")
+        elif (
+            not self.expected_action_id
+            or not self.expected_action_payload_hash
+            or self.expected_result_status != "delivered"
+            or self.expected_world_revision is not None
+            or self.expected_event_type is not None
+            or self.expected_ref_id is not None
+            or self.expected_immutable_hash is not None
+            or self.expected_thread_id is not None
+        ):
+            raise ValueError("receipt fulfillment contract must pin delivered action payload")
+        return self
+
+
+CommitmentStatus = Literal["open", "due", "fulfilled", "broken", "released"]
+
+
+class CommitmentValues(FrozenModel):
+    owner_ref: Literal["actor:companion"] = "actor:companion"
+    subject_ref: str | None = None
     content_ref: str = Field(min_length=1)
-    source_refs: tuple[str, ...] = Field(min_length=1)
+    content_hash: str = Field(min_length=64, max_length=64)
+    anchor_evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    source_evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     importance_bp: int = Field(ge=0, le=10_000)
-    persistence_level: Literal["ephemeral", "turn", "session", "durable"]
-    due_window: tuple[datetime, datetime] | None = None
-    status: Literal["open", "fulfilled", "broken", "released"]
+    due_window: DueWindow
+    persistence_level: Literal["session", "durable"]
+    fulfillment_contract: CommitmentFulfillmentContract
     privacy_class: PrivacyClass = "private"
+    status: CommitmentStatus = "open"
+    settlement_evidence_ref: str | None = None
+    settlement_reason_code: Literal[
+        "evidence_satisfied",
+        "deadline_elapsed",
+        "authoritative_failure",
+        "user_withdrew",
+        "obsolete",
+        "precondition_failed",
+        "boundary_or_safety_conflict",
+        "operator_correction",
+    ] | None = None
+    predecessor_commitment_ref: str | None = None
+    lineage_kind: Literal["correction", "replacement", "renewal"] | None = None
+
+    @model_validator(mode="after")
+    def lifecycle_and_sources_are_complete(self) -> CommitmentValues:
+        if (
+            self.due_window.opens_at.tzinfo is None
+            or self.due_window.closes_at.tzinfo is None
+        ):
+            raise ValueError("commitment due window must be timezone-aware")
+        if len(self.source_evidence_refs) != len(
+            {(item.evidence_type, item.ref_id) for item in self.source_evidence_refs}
+        ):
+            raise ValueError("commitment source evidence refs must be unique")
+        if not set(self.anchor_evidence_refs).issubset(set(self.source_evidence_refs)):
+            raise ValueError("commitment anchor evidence must remain in source evidence")
+        terminal = self.status in {"fulfilled", "broken", "released"}
+        if terminal != bool(self.settlement_evidence_ref and self.settlement_reason_code):
+            raise ValueError("commitment terminal settlement evidence is incomplete")
+        if self.status in {"open", "due"} and (
+            self.settlement_evidence_ref is not None or self.settlement_reason_code is not None
+        ):
+            raise ValueError("active commitment cannot carry terminal settlement")
+        if bool(self.predecessor_commitment_ref) != bool(self.lineage_kind):
+            raise ValueError("commitment predecessor and lineage kind must appear together")
+        return self
+
+
+def commitment_semantic_fingerprint(
+    *,
+    owner_ref: str,
+    subject_ref: str | None,
+    content_ref: str,
+    content_hash: str,
+    anchor_evidence_refs: tuple[EvidenceRef, ...],
+    fulfillment_contract: CommitmentFulfillmentContract,
+    predecessor_commitment_ref: str | None = None,
+    lineage_kind: str | None = None,
+    policy_refs: tuple[str, ...],
+) -> str:
+    material = {
+        "owner_ref": owner_ref,
+        "subject_ref": subject_ref,
+        "content_ref": content_ref,
+        "content_hash": content_hash,
+        "anchor_evidence": sorted(
+            (
+                {
+                    "evidence_type": item.evidence_type,
+                    "ref_id": item.ref_id,
+                    "source_world_revision": item.source_world_revision,
+                    "immutable_hash": item.immutable_hash,
+                }
+                for item in anchor_evidence_refs
+            ),
+            key=lambda item: (str(item["ref_id"]), json.dumps(item, sort_keys=True)),
+        ),
+        "fulfillment_contract": fulfillment_contract.model_dump(mode="json"),
+        "predecessor_commitment_ref": predecessor_commitment_ref,
+        "lineage_kind": lineage_kind,
+        "policy_refs": sorted(policy_refs),
+    }
+    return hashlib.sha256(
+        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+class CommitmentOrigin(FrozenModel):
+    authority_mode: Literal["accepted_proposal", "mechanical_clock"] = "accepted_proposal"
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+
+
+class CommitmentProjection(FrozenModel):
+    commitment_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    semantic_fingerprint: str = Field(min_length=64, max_length=64)
+    values: CommitmentValues
+    origin: CommitmentOrigin
+    opened_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def fingerprint_matches_authority(self) -> CommitmentProjection:
+        expected = commitment_semantic_fingerprint(
+            owner_ref=self.values.owner_ref,
+            subject_ref=self.values.subject_ref,
+            content_ref=self.values.content_ref,
+            content_hash=self.values.content_hash,
+            anchor_evidence_refs=self.values.anchor_evidence_refs,
+            fulfillment_contract=self.values.fulfillment_contract,
+            predecessor_commitment_ref=self.values.predecessor_commitment_ref,
+            lineage_kind=self.values.lineage_kind,
+            policy_refs=self.origin.policy_refs,
+        )
+        if self.semantic_fingerprint != expected:
+            raise ValueError("commitment semantic fingerprint does not match authority")
+        return self
+
+
+class CommitmentTransitionProjection(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    commitment_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    operation: Literal["open", "due", "fulfill", "break", "release"]
+    values_before: CommitmentValues | None
+    values_after: CommitmentValues
+    change_id: str = Field(min_length=1)
+    authority_mode: Literal["accepted_proposal", "mechanical_clock"]
+    accepted_event_ref: str = Field(min_length=1)
+    accepted_at: datetime
+
+
+class CommitmentProposedMutation(FrozenModel):
+    event_type: Literal[
+        "PrivateCommitmentOpened",
+        "PrivateCommitmentFulfilled",
+        "PrivateCommitmentBroken",
+        "PrivateCommitmentReleased",
+    ]
+    payload_json: str = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def payload_is_canonical(self) -> CommitmentProposedMutation:
+        decoded = json.loads(self.payload_json)
+        if not isinstance(decoded, dict):
+            raise ValueError("commitment mutation payload must be an object")
+        canonical = json.dumps(decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if canonical != self.payload_json:
+            raise ValueError("commitment mutation payload must use canonical JSON")
+        return self
+
+
+class CommitmentProposalProjection(FrozenModel):
+    proposal_id: str = Field(min_length=1)
+    proposal_kind: Literal["commitment_transition"] = "commitment_transition"
+    proposal_encoding: Literal["typed-authority-v1"]
+    authority_contract_ref: Literal["proposal-contract:commitment.1"]
+    transition_kind: Literal["open", "fulfill", "break", "release"]
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    expected_entity_revision: int = Field(ge=0)
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    proposed_mutation: CommitmentProposedMutation
+
+    @model_validator(mode="after")
+    def transition_matches_event(self) -> CommitmentProposalProjection:
+        expected = {
+            "open": "PrivateCommitmentOpened",
+            "fulfill": "PrivateCommitmentFulfilled",
+            "break": "PrivateCommitmentBroken",
+            "release": "PrivateCommitmentReleased",
+        }[self.transition_kind]
+        if self.proposed_mutation.event_type != expected:
+            raise ValueError("commitment proposal transition does not match event")
+        return self
+
+
+# Temporary compatibility alias for callers that imported the old placeholder.
+CommitmentStateProjection = CommitmentProjection
 
 
 def affect_decay_config_digest(
@@ -2148,7 +2385,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.10"
+    reducer_bundle_version: str = "world-v2-reducers.11"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -2202,6 +2439,10 @@ class LedgerProjection(FrozenModel):
     thread_transitions: tuple[ThreadTransitionProjection, ...] = ()
     thread_proposals: tuple[ThreadProposalProjection, ...] = ()
     thread_proposal_ids: tuple[str, ...] = ()
+    commitments: tuple[CommitmentProjection, ...] = ()
+    commitment_transitions: tuple[CommitmentTransitionProjection, ...] = ()
+    commitment_proposals: tuple[CommitmentProposalProjection, ...] = ()
+    commitment_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
