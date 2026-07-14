@@ -14,6 +14,7 @@ from companion_daemon.qq_websocket import (
     ActiveSend,
     AfterthoughtPlan,
     CompanionQQClient,
+    QueuedQQMessage,
     QQMessageCoalescer,
     QQTurnTransport,
     QQTurnPresenter,
@@ -33,7 +34,7 @@ from companion_daemon.companion_turn import (
     ExternalObservation,
     TurnPresentation,
 )
-from companion_daemon.turn_taking import TurnTakingPolicy
+from companion_daemon.turn_taking import TurnState, TurnTakingPolicy
 from companion_daemon.world import WorldKernel
 from companion_daemon.world import WorldError
 
@@ -260,6 +261,90 @@ def test_classifies_mid_reply_interruption() -> None:
     assert classify_mid_reply_interruption("对对对") == "backchannel"
     assert classify_mid_reply_interruption("等下我不是这个意思") == "takeover"
     assert classify_mid_reply_interruption("那你觉得我应该怎么办？") == "takeover"
+
+
+@pytest.mark.asyncio
+async def test_semantic_companion_interruption_advisor_can_shorten_open_burst_wait() -> None:
+    from companion_daemon.companion_interruption import CompanionInterruptionAdvice
+
+    class Advisor:
+        calls = 0
+
+        async def advise(self, context):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            assert context.latest_text == "不是，我不同意这个说法，"
+            assert context.base_reason == "latest_message_continues"
+            return CompanionInterruptionAdvice(
+                True,
+                "disagreement",
+                0.82,
+                0.05,
+                ("不同意",),
+            )
+
+    advisor = Advisor()
+    coalescer = QQMessageCoalescer(
+        object(),  # type: ignore[arg-type]
+        delay_seconds=2.0,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=2.0, long_wait_seconds=5.0),
+        interruption_advisor=advisor,
+    )
+    coalescer._pending["c2c:user"].append(
+        QueuedQQMessage(
+            incoming=IncomingMessage(
+                platform="qq",
+                platform_user_id="user",
+                text="不是，我不同意这个说法，",
+            ),
+            reply_target=object(),  # type: ignore[arg-type]
+            received_monotonic=0.0,
+        )
+    )
+
+    base = coalescer._decision_for("c2c:user")
+    assert base.state == TurnState.COLLECTING
+
+    revised = await coalescer._maybe_apply_companion_interruption_advice("c2c:user", base)
+
+    assert advisor.calls == 1
+    assert revised.state == TurnState.READY
+    assert revised.wait_seconds == 0.05
+    assert revised.reason == "semantic_companion_interruption:disagreement"
+
+
+@pytest.mark.asyncio
+async def test_semantic_companion_interruption_respects_explicit_hold_floor() -> None:
+    class Advisor:
+        calls = 0
+
+        async def advise(self, context):  # type: ignore[no-untyped-def]
+            self.calls += 1
+            raise AssertionError("advisor should not override explicit hold-floor text")
+
+    advisor = Advisor()
+    coalescer = QQMessageCoalescer(
+        object(),  # type: ignore[arg-type]
+        delay_seconds=2.0,
+        turn_policy=TurnTakingPolicy(short_wait_seconds=2.0, long_wait_seconds=5.0),
+        interruption_advisor=advisor,
+    )
+    coalescer._pending["c2c:user"].append(
+        QueuedQQMessage(
+            incoming=IncomingMessage(
+                platform="qq",
+                platform_user_id="user",
+                text="先别回，我还没说完，",
+            ),
+            reply_target=object(),  # type: ignore[arg-type]
+            received_monotonic=0.0,
+        )
+    )
+
+    base = coalescer._decision_for("c2c:user")
+    revised = await coalescer._maybe_apply_companion_interruption_advice("c2c:user", base)
+
+    assert advisor.calls == 0
+    assert revised.reason == "user_thinking_or_hesitating"
 
 
 def test_afterthought_plans_favor_open_story_and_respect_goodbyes() -> None:

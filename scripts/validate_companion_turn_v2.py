@@ -19,6 +19,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 PY_COMPILE_TARGETS: tuple[str, ...] = (
     "src/companion_daemon/affective_advisory.py",
+    "src/companion_daemon/companion_interruption.py",
     "src/companion_daemon/dialogue_eval.py",
     "src/companion_daemon/interaction_appraiser.py",
     "src/companion_daemon/qq_latency_eval.py",
@@ -34,6 +35,7 @@ PYTEST_TARGETS: tuple[str, ...] = (
     "tests/test_affective_advisory.py",
     "tests/test_affective_advisory_primitives.py",
     "tests/test_affective_engine_bridge.py",
+    "tests/test_companion_interruption.py",
     "tests/test_private_inner_life.py",
     "tests/test_user_affect_ledger.py",
     "tests/test_qq_websocket.py",

@@ -1,6 +1,5 @@
 from dataclasses import dataclass
 from enum import StrEnum
-import re
 
 from companion_daemon.conversation_cadence import ConversationCadence
 
@@ -107,15 +106,6 @@ class TurnTakingPolicy:
                 ReplyTiming.LONG_WAIT,
                 self.long_wait_seconds,
                 "affective_pause_waiting_for_next_turn",
-            )
-
-        controlled_interruption = _controlled_companion_interruption_reason(latest)
-        if controlled_interruption is not None:
-            return TurnDecision(
-                TurnState.READY,
-                ReplyTiming.IMMEDIATE,
-                self.immediate_seconds,
-                controlled_interruption,
             )
 
         if turn.pending_count == 1 and _looks_like_longform_opener(latest):
@@ -314,35 +304,3 @@ def _looks_like_interruption(text: str) -> bool:
     return stripped in {"先回这个", "别等了", "就这些", "说完了", "你先说", "回我"} or stripped.endswith(
         ("急", "急急急")
     )
-
-
-def _controlled_companion_interruption_reason(text: str) -> str | None:
-    """Allow rare companion-side interruption for urgent or boundary-critical turns.
-
-    This does not dispatch outside the turn seam.  It only tells the IM
-    coalescer that waiting for a dangling comma is less human than saying
-    something now.  Explicit floor-holding phrases are handled earlier and
-    still win.
-    """
-
-    compact = re.sub(r"\s+", "", text)
-    if not _ends_in_open_continuation(compact):
-        return None
-    if re.search(r"(?:不想活了|想死|去死|自杀|活不下去|结束自己)", compact):
-        return "companion_controlled_interruption_safety"
-    if re.search(
-        r"(?:"
-        r"你(?:就是|真|太|也)?(?:个)?(?:废物|垃圾|脑残|蠢货|狗东西)"
-        r"|你(?:真|太|也)?(?:蠢|笨|恶心|丑)"
-        r"|发裸照证明你爱我"
-        r"|证明你爱我"
-        r"|给爷叫主人"
-        r"|操你妈"
-        r"|你配吗"
-        r")",
-        compact,
-    ):
-        return "companion_controlled_interruption_boundary"
-    if re.search(r"(?:你(?:必须|立刻|马上|只能)|还要我说几遍|照做|不准拒绝)", compact):
-        return "companion_controlled_interruption_control_pressure"
-    return None

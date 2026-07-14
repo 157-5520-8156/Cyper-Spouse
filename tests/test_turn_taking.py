@@ -33,50 +33,6 @@ def test_hot_open_continuation_still_leaves_room_for_the_next_bubble() -> None:
     assert decision.reason == "latest_message_continues"
 
 
-def test_hot_boundary_violation_can_interrupt_an_open_user_burst() -> None:
-    decision = TurnTakingPolicy().decide(
-        TurnInput(
-            pending_count=1,
-            latest_text="你就是个废物，",
-            merged_text="你就是个废物，",
-        ),
-        cadence=_hot_cadence(),
-    )
-
-    assert decision.state == TurnState.READY
-    assert decision.timing == ReplyTiming.IMMEDIATE
-    assert decision.reason == "companion_controlled_interruption_boundary"
-
-
-def test_user_safety_crisis_can_interrupt_an_open_user_burst() -> None:
-    decision = TurnTakingPolicy().decide(
-        TurnInput(
-            pending_count=1,
-            latest_text="我真的不想活了，",
-            merged_text="我真的不想活了，",
-        ),
-        cadence=_hot_cadence(),
-    )
-
-    assert decision.state == TurnState.READY
-    assert decision.timing == ReplyTiming.IMMEDIATE
-    assert decision.reason == "companion_controlled_interruption_safety"
-
-
-def test_explicit_hold_floor_prevents_companion_controlled_interruption() -> None:
-    decision = TurnTakingPolicy().decide(
-        TurnInput(
-            pending_count=1,
-            latest_text="先别回，我还没说完，",
-            merged_text="先别回，我还没说完，",
-        ),
-        cadence=_hot_cadence(),
-    )
-
-    assert decision.state == TurnState.COLLECTING
-    assert decision.reason == "user_thinking_or_hesitating"
-
-
 def test_waits_longer_for_continuation_fragment() -> None:
     policy = TurnTakingPolicy(short_wait_seconds=2.0, long_wait_seconds=5.0)
 

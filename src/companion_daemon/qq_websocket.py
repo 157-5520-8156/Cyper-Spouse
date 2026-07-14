@@ -27,6 +27,11 @@ from companion_daemon.companion_turn import (
     TurnPresenter,
     TurnTransport,
 )
+from companion_daemon.companion_interruption import (
+    CompanionInterruptionAdvisor,
+    CompanionInterruptionContext,
+    ModelCompanionInterruptionAdvisor,
+)
 from companion_daemon.config import get_settings
 from companion_daemon.models import (
     CompanionReply,
@@ -53,7 +58,13 @@ from companion_daemon.reply_decision import (
     is_urgent_interrupt,
 )
 from companion_daemon.time import utc_now
-from companion_daemon.turn_taking import TurnInput, TurnTakingPolicy
+from companion_daemon.turn_taking import (
+    ReplyTiming,
+    TurnDecision,
+    TurnInput,
+    TurnState,
+    TurnTakingPolicy,
+)
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.world import WorldError, WorldKernel
 
@@ -578,6 +589,7 @@ class QQMessageCoalescer:
         monotonic: Callable[[], float] = time.monotonic,
         response_timeout_seconds: float | None = None,
         runtime_adapter: str = "qq",
+        interruption_advisor: CompanionInterruptionAdvisor | None = None,
     ):
         self.engine = engine
         self.delay_seconds = delay_seconds
@@ -594,6 +606,11 @@ class QQMessageCoalescer:
         self.monotonic = monotonic
         self.response_timeout_seconds = response_timeout_seconds
         self.runtime_adapter = runtime_adapter
+        self.interruption_advisor = interruption_advisor
+        if self.interruption_advisor is None:
+            appraisal_model = getattr(self.engine, "interaction_appraisal_model", None)
+            if appraisal_model is not None:
+                self.interruption_advisor = ModelCompanionInterruptionAdvisor(appraisal_model)
         self._pending: dict[str, list[QueuedQQMessage]] = defaultdict(list)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._deferred: dict[str, DeferredReply] = {}
@@ -698,6 +715,7 @@ class QQMessageCoalescer:
             )
         )
         decision = self._decision_for(key)
+        decision = await self._maybe_apply_companion_interruption_advice(key, decision)
         if hasattr(self.engine, "record_input_merge_candidate"):
             self.engine.record_input_merge_candidate(
                 key, incoming, decision, pending_count=len(self._pending[key])
@@ -706,6 +724,49 @@ class QQMessageCoalescer:
         if existing and not existing.done():
             existing.cancel()
         self._tasks[key] = asyncio.create_task(self._flush_later(key, decision.wait_seconds))
+
+    async def _maybe_apply_companion_interruption_advice(
+        self, key: str, decision: TurnDecision
+    ) -> TurnDecision:
+        if (
+            self.interruption_advisor is None
+            or decision.state != TurnState.COLLECTING
+            or decision.reason
+            in {
+                "user_thinking_or_hesitating",
+                "affective_pause_waiting_for_next_turn",
+                "empty",
+            }
+        ):
+            return decision
+        pending = self._pending.get(key) or []
+        if not pending:
+            return decision
+        latest = pending[-1].incoming.text
+        merged = "\n".join(item.incoming.text for item in pending)
+        cadence_heat = self._turn_cadences.get(key, "unknown")
+        try:
+            advice = await self.interruption_advisor.advise(
+                CompanionInterruptionContext(
+                    pending_count=len(pending),
+                    latest_text=latest,
+                    merged_text=merged,
+                    cadence_heat=cadence_heat,
+                    base_wait_seconds=decision.wait_seconds,
+                    base_reason=decision.reason,
+                )
+            )
+        except Exception:
+            logger.debug("companion interruption advisor failed", exc_info=True)
+            return decision
+        if advice is None:
+            return decision
+        return TurnDecision(
+            TurnState.READY,
+            ReplyTiming.IMMEDIATE,
+            min(decision.wait_seconds, advice.wait_seconds),
+            advice.reason,
+        )
 
     async def _handle_mid_reply_interruption(
         self,
