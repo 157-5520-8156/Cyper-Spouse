@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 
 from companion_daemon.qq_runtime_observations import (
     QQTurnObservationJSONLExporter,
+    _main,
     load_qq_turn_observation_jsonl,
     summarize_qq_turn_experience,
 )
@@ -195,3 +196,37 @@ def test_redacted_turn_observation_summary_flags_repetitive_affordance_pattern()
     }
     assert summary["top_selected_affordance_rate"] == 0.8
     assert summary["fixed_pattern_diagnostic"] == "possible_fixed_pattern"
+
+
+def test_redacted_turn_observation_cli_prints_summary_without_private_content(
+    tmp_path, capsys
+) -> None:
+    report_path = tmp_path / "private" / "qq-turns.jsonl"
+    exporter = QQTurnObservationJSONLExporter(report_path)
+    exporter(
+        TurnRuntimeObservation(
+            key="c2c:private-user-id",
+            outcome="reply_delivered",
+            elapsed_seconds=0.9,
+            cadence="hot",
+            input_count=1,
+            observed_at=datetime(2026, 7, 13, 8, 0, tzinfo=timezone.utc),
+            adapter="napcat",
+            message_kinds=("reply",),
+            segment_ids=("segment-1",),
+            affective_reading_kinds=("possible_disappointment",),
+            selected_affordance_kind="soft_repair",
+            user_affect_kinds=("disappointment",),
+            user_affect_recorded=True,
+            private_impression_recorded=True,
+        )
+    )
+
+    assert _main((str(report_path), "--pretty")) == 0
+
+    output = capsys.readouterr().out
+    summary = json.loads(output)
+    assert summary["sample_count"] == 1
+    assert summary["selected_affordance_counts"] == {"soft_repair": 1}
+    assert summary["user_affect_kind_counts"] == {"disappointment": 1}
+    assert "private-user-id" not in output

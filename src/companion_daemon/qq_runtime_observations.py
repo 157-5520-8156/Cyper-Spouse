@@ -7,8 +7,10 @@ external receipt values, and free-form failure reasons.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from collections import Counter
 from collections.abc import Iterable, Mapping
@@ -220,3 +222,38 @@ def _fixed_pattern_diagnostic(
     if top_selected_affordance_rate >= 0.7:
         return "possible_fixed_pattern"
     return "varied"
+
+
+def _main(argv: Iterable[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        description=(
+            "Summarize privacy-preserving QQ/NapCat turn observations without "
+            "reading message content or user identifiers."
+        )
+    )
+    parser.add_argument(
+        "path",
+        type=Path,
+        help="Path to the redacted QQ turn observation JSONL file.",
+    )
+    parser.add_argument(
+        "--pretty",
+        action="store_true",
+        help="Pretty-print the JSON report for manual inspection.",
+    )
+    args = parser.parse_args(tuple(argv) if argv is not None else None)
+
+    summary = summarize_qq_turn_experience(load_qq_turn_observation_jsonl(args.path))
+    json.dump(
+        summary,
+        sys.stdout,
+        ensure_ascii=False,
+        indent=2 if args.pretty else None,
+        sort_keys=True,
+    )
+    sys.stdout.write("\n")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(_main())
