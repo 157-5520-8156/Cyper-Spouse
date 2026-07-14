@@ -718,7 +718,9 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
 - 真实 QQ/NapCat 样本的统一审计命令：
   `python -m companion_daemon.qq_latency_eval --observation-jsonl data/private/qq-turns.jsonl`。
   输出同时包含 first-visible/complete 延迟分位、cadence 分组、multi-segment/afterthought、
-  selected affordance 分布、用户情绪/私密印象入账率和隐私声明；
+  selected affordance 分布、用户情绪/私密印象入账率、`evidence_status` 和隐私声明；
+  热启动样本不足、缺 first-visible 计时或 hot P95 超过目标都会在报告中显式标出，不能把空
+  JSONL 当作真实平台通过；
 - 任何迁移阶段都不能只看测试通过而忽略 baseline 变差。
 
 已记录的实测证据（不纳入仓库，以避免把运行数据或环境细节提交）：

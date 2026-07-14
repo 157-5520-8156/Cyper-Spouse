@@ -27,6 +27,8 @@ from companion_daemon.usage_metrics import nearest_rank
 
 
 CADENCES = ("all", "cold", "warm", "hot")
+_LIVE_QQ_MIN_HOT_SAMPLES = 8
+_LIVE_QQ_HOT_P95_TARGET_MS = 7_000
 
 
 @dataclass(frozen=True)
@@ -52,6 +54,8 @@ def qq_latency_definition() -> dict[str, object]:
         ),
         "cadence_source": "the cadence frozen when the coalescer chose its debounce policy",
         "excludes": "server-to-client rendering after the QQ adapter returns its receipt",
+        "live_hot_sample_minimum": _LIVE_QQ_MIN_HOT_SAMPLES,
+        "live_hot_p95_target_ms": _LIVE_QQ_HOT_P95_TARGET_MS,
     }
 
 
@@ -147,14 +151,16 @@ def summarize_qq_latency_observation_rows(
 def qq_latency_observation_jsonl_report(path: Path) -> dict[str, object]:
     """Build a JSON-safe live QQ/NapCat baseline report from redacted JSONL."""
     rows = load_qq_turn_observation_jsonl(path)
+    summaries = summarize_qq_latency_observation_rows(rows)
+    evidence = assess_live_qq_observation_evidence(summaries)
     return {
         "live": True,
         "source": "redacted_qq_turn_observation_jsonl",
         "path": str(path),
         "definition": qq_latency_definition(),
-        "summaries": [
-            asdict(row) for row in summarize_qq_latency_observation_rows(rows)
-        ],
+        "summaries": [asdict(row) for row in summaries],
+        "evidence_status": evidence["status"],
+        "evidence_reasons": evidence["reasons"],
         "experience_summary": summarize_qq_turn_experience(rows),
         "privacy": {
             "contains_message_text": False,
@@ -163,6 +169,43 @@ def qq_latency_observation_jsonl_report(path: Path) -> dict[str, object]:
             "contains_free_form_failure_reason": False,
         },
     }
+
+
+def assess_live_qq_observation_evidence(
+    summaries: Iterable[QQLatencySummary],
+) -> dict[str, object]:
+    """Assess whether redacted live QQ evidence is enough to trust yet.
+
+    This is intentionally a diagnostic for the report, not a process exit
+    gate.  Human experience still needs inspection; this only prevents empty
+    or tiny JSONL files from looking like a completed live baseline.
+    """
+    by_cadence = {item.cadence: item for item in summaries}
+    hot = by_cadence.get("hot")
+    reasons: list[str] = []
+    sufficient_sample = hot is not None and hot.sample_count >= _LIVE_QQ_MIN_HOT_SAMPLES
+    complete_visible = hot is not None and hot.visible_count == hot.sample_count
+    if hot is None or hot.sample_count < _LIVE_QQ_MIN_HOT_SAMPLES:
+        observed = hot.sample_count if hot is not None else 0
+        reasons.append(
+            f"Need at least {_LIVE_QQ_MIN_HOT_SAMPLES} hot QQ/NapCat turns; observed {observed}."
+        )
+    if hot is None or hot.visible_count < hot.sample_count:
+        observed_visible = hot.visible_count if hot is not None else 0
+        observed_total = hot.sample_count if hot is not None else 0
+        reasons.append(
+            f"Need first-visible timing for every hot turn; observed {observed_visible}/{observed_total}."
+        )
+    if hot is None or hot.p95_first_visible_ms is None:
+        reasons.append("Hot P95 first-visible latency is unavailable.")
+    if not sufficient_sample or not complete_visible or hot is None or hot.p95_first_visible_ms is None:
+        return {"status": "insufficient_evidence", "reasons": reasons}
+    if hot.p95_first_visible_ms > _LIVE_QQ_HOT_P95_TARGET_MS:
+        reasons.append(
+            f"Hot P95 first-visible latency {hot.p95_first_visible_ms}ms exceeds {_LIVE_QQ_HOT_P95_TARGET_MS}ms."
+        )
+        return {"status": "latency_watch", "reasons": reasons}
+    return {"status": "pass", "reasons": []}
 
 
 async def run_synthetic_qq_latency_smoke() -> tuple[TurnRuntimeObservation, ...]:

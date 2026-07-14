@@ -6,6 +6,8 @@ import pytest
 from companion_daemon.models import CompanionReply, IncomingMessage
 from companion_daemon.conversation_cadence import ConversationCadence
 from companion_daemon.qq_latency_eval import (
+    QQLatencySummary,
+    assess_live_qq_observation_evidence,
     qq_latency_observation_jsonl_report,
     qq_latency_report,
     run_synthetic_qq_latency_smoke,
@@ -174,6 +176,8 @@ def test_live_observation_jsonl_latency_report_reuses_redacted_rows(tmp_path) ->
 
     assert report["live"] is True
     assert report["source"] == "redacted_qq_turn_observation_jsonl"
+    assert report["evidence_status"] == "insufficient_evidence"
+    assert report["evidence_reasons"]
     summaries = {item["cadence"]: item for item in report["summaries"]}  # type: ignore[index]
     assert summaries["hot"]["sample_count"] == 2
     assert summaries["hot"]["p95_first_visible_ms"] == 800
@@ -188,3 +192,34 @@ def test_live_observation_jsonl_latency_report_reuses_redacted_rows(tmp_path) ->
         "contains_external_receipts": False,
         "contains_free_form_failure_reason": False,
     }
+
+
+def test_live_qq_observation_evidence_status_requires_real_hot_sample_size() -> None:
+    insufficient = assess_live_qq_observation_evidence(
+        (
+            QQLatencySummary("all", 3, 3, 500, 800, 900, 1200),
+            QQLatencySummary("hot", 3, 3, 500, 800, 900, 1200),
+        )
+    )
+
+    assert insufficient["status"] == "insufficient_evidence"
+    assert "Need at least" in str(insufficient["reasons"])
+
+    passed = assess_live_qq_observation_evidence(
+        (
+            QQLatencySummary("all", 8, 8, 900, 1600, 1200, 2200),
+            QQLatencySummary("hot", 8, 8, 900, 1600, 1200, 2200),
+        )
+    )
+
+    assert passed == {"status": "pass", "reasons": []}
+
+    latency_watch = assess_live_qq_observation_evidence(
+        (
+            QQLatencySummary("all", 8, 8, 2000, 7600, 2600, 9000),
+            QQLatencySummary("hot", 8, 8, 2000, 7600, 2600, 9000),
+        )
+    )
+
+    assert latency_watch["status"] == "latency_watch"
+    assert "exceeds" in str(latency_watch["reasons"])
