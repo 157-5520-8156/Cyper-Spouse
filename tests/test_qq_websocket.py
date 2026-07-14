@@ -18,9 +18,12 @@ from companion_daemon.qq_websocket import (
     QQTurnTransport,
     QQTurnPresenter,
     _attachments_from_botpy,
+    _apply_affective_afterthought_affordance,
     _clean_content,
     _afterthought_plans,
+    _default_response_budget_seconds,
     _requires_world_turn_runtime,
+    _world_action_affective_observation,
     classify_mid_reply_interruption,
     _send_reply_parts,
 )
@@ -44,6 +47,11 @@ def test_reply_msg_seq_is_positive() -> None:
     from companion_daemon.qq_websocket import _reply_msg_seq
 
     assert _reply_msg_seq() > 0
+
+
+def test_hot_default_response_budget_leaves_room_for_live_model_result() -> None:
+    assert _default_response_budget_seconds("hot") == 7.0
+    assert _default_response_budget_seconds("hot") > 5.0
 
 
 @pytest.mark.asyncio
@@ -267,6 +275,85 @@ def test_afterthought_plans_favor_open_story_and_respect_goodbyes() -> None:
     assert _afterthought_plans("晚安啦", FixedRandom()) == []
     assert _afterthought_plans("？", FixedRandom()) == []
     assert _afterthought_plans("你是不是在跟别人聊天", FixedRandom()) == []
+
+
+def test_affective_affordance_modulates_afterthought_opportunity_without_content() -> None:
+    class FixedRandom:
+        def uniform(self, low: float, high: float) -> float:
+            return low
+
+    base = [AfterthoughtPlan("quick_continue", 20, 0.26)]
+
+    boosted = _apply_affective_afterthought_affordance(
+        base, "soft_repair", FixedRandom()
+    )
+    assert boosted[0].mode == "quick_continue"
+    assert boosted[0].probability > base[0].probability
+
+    delayed = _apply_affective_afterthought_affordance(
+        [], "delayed_afterthought", FixedRandom()
+    )
+    assert delayed == [AfterthoughtPlan("delayed_afterthought", 45, 0.42)]
+
+    assert _apply_affective_afterthought_affordance(
+        base, "let_it_pass", FixedRandom()
+    ) == []
+
+    guarded = _apply_affective_afterthought_affordance(
+        base, "withdraw_slightly", FixedRandom()
+    )
+    assert guarded[0].mode == "quick_continue"
+    assert guarded[0].probability < base[0].probability
+
+
+def test_world_action_affective_observation_exports_only_redacted_metrics() -> None:
+    class World:
+        def snapshot(self, world_id: str) -> dict[str, object]:
+            assert world_id == "zhizhi-v1"
+            return {
+                "actions": {
+                    "action-1": {
+                        "message_kind": "afterthought",
+                        "trace": {
+                            "user_affect": {"kind": "disappointment"},
+                            "private_impression": {"summary": "private text"},
+                            "affective_advisory": {
+                                "readings": [
+                                    {
+                                        "kind": "possible_disappointment",
+                                        "evidence_spans": ["敷衍"],
+                                    }
+                                ],
+                                "selection": {
+                                    "selected": {"kind": "soft_repair"},
+                                    "candidates": [
+                                        {"kind": "soft_repair"},
+                                        {"kind": "let_it_pass"},
+                                    ],
+                                },
+                            },
+                        }
+                    }
+                }
+            }
+
+    class Engine:
+        world_kernel = World()
+        world_id = "zhizhi-v1"
+
+    summary = _world_action_affective_observation(Engine(), ("action-1",))
+
+    assert summary == {
+        "message_kinds": ("afterthought",),
+        "affective_reading_kinds": ("possible_disappointment",),
+        "expression_affordance_candidate_kinds": ("soft_repair", "let_it_pass"),
+        "selected_affordance_kind": "soft_repair",
+        "user_affect_kinds": ("disappointment",),
+        "user_affect_recorded": True,
+        "private_impression_recorded": True,
+    }
+    assert "敷衍" not in json.dumps(summary, ensure_ascii=False)
+    assert "private text" not in json.dumps(summary, ensure_ascii=False)
 
 
 @pytest.mark.asyncio

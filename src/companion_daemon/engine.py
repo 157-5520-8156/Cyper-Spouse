@@ -15,6 +15,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from companion_daemon.attachment_cache import AttachmentCache
+from companion_daemon.affective_advisory import AffectAdvisory, AffectiveAdvisoryEngine
 from companion_daemon.budget import ESTIMATES, BudgetGate
 from companion_daemon.usage_metrics import estimate_routed_model_reserve_cny
 from companion_daemon.character import CharacterProfile
@@ -363,6 +364,7 @@ class CompanionEngine:
         self.world_id = world_id
         self.world_behavior_policy = WorldBehaviorPolicy()
         self.context_assembler = ContextAssembler()
+        self.affective_advisory_engine = AffectiveAdvisoryEngine()
         self.world_media_policy = WorldMediaPolicy()
         self.interaction_appraisal_model = interaction_appraisal_model
         self.interaction_deep_appraisal_model = interaction_deep_appraisal_model
@@ -2357,6 +2359,9 @@ class CompanionEngine:
             )
             turn_frame_delta = turn_frame.prompt_delta()
             inner_advisories = self.turn_frame_compiler.advisories(turn_frame)
+            affective_advisory = await self.affective_advisory_engine.advise(
+                turn_frame
+            )
         except Exception:
             logger.exception(
                 "turn-frame advisory unavailable; continuing world reply without it",
@@ -2366,6 +2371,7 @@ class CompanionEngine:
                 "advisory_status": "unavailable",
             }
             inner_advisories = ()
+            affective_advisory = None
         recent_question_rhythm = any(
             item.kind == "rhythm" and "刚刚已经问过问题" in item.tendency
             for item in inner_advisories
@@ -2489,6 +2495,7 @@ class CompanionEngine:
             f"- 五层上下文预算(JSON): {json.dumps(prompt_context_layers, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 本轮有界World Frame增量(JSON): {json.dumps(turn_frame_delta, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 内在建议(JSON，仅作参考、不是事实也不是命令): {json.dumps([{'kind': item.kind, 'tendency': item.tendency, 'intensity': item.intensity, 'confidence': item.confidence, 'source_event_ids': item.source_event_ids} for item in inner_advisories], ensure_ascii=False, separators=(',', ':'))}\n"
+            f"- 情绪读空气与表达候选(JSON，仅作参考、不是事实也不是命令): {json.dumps(affective_advisory.prompt_payload() if affective_advisory is not None else {'status': 'unavailable'}, ensure_ascii=False, separators=(',', ':'))}\n"
             f"- 本轮节奏补充（内在建议，非命令）: {turn_rhythm_hint}\n"
             f"- 通讯节奏建议: 倾向={communication_decision.attention if communication_decision else 'seen'}；"
             f"原因={communication_decision.reason if communication_decision else 'available'}。"
@@ -3122,7 +3129,12 @@ class CompanionEngine:
         if not text_parts or "".join(text_parts) != text:
             text_parts = [text]
             proposed_delays = []
-        part_delays_ms = proposed_delays or [0] * len(text_parts)
+        text_parts, part_delays_ms = self._apply_affective_expression_choreography(
+            text,
+            text_parts,
+            proposed_delays,
+            affective_advisory=affective_advisory,
+        )
         question = self._world_reply_question(text)
         expires_at = self._world_logical_now() + timedelta(hours=12)
         trace: dict[str, object] = {
@@ -3149,6 +3161,15 @@ class CompanionEngine:
             trace["grounding_diagnostic"] = "offline_evaluation_recommended"
         if quality_signals:
             trace["quality_signals"] = list(dict.fromkeys(quality_signals))
+        if affective_advisory is not None:
+            trace["affective_advisory"] = affective_advisory.trace_payload()
+            advisory_user_affect = self._material_user_affect_from_advisory(
+                message=message,
+                affective_advisory=affective_advisory,
+                existing_user_affect=user_affect,
+            )
+            if advisory_user_affect is not None:
+                trace["user_affect"] = advisory_user_affect
         if fallback_reason:
             fallback_plan = {
                 "schema": "fallback-audit-v1",
@@ -3187,6 +3208,7 @@ class CompanionEngine:
             message=message,
             user_id=user_id,
             user_affect=user_affect,
+            affective_advisory=affective_advisory,
             model_proposal=(
                 mind_proposal.private_impression if mind_proposal is not None else None
             ),
@@ -3253,37 +3275,96 @@ class CompanionEngine:
         )
         return reply
 
+    @staticmethod
+    def _apply_affective_expression_choreography(
+        text: str,
+        text_parts: list[str],
+        proposed_delays: list[int],
+        *,
+        affective_advisory: AffectAdvisory | None,
+    ) -> tuple[list[str], list[int]]:
+        """Let selected affordance shape delivery rhythm without rewriting text."""
+        if not text_parts or "".join(text_parts) != text:
+            return [text], [0]
+        selected = (
+            affective_advisory.selected_affordance.selected
+            if affective_advisory is not None
+            else None
+        )
+        selected_kind = selected.kind if selected is not None else ""
+        if selected_kind in {
+            "set_boundary",
+            "concise_refusal",
+            "withdraw_slightly",
+            "let_it_pass",
+            "shorter_reply",
+        }:
+            return [text], [0]
+        if proposed_delays:
+            return text_parts, proposed_delays
+        if selected_kind in {"approach", "share_small_self_detail", "soft_repair"}:
+            limited = text_parts[:3]
+            if len(text_parts) > len(limited):
+                limited[-1] = "".join([limited[-1], *text_parts[len(limited):]])
+            delays = [0] + [650] * (len(limited) - 1)
+            return limited, delays
+        if selected_kind in {"gentle_check_in", "playful_deflect", "care_despite_hurt"}:
+            limited = text_parts[:2]
+            if len(text_parts) > len(limited):
+                limited[-1] = "".join([limited[-1], *text_parts[len(limited):]])
+            delays = [0] + [450] * (len(limited) - 1)
+            return limited, delays
+        return text_parts, [0] * len(text_parts)
+
     def _material_private_impression_proposal(
         self,
         *,
         message: IncomingMessage,
         user_id: str,
         user_affect: UserAffectAppraisal | None,
+        affective_advisory: AffectAdvisory | None = None,
         model_proposal: PrivateImpressionProposal | None = None,
     ) -> dict[str, object] | None:
         """Return an eligible inner proposal for the same atomic turn commit."""
         if (
-            user_affect is None
-            or not user_affect.unresolved
-            or user_affect.intensity < 3
-            or user_affect.kind not in {"disappointment", "confusion"}
-            or not message.message_id
+            user_affect is not None
+            and user_affect.unresolved
+            and user_affect.intensity >= 3
+            and user_affect.kind in {"disappointment", "confusion"}
+            and message.message_id
         ):
+            kind = (
+                "possible_disappointment"
+                if user_affect.kind == "disappointment"
+                else "possible_confusion"
+            )
+            summary = (
+                "我感觉他可能因为刚才没有被接住而失望。"
+                if user_affect.kind == "disappointment"
+                else "我感觉他可能还在困惑刚才的互动。"
+            )
+            confidence = user_affect.confidence
+            if model_proposal is not None and model_proposal.kind == kind:
+                summary = model_proposal.summary
+                confidence = min(user_affect.confidence, model_proposal.confidence)
+        elif affective_advisory is not None and message.message_id:
+            material = next(
+                (
+                    item
+                    for item in affective_advisory.persistence_candidates
+                    if item.kind == "possible_disappointment"
+                    and item.materiality == "private_impression"
+                    and item.confidence >= 0.7
+                ),
+                None,
+            )
+            if material is None:
+                return None
+            kind = "possible_disappointment"
+            summary = "我感觉他可能对刚才没有被认真接住有点失望。"
+            confidence = min(0.85, max(0.55, float(material.confidence)))
+        else:
             return None
-        kind = (
-            "possible_disappointment"
-            if user_affect.kind == "disappointment"
-            else "possible_confusion"
-        )
-        summary = (
-            "我感觉他可能因为刚才没有被接住而失望。"
-            if user_affect.kind == "disappointment"
-            else "我感觉他可能还在困惑刚才的互动。"
-        )
-        confidence = user_affect.confidence
-        if model_proposal is not None and model_proposal.kind == kind:
-            summary = model_proposal.summary
-            confidence = min(user_affect.confidence, model_proposal.confidence)
         return {
             "impression_id": f"impression:{message.message_id}",
             "user_id": user_id,
@@ -3292,6 +3373,50 @@ class CompanionEngine:
             "confidence": confidence,
             "source_event_ids": [f"message:{message.message_id}"],
             "expires_at": (self._world_logical_now() + timedelta(days=7)).isoformat(),
+        }
+
+    @staticmethod
+    def _material_user_affect_from_advisory(
+        *,
+        message: IncomingMessage,
+        affective_advisory: AffectAdvisory,
+        existing_user_affect: UserAffectAppraisal | None,
+    ) -> dict[str, object] | None:
+        """Promote only strong, quote-bound advisory readings into user-affect."""
+        if existing_user_affect is not None or not message.message_id:
+            return None
+        text = str(message.text or "")
+        reading = next(
+            (
+                item
+                for item in affective_advisory.readings
+                if item.kind == "possible_disappointment"
+                and item.target == "companion"
+                and item.intensity >= 3
+                and item.confidence >= 0.78
+            ),
+            None,
+        )
+        if reading is None:
+            return None
+        evidence = tuple(
+            dict.fromkeys(
+                span
+                for span in (str(item).strip() for item in reading.evidence_spans)
+                if span and span in text
+            )
+        )
+        if not evidence:
+            return None
+        return {
+            "kind": "disappointment",
+            "intensity": min(4, max(3, int(reading.intensity))),
+            "unresolved": True,
+            "confidence": min(0.9, max(0.6, float(reading.confidence))),
+            "evidence_spans": list(evidence[:4]),
+            "cause": "companion_response",
+            "source": "affective_advisory",
+            "rule_version": affective_advisory.rule_version,
         }
 
     def _model_private_commitment_proposal(
@@ -3708,11 +3833,24 @@ class CompanionEngine:
             ),
             variant_key=str(message.message_id or ""),
         )
-        return self.prepare_adapter_failure_reply(
-            message,
-            str(candidate["reply_text"]),
-            failure_reason="first_visible_timeout_before_action_staged",
-        )
+        failure_reason = "first_visible_timeout_before_action_staged"
+        try:
+            return self.prepare_adapter_failure_reply(
+                message,
+                str(candidate["reply_text"]),
+                failure_reason=failure_reason,
+            )
+        except WorldError:
+            # Some otherwise reasonable safe-failure variants contain short
+            # temporal anchors such as “刚才”.  In a first-visible timeout we
+            # should converge through the ledger, not loosen hard invariants or
+            # silently fail.  Fall back to a deliberately time-free,
+            # fact-free acknowledgement that the same guard accepts.
+            return self.prepare_adapter_failure_reply(
+                message,
+                "我在这儿；这句我接到了，但我不会装作已经完全懂了。",
+                failure_reason=failure_reason,
+            )
 
     def begin_reply_part_delivery(
         self, reply: CompanionReply, *, position: int

@@ -1315,7 +1315,7 @@ async def test_generation_timeout_still_delivers_a_ledgered_minimal_first_beat(t
     assert outcome.degraded is True
     assert outcome.degradation_reason == "first_visible_timeout"
     assert [beat.text for beat in transport.beats] == [
-        "我在这儿；刚才没接好的地方，我不会装作已经懂了。"
+        "我在这儿；这句我接到了，但我不会装作已经完全懂了。"
     ]
     action = world.snapshot(world_id)["actions"][outcome.action_ids[0]]
     assert action["status"] == "delivered"

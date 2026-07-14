@@ -94,6 +94,10 @@ def _requires_world_turn_runtime(engine: object) -> bool:
     return getattr(engine, "world_kernel", None) is not None
 
 
+def _default_response_budget_seconds(heat: str) -> float:
+    return {"hot": 7.0, "warm": 8.0, "cold": 12.0}.get(heat, 12.0)
+
+
 def _world_afterthought_suppression_reason(
     engine: object, _canonical_user_id: str
 ) -> str | None:
@@ -1011,7 +1015,7 @@ class QQMessageCoalescer:
             response_budget = self.response_timeout_seconds
             if response_budget is None:
                 heat = str(getattr(getattr(frozen_context, "cadence", None), "heat", "cold"))
-                response_budget = {"hot": 5.0, "warm": 8.0, "cold": 12.0}.get(heat, 12.0)
+                response_budget = _default_response_budget_seconds(heat)
             # The deadline is user-perceived turn time, not a fresh budget
             # granted after coalescing has already consumed several seconds.
             generation_budget = response_budget - (flushed_at - input_started_at)
@@ -1247,6 +1251,11 @@ class QQMessageCoalescer:
                 durable_receipt_status=trace.durable_receipt_status,
                 recovery_result=trace.recovery_result,
             )
+        affective_summary = _world_action_affective_observation(
+            self.engine, observation.action_ids
+        )
+        if affective_summary:
+            observation = replace(observation, **affective_summary)
         if observation.adapter == "qq" and self.runtime_adapter != "qq":
             observation = replace(observation, adapter=self.runtime_adapter)
         logger.info(
@@ -1717,6 +1726,12 @@ class QQMessageCoalescer:
                 # participate in the optional afterthought feature.
                 pass
         plans = _afterthought_plans(merged.text, self.rng)
+        if _requires_world_turn_runtime(self.engine):
+            plans = _apply_affective_afterthought_affordance(
+                plans,
+                _world_last_expression_affordance_kind(self.engine),
+                self.rng,
+            )
         selected: list[AfterthoughtPlan] = []
         for plan in plans:
             if self.rng.random() <= plan.probability:
@@ -1982,6 +1997,156 @@ def _afterthought_plans(text: str, rng: random.Random) -> list[AfterthoughtPlan]
     # A normal short turn has already received its answer. Scheduling an extra
     # message here makes it too easy for her to appear to answer herself.
     return []
+
+
+def _world_last_expression_affordance_kind(engine: object) -> str:
+    world = getattr(engine, "world_kernel", None)
+    world_id = getattr(engine, "world_id", None)
+    if world is None or not world_id:
+        return ""
+    try:
+        snapshot = world.snapshot(world_id)
+    except Exception:
+        logger.exception("failed to load world projection for affective afterthought modulation")
+        return ""
+    last = snapshot.get("last_expression_affordance")
+    if not isinstance(last, dict):
+        return ""
+    selected = last.get("selected")
+    if not isinstance(selected, dict):
+        return ""
+    return str(selected.get("kind") or "")
+
+
+def _world_action_affective_observation(
+    engine: object, action_ids: tuple[str, ...]
+) -> dict[str, object]:
+    """Return redacted affective metrics for live-turn observation export."""
+    if not action_ids:
+        return {}
+    world = getattr(engine, "world_kernel", None)
+    world_id = getattr(engine, "world_id", None)
+    if world is None or not world_id:
+        return {}
+    try:
+        snapshot = world.snapshot(world_id)
+    except Exception:
+        logger.exception("failed to load world projection for affective observation")
+        return {}
+    actions = snapshot.get("actions", {})
+    if not isinstance(actions, dict):
+        return {}
+    reading_kinds: list[str] = []
+    candidate_kinds: list[str] = []
+    message_kinds: list[str] = []
+    user_affect_kinds: list[str] = []
+    selected_kind: str | None = None
+    user_affect_recorded = False
+    private_impression_recorded = False
+    for action_id in action_ids:
+        raw_action = actions.get(str(action_id))
+        if not isinstance(raw_action, dict):
+            continue
+        message_kind = str(raw_action.get("message_kind") or "")
+        if message_kind and message_kind not in message_kinds:
+            message_kinds.append(message_kind)
+        trace = raw_action.get("trace")
+        if not isinstance(trace, dict):
+            continue
+        raw_user_affect = trace.get("user_affect")
+        user_affect_recorded = user_affect_recorded or isinstance(raw_user_affect, dict)
+        if isinstance(raw_user_affect, dict):
+            kind = str(raw_user_affect.get("kind") or "")
+            if kind and kind not in user_affect_kinds:
+                user_affect_kinds.append(kind)
+        private_impression_recorded = private_impression_recorded or isinstance(
+            trace.get("private_impression"), dict
+        )
+        affective = trace.get("affective_advisory")
+        if not isinstance(affective, dict):
+            continue
+        readings = affective.get("readings")
+        if isinstance(readings, list):
+            for item in readings:
+                if isinstance(item, dict):
+                    kind = str(item.get("kind") or "")
+                    if kind and kind not in reading_kinds:
+                        reading_kinds.append(kind)
+        selection = affective.get("selection")
+        if isinstance(selection, dict):
+            selected = selection.get("selected")
+            if isinstance(selected, dict):
+                selected_kind = selected_kind or str(selected.get("kind") or "") or None
+            candidates = selection.get("candidates")
+            if isinstance(candidates, list):
+                for item in candidates:
+                    if isinstance(item, dict):
+                        kind = str(item.get("kind") or "")
+                        if kind and kind not in candidate_kinds:
+                            candidate_kinds.append(kind)
+    if (
+        not message_kinds
+        and not reading_kinds
+        and not candidate_kinds
+        and selected_kind is None
+        and not user_affect_recorded
+        and not private_impression_recorded
+    ):
+        return {}
+    return {
+        "message_kinds": tuple(message_kinds),
+        "affective_reading_kinds": tuple(reading_kinds),
+        "expression_affordance_candidate_kinds": tuple(candidate_kinds),
+        "selected_affordance_kind": selected_kind,
+        "user_affect_kinds": tuple(user_affect_kinds),
+        "user_affect_recorded": user_affect_recorded,
+        "private_impression_recorded": private_impression_recorded,
+    }
+
+
+def _apply_affective_afterthought_affordance(
+    plans: list[AfterthoughtPlan],
+    selected_kind: str,
+    rng: random.Random,
+) -> list[AfterthoughtPlan]:
+    """Let affective expression affordance modulate optional follow-up pulses."""
+    if selected_kind in {
+        "set_boundary",
+        "concise_refusal",
+        "withdraw_slightly",
+        "let_it_pass",
+        "shorter_reply",
+    }:
+        if selected_kind in {"let_it_pass", "shorter_reply"}:
+            return []
+        return [
+            replace(plan, probability=round(plan.probability * 0.35, 4))
+            for plan in plans[:1]
+        ]
+    if selected_kind == "delayed_afterthought":
+        if not plans:
+            return [AfterthoughtPlan("delayed_afterthought", rng.uniform(45, 150), 0.42)]
+        return [
+            replace(
+                plans[0],
+                mode="delayed_afterthought",
+                probability=min(0.52, round(plans[0].probability + 0.18, 4)),
+            ),
+            *plans[1:],
+        ]
+    if selected_kind in {"soft_repair", "gentle_check_in", "care_despite_hurt"}:
+        if not plans:
+            return [AfterthoughtPlan("repair_afterthought", rng.uniform(30, 120), 0.28)]
+        return [
+            replace(plan, probability=min(0.45, round(plan.probability + 0.1, 4)))
+            for plan in plans
+        ]
+    if selected_kind in {"approach", "share_small_self_detail", "playful_deflect"}:
+        return [
+            replace(plan, probability=min(0.4, round(plan.probability + 0.06, 4)))
+            for plan in plans
+        ]
+    return plans
 
 
 class CompanionQQClient(botpy.Client):

@@ -763,6 +763,98 @@ class WorldKernel:
                 action_id = f"outgoing:{delivery_id}"
                 private_inner_events: list[tuple[str, dict[str, object]]] = []
                 expected_inner_user_id = f"user:{canonical_user_id}"
+                user_affect_events: list[tuple[str, dict[str, object]]] = []
+                raw_user_affect = trace.get("user_affect")
+                if raw_user_affect is not None:
+                    affect = _as_dict(raw_user_affect, "outgoing user affect")
+                    input_message_id = str(trace.get("input_message_id") or "")
+                    affect_kind = str(affect.get("kind") or "")
+                    affect_intensity = int(affect.get("intensity") or 0)
+                    affect_unresolved = bool(affect.get("unresolved"))
+                    affect_confidence = float(affect.get("confidence") or 0.0)
+                    affect_evidence = [
+                        str(item)[:120]
+                        for item in _as_list(
+                            affect.get("evidence_spans", []),
+                            "outgoing user affect evidence",
+                        )[:6]
+                    ]
+                    if (
+                        not input_message_id
+                        or affect_kind not in {"disappointment", "confusion"}
+                        or not 2 <= affect_intensity <= 4
+                        or not affect_unresolved
+                        or not 0.0 <= affect_confidence <= 1.0
+                        or not affect_evidence
+                    ):
+                        raise WorldError("outgoing user affect is outside the bounded schema")
+                    observed = next(
+                        (
+                            item
+                            for item in _as_list(state.get("recent_messages", []), "recent messages")
+                            if str(_as_dict(item, "recent message").get("message_id") or "")
+                            == input_message_id
+                            and str(_as_dict(item, "recent message").get("user_id") or "")
+                            == expected_inner_user_id
+                            and str(_as_dict(item, "recent message").get("direction") or "")
+                            == "in"
+                        ),
+                        None,
+                    )
+                    if observed is None:
+                        raise WorldError("outgoing user affect requires its observed user message")
+                    observed_text = str(
+                        _as_dict(observed, "observed user message").get("text") or ""
+                    )
+                    if any(not span or span not in observed_text for span in affect_evidence):
+                        raise WorldError("outgoing user affect evidence must quote the observed message")
+                    prior_user_affect = _as_dict(
+                        _as_dict(state.get("user_affect", {}), "user affect projection").get(
+                            expected_inner_user_id,
+                            {},
+                        ),
+                        "active user affect",
+                    )
+                    prior_active_episodes = [
+                        _as_dict(item, "active user affect episode")
+                        for item in _as_list(
+                            prior_user_affect.get("active_episodes", []),
+                            "active user affect episodes",
+                        )
+                    ]
+                    if (
+                        bool(prior_user_affect.get("unresolved"))
+                        and str(prior_user_affect.get("source_message_id") or "")
+                        and not prior_active_episodes
+                    ):
+                        prior_active_episodes = [prior_user_affect]
+                    user_affect_events.append(
+                        (
+                            "UserAffectAppraised",
+                            {
+                                "user_id": expected_inner_user_id,
+                                "source_message_id": input_message_id,
+                                "kind": affect_kind,
+                                "intensity": affect_intensity,
+                                "unresolved": True,
+                                "confidence": affect_confidence,
+                                "cause": str(affect.get("cause") or "companion_response")[:80],
+                                "evidence_spans": affect_evidence,
+                                "settles_source_message_id": "",
+                                "settles_source_message_ids": [],
+                                "source": str(affect.get("source") or "outgoing_trace")[:80],
+                                "rule_version": "user-affect-v1",
+                                "advisory_rule_version": str(
+                                    affect.get("rule_version") or ""
+                                )[:80],
+                                "prior_unresolved_source_message_ids": [
+                                    str(item.get("source_message_id") or "")
+                                    for item in prior_active_episodes
+                                    if str(item.get("source_message_id") or "")
+                                ][:6],
+                            },
+                        )
+                    )
                 raw_private_impression = trace.get("private_impression")
                 if raw_private_impression is not None:
                     impression = self._private_impression_payload(
@@ -811,6 +903,44 @@ class WorldKernel:
                 )
                 segment_projection = self.action_coordinator.to_projection(segmented)
                 planned_event = self.action_coordinator.planned_world_event(segmented)
+                affective_trace = (
+                    dict(trace.get("affective_advisory", {}))
+                    if isinstance(trace.get("affective_advisory"), dict)
+                    else {}
+                )
+                affordance_selection = (
+                    dict(affective_trace.get("selection", {}))
+                    if isinstance(affective_trace.get("selection"), dict)
+                    else {}
+                )
+                selected_affordance = affordance_selection.get("selected")
+                affordance_events: list[tuple[str, dict[str, object]]] = []
+                if isinstance(selected_affordance, dict):
+                    affordance_events.append(
+                        (
+                            "ExpressionAffordanceSelected",
+                            {
+                                "action_id": action_id,
+                                "trace_id": trace_row_id,
+                                "user_id": f"user:{canonical_user_id}",
+                                "input_message_id": str(trace.get("input_message_id") or ""),
+                                "selected": dict(selected_affordance),
+                                "candidates": list(
+                                    _as_list(
+                                        affordance_selection.get("candidates", []),
+                                        "expression affordance candidates",
+                                    )
+                                ),
+                                "seed_hash": str(affordance_selection.get("seed_hash") or ""),
+                                "rule_version": str(
+                                    affordance_selection.get("rule_version")
+                                    or affective_trace.get("rule_version")
+                                    or ""
+                                ),
+                                "source": "affective_advisory",
+                            },
+                        )
+                    )
                 self._append_and_project(
                     conn,
                     world_id,
@@ -845,6 +975,8 @@ class WorldKernel:
                                 "trace_id": trace_row_id,
                             },
                         ),
+                        *user_affect_events,
+                        *affordance_events,
                         planned_event,
                         *private_inner_events,
                     ],
@@ -7187,6 +7319,8 @@ def reduce_event(state: dict[str, object], event: WorldEvent) -> dict[str, objec
     elif event.event_type == "ActionScheduled":
         item = {**payload, "status": "scheduled"}
         _as_dict(next_state["actions"], "actions")[str(item["action_id"])] = item
+    elif event.event_type == "ExpressionAffordanceSelected":
+        next_state["last_expression_affordance"] = dict(payload)
     elif event.event_type == "ActionSegmentsPlanned":
         action = _as_dict(next_state["actions"], "actions")[str(payload["action_id"])]
         action["segment_state"] = {
@@ -7971,6 +8105,7 @@ def _empty_state(world_id: str) -> dict[str, object]:
         "recent_messages": [],
         "input_merges": {},
         "last_appraisal": None,
+        "last_expression_affordance": None,
         "user_affect": {},
         "private_impressions": {},
         "private_commitments": {},

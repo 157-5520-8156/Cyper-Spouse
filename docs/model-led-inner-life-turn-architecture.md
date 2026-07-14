@@ -670,6 +670,41 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
 这仍不等于完成门禁：真实平台回执、重复的真实模型质量样本和人工盲评仍是外部证据缺口；
 非 World 兼容代码也仍应继续收缩，而不是成为新的功能落点。
 
+### 近期实现复核（2026-07-14）
+
+- 新增 `AffectiveAdvisoryEngine`，把失望、控制压力、温暖、世界压力等读空气结果转成
+  `readings / drive_deltas / expression_affordances / selected_affordance`。它是 Advisory，
+  不是事实源，也不是表达命令；本地轻量 LLM 只作为可选 `LocalAffectReader` seam，失败不阻塞。
+- `possible_disappointment` 现在能形成多候选表达分布，而不是固定安慰：可轻修复、轻问、
+  带过、别扭收住或撤回；高置信且有 materiality 时才落为有过期时间的 `PrivateImpression`。
+- 强 materiality 且逐字证据绑定当前消息的 `possible_disappointment` 也可桥接为
+  `UserAffectAppraised`；轻微、低置信、无逐字证据或已有正式 `UserAffectAppraisal` 的情况不重复入账。
+- `ExpressionAffordanceSelected` 已进入 World event 与 projection；下一轮 `TurnFrame` 会携带
+  `last_expression_affordance` 形成节奏连续性 advisory，避免刚修复后突然热情、突然追问或清零。
+- selected affordance 已影响多段 Action choreography：靠近/修复类保留短多段，收住/边界/撤回类
+  合并成单段；QQ observation 追加 `segment_count` 与 `multi_segment` 供后续体验统计。
+- redacted QQ/NapCat JSONL 可用 `summarize_qq_turn_experience()` 汇总多段率、afterthought 率、
+  单气泡普通回复率、selected
+  affordance 分布、top selected affordance 占比、固定模式诊断、情绪 reading 计数、用户情绪/
+  私密印象入账率、情绪纠正信号率；汇总不读取消息文本、用户标识或平台回执。
+- selected affordance 已影响可取消 afterthought 的机会：修复/在意/延迟余波提高概率，收住/边界/
+  带过降低或清空概率；它不固定生成内容，后续文本仍过 afterthought 模型、hard guard、Action
+  调度、用户插话取消与 receipt 结算。
+- `TurnFrame.capability["current_text"]` 只给情绪机内部读取，不导出到 `prompt_payload` /
+  `prompt_delta`，避免当前消息在主 prompt 重复占 token。
+- 修复 first-visible generation timeout 的失败收敛：若语义 fallback 因硬门拒绝短时间锚而失败，
+  会改用不含时间/经历词的 fact-free acknowledgment，并仍通过 World ledger 排队、投递、回执结算；
+  不放宽 hard invariant，也不走 adapter 旁路。
+- 相关回归：`tests/test_dialogue_eval.py`、`tests/test_companion_turn.py`、
+  `tests/test_qq_websocket.py`、
+  `tests/test_affective_advisory.py`、`tests/test_qq_runtime_observations.py`、
+  `tests/test_private_inner_life.py`、`tests/test_user_affect_ledger.py`、
+  `tests/test_world_offense_experience.py`、`tests/test_world_28_day_emotion_replay.py`、
+  `tests/test_conversation_cadence.py`、`tests/test_turn_taking.py`、`tests/test_qq_latency_eval.py`
+  合计 216 passed（2026-07-14）。
+
+仍不声明完成：真实 QQ/NapCat 端到端网络样本、人工盲评和长期权重校准仍缺。
+
 ### Phase 0：建立体验基线
 
 - 固定普通聊天、关系修复、口是心非、多段 Action、NPC/世界事实五组回放；
