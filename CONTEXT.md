@@ -68,6 +68,14 @@ A time-bound World Projection of visible character facts such as current hair ar
 
 The frozen, shot-local way a character appears and performs in one Media Plan: appearance source, head and shoulder orientation, gaze, expression, posture, gesture, and photo awareness. It is not a World fact or a media category, and identity references must not silently override it.
 
+## Media Interaction Bid
+
+The response a character hopes one delivered Media Plan may invite, including its communicative goal, hoped response, and response pressure. It is an invitation rather than a claim or obligation. Planning freezes it, but only a confirmed delivery may open a pending World interaction state.
+
+## Photo Display Strategy
+
+The shot-local social performance used to make a Media Interaction Bid visually legible, such as playing innocent, sharing restrained pride, or presenting a mishap deadpan. It belongs to Subject Presentation, not Affect or World truth, and freezes a coherent expression recipe rather than independently composed facial axes.
+
 ## Relationship Stage
 
 A slow projection of settled interaction history. It influences likely choices and their cost but does not grant the user control over the companion or act as a context-free vocabulary licence.

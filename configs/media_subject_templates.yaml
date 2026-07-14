@@ -1,4 +1,213 @@
-version: 1
+version: 2
+
+# These are affinities, not event-to-expression rules. The planner receives
+# complete candidates and chooses one; hard rejection remains limited to facts,
+# privacy, capture feasibility and clear affect contradictions.
+display_strategies:
+  matter_of_fact_showing:
+    communicative_goals: [share_presence, share_discovery]
+    tone_affinities: [neutral, calm, tired, frustrated]
+    intentionality: lightly_deliberate
+    intensity: subtle
+    holistic_cue: she presents what happened plainly and lets the real evidence carry the meaning
+    mouth: relaxed_neutral_mouth
+    eyes: attentive_relaxed
+    brows: neutral
+    gaze_quality: evidence_then_recipient
+    facial_tension: low
+    temporal_beat: settled_explanatory_moment
+    forbidden_cues: [commercial_smile, exaggerated_surprise]
+  candid_enjoyment:
+    communicative_goals: [share_presence, celebrate_together]
+    tone_affinities: [warm, bright, amused]
+    intentionality: spontaneous
+    intensity: subtle
+    holistic_cue: she remains genuinely engaged in the activity while letting the recipient into the moment
+    mouth: natural_unforced_smile
+    eyes: engaged_with_activity
+    brows: relaxed
+    gaze_quality: partial_attention_to_recipient
+    facial_tension: low
+    temporal_beat: enjoyment_still_unfolding
+    forbidden_cues: [advertising_smile, frozen_pose]
+  warm_include_you:
+    communicative_goals: [share_presence, revisit_memory, share_discovery]
+    tone_affinities: [warm, calm, bright, tender]
+    intentionality: lightly_deliberate
+    intensity: subtle
+    holistic_cue: she warmly includes the recipient in an ordinary moment without performing for an audience
+    mouth: small_warm_smile
+    eyes: softly_engaged
+    brows: relaxed
+    gaze_quality: friendly_recipient_contact
+    facial_tension: low
+    temporal_beat: brief_warm_acknowledgement
+    forbidden_cues: [commercial_smile, exaggerated_cuteness]
+  pretend_innocent:
+    communicative_goals: [invite_playful_exchange]
+    tone_affinities: [amused, playful, embarrassed]
+    intentionality: lightly_performed
+    intensity: subtle
+    holistic_cue: she knowingly plays innocent for the recipient as if waiting to be gently teased about what happened
+    mouth: subtle_relaxed_pout
+    eyes: relaxed_slightly_widened
+    brows: barely_raised
+    gaze_quality: direct_soft_lens_contact
+    facial_tension: relaxed
+    temporal_beat: holding_the_look_before_breaking_character
+    forbidden_cues: [exaggerated_duck_face, kiss_gesture, broad_smile, distressed_expression]
+    exclude_when_severe_affect: true
+  mock_wronged:
+    communicative_goals: [invite_playful_exchange, seek_validation]
+    tone_affinities: [embarrassed, frustrated, playful]
+    intentionality: knowingly_performed
+    intensity: subtle
+    holistic_cue: she playfully acts a little wronged by the minor mishap without implying real hurt
+    mouth: lightly_pressed_corners
+    eyes: soft_direct_appeal
+    brows: faint_inward_draw
+    gaze_quality: recipient_acknowledging
+    facial_tension: low
+    temporal_beat: mock_complaint_held_for_a_second
+    forbidden_cues: [crying, severe_sadness, invented_pain]
+    exclude_when_severe_affect: true
+  deadpan_reveal:
+    communicative_goals: [invite_playful_exchange, share_discovery]
+    tone_affinities: [neutral, amused, frustrated]
+    intentionality: deliberately_underplayed
+    intensity: subtle
+    holistic_cue: she presents the absurd evidence with an intentionally straight face so the contrast becomes the joke
+    mouth: composed_neutral_line
+    eyes: steady_attentive
+    brows: almost_neutral
+    gaze_quality: matter_of_fact_recipient_contact
+    facial_tension: low
+    temporal_beat: solemn_reveal_of_something_silly
+    forbidden_cues: [broad_smile, melodramatic_shock, blank_dissociation]
+  suppressed_laugh:
+    communicative_goals: [invite_playful_exchange]
+    tone_affinities: [amused, playful, embarrassed]
+    intentionality: spontaneous_with_restraint
+    intensity: subtle
+    holistic_cue: she has realized how funny the situation is and is visibly close to breaking into laughter
+    mouth: corners_barely_escaping_restraint
+    eyes: gently_crinkled
+    brows: relaxed
+    gaze_quality: glances_back_to_recipient
+    facial_tension: lightly_held
+    temporal_beat: one_moment_before_laughter_breaks_through
+    forbidden_cues: [full_open_laugh, commercial_smile, expressionless_face]
+    exclude_when_severe_affect: true
+  self_deprecating_grin:
+    communicative_goals: [seek_validation, invite_playful_exchange]
+    tone_affinities: [embarrassed, amused, tired]
+    intentionality: lightly_deliberate
+    intensity: subtle
+    holistic_cue: she acknowledges her own small mishap with a modest self-aware grin
+    mouth: small_asymmetric_grin
+    eyes: mildly_embarrassed_warmth
+    brows: relaxed
+    gaze_quality: recipient_acknowledging
+    facial_tension: low
+    temporal_beat: admitting_the_mishap_without_overplaying_it
+    forbidden_cues: [broad_perfect_smile, shame_distress, exaggerated_shrug]
+  curious_check:
+    communicative_goals: [invite_opinion]
+    tone_affinities: [neutral, calm]
+    intentionality: deliberate
+    intensity: subtle
+    holistic_cue: she genuinely checks the recipient's opinion rather than merely displaying herself
+    mouth: softly_questioning_neutral
+    eyes: attentive_open
+    brows: slight_questioning_lift
+    gaze_quality: direct_consultative_contact
+    facial_tension: low
+    temporal_beat: waiting_for_an_honest_reaction
+    forbidden_cues: [sales_pitch_smile, exaggerated_confusion]
+  small_proud_reveal:
+    communicative_goals: [invite_appreciation, celebrate_together]
+    tone_affinities: [proud, bright]
+    intentionality: lightly_deliberate
+    intensity: subtle
+    holistic_cue: she shows a small success with contained pride and leaves room for the recipient to notice it
+    mouth: restrained_pleased_smile
+    eyes: quietly_bright
+    brows: relaxed_open
+    gaze_quality: evidence_then_recipient
+    facial_tension: low
+    temporal_beat: satisfaction_just_after_completion
+    forbidden_cues: [triumphant_pose, commercial_grin, smug_expression]
+  soft_bid_for_care:
+    communicative_goals: [seek_care]
+    tone_affinities: [tender, vulnerable, tired]
+    intentionality: restrained
+    intensity: subtle
+    holistic_cue: she lets the recipient notice that she could use some care without dramatizing or inventing symptoms
+    mouth: relaxed_unsmiling
+    eyes: soft_tired_contact
+    brows: gently_relaxed
+    gaze_quality: quiet_recipient_contact
+    facial_tension: low
+    temporal_beat: a_brief_honest_check_in
+    forbidden_cues: [invented_pain, crying, glamorized_illness, exaggerated_helplessness]
+    minimum_privacy: personal
+  tired_unfiltered:
+    communicative_goals: [seek_validation, seek_care, share_presence]
+    tone_affinities: [tired, frustrated, vulnerable]
+    intentionality: unpolished
+    intensity: subtle
+    holistic_cue: she shares an honestly tired everyday state without switching into a camera-ready smile
+    mouth: naturally_relaxed
+    eyes: visibly_tired_but_present
+    brows: relaxed
+    gaze_quality: low_effort_recipient_contact
+    facial_tension: low
+    temporal_beat: caught_between_tasks_or_just_after_effort
+    forbidden_cues: [commercial_smile, invented_illness, glamour_pose]
+  composed_attraction:
+    communicative_goals: [invite_closeness, invite_appreciation]
+    tone_affinities: [tender, calm]
+    intentionality: knowingly_performed
+    intensity: restrained
+    holistic_cue: she knowingly presents herself with calm restrained attraction rather than an explicit sexual performance
+    mouth: composed_soft_mouth
+    eyes: steady_warm_contact
+    brows: relaxed
+    gaze_quality: sustained_recipient_contact
+    facial_tension: low
+    temporal_beat: a_quiet_deliberate_pause_for_the_recipient
+    forbidden_cues: [explicit_sexual_expression, kiss_gesture, exaggerated_seduction]
+    minimum_privacy: intimate
+    requires_relationship: true
+    exclude_when_severe_affect: true
+  playful_challenge:
+    communicative_goals: [invite_closeness, invite_playful_exchange]
+    tone_affinities: [playful, amused]
+    intentionality: knowingly_performed
+    intensity: restrained
+    holistic_cue: she gives the recipient a lightly challenging look that invites a response without demanding one
+    mouth: faint_asymmetric_smile
+    eyes: confident_playful_contact
+    brows: subtle_single_brow_energy
+    gaze_quality: direct_playful_contact
+    facial_tension: low
+    temporal_beat: waiting_to_see_if_the_recipient_plays_along
+    forbidden_cues: [aggressive_glare, explicit_seduction, exaggerated_smirk]
+    minimum_privacy: personal
+    requires_relationship: true
+    exclude_when_severe_affect: true
+
+display_strategy_bindings:
+  aware_three_quarter: [warm_include_you, pretend_innocent, deadpan_reveal, suppressed_laugh, self_deprecating_grin]
+  look_at_primary: [candid_enjoyment, matter_of_fact_showing, small_proud_reveal]
+  screen_check_reaction: [self_deprecating_grin, pretend_innocent, mock_wronged, tired_unfiltered]
+  playful_level_pose: [playful_challenge, pretend_innocent, curious_check]
+  mirror_composed: [matter_of_fact_showing, curious_check, composed_attraction]
+  timer_environment_pose: [warm_include_you, candid_enjoyment, small_proud_reveal]
+  helper_checkin_pose: [small_proud_reveal, warm_include_you, playful_challenge]
+  companion_reaction: [candid_enjoyment, suppressed_laugh, warm_include_you]
+  external_candid_glance: [matter_of_fact_showing, candid_enjoyment, tired_unfiltered]
+  body_detail_showcase: [matter_of_fact_showing, curious_check, soft_bid_for_care]
 
 # These are coherent photographic performances. MediaPlanner chooses one ID;
 # it does not independently compose pose axes and accidentally create a puppet.

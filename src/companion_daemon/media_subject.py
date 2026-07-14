@@ -11,11 +11,14 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, replace
 from functools import lru_cache
 from hashlib import sha256
+import json
+from math import exp, log
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import yaml
 
+from companion_daemon.media_domain import PRIVACY_RANK
 from companion_daemon.visual_identity import load_visual_identity
 
 
@@ -32,6 +35,61 @@ _PERFORMANCE_REQUIRED_FIELDS = (
     "photo_awareness",
 )
 _OCCLUSION_RANK = {"low": 0, "medium": 1, "high": 2}
+SUBJECT_PRESENTATION_V2 = "subject-presentation-v2"
+
+
+@dataclass(frozen=True)
+class PhotoDisplayStrategy:
+    """A shot-local social performance, expanded so replay never rereads recipes."""
+
+    strategy_id: str
+    communicative_goals: tuple[str, ...]
+    intentionality: str
+    intensity: str
+    holistic_cue: str
+    mouth: str
+    eyes: str
+    brows: str
+    gaze_quality: str
+    facial_tension: str
+    temporal_beat: str
+    forbidden_cues: tuple[str, ...] = ()
+    tone_affinities: tuple[str, ...] = ()
+    minimum_privacy: str = "ordinary"
+    requires_relationship: bool = False
+    exclude_when_severe_affect: bool = False
+
+    def to_payload(self) -> dict[str, object]:
+        value = asdict(self)
+        value["communicative_goals"] = list(self.communicative_goals)
+        value["forbidden_cues"] = list(self.forbidden_cues)
+        value["tone_affinities"] = list(self.tone_affinities)
+        return value
+
+    @classmethod
+    def from_payload(cls, value: object) -> "PhotoDisplayStrategy":
+        if not isinstance(value, dict):
+            raise ValueError("photo display strategy must be an object")
+        return cls(
+            strategy_id=_required_text(value, "strategy_id"),
+            communicative_goals=tuple(
+                str(item) for item in value.get("communicative_goals", []) if str(item)
+            ),
+            intentionality=_required_text(value, "intentionality"),
+            intensity=_required_text(value, "intensity"),
+            holistic_cue=_required_text(value, "holistic_cue"),
+            mouth=_required_text(value, "mouth"),
+            eyes=_required_text(value, "eyes"),
+            brows=_required_text(value, "brows"),
+            gaze_quality=_required_text(value, "gaze_quality"),
+            facial_tension=_required_text(value, "facial_tension"),
+            temporal_beat=_required_text(value, "temporal_beat"),
+            forbidden_cues=tuple(str(item) for item in value.get("forbidden_cues", [])),
+            tone_affinities=tuple(str(item) for item in value.get("tone_affinities", [])),
+            minimum_privacy=_optional_text(value, "minimum_privacy", "ordinary"),
+            requires_relationship=bool(value.get("requires_relationship", False)),
+            exclude_when_severe_affect=bool(value.get("exclude_when_severe_affect", False)),
+        )
 
 
 @dataclass(frozen=True)
@@ -100,27 +158,65 @@ class SubjectPresentationPlan:
     appearance: SubjectAppearance
     performance: SubjectPerformance
     subject_signature: str
+    version: str = "subject-presentation-v1"
+    display_strategy: PhotoDisplayStrategy | None = None
 
     def to_payload(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "variant_id": self.variant_id,
             "appearance": self.appearance.to_payload(),
             "performance": self.performance.to_payload(),
             "subject_signature": self.subject_signature,
         }
+        if self.version == SUBJECT_PRESENTATION_V2:
+            payload["version"] = self.version
+            payload["display_strategy"] = (
+                self.display_strategy.to_payload() if self.display_strategy else None
+            )
+        return payload
+
+    @classmethod
+    def create_v2(
+        cls,
+        *,
+        variant_id: str,
+        appearance: SubjectAppearance,
+        performance: SubjectPerformance,
+        display_strategy: PhotoDisplayStrategy,
+    ) -> "SubjectPresentationPlan":
+        return cls(
+            variant_id=variant_id,
+            appearance=appearance,
+            performance=performance,
+            subject_signature=_subject_signature(appearance, performance, display_strategy),
+            version=SUBJECT_PRESENTATION_V2,
+            display_strategy=display_strategy,
+        )
 
     @classmethod
     def from_payload(cls, value: object) -> "SubjectPresentationPlan":
         if not isinstance(value, dict):
             raise ValueError("subject presentation must be an object")
+        version = str(value.get("version") or "subject-presentation-v1")
+        display_strategy = (
+            PhotoDisplayStrategy.from_payload(value.get("display_strategy"))
+            if version == SUBJECT_PRESENTATION_V2
+            else None
+        )
         presentation = cls(
             variant_id=_required_text(value, "variant_id"),
             appearance=SubjectAppearance.from_payload(value.get("appearance")),
             performance=SubjectPerformance.from_payload(value.get("performance")),
             subject_signature=_required_text(value, "subject_signature"),
+            version=version,
+            display_strategy=display_strategy,
         )
+        if version not in {"subject-presentation-v1", SUBJECT_PRESENTATION_V2}:
+            raise ValueError("unsupported subject presentation version")
+        if version == SUBJECT_PRESENTATION_V2 and display_strategy is None:
+            raise ValueError("missing photo display strategy")
         if presentation.subject_signature != _subject_signature(
-            presentation.appearance, presentation.performance
+            presentation.appearance, presentation.performance, presentation.display_strategy
         ):
             raise ValueError("invalid subject signature")
         return presentation
@@ -137,6 +233,11 @@ class SubjectCandidate:
             "appearance": self.presentation.appearance.to_payload(),
             "performance": self.presentation.performance.to_payload(),
             "subject_signature": self.presentation.subject_signature,
+            "display_strategy": (
+                self.presentation.display_strategy.to_payload()
+                if self.presentation.display_strategy
+                else None
+            ),
         }
 
 
@@ -145,6 +246,8 @@ class SubjectCatalog:
     variants: tuple[dict[str, object], ...]
     reference_pose_metadata: dict[str, dict[str, str]]
     render_lexicon: dict[str, dict[str, str]]
+    display_strategies: dict[str, PhotoDisplayStrategy]
+    bindings: dict[str, tuple[str, ...]]
 
 
 @lru_cache(maxsize=8)
@@ -153,7 +256,17 @@ def load_subject_catalog(path: Path = DEFAULT_SUBJECT_CONFIG) -> SubjectCatalog:
     variants = raw.get("variants")
     metadata = raw.get("reference_pose_metadata", {})
     lexicon = raw.get("render_lexicon", {})
-    if not isinstance(variants, list) or not isinstance(metadata, dict) or not isinstance(lexicon, dict):
+    strategies = raw.get("display_strategies", {})
+    bindings = raw.get("display_strategy_bindings", {})
+    if not all(
+        (
+            isinstance(variants, list),
+            isinstance(metadata, dict),
+            isinstance(lexicon, dict),
+            isinstance(strategies, dict),
+            isinstance(bindings, dict),
+        )
+    ):
         raise ValueError("invalid media subject catalog")
     return SubjectCatalog(
         variants=tuple(dict(item) for item in variants if isinstance(item, dict)),
@@ -167,6 +280,16 @@ def load_subject_catalog(path: Path = DEFAULT_SUBJECT_CONFIG) -> SubjectCatalog:
             for field, values in lexicon.items()
             if isinstance(values, dict)
         },
+        display_strategies={
+            str(key): PhotoDisplayStrategy.from_payload({"strategy_id": str(key), **value})
+            for key, value in strategies.items()
+            if isinstance(value, dict)
+        },
+        bindings={
+            str(key): tuple(str(item) for item in value)
+            for key, value in bindings.items()
+            if isinstance(value, list)
+        },
     )
 
 
@@ -177,6 +300,10 @@ def build_subject_candidates(
     capture_mode: str,
     character_visibility: str,
     recent_subject_signatures: Sequence[str] = (),
+    privacy_ceiling: str = "personal",
+    relationship_stage: str = "",
+    public_affect: Mapping[str, object] | None = None,
+    display_bounds: Sequence[str] = (),
     config_path: Path = DEFAULT_SUBJECT_CONFIG,
     limit: int = 6,
 ) -> tuple[SubjectCandidate, ...]:
@@ -186,6 +313,11 @@ def build_subject_candidates(
     world_appearance = _world_appearance(appearance_state) if appearance_state else None
     recent = {item for item in recent_subject_signatures[-12:] if item}
     recent_three = tuple(recent_subject_signatures[-3:])
+    if privacy_ceiling not in PRIVACY_RANK:
+        raise ValueError("invalid subject privacy ceiling")
+    bounded_strategies = {str(item) for item in display_bounds if str(item)}
+    severe_affect = _is_severe_public_affect(public_affect)
+    affect_labels = _public_affect_labels(snapshot, public_affect)
     candidates: list[SubjectCandidate] = []
     for raw in catalog.variants:
         variant_id = str(raw.get("id") or "")
@@ -207,13 +339,52 @@ def build_subject_candidates(
         appearance = world_appearance or _media_local_appearance(
             raw, snapshot=snapshot, stable_seed=f"{opportunity_id}:{variant_id}"
         )
-        signature = _subject_signature(appearance, performance)
-        if signature in recent:
+        strategy_ids = catalog.bindings.get(variant_id, ())
+        if not strategy_ids:
+            signature = _subject_signature(appearance, performance)
+            if signature not in recent:
+                presentation = SubjectPresentationPlan(
+                    variant_id, appearance, performance, signature
+                )
+                candidates.append(SubjectCandidate(variant_id, presentation))
             continue
-        presentation = SubjectPresentationPlan(variant_id, appearance, performance, signature)
-        candidates.append(SubjectCandidate(variant_id, presentation))
+        for index, strategy_id in enumerate(strategy_ids):
+            strategy = catalog.display_strategies.get(strategy_id)
+            if strategy is None:
+                raise ValueError(f"unknown display strategy binding: {strategy_id}")
+            if strategy.minimum_privacy not in PRIVACY_RANK:
+                raise ValueError(f"invalid display strategy privacy: {strategy_id}")
+            if PRIVACY_RANK[strategy.minimum_privacy] > PRIVACY_RANK[privacy_ceiling]:
+                continue
+            if strategy.requires_relationship and not relationship_stage:
+                continue
+            if severe_affect and strategy.exclude_when_severe_affect:
+                continue
+            if bounded_strategies and strategy_id not in bounded_strategies:
+                continue
+            if character_visibility == "body_detail":
+                strategy = replace(
+                    strategy,
+                    mouth="not_applicable",
+                    eyes="not_applicable",
+                    brows="not_applicable",
+                    gaze_quality="not_applicable",
+                    facial_tension="not_applicable",
+                    temporal_beat="detail_is_made_legible_through_framing_and_gesture",
+                    forbidden_cues=(),
+                )
+            strategy_performance = replace(performance, expression=strategy.strategy_id)
+            candidate_id = variant_id if index == 0 else f"{variant_id}__{strategy_id}"
+            presentation = SubjectPresentationPlan.create_v2(
+                variant_id=candidate_id,
+                appearance=appearance,
+                performance=strategy_performance,
+                display_strategy=strategy,
+            )
+            if presentation.subject_signature not in recent:
+                candidates.append(SubjectCandidate(candidate_id, presentation))
 
-    def score(item: SubjectCandidate) -> tuple[int, str]:
+    def weighted_key(item: SubjectCandidate) -> tuple[float, int, str]:
         signature = item.presentation.subject_signature
         axes = signature.split("|")
         soft = sum(sum(axis in recent_item.split("|") for axis in axes) for recent_item in recent_three)
@@ -221,9 +392,37 @@ def build_subject_candidates(
         risk = {"low": 0, "medium": 2, "high": 6}.get(
             item.presentation.performance.occlusion_complexity, 1
         )
-        return soft + risk, stable
+        strategy = item.presentation.display_strategy
+        affinity = 0
+        if strategy and affect_labels.intersection(strategy.tone_affinities):
+            affinity += 2
+        if strategy and relationship_stage and "invite_closeness" in strategy.communicative_goals:
+            affinity += 1
+        penalty = soft + risk - affinity
+        composite = 1 if "__" in item.variant_id else 0
+        weight = exp(-0.7 * penalty) * (1.15 if composite == 0 else 1.0)
+        uniform = (int(stable[:16], 16) + 1) / ((1 << 64) + 1)
+        return -log(uniform) / weight, composite, stable
 
-    return tuple(sorted(candidates, key=score)[:limit])
+    ranked = sorted(candidates, key=weighted_key)
+    # Stable weighted sampling without replacement across social-strategy
+    # strata keeps the shortlist semantically varied before the LLM chooses.
+    representatives: list[SubjectCandidate] = []
+    seen_strategies: set[str] = set()
+    for item in ranked:
+        strategy_id = (
+            item.presentation.display_strategy.strategy_id
+            if item.presentation.display_strategy
+            else f"legacy:{item.variant_id}"
+        )
+        if strategy_id not in seen_strategies:
+            representatives.append(item)
+            seen_strategies.add(strategy_id)
+    selected = representatives[:limit]
+    if len(selected) < limit:
+        selected_ids = {item.variant_id for item in selected}
+        selected.extend(item for item in ranked if item.variant_id not in selected_ids)
+    return tuple(selected[:limit])
 
 
 def select_identity_references(
@@ -281,6 +480,20 @@ def presentation_prompt_block(
 
     accessories = "; ".join(render("accessories", item) for item in appearance.accessories)
     accessories = accessories or "no accessory"
+    social = ""
+    if presentation.display_strategy:
+        strategy = presentation.display_strategy
+        forbidden = "; ".join(_forbidden_cue_text(item) for item in strategy.forbidden_cues)
+        social = (
+            "\nFrozen photo display strategy (the social performance for this recipient):\n"
+            f"- overall behavior: {strategy.holistic_cue}\n"
+            f"- visible expression cues: {strategy.mouth.replace('_', ' ')}; "
+            f"{strategy.eyes.replace('_', ' ')}; {strategy.brows.replace('_', ' ')}; "
+            f"{strategy.gaze_quality.replace('_', ' ')}; "
+            f"{strategy.facial_tension.replace('_', ' ')}\n"
+            f"- captured beat: {strategy.temporal_beat.replace('_', ' ')}\n"
+            f"- forbidden expression cues: {forbidden or 'none'}\n"
+        )
     return (
         "Frozen subject presentation (camera-frame directions, not the character's left/right):\n"
         f"- appearance source: {appearance.source}; hair: "
@@ -303,6 +516,7 @@ def presentation_prompt_block(
         "contact or attachment to the described surface.\n"
         "The accessory list is exhaustive for this shot: do not add an unlisted signature hair clip "
         "or inherit accessories from an identity reference.\n"
+        f"{social}"
         "Identity references and the general identity anchor define identity only. This shot-specific "
         "appearance overrides their default hairstyle tendencies. Do not copy their head angle, gaze, "
         "expression, hairstyle, gesture, or framing. Follow this frozen presentation instead."
@@ -377,9 +591,12 @@ def _infer_outfit_role(snapshot: Mapping[str, object]) -> str:
     }.get(kind, "event_appropriate_casual")
 
 
-def _subject_signature(appearance: SubjectAppearance, performance: SubjectPerformance) -> str:
-    return "|".join(
-        (
+def _subject_signature(
+    appearance: SubjectAppearance,
+    performance: SubjectPerformance,
+    display_strategy: PhotoDisplayStrategy | None = None,
+) -> str:
+    axes = [
             appearance.hair_arrangement,
             performance.head_yaw,
             performance.head_pitch,
@@ -388,8 +605,63 @@ def _subject_signature(appearance: SubjectAppearance, performance: SubjectPerfor
             performance.expression,
             performance.shoulder_orientation,
             performance.gesture,
+    ]
+    if display_strategy:
+        axes.extend(
+            (
+                display_strategy.strategy_id,
+                display_strategy.mouth,
+                display_strategy.gaze_quality,
+                sha256(
+                    json.dumps(
+                        display_strategy.to_payload(),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest(),
+            )
         )
-    )
+    return "|".join(axes)
+
+
+def _forbidden_cue_text(value: str) -> str:
+    articles = {
+        "exaggerated_duck_face": "not an exaggerated duck face",
+        "broad_smile": "no broad smile",
+        "kiss_gesture": "no kiss gesture",
+        "distressed_expression": "no genuinely distressed expression",
+    }
+    return articles.get(value, f"no {value.replace('_', ' ')}")
+
+
+def _is_severe_public_affect(value: Mapping[str, object] | None) -> bool:
+    if not value:
+        return False
+    if str(value.get("severity") or "").lower() in {"severe", "acute"}:
+        return True
+    return any(value.get(key) is True for key in ("acute_pain", "severe_distress"))
+
+
+def _public_affect_labels(
+    snapshot: Mapping[str, object],
+    value: Mapping[str, object] | None,
+) -> set[str]:
+    labels: set[str] = set()
+    emotion = _mapping(snapshot.get("character")).get("emotion")
+    if isinstance(emotion, str) and emotion:
+        labels.add(emotion.lower())
+    if value:
+        for key in ("emotion", "tone", "dominant"):
+            item = value.get(key)
+            if isinstance(item, str) and item:
+                labels.add(item.lower())
+        labels.update(
+            str(key).lower()
+            for key, item in value.items()
+            if isinstance(item, (int, float)) and item > 0
+        )
+    return labels
 
 
 def _derive_hand_occupancy(capture_mode: str, gesture: str) -> str:

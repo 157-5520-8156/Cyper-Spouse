@@ -1,0 +1,54 @@
+version: 1
+
+# Affinities guide one bounded planning call; they are not event-to-response rules.
+interaction_bids:
+  share_presence:
+    hoped_response: acknowledge_or_light_reaction
+    response_pressure: low
+    share_intent_affinities: [atmosphere, record, check_in]
+    minimum_privacy: ordinary
+  invite_playful_exchange:
+    hoped_response: tease_or_joke_back
+    response_pressure: low
+    share_intent_affinities: [humor, complain]
+    minimum_privacy: ordinary
+  invite_appreciation:
+    hoped_response: notice_or_compliment
+    response_pressure: low
+    share_intent_affinities: [show_and_tell, check_in]
+    minimum_privacy: ordinary
+  invite_opinion:
+    hoped_response: give_opinion
+    response_pressure: medium
+    share_intent_affinities: [seek_feedback, show_and_tell]
+    minimum_privacy: ordinary
+  celebrate_together:
+    hoped_response: congratulate_or_share_delight
+    response_pressure: low
+    share_intent_affinities: [progress_update, show_and_tell]
+    minimum_privacy: ordinary
+  seek_validation:
+    hoped_response: validate_or_commiserate
+    response_pressure: medium
+    share_intent_affinities: [complain, progress_update]
+    minimum_privacy: ordinary
+  seek_care:
+    hoped_response: check_in_or_reassure
+    response_pressure: medium
+    share_intent_affinities: [care_update, complain]
+    minimum_privacy: personal
+  invite_closeness:
+    hoped_response: affectionate_acknowledgement
+    response_pressure: low
+    share_intent_affinities: [intimate_signal, memory_keep]
+    minimum_privacy: intimate
+  revisit_memory:
+    hoped_response: reminisce_or_add_memory
+    response_pressure: low
+    share_intent_affinities: [memory_keep, record]
+    minimum_privacy: ordinary
+  share_discovery:
+    hoped_response: react_or_add_observation
+    response_pressure: low
+    share_intent_affinities: [show_and_tell, atmosphere]
+    minimum_privacy: ordinary

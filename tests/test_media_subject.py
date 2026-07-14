@@ -3,6 +3,7 @@ from pathlib import Path
 import yaml
 
 from companion_daemon.media_subject import (
+    PhotoDisplayStrategy,
     SubjectAppearance,
     SubjectPerformance,
     SubjectPresentationPlan,
@@ -34,6 +35,7 @@ def test_catalog_builds_deterministic_coherent_candidates() -> None:
         capture_mode="character_front_camera",
         character_visibility="identifiable",
         config_path=CONFIG,
+        limit=64,
     )
     second = build_subject_candidates(
         snapshot=_snapshot(),
@@ -41,6 +43,7 @@ def test_catalog_builds_deterministic_coherent_candidates() -> None:
         capture_mode="character_front_camera",
         character_visibility="identifiable",
         config_path=CONFIG,
+        limit=64,
     )
 
     assert first == second
@@ -48,6 +51,188 @@ def test_catalog_builds_deterministic_coherent_candidates() -> None:
     assert all(item.presentation.appearance.source == "media_local" for item in first)
     assert all(item.presentation.performance.photo_awareness for item in first)
     assert len({item.presentation.subject_signature for item in first}) == len(first)
+
+
+def test_character_candidates_include_coherent_social_performance_recipes() -> None:
+    candidates = build_subject_candidates(
+        snapshot=_snapshot(),
+        opportunity_id="op:social-performance",
+        capture_mode="character_front_camera",
+        character_visibility="identifiable",
+        config_path=CONFIG,
+        limit=32,
+    )
+
+    pretend = next(
+        item for item in candidates if item.presentation.display_strategy
+        and item.presentation.display_strategy.strategy_id == "pretend_innocent"
+    )
+    strategy = pretend.presentation.display_strategy
+    assert strategy is not None
+    assert strategy.communicative_goals == ("invite_playful_exchange",)
+    assert strategy.mouth == "subtle_relaxed_pout"
+    assert "exaggerated_duck_face" in strategy.forbidden_cues
+    assert pretend.presentation.version == "subject-presentation-v2"
+    assert SubjectPresentationPlan.from_payload(pretend.presentation.to_payload()) == (
+        pretend.presentation
+    )
+
+
+def test_social_performance_prompt_leads_with_holistic_behavior() -> None:
+    strategy = PhotoDisplayStrategy(
+        strategy_id="pretend_innocent",
+        communicative_goals=("invite_playful_exchange",),
+        intentionality="lightly_performed",
+        intensity="subtle",
+        holistic_cue="knowingly plays innocent for the recipient",
+        mouth="subtle_relaxed_pout",
+        eyes="relaxed_slightly_widened",
+        brows="barely_raised",
+        gaze_quality="direct_soft_lens_contact",
+        facial_tension="relaxed",
+        temporal_beat="holding_the_look_before_breaking_character",
+        forbidden_cues=("exaggerated_duck_face", "broad_smile"),
+    )
+    appearance = SubjectAppearance("media_local", "natural_down", "home_cooking", "natural")
+    performance = SubjectPerformance(
+        "near_front", "level", "none", "lens", "pretend_innocent",
+        "slightly_turned", "compact_casual", "show_primary_evidence", "aware_light_pose",
+    )
+    presentation = SubjectPresentationPlan.create_v2(
+        variant_id="test__pretend_innocent",
+        appearance=appearance,
+        performance=performance,
+        display_strategy=strategy,
+    )
+
+    prompt = presentation_prompt_block(presentation, config_path=CONFIG)
+
+    assert prompt.index("knowingly plays innocent") < prompt.index("subtle relaxed pout")
+    assert "not an exaggerated duck face" in prompt
+
+
+def test_subject_candidate_matrix_exposes_every_social_strategy_without_flat_rules() -> None:
+    strategies: set[str] = set()
+    for capture_mode in (
+        "character_front_camera",
+        "character_rear_camera",
+        "mirror",
+        "timer_fixed",
+        "requested_helper",
+        "known_companion",
+        "external_sender",
+    ):
+        for visibility in ("identifiable", "body_detail"):
+            candidates = build_subject_candidates(
+                snapshot=_snapshot(),
+                opportunity_id=f"op:matrix:{capture_mode}:{visibility}",
+                capture_mode=capture_mode,
+                character_visibility=visibility,
+                privacy_ceiling="intimate",
+                relationship_stage="close_friend",
+                config_path=CONFIG,
+                limit=64,
+            )
+            strategies.update(
+                item.presentation.display_strategy.strategy_id
+                for item in candidates
+                if item.presentation.display_strategy is not None
+            )
+
+    assert strategies == {
+        "matter_of_fact_showing",
+        "candid_enjoyment",
+        "warm_include_you",
+        "pretend_innocent",
+        "mock_wronged",
+        "deadpan_reveal",
+        "suppressed_laugh",
+        "self_deprecating_grin",
+        "curious_check",
+        "small_proud_reveal",
+        "soft_bid_for_care",
+        "tired_unfiltered",
+        "composed_attraction",
+        "playful_challenge",
+    }
+
+
+def test_different_opportunities_stably_change_social_candidate_order() -> None:
+    first = build_subject_candidates(
+        snapshot=_snapshot(), opportunity_id="op:variation:a",
+        capture_mode="character_front_camera", character_visibility="identifiable",
+        config_path=CONFIG, limit=32,
+    )
+    repeated = build_subject_candidates(
+        snapshot=_snapshot(), opportunity_id="op:variation:a",
+        capture_mode="character_front_camera", character_visibility="identifiable",
+        config_path=CONFIG, limit=32,
+    )
+    second = build_subject_candidates(
+        snapshot=_snapshot(), opportunity_id="op:variation:b",
+        capture_mode="character_front_camera", character_visibility="identifiable",
+        config_path=CONFIG, limit=32,
+    )
+
+    assert first == repeated
+    assert [item.variant_id for item in first] != [item.variant_id for item in second]
+
+
+def test_recent_social_strategy_axes_are_softly_downranked_before_seeded_sampling() -> None:
+    kwargs = {
+        "snapshot": _snapshot(),
+        "opportunity_id": "op:soft-social-history",
+        "capture_mode": "character_front_camera",
+        "character_visibility": "identifiable",
+        "config_path": CONFIG,
+    }
+    baseline = build_subject_candidates(**kwargs)
+    first_strategy = baseline[0].presentation.display_strategy
+    assert first_strategy is not None
+    historical_near_match = baseline[0].presentation.subject_signature + "|historical-extra"
+
+    varied = build_subject_candidates(
+        **kwargs, recent_subject_signatures=(historical_near_match,)
+    )
+
+    assert varied[0].presentation.display_strategy is not None
+    assert varied[0].presentation.display_strategy.strategy_id != first_strategy.strategy_id
+
+
+def test_world_context_only_filters_privacy_and_clear_affect_conflicts() -> None:
+    ordinary = build_subject_candidates(
+        snapshot=_snapshot(), opportunity_id="op:ordinary",
+        capture_mode="mirror", character_visibility="identifiable",
+        privacy_ceiling="ordinary", config_path=CONFIG, limit=64,
+    )
+    severe = build_subject_candidates(
+        snapshot=_snapshot(), opportunity_id="op:severe",
+        capture_mode="character_front_camera", character_visibility="identifiable",
+        privacy_ceiling="personal", relationship_stage="close_friend",
+        public_affect={"severity": "severe"}, config_path=CONFIG, limit=64,
+    )
+    no_relationship = build_subject_candidates(
+        snapshot=_snapshot(), opportunity_id="op:no-relationship",
+        capture_mode="character_front_camera", character_visibility="identifiable",
+        privacy_ceiling="personal", config_path=CONFIG, limit=64,
+    )
+
+    ordinary_strategies = {
+        item.presentation.display_strategy.strategy_id
+        for item in ordinary if item.presentation.display_strategy
+    }
+    severe_strategies = {
+        item.presentation.display_strategy.strategy_id
+        for item in severe if item.presentation.display_strategy
+    }
+    no_relationship_strategies = {
+        item.presentation.display_strategy.strategy_id
+        for item in no_relationship if item.presentation.display_strategy
+    }
+    assert "composed_attraction" not in ordinary_strategies
+    assert "playful_challenge" not in no_relationship_strategies
+    assert "pretend_innocent" not in severe_strategies
+    assert {"matter_of_fact_showing", "tired_unfiltered"} & severe_strategies
 
 
 def test_world_appearance_is_frozen_without_media_local_override() -> None:
@@ -64,6 +249,7 @@ def test_world_appearance_is_frozen_without_media_local_override() -> None:
         capture_mode="character_front_camera",
         character_visibility="identifiable",
         config_path=CONFIG,
+        limit=64,
     )
 
     assert candidates
@@ -122,6 +308,12 @@ def test_body_detail_uses_partial_non_face_presentation() -> None:
     assert candidates
     assert {item.presentation.performance.gaze_target for item in candidates} == {"not_applicable"}
     assert all("detail" in item.variant_id for item in candidates)
+    assert all(
+        item.presentation.display_strategy is not None
+        and item.presentation.display_strategy.mouth == "not_applicable"
+        and not item.presentation.display_strategy.forbidden_cues
+        for item in candidates
+    )
 
 
 def test_subject_presentation_payload_round_trip() -> None:
@@ -163,6 +355,7 @@ def test_capture_mode_derives_hand_occupancy_and_occlusion_risk() -> None:
         capture_mode="character_front_camera",
         character_visibility="identifiable",
         config_path=CONFIG,
+        limit=64,
     )
     timer = build_subject_candidates(
         snapshot=_snapshot(),
@@ -170,6 +363,7 @@ def test_capture_mode_derives_hand_occupancy_and_occlusion_risk() -> None:
         capture_mode="timer_fixed",
         character_visibility="identifiable",
         config_path=CONFIG,
+        limit=64,
     )
 
     aware = next(item for item in selfie if item.variant_id == "aware_three_quarter")
@@ -195,6 +389,7 @@ def test_configured_high_occlusion_is_downranked_but_remains_legal(tmp_path: Pat
         capture_mode="character_front_camera",
         character_visibility="identifiable",
         config_path=configured,
+        limit=64,
     )
 
     selected = next(item for item in candidates if item.variant_id == "aware_three_quarter")

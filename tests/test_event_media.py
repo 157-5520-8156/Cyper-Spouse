@@ -5,6 +5,7 @@ import httpx
 import pytest
 
 from companion_daemon.event_media import (
+    AudienceContext,
     LegacyMediaShotAdapter,
     MediaInspection,
     MediaOpportunity,
@@ -91,6 +92,7 @@ def _proposal(**overrides: object) -> dict[str, object]:
         "sharing_motive": "把这个生活瞬间分享给熟悉的人",
         "constraints": ["不生成可读文字", "手部结构自然"],
         "route": "generate",
+        "interaction_bid_id": "share_discovery",
         "subject_variant_id": "aware_three_quarter",
     }
     value.update(overrides)
@@ -116,6 +118,19 @@ def _proposal(**overrides: object) -> dict[str, object]:
             "external_sender": "external_candid_glance",
             "existing_artifact": "aware_three_quarter",
         }[str(value["capture_mode"])]
+    if "interaction_bid_id" not in overrides:
+        variant = str(value.get("subject_variant_id") or "")
+        value["interaction_bid_id"] = (
+            "seek_validation"
+            if variant.startswith("screen_check_reaction")
+            else "invite_appreciation"
+            if variant.startswith("helper_checkin_pose")
+            else "share_presence"
+            if variant.startswith(("companion_reaction", "look_at_primary"))
+            else "invite_playful_exchange"
+            if variant.startswith("playful_level_pose")
+            else "share_discovery"
+        )
     primary = value["primary_evidence_ref"]
     value["supporting_evidence_refs"] = [
         item for item in value["supporting_evidence_refs"] if item != primary
@@ -278,14 +293,24 @@ async def test_planner_accepts_cross_matrix_prototypes(
 
 @pytest.mark.asyncio
 async def test_new_character_plan_freezes_subject_presentation_in_same_call() -> None:
-    model = FakeModel(_proposal(subject_variant_id="screen_check_reaction"))
+    model = FakeModel(
+        _proposal(
+            subject_variant_id="screen_check_reaction",
+            interaction_bid_id="seek_validation",
+        )
+    )
 
     result = await MediaPlanner(model).plan(_opportunity())
 
     assert isinstance(result, PlannedMedia)
-    assert result.plan.version == "event-media-plan-v2"
+    assert result.plan.version == "event-media-plan-v3"
+    assert result.plan.interaction_bid is not None
+    assert result.plan.interaction_bid.communicative_goal == "seek_validation"
+    assert result.plan.interaction_bid.bid_id == "media-bid:opportunity:42"
     assert result.plan.subject_presentation is not None
-    assert result.plan.subject_presentation.variant_id == "screen_check_reaction"
+    assert result.plan.subject_presentation.variant_id == (
+        "screen_check_reaction"
+    )
     assert "legal_subject_presentation_candidates" in model.messages[1]["content"]
     restored = MediaPlan.from_payload(result.plan.to_payload())
     assert restored == result.plan
@@ -293,6 +318,148 @@ async def test_new_character_plan_freezes_subject_presentation_in_same_call() ->
     assert "Frozen subject presentation" in prompt
     assert "Do not copy their head angle" in prompt
     assert prompt.rfind("Frozen subject presentation") > prompt.rfind("Character identity anchor")
+
+
+@pytest.mark.asyncio
+async def test_planner_freezes_interaction_bid_for_life_share_without_subject() -> None:
+    proposal = _proposal(
+        content_domain="place_environment",
+        visual_form="wide_scene",
+        share_intent="atmosphere",
+        capture_mode="character_rear_camera",
+        character_visibility="none",
+        privacy="ordinary",
+        interaction_bid_id="share_presence",
+    )
+    proposal.pop("subject_variant_id")
+
+    result = await MediaPlanner(FakeModel(proposal)).plan(_opportunity(family="life_share"))
+
+    assert isinstance(result, PlannedMedia)
+    assert result.plan.subject_presentation is None
+    assert result.plan.interaction_bid is not None
+    assert result.plan.interaction_bid.hoped_response == "acknowledge_or_light_reaction"
+    assert MediaPlan.from_payload(result.plan.to_payload()) == result.plan
+
+
+@pytest.mark.asyncio
+async def test_interaction_bid_id_is_unique_per_media_opportunity() -> None:
+    proposal = _proposal(
+        content_domain="place_environment",
+        visual_form="wide_scene",
+        share_intent="atmosphere",
+        capture_mode="character_rear_camera",
+        character_visibility="none",
+        privacy="ordinary",
+        interaction_bid_id="share_presence",
+    )
+    proposal.pop("subject_variant_id")
+    first = await MediaPlanner(FakeModel(proposal)).plan(_opportunity(family="life_share"))
+    second_opportunity = MediaOpportunity(
+        **{
+            **_opportunity(family="life_share").__dict__,
+            "opportunity_id": "opportunity:43",
+        }
+    )
+    second = await MediaPlanner(FakeModel(proposal)).plan(second_opportunity)
+
+    assert isinstance(first, PlannedMedia) and isinstance(second, PlannedMedia)
+    assert first.plan.interaction_bid is not None
+    assert second.plan.interaction_bid is not None
+    assert first.plan.interaction_bid.bid_id != second.plan.interaction_bid.bid_id
+
+
+@pytest.mark.asyncio
+async def test_planner_exposes_all_ordinary_bids_but_requires_audience_for_closeness() -> None:
+    without_audience = FakeModel(_proposal())
+    result = await MediaPlanner(without_audience).plan(_opportunity(privacy="intimate"))
+    assert isinstance(result, PlannedMedia)
+    prompt = without_audience.messages[1]["content"]
+    assert '"interaction_bid_id":"share_presence"' in prompt
+    assert '"interaction_bid_id":"invite_closeness"' not in prompt
+
+    with_audience = FakeModel(
+        _proposal(
+            content_domain="appearance_style",
+            share_intent="intimate_signal",
+            privacy="intimate",
+            intimate_intensity="soft",
+            interaction_bid_id="invite_closeness",
+            subject_variant_id="playful_level_pose",
+            primary_evidence_ref="/character/appearance",
+            sharing_motive="传递克制且非露骨的亲密信号",
+        )
+    )
+    opportunity = _opportunity(privacy="intimate")
+    opportunity = MediaOpportunity(
+        **{
+            **opportunity.__dict__,
+            "audience_context": AudienceContext(
+                recipient_ref="user:geoff", relationship_stage="close_friend"
+            ),
+        }
+    )
+    result = await MediaPlanner(with_audience).plan(opportunity)
+    assert isinstance(result, PlannedMedia)
+    assert result.plan.interaction_bid is not None
+    assert result.plan.interaction_bid.audience_ref == "user:geoff"
+    assert '"interaction_bid_id":"invite_closeness"' in with_audience.messages[1]["content"]
+
+
+@pytest.mark.asyncio
+async def test_planner_rejects_interaction_bid_outside_frozen_privacy() -> None:
+    result = await MediaPlanner(
+        FakeModel(_proposal(interaction_bid_id="invite_closeness"))
+    ).plan(_opportunity(privacy="ordinary"))
+
+    assert isinstance(result, NotRenderable)
+    assert result.reason == "illegal_interaction_bid"
+
+
+@pytest.mark.asyncio
+async def test_planner_rejects_semantically_mismatched_bid_and_subject_strategy() -> None:
+    result = await MediaPlanner(
+        FakeModel(
+            _proposal(
+                interaction_bid_id="seek_care",
+                subject_variant_id="aware_three_quarter",
+            )
+        )
+    ).plan(_opportunity())
+
+    assert isinstance(result, NotRenderable)
+    assert result.reason == "subject_interaction_bid_conflict"
+
+
+@pytest.mark.asyncio
+async def test_final_plan_privacy_limits_subject_display_strategy() -> None:
+    audience = AudienceContext(recipient_ref="user:geoff", relationship_stage="close_friend")
+    opportunity = MediaOpportunity(**{**_opportunity().__dict__, "audience_context": audience})
+    planned = await MediaPlanner(
+        FakeModel(
+            _proposal(
+                share_intent="humor",
+                interaction_bid_id="invite_playful_exchange",
+                subject_variant_id="playful_level_pose",
+            )
+        )
+    ).plan(opportunity)
+    assert isinstance(planned, PlannedMedia)
+
+    tampered = planned.plan.to_payload()
+    tampered["privacy"] = "ordinary"
+    with pytest.raises(ValueError, match="subject_display_privacy_conflict"):
+        MediaPlan.from_payload(tampered)
+
+    ordinary_proposal = _proposal(
+        share_intent="humor",
+        privacy="ordinary",
+        interaction_bid_id="invite_playful_exchange",
+        subject_variant_id="playful_level_pose",
+    )
+    rejected = await MediaPlanner(FakeModel(ordinary_proposal)).plan(opportunity)
+    assert isinstance(rejected, NotRenderable)
+    assert rejected.reason == "illegal_subject_variant"
 
 
 @pytest.mark.asyncio
@@ -350,12 +517,28 @@ async def test_missing_subject_catalog_fails_closed_before_model_call(tmp_path: 
 
 
 @pytest.mark.asyncio
+async def test_missing_interaction_catalog_fails_closed_before_model_call(
+    tmp_path: Path,
+) -> None:
+    model = FakeModel(_proposal())
+
+    result = await MediaPlanner(
+        model, interaction_config_path=tmp_path / "missing-interactions.yaml"
+    ).plan(_opportunity())
+
+    assert isinstance(result, NotRenderable)
+    assert result.reason == "interaction_catalog_unavailable"
+    assert model.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_v1_plan_replays_without_new_subject_interpretation() -> None:
     current = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity())
     assert isinstance(current, PlannedMedia)
     payload = current.plan.to_payload()
     payload["version"] = "event-media-plan-v1"
     payload["subject_presentation"] = None
+    payload["interaction_bid"] = None
 
     restored = MediaPlan.from_payload(payload)
 
@@ -376,6 +559,28 @@ async def test_frozen_plan_rejects_tampered_hand_occupancy() -> None:
 
     with pytest.raises(ValueError, match="capture_hand_occupancy_conflict"):
         MediaPlan.from_payload(payload)
+
+
+@pytest.mark.asyncio
+async def test_frozen_v3_rejects_tampered_social_meaning() -> None:
+    current = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity())
+    assert isinstance(current, PlannedMedia)
+
+    bid_tamper = current.plan.to_payload()
+    bid = bid_tamper["interaction_bid"]
+    assert isinstance(bid, dict)
+    bid["communicative_goal"] = "demand_unconditional_reply"
+    with pytest.raises(ValueError, match="invalid media plan payload"):
+        MediaPlan.from_payload(bid_tamper)
+
+    display_tamper = current.plan.to_payload()
+    subject = display_tamper["subject_presentation"]
+    assert isinstance(subject, dict)
+    strategy = subject["display_strategy"]
+    assert isinstance(strategy, dict)
+    strategy["holistic_cue"] = "perform an unrelated expression"
+    with pytest.raises(ValueError, match="invalid media plan payload"):
+        MediaPlan.from_payload(display_tamper)
 
 
 @pytest.mark.asyncio
@@ -953,6 +1158,66 @@ async def test_renderer_repairs_garment_and_evidence_attachment_defects(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_renderer_repairs_contradicted_photo_display_strategy(tmp_path: Path) -> None:
+    planned = await MediaPlanner(
+        FakeModel(
+            _proposal(
+                interaction_bid_id="share_discovery",
+                subject_variant_id="aware_three_quarter",
+            )
+        )
+    ).plan(_opportunity())
+    assert isinstance(planned, PlannedMedia)
+    contradicted = MediaInspection(
+        passed=True,
+        reason="ok",
+        observed_summary="角色大笑着展示食物",
+        observed_facts=("角色可识别",),
+        deviations=(),
+        inspector_model="fake",
+        observed_subject_presentation={"expression": "broad_smile"},
+        garment_topology_ok=True,
+        hand_sleeve_occlusion_ok=True,
+        evidence_attachment_ok=True,
+        observed_photo_display_strategy="commercial_smile",
+        display_strategy_broadly_matches=False,
+        expression_artifact_free=True,
+        salient_expression_cues=("broad smile",),
+        forbidden_expression_cues=("commercial_smile",),
+    )
+    accepted = MediaInspection(
+        passed=True,
+        reason="ok",
+        observed_summary="角色温和自然地把早餐分享给熟悉的人",
+        observed_facts=("角色可识别",),
+        deviations=(),
+        inspector_model="fake",
+        observed_subject_presentation={"expression": "warm_include_you"},
+        garment_topology_ok=True,
+        hand_sleeve_occlusion_ok=True,
+        evidence_attachment_ok=True,
+        observed_photo_display_strategy="warm_include_you",
+        display_strategy_broadly_matches=True,
+        expression_artifact_free=True,
+        salient_expression_cues=("small warm smile", "friendly gaze"),
+        forbidden_expression_cues=(),
+    )
+    generator = FakeGenerator()
+
+    result = await MediaRenderer(
+        generator=generator,
+        inspector=FakeInspector([contradicted, accepted]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+
+    assert isinstance(result, RenderedMedia)
+    assert result.attempts == 2
+    assert "display_strategy_contradiction" in generator.prompts[1]
+    assert "same social performance" in generator.prompts[1]
+
+
+@pytest.mark.asyncio
 async def test_renderer_keeps_references_for_adapter_without_quality_parameter(
     tmp_path: Path,
 ) -> None:
@@ -1033,7 +1298,7 @@ async def test_automatic_render_fails_closed_without_observed_summary(tmp_path: 
 
 
 @pytest.mark.asyncio
-async def test_automatic_v2_render_requires_structural_quality_fields(tmp_path: Path) -> None:
+async def test_automatic_v3_render_requires_structural_quality_fields(tmp_path: Path) -> None:
     planned = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity(automatic=True))
     assert isinstance(planned, PlannedMedia)
     incomplete = MediaInspection(
@@ -1052,6 +1317,83 @@ async def test_automatic_v2_render_requires_structural_quality_fields(tmp_path: 
         output_dir=tmp_path,
         visual_identity_path=None,
     ).render(planned.plan)
+
+    assert not isinstance(result, RenderedMedia)
+    assert result.reason == "inspection_quality_fields_missing"
+
+
+@pytest.mark.asyncio
+async def test_automatic_v3_render_requires_social_performance_fields(tmp_path: Path) -> None:
+    planned = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity(automatic=True))
+    assert isinstance(planned, PlannedMedia)
+    incomplete = MediaInspection(
+        passed=True,
+        reason="ok",
+        observed_summary="角色在咖啡馆自然地分享早餐",
+        observed_facts=("角色可识别",),
+        deviations=(),
+        inspector_model="fake",
+        observed_subject_presentation={"gesture": "show_primary_evidence"},
+        garment_topology_ok=True,
+        hand_sleeve_occlusion_ok=True,
+        evidence_attachment_ok=True,
+    )
+
+    result = await MediaRenderer(
+        generator=FakeGenerator(),
+        inspector=FakeInspector([incomplete, incomplete]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+
+    assert not isinstance(result, RenderedMedia)
+    assert result.reason == "inspection_social_performance_fields_missing"
+
+
+@pytest.mark.asyncio
+async def test_legacy_v2_plan_keeps_structural_quality_gate_after_v3_upgrade(
+    tmp_path: Path,
+) -> None:
+    current = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity(automatic=True))
+    assert isinstance(current, PlannedMedia)
+    payload = current.plan.to_payload()
+    payload["version"] = "event-media-plan-v2"
+    payload["interaction_bid"] = None
+    subject = payload["subject_presentation"]
+    assert isinstance(subject, dict)
+    subject.pop("version")
+    subject.pop("display_strategy")
+    appearance = subject["appearance"]
+    performance = subject["performance"]
+    assert isinstance(appearance, dict) and isinstance(performance, dict)
+    subject["subject_signature"] = "|".join(
+        str(value)
+        for value in (
+            appearance["hair_arrangement"],
+            performance["head_yaw"],
+            performance["head_pitch"],
+            performance["head_roll"],
+            performance["gaze_target"],
+            performance["expression"],
+            performance["shoulder_orientation"],
+            performance["gesture"],
+        )
+    )
+    restored = MediaPlan.from_payload(payload)
+    incomplete = MediaInspection(
+        passed=True,
+        reason="ok",
+        observed_summary="角色在咖啡馆展示早餐",
+        observed_facts=("角色可识别",),
+        deviations=(),
+        inspector_model="fake",
+        observed_subject_presentation={"gesture": "show_primary_evidence"},
+    )
+
+    result = await MediaRenderer(
+        generator=FakeGenerator(), inspector=FakeInspector([incomplete, incomplete]),
+        output_dir=tmp_path, visual_identity_path=None,
+    ).render(restored)
 
     assert not isinstance(result, RenderedMedia)
     assert result.reason == "inspection_quality_fields_missing"
