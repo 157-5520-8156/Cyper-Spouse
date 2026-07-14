@@ -709,6 +709,9 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
 
 - 固定普通聊天、关系修复、口是心非、多段 Action、NPC/世界事实五组回放；
 - 同时记录 bare baseline 与当前 full path 的自然度、首段延迟、模型调用数和错误；
+- bare/full baseline report 会输出 hot 样本的 `token_status`、full/bare token 总量与允许上限；
+  token 诊断不替代人工质量判断，但用于发现 TurnFrame、Advisory 或 fallback 链路把普通聊天变成
+  过重 prompt 的回归；
 - 真实 QQ/NapCat 运行可设置 `QQ_TURN_OBSERVATION_PATH=data/private/qq-turns.jsonl`；该
   文件会以 `0600` 权限追加仅含运行事实的 JSONL，供离线按 cadence 汇总。它不是聊天日志，
   不得用来重建用户文本、用户账号、附件、平台回执值或密钥；
