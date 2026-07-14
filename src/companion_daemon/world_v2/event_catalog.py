@@ -1041,6 +1041,7 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "AffectEpisodeDecayedPayload",
                 allowed_predecessors=(
                     "ClockAdvanced",
+                    "V2GoalExpired",
                     "AffectEpisodeDecayed",
                 ),
                 evidence_types=("clock_observation",),

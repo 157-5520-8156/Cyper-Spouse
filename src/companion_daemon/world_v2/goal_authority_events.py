@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
 import hashlib
 import json
 from typing import Any, Literal
@@ -11,6 +10,7 @@ from typing import Any, Literal
 from pydantic import Field, model_validator
 from pydantic_core import to_jsonable_python
 
+from .goal_authority_contract import V2_GOAL_EVENT_TYPES, V2GoalOperation
 from .goal_situation_schemas import (
     CompensationCauseAuthority,
     ClockCauseAuthority,
@@ -31,21 +31,7 @@ from .goal_situation_schemas import (
     V2GoalTerminalReason,
     V2GoalProjection,
 )
-from .schemas import EvidenceRef, FrozenModel
-
-
-V2GoalOperation = Literal[
-    "open",
-    "revise",
-    "progress",
-    "pause",
-    "resume",
-    "block",
-    "unblock",
-    "complete",
-    "abandon",
-    "compensate",
-]
+from .schema_core import EvidenceRef, FrozenModel, canonicalize_json_value
 
 
 class V2GoalChangedPayload(V16AuthorizedMutationEnvelope):
@@ -229,16 +215,7 @@ class V2GoalChangedPayload(V16AuthorizedMutationEnvelope):
 
 
 V2_GOAL_PAYLOAD_MODELS = {
-    "V2GoalOpened": V2GoalChangedPayload,
-    "V2GoalRevised": V2GoalChangedPayload,
-    "V2GoalProgressed": V2GoalChangedPayload,
-    "V2GoalPaused": V2GoalChangedPayload,
-    "V2GoalResumed": V2GoalChangedPayload,
-    "V2GoalBlocked": V2GoalChangedPayload,
-    "V2GoalUnblocked": V2GoalChangedPayload,
-    "V2GoalCompleted": V2GoalChangedPayload,
-    "V2GoalAbandoned": V2GoalChangedPayload,
-    "V2GoalTransitionCompensated": V2GoalChangedPayload,
+    event_type: V2GoalChangedPayload for event_type in V2_GOAL_EVENT_TYPES
 }
 
 
@@ -253,7 +230,7 @@ def v2_goal_expiry_hash(value: object) -> str:
     material.pop("mechanical_change_hash", None)
     return hashlib.sha256(
         json.dumps(
-            _canonicalize(material),
+            canonicalize_json_value(material),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -263,6 +240,7 @@ def v2_goal_expiry_hash(value: object) -> str:
 
 def v2_goal_expiry_id(
     *,
+    world_id: str,
     goal_id: str,
     expected_entity_revision: int,
     clock_event_ref: str,
@@ -271,6 +249,7 @@ def v2_goal_expiry_id(
     digest = hashlib.sha256(
         json.dumps(
             {
+                "world_id": world_id,
                 "goal_id": goal_id,
                 "expected_entity_revision": expected_entity_revision,
                 "clock_event_ref": clock_event_ref,
@@ -286,6 +265,7 @@ def v2_goal_expiry_id(
 class V2GoalExpiredPayload(FrozenModel):
     operation: Literal["expire"] = "expire"
     authority_lane: Literal["clock_runtime"] = "clock_runtime"
+    world_id: str = Field(min_length=1)
     expiry_id: str = Field(min_length=1)
     change_id: str = Field(min_length=1)
     transition_id: str = Field(min_length=1)
@@ -305,6 +285,7 @@ class V2GoalExpiredPayload(FrozenModel):
     def mechanical_expiry_is_exact(self) -> V2GoalExpiredPayload:
         after = self.goal_after
         expected_expiry_id = v2_goal_expiry_id(
+            world_id=self.world_id,
             goal_id=after.goal_id,
             expected_entity_revision=self.expected_entity_revision,
             clock_event_ref=self.cause_authority.clock_event_ref,
@@ -568,26 +549,9 @@ def v2_goal_mutation_hash(
     )
     material.pop("accepted_change_hash", None)
     encoded = json.dumps(
-        _canonicalize(material),
+        canonicalize_json_value(material),
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
     )
     return hashlib.sha256(encoded.encode()).hexdigest()
-
-
-def _canonicalize(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {key: _canonicalize(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_canonicalize(item) for item in value]
-    if isinstance(value, datetime):
-        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    if isinstance(value, str) and (value.endswith("Z") or "+" in value[-6:]):
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return value
-        if parsed.tzinfo is not None:
-            return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    return value

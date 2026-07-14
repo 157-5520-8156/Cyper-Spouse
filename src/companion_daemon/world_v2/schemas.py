@@ -101,11 +101,15 @@ class ClockObservation(FrozenModel):
     logical_time_from: datetime
     logical_time_to: datetime
     reason: str = Field(min_length=1)
+    policy_version: str | None = Field(default=None, min_length=1)
+    policy_digest: str | None = Field(default=None, min_length=64, max_length=64)
 
     @model_validator(mode="after")
     def time_moves_forward(self) -> ClockObservation:
         if self.logical_time_to <= self.logical_time_from:
             raise ValueError("logical time must move forwards")
+        if (self.policy_version is None) != (self.policy_digest is None):
+            raise ValueError("clock policy version and digest must be supplied together")
         return self
 
 

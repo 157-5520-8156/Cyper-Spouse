@@ -3844,6 +3844,8 @@ def _v2_goal_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
 def _v2_goal_expired(state: ReducerState, event: WorldEvent) -> ReducerState:
     logical_time = _require_life_time(state, event)
     payload = V2GoalExpiredPayload.model_validate_json(event.payload_json)
+    if payload.world_id != event.world_id:
+        raise ValueError("goal expiry payload belongs to another world")
     goals, transitions = reduce_v2_goal_expiry(
         state.goals,
         state.goal_transitions,

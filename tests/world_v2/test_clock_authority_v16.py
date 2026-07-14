@@ -7,6 +7,8 @@ import pytest
 from companion_daemon.world_v2.clock_authority import (
     CLOCK_AUTHORITY_POLICY_DIGEST,
     CLOCK_AUTHORITY_POLICY_VERSION,
+    CLOCK_EXPLICIT_POLICY_DIGEST,
+    CLOCK_EXPLICIT_POLICY_VERSION,
     resolve_latest_clock,
 )
 from companion_daemon.world_v2.reducers import ReducerState, reduce_event
@@ -81,6 +83,70 @@ def test_clock_advanced_freezes_computed_authority_projection() -> None:
         reduced.clock_transition_history,
         current_logical_time=reduced.logical_time,
     ) == frozen
+
+
+def test_clock_explicit_policy_pair_is_resolved_from_immutable_registry() -> None:
+    assert (
+        CLOCK_EXPLICIT_POLICY_DIGEST
+        == "e17bd01d29b6079cb02fbb67b2fd668a72ffd1741646b2efb15de8f8506427ba"
+    )
+    event = clock_event(
+        extra={
+            "policy_version": CLOCK_EXPLICIT_POLICY_VERSION,
+            "policy_digest": CLOCK_EXPLICIT_POLICY_DIGEST,
+        }
+    )
+    frozen = reduce_event(state_at_now(), event).clock_transition_history[-1]
+    assert frozen.installed_policy_version == CLOCK_EXPLICIT_POLICY_VERSION
+    assert frozen.installed_policy_digest == CLOCK_EXPLICIT_POLICY_DIGEST
+
+
+@pytest.mark.parametrize(
+    "policy",
+    (
+        {"policy_version": CLOCK_EXPLICIT_POLICY_VERSION},
+        {"policy_digest": CLOCK_EXPLICIT_POLICY_DIGEST},
+        {"policy_version": "world-clock-authority.unknown", "policy_digest": "f" * 64},
+        {"policy_version": CLOCK_EXPLICIT_POLICY_VERSION, "policy_digest": "f" * 64},
+    ),
+)
+def test_clock_rejects_partial_unknown_or_wrong_policy_pairs(
+    policy: dict[str, object],
+) -> None:
+    with pytest.raises(ValueError, match="policy|Policy"):
+        reduce_event(state_at_now(), clock_event(extra=policy))
+
+
+def test_mixed_legacy_and_explicit_clock_history_freezes_each_resolved_artifact() -> None:
+    legacy = reduce_event(state_at_now(), clock_event())
+    explicit = reduce_event(
+        legacy,
+        clock_event(
+            event_id="event:clock:explicit",
+            origin=legacy.logical_time,
+            target=NOW + timedelta(minutes=2),
+            extra={
+                "policy_version": CLOCK_EXPLICIT_POLICY_VERSION,
+                "policy_digest": CLOCK_EXPLICIT_POLICY_DIGEST,
+            },
+        ),
+    )
+    legacy_again = reduce_event(
+        explicit,
+        clock_event(
+            event_id="event:clock:legacy-again",
+            origin=explicit.logical_time,
+            target=NOW + timedelta(minutes=3),
+        ),
+    )
+    assert tuple(
+        (item.installed_policy_version, item.installed_policy_digest)
+        for item in legacy_again.clock_transition_history
+    ) == (
+        (CLOCK_AUTHORITY_POLICY_VERSION, CLOCK_AUTHORITY_POLICY_DIGEST),
+        (CLOCK_EXPLICIT_POLICY_VERSION, CLOCK_EXPLICIT_POLICY_DIGEST),
+        (CLOCK_AUTHORITY_POLICY_VERSION, CLOCK_AUTHORITY_POLICY_DIGEST),
+    )
 
 
 def test_clock_payload_cannot_override_computed_authority_fields() -> None:

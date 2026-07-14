@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -67,3 +67,22 @@ class EvidenceRef(FrozenModel):
             if self.source_world_revision is None or self.immutable_hash is None:
                 raise ValueError("world-event evidence requires revision and immutable hash")
         return self
+
+
+def canonicalize_json_value(value: Any) -> Any:
+    """Normalize nested datetime-like JSON values for stable authority hashes."""
+
+    if isinstance(value, dict):
+        return {key: canonicalize_json_value(item) for key, item in value.items()}
+    if isinstance(value, list):
+        return [canonicalize_json_value(item) for item in value]
+    if isinstance(value, datetime):
+        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if isinstance(value, str) and (value.endswith("Z") or "+" in value[-6:]):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return value
+        if parsed.tzinfo is not None:
+            return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return value

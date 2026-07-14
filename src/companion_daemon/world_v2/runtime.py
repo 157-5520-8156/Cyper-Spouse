@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 
 from .affect_math import DecayAnchor, DecayProfile, decay_intensity_bp
-from .errors import IdempotencyConflict
+from .errors import ConcurrencyConflict, IdempotencyConflict
 from .ledger import LedgerPort, WorldLedger
 from .event_identity import domain_idempotency_key
+from .clock_authority import append_clock_transition, resolve_latest_clock
+from .goal_expiry_runtime import build_due_goal_expiry_events
 from .projection import ProjectionAuthority, ProjectionCompiler
 from .settlement import SettlementPlanner
 from .schemas import (
@@ -211,6 +213,26 @@ class WorldRuntime:
             )
         return events
 
+    def _goal_expiry_events(
+        self,
+        projection,
+        clock: ClockObservation,
+        *,
+        clock_event: WorldEvent,
+    ) -> list[WorldEvent]:
+        clock_transition = append_clock_transition(
+            projection.clock_transition_history,
+            event=clock_event,
+            current_logical_time=projection.logical_time,
+            computed_world_revision=projection.world_revision + 1,
+        )[-1]
+        return build_due_goal_expiry_events(
+            world_id=self._world_id,
+            goals=projection.goals,
+            clock=clock,
+            clock_transition=clock_transition,
+        )
+
     async def advance(self, clock: ClockObservation) -> RuntimeOutcome:
         if clock.world_id != self._world_id:
             raise ValueError("clock belongs to another world")
@@ -236,15 +258,25 @@ class WorldRuntime:
             existing = await self._lookup_event_commit(event.event_id)
             if existing is not None:
                 persisted, original_commit = existing
-                return self._clock_retry_outcome(
+                original_outcome = self._clock_retry_outcome(
                     event=event,
                     persisted=persisted,
                     original_commit=original_commit,
                     trigger_id=trigger_id,
                     tick_id=clock.tick_id,
                 )
+                return await self._recover_goal_expiries(
+                    clock=clock,
+                    clock_event=persisted,
+                    original_outcome=original_outcome,
+                    trigger_id=trigger_id,
+                )
             before = await self._project_for_write()
-            events = [event, *self._affect_decay_events(before, clock)]
+            events = [
+                event,
+                *self._goal_expiry_events(before, clock, clock_event=event),
+                *self._affect_decay_events(before, clock),
+            ]
             try:
                 committed = await self._commit(
                     events,
@@ -256,13 +288,91 @@ class WorldRuntime:
                 if raced is None:
                     raise
                 persisted, original_commit = raced
-                return self._clock_retry_outcome(
+                original_outcome = self._clock_retry_outcome(
                     event=event,
                     persisted=persisted,
                     original_commit=original_commit,
                     trigger_id=trigger_id,
                     tick_id=clock.tick_id,
                 )
+                return await self._recover_goal_expiries(
+                    clock=clock,
+                    clock_event=persisted,
+                    original_outcome=original_outcome,
+                    trigger_id=trigger_id,
+                )
+        return RuntimeOutcome(
+            outcome_id=f"outcome:{trigger_id}",
+            trigger_id=trigger_id,
+            committed_world_revision=committed.world_revision,
+            ledger_sequence=committed.ledger_sequence,
+            status="observed_only",
+            projection_hint=f"world-revision:{committed.world_revision}",
+        )
+
+    async def _recover_goal_expiries(
+        self,
+        *,
+        clock: ClockObservation,
+        clock_event: WorldEvent,
+        original_outcome: RuntimeOutcome,
+        trigger_id: str,
+    ) -> RuntimeOutcome:
+        """Idempotently supplement due Goals omitted after an exact latest Clock."""
+
+        for _attempt in range(3):
+            current = await self._project_for_write()
+            try:
+                latest = resolve_latest_clock(
+                    current.clock_transition_history,
+                    current_logical_time=current.logical_time,
+                )
+            except ValueError:
+                return original_outcome
+            if (
+                latest.clock_event_ref != clock_event.event_id
+                or latest.payload_hash != clock_event.payload_hash
+            ):
+                return original_outcome
+            events = build_due_goal_expiry_events(
+                world_id=self._world_id,
+                goals=current.goals,
+                clock=clock,
+                clock_transition=latest,
+            )
+            if not events:
+                return original_outcome
+            try:
+                committed = await self._commit(
+                    events,
+                    world_revision=current.world_revision,
+                    deliberation_revision=current.deliberation_revision,
+                )
+            except (ConcurrencyConflict, IdempotencyConflict):
+                joined = [await self._lookup_event_commit(item.event_id) for item in events]
+                if all(item is not None for item in joined):
+                    persisted = [item for item in joined if item is not None]
+                    if all(
+                        stored_event == expected
+                        for (stored_event, _commit), expected in zip(
+                            persisted, events, strict=True
+                        )
+                    ) and len({commit for _event, commit in persisted}) == 1:
+                        return self._runtime_outcome_for_commit(
+                            trigger_id=trigger_id,
+                            committed=persisted[0][1],
+                        )
+                continue
+            return self._runtime_outcome_for_commit(
+                trigger_id=trigger_id,
+                committed=committed,
+            )
+        raise ConcurrencyConflict("Goal expiry recovery did not converge")
+
+    @staticmethod
+    def _runtime_outcome_for_commit(
+        *, trigger_id: str, committed: CommitResult
+    ) -> RuntimeOutcome:
         return RuntimeOutcome(
             outcome_id=f"outcome:{trigger_id}",
             trigger_id=trigger_id,

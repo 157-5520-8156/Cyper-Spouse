@@ -22,6 +22,7 @@ from .commitment_events import CommitmentChangedPayload
 from .character_core_events import CHARACTER_CORE_PAYLOAD_MODELS, CharacterCoreChangedPayload
 from .fact_events import FACT_PAYLOAD_MODELS, FactChangedPayload
 from .goal_authority_events import V2_GOAL_PAYLOAD_MODELS, V2GoalChangedPayload
+from .goal_authority_contract import require_goal_event_operation
 from .goal_situation_schemas import V2GoalProposalProjection
 from .experience_events import EXPERIENCE_PAYLOAD_MODELS, ExperienceCommittedPayload
 from .life_events import OutcomeProposalRecordedPayload, WorldOccurrenceSettledPayload
@@ -621,19 +622,6 @@ class _CharacterCoreFamilyCodec:
 
 
 class _V2GoalFamilyCodec:
-    _EVENT_OPERATION = {
-        "V2GoalOpened": "open",
-        "V2GoalRevised": "revise",
-        "V2GoalProgressed": "progress",
-        "V2GoalPaused": "pause",
-        "V2GoalResumed": "resume",
-        "V2GoalBlocked": "block",
-        "V2GoalUnblocked": "unblock",
-        "V2GoalCompleted": "complete",
-        "V2GoalAbandoned": "abandon",
-        "V2GoalTransitionCompensated": "compensate",
-    }
-
     def decode_record(
         self, *, event_type: str, payload: dict[str, object]
     ) -> V2GoalProposalProjection:
@@ -657,8 +645,10 @@ class _V2GoalFamilyCodec:
 
     def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
         mutation = _validate_json(V2GoalChangedPayload, payload)
-        if self._EVENT_OPERATION.get(event_type) != mutation.operation:  # type: ignore[attr-defined]
-            raise ValueError("Goal mutation event type does not match operation")
+        require_goal_event_operation(
+            event_type=event_type,
+            operation=mutation.operation,  # type: ignore[attr-defined]
+        )
         return mutation
 
     def bind_mutation(self, mutation: object) -> AcceptedMutationBinding:

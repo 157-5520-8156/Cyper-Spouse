@@ -13,6 +13,7 @@ import json
 from .goal_authority_events import V2GoalChangedPayload, V2GoalExpiredPayload
 from .actor_authority_reducers import ACTOR_AUTHORITY_V2_POLICY_DIGEST
 from .clock_authority import resolve_latest_clock, validate_clock_history
+from .goal_authority_contract import require_goal_event_operation
 from .goal_situation_schemas import (
     CompensationCauseAuthority,
     ClockCauseAuthority,
@@ -171,20 +172,6 @@ V2_GOAL_POLICY_DIGEST = hashlib.sha256(
     json.dumps(_POLICY_ARTIFACT, sort_keys=True, separators=(",", ":")).encode()
 ).hexdigest()
 
-_EVENT_OPERATION = {
-    "V2GoalOpened": "open",
-    "V2GoalRevised": "revise",
-    "V2GoalProgressed": "progress",
-    "V2GoalPaused": "pause",
-    "V2GoalResumed": "resume",
-    "V2GoalBlocked": "block",
-    "V2GoalUnblocked": "unblock",
-    "V2GoalCompleted": "complete",
-    "V2GoalAbandoned": "abandon",
-    "V2GoalTransitionCompensated": "compensate",
-}
-
-
 def reduce_v2_goal(
     goals: tuple[V2GoalProjection, ...],
     history: tuple[V2GoalTransitionProjection, ...],
@@ -201,8 +188,7 @@ def reduce_v2_goal(
     experiences: tuple[ExperienceProjection, ...] = (),
     clock_transition_history: tuple[ClockTransitionProjection, ...] = (),
 ) -> tuple[tuple[V2GoalProjection, ...], tuple[V2GoalTransitionProjection, ...]]:
-    if _EVENT_OPERATION.get(event_type) != payload.operation:
-        raise ValueError("goal event type does not match operation")
+    require_goal_event_operation(event_type=event_type, operation=payload.operation)
     if payload.policy_refs != V2_GOAL_POLICY_REFS or (
         payload.policy_version != V2_GOAL_POLICY_VERSION
         or payload.policy_digest != V2_GOAL_POLICY_DIGEST
@@ -324,8 +310,8 @@ def reduce_v2_goal(
             != current.values.supersedes_goal_authority
         ):
             raise ValueError("goal transition changed immutable identity or outcome")
-        if after.updated_at <= current.updated_at:
-            raise ValueError("goal transition time must advance monotonically")
+        if after.updated_at < current.updated_at:
+            raise ValueError("goal transition time cannot move backward")
         if current.values.status in {"completed", "abandoned", "expired"} and (
             payload.operation != "compensate"
         ):
@@ -433,7 +419,7 @@ def reduce_v2_goal_expiry(
         or after.origin.accepted_event_ref != event_id
         or after.origin.policy_refs != V2_GOAL_POLICY_REFS
         or after.updated_at != logical_time
-        or after.updated_at <= current.updated_at
+        or after.updated_at < current.updated_at
         or after.goal_id != current.goal_id
         or after.actor_ref != current.actor_ref
         or after.opened_at != current.opened_at

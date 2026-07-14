@@ -65,7 +65,7 @@
 - [ ] 冻结 typed `DeliberativeBasisBinding`、纯 `DeliberativeBasisResolver`、capability matrix 与 privacy floor；禁止自由 EvidenceRef 列表，internal intention floor固定private。
 - [ ] 冻结 `supersedes_goal_id` exact binding：同actor、非self、既存current head且terminal。
 - [ ] 冻结 cause之外独立typed `GoalCompletionEvidence` union与`evidence_cutoff_world_revision`：Complete为deliberative recognition/operator补结算，二者都必填strict evidence；Goal无settlement写lane。
-- [ ] 冻结`GoalRationale`/`InternalIntentionBasis`内嵌closed class + NFC bounded text + privacy；禁止rationale ref/blob，viewer默认不披露原文。
+- [ ] 冻结`InternalIntentionBasis.intention_class`等外层assessment/reason closed分类；`GoalRationale`只含NFC bounded text + privacy，不重复保存分类；禁止rationale ref/blob，viewer默认不披露原文。
 - [ ] 冻结head `GoalTerminalReason` structured union：abandon复用typed lifecycle reason，complete/expire绑定evidence/Clock；禁止terminal_reason_ref。
 - [ ] 冻结typed `GoalBlocker/GoalBlockerResolution`集合；Block/Unblock不存裸refs、不由settlement自动改变。
 - [ ] 冻结Goal closed lane matrix：Complete=deliberative recognition/operator strict-evidence补结算；Progress/Block/Unblock/Pause/Resume/Abandon deliberative-only；operator其余只Open初始化/导入、Revised治理修正和operator-origin compensation reauth；无settlement写lane。
@@ -109,7 +109,7 @@
 - [ ] 新建 `src/companion_daemon/world_v2/goal_reducers.py`：
   - [ ] 状态矩阵含 revise/reprioritize/reschedule/recontract；
   - [ ] progress仅由Deliberation主观评估exact committed settled/Fact/Experience basis；Runtime不得自动增长；
-  - [ ] `GoalProgressAssessment`记录contribution_class、bounded rationale与strictly-positive delta；reducer只验typed authority/capability、算术/范围、时间、privacy，不硬编码event/outcome相关性；
+  - [ ] `GoalProgressAssessment`记录contribution_class、bounded rationale与basis；strictly-positive delta只记录在mutation的`progress_delta_bp`；reducer只验typed authority/capability、算术/范围、时间、privacy，不硬编码event/outcome相关性；
   - [ ] rationale使用内嵌`GoalRationale` closed class；trim→NFC后1..512 code points，拒绝全部Unicode category Cc control；带privacy并禁止ref/blob；
   - [ ] no-change不产生`V2GoalProgressed`或delta=0空mutation，可只留审议trace；paused/blocked合法positive progress不隐式换状态；
   - [ ] partial unblock保持 blocked，最后一个 blocker移除才 active；

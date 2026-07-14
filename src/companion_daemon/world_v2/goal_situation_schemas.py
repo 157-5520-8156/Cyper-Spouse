@@ -7,7 +7,7 @@ the reducer interface.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import datetime
 import hashlib
 import json
 import unicodedata
@@ -15,7 +15,18 @@ from typing import Annotated, Literal
 
 from pydantic import Field, field_validator, model_validator
 
-from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
+from .goal_authority_contract import (
+    V2GoalEventType,
+    V2GoalOperation,
+    V2GoalTransitionOperation,
+    goal_event_for_operation,
+)
+from .schema_core import (
+    EvidenceRef,
+    FrozenModel,
+    PrivacyClass,
+    canonicalize_json_value,
+)
 
 
 V16AuthorityLane = Literal[
@@ -165,7 +176,9 @@ class InternalIntentionBasis(FrozenModel):
         material.pop("intention_material_hash", None)
         expected = hashlib.sha256(
             json.dumps(
-                _canonicalize(material), sort_keys=True, separators=(",", ":")
+                canonicalize_json_value(material),
+                sort_keys=True,
+                separators=(",", ":"),
             ).encode()
         ).hexdigest()
         if self.intention_material_hash != expected:
@@ -452,7 +465,9 @@ def v2_goal_completion_contract_digest(
     material.pop("contract_digest", None)
     return hashlib.sha256(
         json.dumps(
-            _canonicalize(material), sort_keys=True, separators=(",", ":")
+            canonicalize_json_value(material),
+            sort_keys=True,
+            separators=(",", ":"),
         ).encode()
     ).hexdigest()
 
@@ -557,7 +572,9 @@ class V2GoalBlocker(FrozenModel):
         material.pop("blocker_semantic_hash", None)
         expected = hashlib.sha256(
             json.dumps(
-                _canonicalize(material), sort_keys=True, separators=(",", ":")
+                canonicalize_json_value(material),
+                sort_keys=True,
+                separators=(",", ":"),
             ).encode()
         ).hexdigest()
         if self.blocker_semantic_hash != expected:
@@ -683,26 +700,11 @@ def v2_goal_semantic_fingerprint(
     }
     return hashlib.sha256(
         json.dumps(
-            _canonicalize(material), sort_keys=True, separators=(",", ":")
+            canonicalize_json_value(material),
+            sort_keys=True,
+            separators=(",", ":"),
         ).encode()
     ).hexdigest()
-
-
-def _canonicalize(value: object) -> object:
-    if isinstance(value, dict):
-        return {key: _canonicalize(item) for key, item in value.items()}
-    if isinstance(value, list):
-        return [_canonicalize(item) for item in value]
-    if isinstance(value, datetime):
-        return value.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    if isinstance(value, str) and (value.endswith("Z") or "+" in value[-6:]):
-        try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except ValueError:
-            return value
-        if parsed.tzinfo is not None:
-            return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    return value
 
 
 class V2GoalProjection(FrozenModel):
@@ -747,19 +749,7 @@ class V2GoalTransitionProjection(FrozenModel):
     transition_id: str = Field(min_length=1)
     goal_id: str = Field(min_length=1)
     entity_revision: int = Field(ge=1)
-    operation: Literal[
-        "open",
-        "revise",
-        "progress",
-        "pause",
-        "resume",
-        "block",
-        "unblock",
-        "complete",
-        "abandon",
-        "expire",
-        "compensate",
-    ]
+    operation: V2GoalTransitionOperation
     authority_lane: V16AuthorityLane
     selection_mode: Literal["direct", "random_draw"]
     values_before: V2GoalValues | None = None
@@ -789,18 +779,7 @@ class V2GoalTransitionProjection(FrozenModel):
 
 
 class V2GoalProposedMutation(FrozenModel):
-    event_type: Literal[
-        "V2GoalOpened",
-        "V2GoalRevised",
-        "V2GoalProgressed",
-        "V2GoalPaused",
-        "V2GoalResumed",
-        "V2GoalBlocked",
-        "V2GoalUnblocked",
-        "V2GoalCompleted",
-        "V2GoalAbandoned",
-        "V2GoalTransitionCompensated",
-    ]
+    event_type: V2GoalEventType
     payload_json: str = Field(min_length=2)
 
     @model_validator(mode="after")
@@ -823,18 +802,7 @@ class V2GoalProposalProjection(FrozenModel):
     authority_contract_ref: Literal["proposal-contract:v2-goal.1"] = (
         "proposal-contract:v2-goal.1"
     )
-    transition_kind: Literal[
-        "open",
-        "revise",
-        "progress",
-        "pause",
-        "resume",
-        "block",
-        "unblock",
-        "complete",
-        "abandon",
-        "compensate",
-    ]
+    transition_kind: V2GoalOperation
     change_id: str = Field(min_length=1)
     transition_id: str = Field(min_length=1)
     evaluated_world_revision: int = Field(ge=0)
@@ -846,18 +814,7 @@ class V2GoalProposalProjection(FrozenModel):
 
     @model_validator(mode="after")
     def transition_matches_event_and_payload(self) -> V2GoalProposalProjection:
-        expected = {
-            "open": "V2GoalOpened",
-            "revise": "V2GoalRevised",
-            "progress": "V2GoalProgressed",
-            "pause": "V2GoalPaused",
-            "resume": "V2GoalResumed",
-            "block": "V2GoalBlocked",
-            "unblock": "V2GoalUnblocked",
-            "complete": "V2GoalCompleted",
-            "abandon": "V2GoalAbandoned",
-            "compensate": "V2GoalTransitionCompensated",
-        }[self.transition_kind]
+        expected = goal_event_for_operation(self.transition_kind)
         if self.proposed_mutation.event_type != expected:
             raise ValueError("goal proposal transition does not match event")
         decoded = json.loads(self.proposed_mutation.payload_json)
@@ -911,7 +868,7 @@ def validate_v2_goal_authority_state(
             if (
                 after.entity_revision != before.entity_revision + 1
                 or after.values_before != before.values_after
-                or after.accepted_at <= before.accepted_at
+                or after.accepted_at < before.accepted_at
             ):
                 raise ValueError("goal transition lineage is discontinuous")
         latest = lineage[-1]

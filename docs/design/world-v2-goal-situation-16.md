@@ -298,15 +298,18 @@ CommittedFactStateCompletionEvidence
   privacy_class
 
 GoalRationale
-  rationale_class              # effort_attribution|milestone_interpretation|priority_reassessment|constraint_response|value_alignment|uncertainty_management|self_direction
   text                         # trim→NFC后1..512 Unicode code points；拒绝全部Unicode General_Category=Cc control
   privacy_class
+  # 不重复保存分类；分类由外层GoalProgressAssessment.contribution_class、
+  # GoalLifecycleReason.reason_kind或InternalIntentionBasis.intention_class承载
 
 GoalProgressAssessment
   contribution_class           # direct_contribution|indirect_support|milestone_reached|reappraisal
   rationale: GoalRationale     # 主观解释，不是客观证据
   basis                        # exact committed settled event | Fact | Experience typed basis
-  delta_bp                     # strictly > 0
+
+V2GoalChangedPayload(operation=progress)
+  progress_delta_bp            # strictly > 0；delta属于mutation算术，不重复写入assessment
 
 GoalLifecycleReason
   reason_kind                  # operation-specific closed catalog

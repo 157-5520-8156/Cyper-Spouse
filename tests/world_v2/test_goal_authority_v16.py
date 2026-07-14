@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 import hashlib
 import json
 
@@ -356,7 +356,9 @@ def goal_expiry_payload(
     raw = {
         "operation": "expire",
         "authority_lane": "clock_runtime",
+        "world_id": "world:goal-integration",
         "expiry_id": v2_goal_expiry_id(
+            world_id="world:goal-integration",
             goal_id=after.goal_id,
             expected_entity_revision=before.entity_revision,
             clock_event_ref=clock.clock_event_ref,
@@ -838,6 +840,117 @@ def test_goal_open_at_full_progress_remains_active() -> None:
     assert history[0].operation == "open"
 
 
+def test_same_goal_can_open_and_progress_at_the_same_logical_tick() -> None:
+    source, occurrence, _ = settled_occurrence(index=31)
+    opened = goal_projection(
+        revision=1,
+        values=V2GoalValues(
+            outcome_ref="outcome:publish-story",
+            importance_bp=8000,
+            progress_bp=0,
+            privacy_class="private",
+            status="active",
+        ),
+        event_ref="event:goal:same-tick-open",
+        updated_at=NOW,
+        opened_at=NOW,
+    )
+    open_payload = goal_payload(
+        opened,
+        operation="open",
+        lane="deliberative",
+        cause=internal_cause(logical_time=NOW),
+    )
+    goals, history = reduce_v2_goal(
+        (),
+        (),
+        open_payload,
+        event_type="V2GoalOpened",
+        event_id=opened.origin.accepted_event_ref,
+        logical_time=NOW,
+        actor_authorities=(),
+        committed_events=(source,),
+        random_draws=(),
+        world_occurrences=(occurrence,),
+    )
+    cause = deliberative_occurrence_cause(source, occurrence)
+    progressed = goal_projection(
+        revision=2,
+        values=opened.values.model_copy(update={"progress_bp": 1000}),
+        event_ref="event:goal:same-tick-progress",
+        updated_at=NOW,
+        opened_at=NOW,
+    )
+    progress_payload = goal_payload(
+        progressed,
+        operation="progress",
+        lane="deliberative",
+        cause=cause,
+        before=opened,
+        progress_delta_bp=1000,
+        progress_assessment=V2GoalProgressAssessment(
+            contribution_class="direct_contribution",
+            basis=cause.basis,
+            rationale=rationale("I count this as progress within the same tick."),
+        ),
+    )
+    goals, history = reduce_v2_goal(
+        goals,
+        history,
+        progress_payload,
+        event_type="V2GoalProgressed",
+        event_id=progressed.origin.accepted_event_ref,
+        logical_time=NOW,
+        actor_authorities=(),
+        committed_events=(source,),
+        random_draws=(),
+        world_occurrences=(occurrence,),
+    )
+    state = ReducerState(
+        logical_time=NOW,
+        goals=goals,
+        goal_transitions=history,
+    )
+    assert tuple(item.entity_revision for item in state.goal_transitions) == (1, 2)
+    assert tuple(item.accepted_at for item in state.goal_transitions) == (NOW, NOW)
+
+
+def test_goal_hashes_normalize_equivalent_datetime_offsets() -> None:
+    china = timezone(timedelta(hours=8))
+    utc_values = V2GoalValues(
+        outcome_ref="outcome:timezone",
+        importance_bp=5000,
+        progress_bp=0,
+        due_window=V2GoalDueWindow(starts_at=NOW, ends_at=NOW + timedelta(hours=1)),
+        privacy_class="private",
+        status="active",
+    )
+    offset_values = utc_values.model_copy(
+        update={
+            "due_window": V2GoalDueWindow(
+                starts_at=NOW.astimezone(china),
+                ends_at=(NOW + timedelta(hours=1)).astimezone(china),
+            )
+        }
+    )
+    assert v2_goal_semantic_fingerprint(
+        goal_id="goal:timezone",
+        actor_ref="actor:companion",
+        values=utc_values,
+        policy_refs=V2_GOAL_POLICY_REFS,
+    ) == v2_goal_semantic_fingerprint(
+        goal_id="goal:timezone",
+        actor_ref="actor:companion",
+        values=offset_values,
+        policy_refs=V2_GOAL_POLICY_REFS,
+    )
+    assert v2_goal_expiry_hash(
+        {"deadline": NOW.isoformat(), "goal_id": "goal:timezone"}
+    ) == v2_goal_expiry_hash(
+        {"deadline": NOW.astimezone(china).isoformat(), "goal_id": "goal:timezone"}
+    )
+
+
 @pytest.mark.parametrize(
     ("status", "blockers"),
     (("paused", ()), ("blocked", ("blocker:editing",))),
@@ -1180,8 +1293,14 @@ def test_progress_rejects_privacy_downgrade_and_time_rollback() -> None:
             random_draws=(),
             world_occurrences=(occurrence,),
         )
+    rolled_back = goal_projection(
+        revision=2,
+        values=before.values.model_copy(update={"progress_bp": 3000}),
+        event_ref="event:goal:progress-rollback",
+        updated_at=NOW - timedelta(seconds=1),
+    )
     private_payload = goal_payload(
-        after,
+        rolled_back,
         operation="progress",
         lane="deliberative",
         cause=cause,
@@ -1193,14 +1312,14 @@ def test_progress_rejects_privacy_downgrade_and_time_rollback() -> None:
             rationale=rationale("This moved the draft forward."),
         ),
     )
-    with pytest.raises(ValueError, match="time must advance"):
+    with pytest.raises(ValueError, match="cannot move backward"):
         reduce_v2_goal(
             (before,),
             (),
             private_payload,
             event_type="V2GoalProgressed",
-            event_id=after.origin.accepted_event_ref,
-            logical_time=NOW,
+            event_id=rolled_back.origin.accepted_event_ref,
+            logical_time=rolled_back.updated_at,
             actor_authorities=(),
             committed_events=(source,),
             random_draws=(),

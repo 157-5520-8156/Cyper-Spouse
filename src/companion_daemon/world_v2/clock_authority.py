@@ -50,8 +50,29 @@ CLOCK_AUTHORITY_POLICY_DIGEST = hashlib.sha256(
         separators=(",", ":"),
     ).encode()
 ).hexdigest()
+CLOCK_EXPLICIT_POLICY_VERSION = "world-clock-authority.2"
+_CLOCK_EXPLICIT_POLICY_ARTIFACT = {
+    "version": CLOCK_EXPLICIT_POLICY_VERSION,
+    "event_type": "ClockAdvanced",
+    "provenance": "event-explicit-exact-immutable-registry-pair",
+    "legacy_missing_pair": {
+        "version": CLOCK_AUTHORITY_POLICY_VERSION,
+        "digest": CLOCK_AUTHORITY_POLICY_DIGEST,
+    },
+    "replay_rule": "history-freezes-resolved-artifact-pair",
+}
+CLOCK_EXPLICIT_POLICY_DIGEST = hashlib.sha256(
+    json.dumps(
+        _CLOCK_EXPLICIT_POLICY_ARTIFACT,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+).hexdigest()
 INSTALLED_CLOCK_AUTHORITY_POLICIES = MappingProxyType(
-    {CLOCK_AUTHORITY_POLICY_VERSION: CLOCK_AUTHORITY_POLICY_DIGEST}
+    {
+        CLOCK_AUTHORITY_POLICY_VERSION: CLOCK_AUTHORITY_POLICY_DIGEST,
+        CLOCK_EXPLICIT_POLICY_VERSION: CLOCK_EXPLICIT_POLICY_DIGEST,
+    }
 )
 
 
@@ -115,6 +136,23 @@ def append_clock_transition(
     raw_to = payload.get("logical_time_to")
     if not isinstance(raw_from, str) or not isinstance(raw_to, str):
         raise ValueError("ClockAdvanced requires exact from/to timestamps")
+    raw_policy_version = payload.get("policy_version")
+    raw_policy_digest = payload.get("policy_digest")
+    if raw_policy_version is None and raw_policy_digest is None:
+        resolved_policy_version = CLOCK_AUTHORITY_POLICY_VERSION
+        resolved_policy_digest = CLOCK_AUTHORITY_POLICY_DIGEST
+    elif not isinstance(raw_policy_version, str) or not isinstance(
+        raw_policy_digest, str
+    ):
+        raise ValueError("ClockAdvanced policy version and digest must be supplied together")
+    elif not clock_policy_is_installed(
+        version=raw_policy_version,
+        digest=raw_policy_digest,
+    ):
+        raise ValueError("ClockAdvanced policy artifact is not installed")
+    else:
+        resolved_policy_version = raw_policy_version
+        resolved_policy_digest = raw_policy_digest
     origin = datetime.fromisoformat(raw_from)
     target = datetime.fromisoformat(raw_to)
     if (
@@ -142,8 +180,8 @@ def append_clock_transition(
         payload_hash=event.payload_hash,
         logical_time_from=origin,
         logical_time_to=target,
-        installed_policy_version=CLOCK_AUTHORITY_POLICY_VERSION,
-        installed_policy_digest=CLOCK_AUTHORITY_POLICY_DIGEST,
+        installed_policy_version=resolved_policy_version,
+        installed_policy_digest=resolved_policy_digest,
     )
     updated = (*history, projection)
     validate_clock_history(
