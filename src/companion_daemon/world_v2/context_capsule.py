@@ -59,6 +59,7 @@ TruncationReason = Literal[
 ]
 
 MAX_INPUT_ITEMS_PER_SLICE = 256
+MAX_RESOLVER_DOMAIN_SCAN_ITEMS = 4_096
 MAX_SOURCE_REFS_PER_ITEM = 32
 MAX_SOURCE_REF_CHARACTERS = 256
 MAX_ITEM_SERIALIZED_CHARACTERS = 64_000
@@ -85,11 +86,43 @@ def _hash(value: object) -> str:
 RESOLVER_ID = "context-capsule-resolver"
 RESOLVER_VERSION = "context-capsule-resolver.1"
 RESOLUTION_POLICY_VERSION = "context-capsule-resolution-policy.1"
+RANK_POLICY_VERSION = "context-capsule-rank-policy.1"
+RANK_DOMAIN_IMPORTANCE_BP: dict[SliceName, int] = {
+    "character_core": 10_000,
+    "current_situation": 10_000,
+    "relationship_slice": 8_500,
+    "affect_episodes": 8_500,
+    "open_threads": 8_000,
+    "relevant_facts": 7_500,
+    "recent_experiences": 7_000,
+    "active_memory_candidates": 7_500,
+    "available_capabilities": 6_000,
+    "action_budget": 6_000,
+    "private_impressions": 8_000,
+    "advisories": 5_000,
+}
+RANK_WEIGHT_BP = {"domain_importance": 4_000, "typed_signal": 4_000, "recency": 2_000}
+RANK_RECENCY_WINDOW_SECONDS = 7 * 24 * 60 * 60
+RANK_POLICY_DIGEST = _hash(
+    {
+        "policy_version": RANK_POLICY_VERSION,
+        "arithmetic": "integer-basis-points",
+        "signals": ("domain_importance", "intensity", "strength", "recency"),
+        "domain_importance_bp": RANK_DOMAIN_IMPORTANCE_BP,
+        "weights_bp": RANK_WEIGHT_BP,
+        "recency_window_seconds": RANK_RECENCY_WINDOW_SECONDS,
+        "tie_break": "item_ref_ascending",
+    }
+)
 RESOLUTION_POLICY_DIGEST = _hash(
     {
         "resolver_id": RESOLVER_ID,
         "resolver_version": RESOLVER_VERSION,
         "policy_version": RESOLUTION_POLICY_VERSION,
+        "rank_policy_version": RANK_POLICY_VERSION,
+        "rank_policy_digest": RANK_POLICY_DIGEST,
+        "max_selected_items_per_slice": MAX_INPUT_ITEMS_PER_SLICE,
+        "max_domain_scan_items": MAX_RESOLVER_DOMAIN_SCAN_ITEMS,
     }
 )
 _COMPILER_AUTHORITY = object()
@@ -119,6 +152,7 @@ def _validate_hex_digest(value: str, *, label: str) -> str:
 
 class ResolvedSourceBinding(_FrozenModel):
     source_kind: Literal["committed_event", "execution_receipt", "projection_snapshot"]
+    authority_type: str = Field(min_length=1, max_length=128)
     ref: str = Field(min_length=1, max_length=MAX_SOURCE_REF_CHARACTERS)
     source_world_revision: int = Field(ge=0)
     immutable_hash: str = Field(min_length=64, max_length=64)
@@ -182,7 +216,13 @@ class ResolvedItemMetadata(_FrozenModel):
     @model_validator(mode="after")
     def hashes_and_refs_are_exact(self) -> ResolvedItemMetadata:
         identities = tuple(
-            (item.source_kind, item.ref, item.source_world_revision, item.immutable_hash)
+            (
+                item.source_kind,
+                item.authority_type,
+                item.ref,
+                item.source_world_revision,
+                item.immutable_hash,
+            )
             for item in self.source_bindings
         )
         if identities != tuple(sorted(set(identities))):
@@ -296,7 +336,7 @@ class ContextCapsuleBudgetPolicy(_FrozenModel):
         default_factory=lambda: SliceBudget(max_items=8, max_fields=96, max_characters=2_000)
     )
     action_budget: SliceBudget = Field(
-        default_factory=lambda: SliceBudget(max_items=8, max_fields=80, max_characters=1_500)
+        default_factory=lambda: SliceBudget(max_items=8, max_fields=80, max_characters=2_000)
     )
     private_impressions: SliceBudget = Field(default_factory=SliceBudget)
     advisories: SliceBudget = Field(
@@ -313,6 +353,7 @@ class ContextCapsuleRequest(_FrozenModel):
     trigger_ref: str = Field(min_length=1)
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
+    ledger_sequence: int = Field(ge=0)
     logical_time: datetime | None = None
     situation: ResolvedSlice[SituationProjection]
     character_core: ResolvedSlice[CharacterCoreProjection] | None = None
@@ -478,6 +519,7 @@ class ContextCapsule(_FrozenModel):
     trigger_ref: str = Field(min_length=1)
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
+    ledger_sequence: int = Field(ge=0)
     logical_time: datetime | None
     character_core: CapsuleSlice
     current_situation: CapsuleSlice
@@ -508,6 +550,7 @@ class ContextCapsule(_FrozenModel):
             "trigger_ref": self.trigger_ref,
             "world_revision": self.world_revision,
             "deliberation_revision": self.deliberation_revision,
+            "ledger_sequence": self.ledger_sequence,
             "logical_time": self.logical_time.isoformat() if self.logical_time else None,
             "character_core": self.character_core.model_dump(mode="json"),
             "current_situation": self.current_situation.model_dump(mode="json"),
@@ -1081,6 +1124,7 @@ def _validate_input_contract(request: ContextCapsuleRequest) -> None:
     situation_bindings = tuple(
         (
             binding.source_kind,
+            binding.authority_type,
             binding.ref,
             binding.source_world_revision,
             binding.immutable_hash,
@@ -1092,6 +1136,7 @@ def _validate_input_contract(request: ContextCapsuleRequest) -> None:
             sorted(
                 (
                     "committed_event",
+                    f"situation_source:{source.domain}",
                     source.event_ref,
                     source.source_world_revision,
                     source.payload_hash,
@@ -1104,6 +1149,7 @@ def _validate_input_contract(request: ContextCapsuleRequest) -> None:
     elif situation_bindings != (
         (
             "projection_snapshot",
+            "LedgerProjection",
             request.snapshot_id,
             request.world_revision,
             request.situation.value.authority_snapshot_hash,
@@ -1304,6 +1350,7 @@ def _compile_resolved_context(
         "trigger_ref": request.trigger_ref,
         "world_revision": request.world_revision,
         "deliberation_revision": request.deliberation_revision,
+        "ledger_sequence": request.ledger_sequence,
         "logical_time": request.logical_time.isoformat() if request.logical_time else None,
         **{name: value.model_dump(mode="json") for name, value in slices.items()},
         "model_content_json": model_content,
@@ -1332,11 +1379,36 @@ def _compile_resolved_context(
         trigger_ref=request.trigger_ref,
         world_revision=request.world_revision,
         deliberation_revision=request.deliberation_revision,
+        ledger_sequence=request.ledger_sequence,
         logical_time=request.logical_time,
         model_content_json=model_content,
         budget=budget,
         **slices,
     )
+
+
+class TrustedContextCapsuleHandle:
+    """Process-local, non-serializable proof that the compiler issued a Capsule.
+
+    The handle is an architectural capability for a non-hostile composition
+    root.  It is not a sandbox against arbitrary code executing in-process.
+    """
+
+    __slots__ = ("__capsule",)
+
+    def __init__(self, capsule: ContextCapsule, *, _authority: object | None = None) -> None:
+        if _authority is not _COMPILER_AUTHORITY:
+            raise ValueError("trusted Context Capsule handles are compiler-issued")
+        if capsule.provenance_kind != "trusted_resolver_compiled":
+            raise ValueError("trusted handle cannot wrap a test-only Capsule")
+        self.__capsule = capsule
+
+    @property
+    def capsule(self) -> ContextCapsule:
+        return self.__capsule
+
+    def __reduce__(self) -> object:
+        raise TypeError("trusted Context Capsule handles cannot be serialized")
 
 
 class ContextCapsuleCompiler:
@@ -1380,6 +1452,7 @@ class ContextCapsuleCompiler:
             "trigger_ref",
             "world_revision",
             "deliberation_revision",
+            "ledger_sequence",
             "logical_time",
         )
         if any(
@@ -1389,3 +1462,6 @@ class ContextCapsuleCompiler:
         return _compile_resolved_context(
             resolved, policy=self._policy, _authority=_COMPILER_AUTHORITY
         )
+
+    def compile_for_deliberation(self, query: ContextCompileQuery) -> TrustedContextCapsuleHandle:
+        return TrustedContextCapsuleHandle(self.compile(query), _authority=_COMPILER_AUTHORITY)

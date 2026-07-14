@@ -137,6 +137,11 @@ def _bound(
                         if isinstance(item, SituationProjection)
                         else "committed_event"
                     ),
+                    authority_type=(
+                        "LedgerProjection"
+                        if isinstance(item, SituationProjection)
+                        else "ObservationRecorded"
+                    ),
                     ref=("snapshot:7" if isinstance(item, SituationProjection) else source_ref),
                     source_world_revision=revision,
                     immutable_hash=(
@@ -201,6 +206,7 @@ def _request(**updates) -> ContextCapsuleRequest:
         "trigger_ref": "event:observation:1",
         "world_revision": 7,
         "deliberation_revision": 3,
+        "ledger_sequence": 11,
         "logical_time": NOW,
         "situation": _bound(_situation()),
     }
@@ -243,6 +249,39 @@ def test_compile_is_stable_source_bound_and_marks_every_missing_domain_unavailab
         assert missing.unavailable_reason == "authority_unavailable"
         assert missing.source_refs == ()
         assert missing.source_hash is None
+
+
+def test_situation_projection_binding_cannot_be_relabeled_as_settled_event() -> None:
+    request = _request()
+    metadata = request.situation.item_metadata[0]
+    binding = metadata.source_bindings[0].model_copy(
+        update={
+            "source_kind": "committed_event",
+            "authority_type": "WorldOccurrenceSettled",
+        }
+    )
+    bindings = (binding,)
+    changed_metadata = metadata.model_copy(
+        update={
+            "source_bindings": bindings,
+            "source_hash": source_bindings_hash(bindings),
+        }
+    )
+    proof = request.situation.resolver_proof
+    assert proof is not None
+    changed_proof = proof.model_copy(
+        update={
+            "explicit_authority_refs": (binding.ref,),
+            "authority_refs_digest": authority_refs_digest((binding.ref,)),
+            "result_set_hash": resolved_result_set_hash("current_situation", (changed_metadata,)),
+        }
+    )
+    changed_situation = request.situation.model_copy(
+        update={"item_metadata": (changed_metadata,), "resolver_proof": changed_proof}
+    )
+
+    with pytest.raises(ValueError, match="authority snapshot"):
+        compile_context_capsule(request.model_copy(update={"situation": changed_situation}))
 
 
 def test_compile_rejects_any_slice_not_pinned_to_capsule_revision() -> None:

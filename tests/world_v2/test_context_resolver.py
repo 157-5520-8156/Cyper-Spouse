@@ -43,6 +43,7 @@ def _query(**updates) -> ContextCompileQuery:
             "trigger_ref",
             "world_revision",
             "deliberation_revision",
+            "ledger_sequence",
             "logical_time",
         )
     }

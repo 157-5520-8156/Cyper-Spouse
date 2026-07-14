@@ -15,6 +15,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from .schemas import LedgerProjection, ProjectionCursor
+
 
 class ContextCompileQuery(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
@@ -27,6 +29,7 @@ class ContextCompileQuery(BaseModel):
     trigger_ref: str = Field(min_length=1, max_length=256)
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
+    ledger_sequence: int = Field(ge=0)
     logical_time: datetime | None = None
 
     @field_validator("logical_time")
@@ -35,6 +38,51 @@ class ContextCompileQuery(BaseModel):
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):
             raise ValueError("Context compile logical time must be timezone-aware")
         return value
+
+    @property
+    def cursor(self) -> ProjectionCursor:
+        return ProjectionCursor(
+            world_revision=self.world_revision,
+            deliberation_revision=self.deliberation_revision,
+            ledger_sequence=self.ledger_sequence,
+        )
+
+
+def projection_snapshot_id(projection: LedgerProjection) -> str:
+    """Canonical identity for the exact ledger cursor used by Context resolution."""
+
+    cursor_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "world_id": projection.world_id,
+                "world_revision": projection.world_revision,
+                "deliberation_revision": projection.deliberation_revision,
+                "ledger_sequence": projection.ledger_sequence,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return f"projection:{cursor_hash}"
+
+
+def query_from_projection(
+    projection: LedgerProjection, *, actor_ref: str, trigger_ref: str
+) -> ContextCompileQuery:
+    """Create a compile query pinned to one already-materialized projection."""
+
+    return ContextCompileQuery(
+        world_id=projection.world_id,
+        snapshot_id=projection_snapshot_id(projection),
+        snapshot_hash=projection.semantic_hash,
+        actor_ref=actor_ref,
+        trigger_ref=trigger_ref,
+        world_revision=projection.world_revision,
+        deliberation_revision=projection.deliberation_revision,
+        ledger_sequence=projection.ledger_sequence,
+        logical_time=projection.logical_time,
+    )
 
 
 def context_query_hash(query: ContextCompileQuery) -> str:
