@@ -23,6 +23,7 @@ PY_COMPILE_TARGETS: tuple[str, ...] = (
     "src/companion_daemon/interaction_appraiser.py",
     "src/companion_daemon/qq_latency_eval.py",
     "src/companion_daemon/qq_runtime_observations.py",
+    "src/companion_daemon/turn_taking.py",
     "src/companion_daemon/turn_frame.py",
     "src/companion_daemon/world_affect.py",
 )
