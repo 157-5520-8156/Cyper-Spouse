@@ -7,6 +7,7 @@ import json
 from typing import Any
 
 from .schemas import WorldEvent
+from .typed_proposal_families import family_for_mutation, family_for_record
 
 
 def domain_idempotency_key(
@@ -41,6 +42,20 @@ def validate_event_identity(event: WorldEvent) -> None:
 def _life_identity_components(
     event_type: str, world_id: str, payload: dict[str, Any]
 ) -> tuple[object, ...] | None:
+    proposal_family = family_for_record(event_type, payload)
+    if proposal_family is not None:
+        return proposal_family.codec.record_identity(
+            world_id=world_id,
+            event_type=event_type,
+            payload=payload,
+        )
+    mutation_family = family_for_mutation(event_type)
+    if mutation_family is not None:
+        return mutation_family.codec.mutation_identity(
+            world_id=world_id,
+            event_type=event_type,
+            payload=payload,
+        )
     if event_type == "NpcRegistered":
         return world_id, _nested(payload, "npc", "npc_id")
     if (
@@ -71,48 +86,18 @@ def _life_identity_components(
         return payload.get("occurrence_id"), payload.get("transition_id")
     if event_type == "OutcomeObservationRecorded":
         return world_id, _nested(payload, "observation", "observation_id")
-    if event_type == "OutcomeProposalRecorded":
-        return world_id, payload.get("outcome_proposal_id")
-    if event_type == "ProposalRecorded" and payload.get("proposal_kind") == "appraisal_transition":
-        return world_id, payload.get("proposal_id"), payload.get("change_id")
-    if (
-        event_type == "ProposalRecorded"
-        and payload.get("proposal_kind") == "relationship_transition"
-        and payload.get("proposal_encoding") == "typed-authority-v1"
-    ):
-        return (
-            world_id,
-            payload.get("proposal_id"),
-            payload.get("change_id"),
-            payload.get("authority_contract_ref"),
-        )
     if (
         event_type == "AcceptanceRecorded"
         and payload.get("proposal_id") is not None
         and payload.get("evaluated_world_revision") is not None
     ):
         return world_id, payload.get("proposal_id"), payload.get("evaluated_world_revision")
-    if event_type == "WorldOccurrenceSettled":
-        return (
-            payload.get("occurrence_id"),
-            payload.get("result_id"),
-            payload.get("expected_entity_revision"),
-        )
     if event_type == "ExperienceCommitted":
         return world_id, _nested(payload, "experience", "experience_id")
     if event_type in {"WorldOccurrenceCancelled", "WorldOccurrenceExpired"}:
         return payload.get("occurrence_id"), payload.get("transition_id")
-    if event_type == "AppraisalAccepted":
-        return world_id, _nested(payload, "appraisal", "appraisal_id"), payload.get("transition_id")
-    if event_type in {"AppraisalContradicted", "AppraisalExpired", "AppraisalSuperseded"}:
+    if event_type == "AppraisalExpired":
         return payload.get("appraisal_id"), payload.get("transition_id")
-    if event_type == "AffectEpisodeOpened":
-        return world_id, _nested(payload, "episode", "episode_id"), payload.get("transition_id")
-    if event_type in {
-        "AffectEpisodeUpdated",
-        "AffectEpisodeResolved",
-    }:
-        return payload.get("episode_id"), payload.get("transition_id")
     if event_type == "AffectEpisodeDecayed":
         results = payload.get("component_results")
         config_digests = (
@@ -125,33 +110,6 @@ def _life_identity_components(
             payload.get("expected_entity_revision"),
             payload.get("to_logical_time"),
             config_digests,
-        )
-    if event_type == "AffectEpisodeSuperseded":
-        return (
-            payload.get("episode_id"),
-            _nested(payload, "successor", "episode_id"),
-            payload.get("transition_id"),
-        )
-    if event_type == "AffectBaselineAdjusted":
-        return (
-            world_id,
-            payload.get("dimension"),
-            payload.get("expected_entity_revision"),
-            payload.get("transition_id"),
-        )
-    if event_type == "RelationshipSignalAccepted":
-        return world_id, _nested(payload, "signal", "semantic_fingerprint")
-    if event_type == "RelationshipSlowVariableAdjusted":
-        return (
-            payload.get("relationship_id"),
-            payload.get("expected_entity_revision"),
-            payload.get("adjustment_id"),
-        )
-    if event_type == "BoundaryChanged":
-        return (
-            _nested(payload, "boundary", "boundary_id"),
-            payload.get("expected_entity_revision"),
-            payload.get("transition_id"),
         )
     if event_type == "TriggerProcessOpened":
         return world_id, _nested(payload, "process", "trigger_id"), "opened"

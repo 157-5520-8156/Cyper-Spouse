@@ -81,9 +81,8 @@ from .relationship_reducers import (
     adjust_relationship_slow_variables,
     change_boundary,
 )
+from .typed_proposal_families import INSTALLED_TYPED_PROPOSAL_FAMILIES
 from .typed_proposals import (
-    ProposalAuthorityBinding,
-    RecordSelector,
     TypedProposalRegistration,
     TypedProposalRegistry,
 )
@@ -283,35 +282,6 @@ class EventDefinition:
     reducer: Reducer
 
 
-class _LegacyAppraisalProposalCodec:
-    def decode_record(
-        self, *, event_type: str, payload: dict[str, object]
-    ) -> AppraisalProposalProjection:
-        if event_type != "ProposalRecorded":
-            raise ValueError("appraisal codec only accepts ProposalRecorded")
-        return AppraisalProposalProjection.model_validate(payload)
-
-    def bind(self, proposal: AppraisalProposalProjection) -> ProposalAuthorityBinding:
-        return ProposalAuthorityBinding(
-            proposal_id=proposal.proposal_id,
-            proposal_kind=proposal.proposal_kind,
-            authority_contract_ref="proposal-contract:appraisal-legacy.1",
-            change_id=proposal.change_id,
-            proposed_change_hash=proposal.proposed_change_hash,
-            evaluated_world_revision=proposal.evaluated_world_revision,
-            expected_entity_revision=proposal.expected_entity_revision,
-            mutation_event_type=proposal.proposed_mutation.event_type,
-        )
-
-    def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
-        model = {
-            "AppraisalAccepted": AppraisalAcceptedPayload,
-            "AppraisalContradicted": AppraisalContradictedPayload,
-            "AppraisalSuperseded": AppraisalSupersededPayload,
-        }[event_type]
-        return model.model_validate(payload)
-
-
 class _LegacyAppraisalProposalStore:
     def validate_and_store(
         self, state: ReducerState, event: object, proposal: object
@@ -332,30 +302,6 @@ class _LegacyAppraisalProposalStore:
                 )
             }
         )
-
-
-class _LegacyAffectProposalCodec:
-    def decode_record(
-        self, *, event_type: str, payload: dict[str, object]
-    ) -> AffectProposalProjection:
-        if event_type != "ProposalRecorded":
-            raise ValueError("affect codec only accepts ProposalRecorded")
-        return AffectProposalProjection.model_validate(payload)
-
-    def bind(self, proposal: AffectProposalProjection) -> ProposalAuthorityBinding:
-        return ProposalAuthorityBinding(
-            proposal_id=proposal.proposal_id,
-            proposal_kind=proposal.proposal_kind,
-            authority_contract_ref="proposal-contract:affect-legacy.1",
-            change_id=proposal.change_id,
-            proposed_change_hash=proposal.proposed_change_hash,
-            evaluated_world_revision=proposal.evaluated_world_revision,
-            expected_entity_revision=proposal.expected_entity_revision,
-            mutation_event_type=proposal.proposed_mutation.event_type,
-        )
-
-    def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
-        return AFFECT_PAYLOAD_MODELS[event_type].model_validate(payload)
 
 
 class _LegacyAffectProposalStore:
@@ -380,33 +326,6 @@ class _LegacyAffectProposalStore:
         )
 
 
-class _LegacyOutcomeProposalCodec:
-    def decode_record(
-        self, *, event_type: str, payload: dict[str, object]
-    ) -> OutcomeProposalProjection:
-        if event_type != "OutcomeProposalRecorded":
-            raise ValueError("outcome codec only accepts OutcomeProposalRecorded")
-        recorded = OutcomeProposalRecordedPayload.model_validate(payload)
-        return OutcomeProposalProjection.model_validate(recorded.model_dump())
-
-    def bind(self, proposal: OutcomeProposalProjection) -> ProposalAuthorityBinding:
-        return ProposalAuthorityBinding(
-            proposal_id=proposal.outcome_proposal_id,
-            proposal_kind="outcome_transition",
-            authority_contract_ref="proposal-contract:outcome-legacy.1",
-            change_id=proposal.change_id,
-            proposed_change_hash=proposal.proposed_change_hash,
-            evaluated_world_revision=proposal.evaluated_world_revision,
-            expected_entity_revision=proposal.evaluated_entity_revision,
-            mutation_event_type="WorldOccurrenceSettled",
-        )
-
-    def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
-        if event_type != "WorldOccurrenceSettled":
-            raise ValueError("outcome codec only owns WorldOccurrenceSettled")
-        return WorldOccurrenceSettledPayload.model_validate(payload)
-
-
 class _LegacyOutcomeProposalStore:
     def validate_and_store(
         self, state: ReducerState, event: object, proposal: object
@@ -427,34 +346,6 @@ class _LegacyOutcomeProposalStore:
         # Outcome proposals are a durable deliberation audit used to explain a
         # later settlement or rejection; deciding one does not erase that audit.
         return state
-
-
-class _RelationshipProposalCodec:
-    def decode_record(
-        self, *, event_type: str, payload: dict[str, object]
-    ) -> RelationshipProposalProjection:
-        if event_type != "ProposalRecorded":
-            raise ValueError("relationship codec only accepts ProposalRecorded")
-        return RelationshipProposalProjection.model_validate_json(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        )
-
-    def bind(self, proposal: RelationshipProposalProjection) -> ProposalAuthorityBinding:
-        return ProposalAuthorityBinding(
-            proposal_id=proposal.proposal_id,
-            proposal_kind=proposal.proposal_kind,
-            authority_contract_ref=proposal.authority_contract_ref,
-            change_id=proposal.change_id,
-            proposed_change_hash=proposal.proposed_change_hash,
-            evaluated_world_revision=proposal.evaluated_world_revision,
-            expected_entity_revision=proposal.expected_entity_revision,
-            mutation_event_type=proposal.proposed_mutation.event_type,
-        )
-
-    def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
-        return RELATIONSHIP_PAYLOAD_MODELS[event_type].model_validate_json(
-            json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        )
 
 
 class _RelationshipProposalStore:
@@ -483,48 +374,23 @@ class _RelationshipProposalStore:
         )
 
 
+_TYPED_PROPOSAL_STORES = {
+    "proposal-contract:appraisal-legacy.1": _LegacyAppraisalProposalStore(),
+    "proposal-contract:affect-legacy.1": _LegacyAffectProposalStore(),
+    "proposal-contract:outcome-legacy.1": _LegacyOutcomeProposalStore(),
+    "proposal-contract:relationship.1": _RelationshipProposalStore(),
+}
+
 _TYPED_PROPOSAL_REGISTRY = TypedProposalRegistry(
-    (
+    tuple(
         TypedProposalRegistration(
-            contract_ref="proposal-contract:appraisal-legacy.1",
-            selector=RecordSelector(
-                event_type="ProposalRecorded", proposal_kind="appraisal_transition"
-            ),
-            mutation_event_types=(
-                "AppraisalAccepted",
-                "AppraisalContradicted",
-                "AppraisalSuperseded",
-            ),
-            codec=_LegacyAppraisalProposalCodec(),
-            store=_LegacyAppraisalProposalStore(),
-        ),
-        TypedProposalRegistration(
-            contract_ref="proposal-contract:affect-legacy.1",
-            selector=RecordSelector(
-                event_type="ProposalRecorded", proposal_kind="affect_transition"
-            ),
-            mutation_event_types=tuple(AFFECT_PAYLOAD_MODELS),
-            codec=_LegacyAffectProposalCodec(),
-            store=_LegacyAffectProposalStore(),
-        ),
-        TypedProposalRegistration(
-            contract_ref="proposal-contract:outcome-legacy.1",
-            selector=RecordSelector(
-                event_type="OutcomeProposalRecorded", proposal_kind="outcome_transition"
-            ),
-            mutation_event_types=("WorldOccurrenceSettled",),
-            codec=_LegacyOutcomeProposalCodec(),
-            store=_LegacyOutcomeProposalStore(),
-        ),
-        TypedProposalRegistration(
-            contract_ref="proposal-contract:relationship.1",
-            selector=RecordSelector(
-                event_type="ProposalRecorded", proposal_kind="relationship_transition"
-            ),
-            mutation_event_types=tuple(RELATIONSHIP_PAYLOAD_MODELS),
-            codec=_RelationshipProposalCodec(),
-            store=_RelationshipProposalStore(),
-        ),
+            contract_ref=family.contract_ref,
+            selector=family.selector,
+            mutation_event_types=family.mutation_event_types,
+            codec=family.codec,
+            store=_TYPED_PROPOSAL_STORES[family.contract_ref],
+        )
+        for family in INSTALLED_TYPED_PROPOSAL_FAMILIES
     )
 )
 

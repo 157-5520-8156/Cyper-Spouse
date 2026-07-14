@@ -304,7 +304,7 @@ def test_rejected_or_stale_decision_discards_pending_typed_proposal(status: str)
 def test_relationship_mutation_rejects_orphan_and_non_adjacent_acceptance() -> None:
     orphan_ledger = initialized_ledger()
     orphan = new_signal_payload()
-    with pytest.raises(ValueError, match="persisted typed proposal"):
+    with pytest.raises(ValueError, match="adjacent revision-pinned AcceptanceRecorded"):
         orphan_ledger.commit(
             [event(orphan.signal.origin.accepted_event_ref, "RelationshipSignalAccepted", orphan.model_dump(mode="json"))],
             expected_world_revision=1,

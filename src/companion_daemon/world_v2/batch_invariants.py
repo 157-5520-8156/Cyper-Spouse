@@ -12,15 +12,11 @@ from .appraisal_events import (
     AppraisalContradictedPayload,
     AppraisalSupersededPayload,
 )
-from .affect_events import (
-    AffectBaselineAdjustedPayload,
-    AffectEpisodeOpenedPayload,
-    AffectEpisodeResolvedPayload,
-    AffectEpisodeSupersededPayload,
-    AffectEpisodeUpdatedPayload,
+from .schemas import WorldEvent
+from .typed_proposal_families import (
+    family_for_mutation,
+    family_for_record,
 )
-from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
-from .schemas import AppraisalProposalProjection, RelationshipProposalProjection, WorldEvent
 
 
 def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revision: int) -> None:
@@ -43,78 +39,39 @@ def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revisi
         for index, event in enumerate(events)
         if event.event_type == "AcceptanceRecorded"
     ]
-    appraisal_proposals: list[AppraisalProposalProjection] = []
+    typed_proposals = []
     for event in events:
-        if (
-            event.event_type == "ProposalRecorded"
-            and event.payload().get("proposal_kind") == "appraisal_transition"
-        ):
-            proposal = AppraisalProposalProjection.model_validate_json(event.payload_json)
-            appraisal_proposals.append(proposal)
-            if proposal.evaluated_world_revision != expected_world_revision:
-                raise ValueError("appraisal proposal must be pinned to the current world revision")
-    if appraisal_proposals and any(event.event_type != "ProposalRecorded" for event in events):
-        raise ValueError("appraisal ProposalRecorded requires a separate deliberation commit")
-    affect_proposals = [
-        event.payload()
-        for event in events
-        if event.event_type == "ProposalRecorded"
-        and event.payload().get("proposal_kind") == "affect_transition"
-    ]
-    if any(
-        item.get("evaluated_world_revision") != expected_world_revision for item in affect_proposals
+        family = family_for_record(event.event_type, event.payload())
+        if family is None:
+            continue
+        proposal = family.codec.decode_record(
+            event_type=event.event_type,
+            payload=event.payload(),
+        )
+        binding = family.codec.bind(proposal)
+        if binding.evaluated_world_revision != expected_world_revision:
+            raise ValueError("typed proposal must be pinned to the current world revision")
+        typed_proposals.append((family, binding))
+    if any(family.requires_separate_deliberation_commit for family, _ in typed_proposals) and any(
+        event.event_type != "ProposalRecorded" for event in events
     ):
-        raise ValueError("affect proposal must be pinned to the current world revision")
-    if affect_proposals and any(event.event_type != "ProposalRecorded" for event in events):
-        raise ValueError("affect ProposalRecorded requires a separate deliberation commit")
-    relationship_proposals = [
-        RelationshipProposalProjection.model_validate_json(event.payload_json)
-        for event in events
-        if event.event_type == "ProposalRecorded"
-        and event.payload().get("proposal_encoding") == "typed-authority-v1"
-        and event.payload().get("authority_contract_ref")
-        == "proposal-contract:relationship.1"
-    ]
-    if any(
-        item.evaluated_world_revision != expected_world_revision
-        for item in relationship_proposals
-    ):
-        raise ValueError("relationship proposal must be pinned to the current world revision")
-    if relationship_proposals and any(event.event_type != "ProposalRecorded" for event in events):
-        raise ValueError("relationship ProposalRecorded requires a separate deliberation commit")
+        raise ValueError("typed proposal requires a separate deliberation commit")
     authorized_appraisal_models = {
         "AppraisalAccepted": AppraisalAcceptedPayload,
         "AppraisalContradicted": AppraisalContradictedPayload,
         "AppraisalSuperseded": AppraisalSupersededPayload,
     }
-    authorized_affect_models = {
-        "AffectBaselineAdjusted": AffectBaselineAdjustedPayload,
-        "AffectEpisodeOpened": AffectEpisodeOpenedPayload,
-        "AffectEpisodeUpdated": AffectEpisodeUpdatedPayload,
-        "AffectEpisodeResolved": AffectEpisodeResolvedPayload,
-        "AffectEpisodeSuperseded": AffectEpisodeSupersededPayload,
-    }
-    authorized_relationship_models = dict(RELATIONSHIP_PAYLOAD_MODELS)
+    typed_mutations = []
     for mutation_index, event in enumerate(events):
-        model = authorized_affect_models.get(event.event_type)
-        if model is None:
+        family = family_for_mutation(event.event_type)
+        if family is None:
             continue
-        mutation = model.model_validate_json(event.payload_json)
-        matching = [
-            acceptance
-            for acceptance_index, acceptance in acceptances
-            if acceptance_index == mutation_index - 1
-            and acceptance.get("status") == "accepted"
-            and acceptance.get("acceptance_id") == mutation.acceptance_id
-            and acceptance.get("proposal_id") == mutation.proposal_id
-            and acceptance.get("evaluated_world_revision") == mutation.evaluated_world_revision
-            and acceptance.get("accepted_change_id") == mutation.change_id
-            and acceptance.get("accepted_change_hash") == mutation.accepted_change_hash
-        ]
-        if mutation.evaluated_world_revision != expected_world_revision or len(matching) != 1:
-            raise ValueError(
-                "Affect transition requires one adjacent revision-pinned AcceptanceRecorded"
-            )
+        mutation = family.codec.decode_mutation(
+            event_type=event.event_type,
+            payload=event.payload(),
+        )
+        binding = family.codec.bind_mutation(mutation)
+        typed_mutations.append((mutation_index, binding))
     for mutation_index, event in enumerate(events):
         model = authorized_appraisal_models.get(event.event_type)
         if model is None:
@@ -154,35 +111,16 @@ def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revisi
             acceptance.get("proposal_id"), str
         ):
             continue
-        matching_appraisal_mutations: list[int] = []
-        for mutation_index, event in enumerate(events):
-            model = {
-                **authorized_appraisal_models,
-                **authorized_affect_models,
-                **authorized_relationship_models,
-            }.get(event.event_type)
-            if model is None or mutation_index <= acceptance_index:
-                continue
-            mutation = model.model_validate_json(event.payload_json)
-            if (
-                mutation.proposal_id == acceptance.get("proposal_id")
-                and mutation.acceptance_id == acceptance.get("acceptance_id")
-                and mutation.change_id == acceptance.get("accepted_change_id")
-                and mutation.accepted_change_hash == acceptance.get("accepted_change_hash")
-            ):
-                matching_appraisal_mutations.append(mutation_index)
-        matching_settlements = [
-            settlement_index
-            for settlement_index, _, settlement in settlement_events
-            if settlement_index > acceptance_index
-            and settlement.outcome_proposal_id == acceptance.get("proposal_id")
-            and settlement.acceptance_id == acceptance.get("acceptance_id")
-            and settlement.change_id == acceptance.get("accepted_change_id")
-            and settlement.accepted_change_hash == acceptance.get("accepted_change_hash")
-        ]
         matching_domain_mutations = [
-            *matching_appraisal_mutations,
-            *matching_settlements,
+            mutation_index
+            for mutation_index, binding in typed_mutations
+            if mutation_index > acceptance_index
+            and binding.proposal_id == acceptance.get("proposal_id")
+            and binding.acceptance_id == acceptance.get("acceptance_id")
+            and binding.evaluated_world_revision
+            == acceptance.get("evaluated_world_revision")
+            and binding.change_id == acceptance.get("accepted_change_id")
+            and binding.accepted_change_hash == acceptance.get("accepted_change_hash")
         ]
         if matching_domain_mutations != [acceptance_index + 1]:
             raise ValueError(
@@ -262,6 +200,25 @@ def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revisi
                 for candidate_occurrence, result_id in settlement_pairs
             ):
                 raise ValueError("occurrence-backed experience must accompany its settlement")
+
+    for mutation_index, binding in typed_mutations:
+        matching = [
+            acceptance
+            for acceptance_index, acceptance in acceptances
+            if acceptance_index == mutation_index - 1
+            and acceptance.get("status") == "accepted"
+            and acceptance.get("acceptance_id") == binding.acceptance_id
+            and acceptance.get("proposal_id") == binding.proposal_id
+            and acceptance.get("evaluated_world_revision")
+            == binding.evaluated_world_revision
+            and acceptance.get("accepted_change_id") == binding.change_id
+            and acceptance.get("accepted_change_hash") == binding.accepted_change_hash
+        ]
+        if binding.evaluated_world_revision != expected_world_revision or len(matching) != 1:
+            raise ValueError(
+                "typed proposal mutation requires one adjacent revision-pinned "
+                "AcceptanceRecorded"
+            )
 
 
 def appraisal_trigger_identity(occurrence_id: str, result_id: str) -> str:

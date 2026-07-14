@@ -46,6 +46,15 @@ class ProposalAuthorityBinding:
     mutation_event_type: str
 
 
+@dataclass(frozen=True, slots=True)
+class AcceptedMutationBinding:
+    proposal_id: str
+    acceptance_id: str
+    evaluated_world_revision: int
+    change_id: str
+    accepted_change_hash: str
+
+
 class ProposalCodec(Protocol[ProposalT]):
     def decode_record(self, *, event_type: str, payload: dict[str, object]) -> ProposalT: ...
 
