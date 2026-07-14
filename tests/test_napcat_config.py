@@ -1,6 +1,7 @@
 import asyncio
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import httpx
 import pytest
@@ -12,6 +13,7 @@ from companion_daemon.db import CompanionStore
 from companion_daemon.engine import CompanionEngine, seed_user
 from companion_daemon.llm import FakeCompanionModel
 from companion_daemon.companion_turn import DispatchAcceptance
+from companion_daemon.models import IncomingMessage
 from companion_daemon.napcat_cli import (
     _parse_id_list,
     _private_sender_is_allowed,
@@ -20,6 +22,7 @@ from companion_daemon.napcat_cli import (
     send_onebot_image_with_acceptance,
 )
 from companion_daemon.qq_outbound_owner import QQOutboundConfigurationError
+from companion_daemon.turn_taking import TurnInput
 from companion_daemon.world import WorldKernel
 
 
@@ -173,6 +176,107 @@ def test_napcat_process_refuses_to_start_when_another_qq_adapter_is_configured(
 
     with pytest.raises(QQOutboundConfigurationError, match="only the configured adapter"):
         napcat_cli.create_app(adapter="napcat", use_fake_model=True)
+
+
+def test_napcat_run_script_defaults_to_hotter_batch_window() -> None:
+    script = Path("scripts/run_napcat_adapter.sh").read_text()
+
+    assert "QQ_MESSAGE_BATCH_SECONDS:=0.8" in script
+
+
+def test_napcat_adapter_caps_single_turn_continuation_wait(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCoalescer:
+        def __init__(self, *_args, turn_policy, **_kwargs) -> None:
+            captured["turn_policy"] = turn_policy
+
+    monkeypatch.setattr(napcat_cli, "get_settings", lambda: Settings(QQ_ADAPTER="napcat"))
+    monkeypatch.setattr(napcat_cli, "build_companion_engine", lambda **_kwargs: SimpleNamespace())
+    monkeypatch.setattr(napcat_cli, "QQMessageCoalescer", FakeCoalescer)
+
+    napcat_cli.create_app(adapter="napcat", use_fake_model=True)
+
+    policy = captured["turn_policy"]
+    decision = policy.decide(  # type: ignore[attr-defined]
+        TurnInput(pending_count=1, latest_text="我刚到家，", merged_text="我刚到家，")
+    )
+    assert decision.wait_seconds <= 2.0
+
+
+@pytest.mark.asyncio
+async def test_napcat_recovers_world_due_reply_later_through_companion_turn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from datetime import UTC, datetime
+
+    message = IncomingMessage(
+        platform="qq",
+        platform_user_id="10001",
+        text="晚点回我",
+        message_id="defer-napcat-1",
+        sent_at=datetime(2026, 7, 14, 9, 0, tzinfo=UTC),
+    )
+    action = {
+        "kind": "reply_later",
+        "action_id": "reply_later:defer-napcat-1",
+        "payload": {"message": message.model_dump(mode="json")},
+    }
+
+    class FakeWorld:
+        def revision(self, world_id: str) -> int:
+            assert world_id == "world-1"
+            return 7
+
+        def snapshot(self, world_id: str) -> dict[str, object]:
+            assert world_id == "world-1"
+            return {"clock": {"logical_at": "2026-07-14T09:02:00+00:00"}}
+
+        def due_actions(self, world_id: str, *, now: datetime) -> list[dict[str, object]]:
+            assert world_id == "world-1"
+            assert now.isoformat() == "2026-07-14T09:02:00+00:00"
+            return [action]
+
+    class FakeClockDriver:
+        def __init__(self, world) -> None:
+            assert isinstance(world, FakeWorld)
+
+        def tick(self, world_id: str, *, observed_now, expected_revision: int) -> None:
+            assert world_id == "world-1"
+            assert expected_revision == 7
+
+    calls: list[object] = []
+
+    class FakeCompanionTurn:
+        def __init__(self, engine, transport) -> None:
+            calls.append(("transport", transport))
+
+        async def resume_scheduled_reply(self, frame, *, budget, context_hint):
+            calls.append((frame, budget, context_hint))
+            return SimpleNamespace(visible_status="delivered")
+
+    engine = SimpleNamespace(
+        world_kernel=FakeWorld(),
+        world_id="world-1",
+        store=SimpleNamespace(resolve_user=lambda platform, user_id: f"{platform}:{user_id}"),
+    )
+    target = object()
+    monkeypatch.setattr(napcat_cli, "WorldClockDriver", FakeClockDriver)
+    monkeypatch.setattr(napcat_cli, "_target_for", lambda *_args: target)
+    monkeypatch.setattr(napcat_cli, "CompanionTurn", FakeCompanionTurn)
+
+    recovered = await napcat_cli._recover_due_world_scheduled_actions(
+        engine, api_url="http://127.0.0.1:3000", access_token="test-token"
+    )
+
+    assert recovered == 1
+    frame, budget, context_hint = calls[1]  # type: ignore[misc]
+    assert frame.source_action_id == "reply_later:defer-napcat-1"
+    assert frame.canonical_user_id == "qq:10001"
+    assert frame.message == message
+    assert frame.kind == "reply_later"
+    assert budget == napcat_cli.NAPCAT_SCHEDULED_BUDGET
+    assert "岔开" in context_hint
 
 
 @pytest.mark.asyncio

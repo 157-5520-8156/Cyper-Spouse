@@ -6,8 +6,10 @@ CompanionEngine and QQ message coalescer as the official QQ bot adapter.
 from __future__ import annotations
 
 import argparse
+import asyncio
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
+from datetime import datetime
 import logging
 from pathlib import Path
 import time
@@ -26,7 +28,8 @@ from companion_daemon.onebot_adapter import (
     send_onebot_emoji_like,
 )
 from companion_daemon.companion_turn import DispatchAcceptance
-from companion_daemon.qq_websocket import QQMessageCoalescer
+from companion_daemon.companion_turn import CompanionTurn, ResponseBudget, ScheduledTurnFrame
+from companion_daemon.qq_websocket import QQMessageCoalescer, QQTurnTransport
 from companion_daemon.qq_delivery import QQDelivery
 from companion_daemon.qq_runtime_observations import QQTurnObservationJSONLExporter
 from companion_daemon.process_lock import AlreadyRunningError
@@ -36,9 +39,14 @@ from companion_daemon.qq_outbound_owner import (
     validate_qq_outbound_configuration,
 )
 from companion_daemon.runtime import build_companion_engine
+from companion_daemon.time import utc_now
 from companion_daemon.turn_taking import TurnTakingPolicy
+from companion_daemon.world import ConcurrencyConflict
+from companion_daemon.world_clock import WorldClockDriver
 
 logger = logging.getLogger(__name__)
+
+NAPCAT_SCHEDULED_BUDGET = ResponseBudget(first_visible_by_ms=12_000, complete_by_ms=15_000)
 
 
 def onebot_image_dispatch_acceptance(result: object | None) -> DispatchAcceptance:
@@ -169,7 +177,12 @@ def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> Fast
     coalescer = QQMessageCoalescer(
         engine,
         delay_seconds=settings.qq_message_batch_seconds,
-        turn_policy=TurnTakingPolicy(short_wait_seconds=settings.qq_message_batch_seconds),
+        turn_policy=TurnTakingPolicy(
+            short_wait_seconds=settings.qq_message_batch_seconds,
+            long_wait_seconds=max(1.2, min(2.0, settings.qq_message_batch_seconds * 2.0)),
+            long_burst_seconds=6.0,
+            longform_start_seconds=4.0,
+        ),
         on_sticker=send_reply_image,
         on_image=send_reply_image,
         on_reaction=send_reaction,
@@ -203,8 +216,15 @@ def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> Fast
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        yield
-        await engine.aclose()
+        recovery_task = asyncio.create_task(
+            _scheduled_recovery_loop(engine, api_url=api_url, access_token=access_token)
+        )
+        try:
+            yield
+        finally:
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
+            await engine.aclose()
 
     app = FastAPI(title=f"Girl-Agent {adapter.title()} Adapter", lifespan=lifespan)
 
@@ -248,6 +268,120 @@ def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> Fast
         return {"status": "running", "adapter": adapter}
 
     return app
+
+
+async def _scheduled_recovery_loop(
+    engine,
+    *,
+    api_url: str,
+    access_token: str | None,
+    interval_seconds: float = 15.0,
+) -> None:
+    """Recover World-scheduled delayed replies through the OneBot/NapCat channel."""
+    while True:
+        try:
+            await _recover_due_world_scheduled_actions(
+                engine, api_url=api_url, access_token=access_token
+            )
+        except Exception:
+            logger.exception("NapCat scheduled recovery pass failed")
+        await asyncio.sleep(interval_seconds)
+
+
+async def _recover_due_world_scheduled_actions(
+    engine,
+    *,
+    api_url: str,
+    access_token: str | None,
+) -> int:
+    world = getattr(engine, "world_kernel", None)
+    world_id = getattr(engine, "world_id", None)
+    if world is None or not world_id:
+        return 0
+    try:
+        WorldClockDriver(world).tick(
+            world_id,
+            observed_now=utc_now(),
+            expected_revision=world.revision(world_id),
+        )
+    except ConcurrencyConflict:
+        return 0
+    snapshot = world.snapshot(world_id)
+    logical_now = snapshot.get("clock", {}).get("logical_at")
+    if not logical_now:
+        return 0
+
+    due = [
+        item
+        for item in world.due_actions(world_id, now=datetime.fromisoformat(str(logical_now)))
+        if item.get("kind") in {"reply_later", "conversation_pulse"}
+    ]
+    recovered = 0
+    for action in due:
+        kind = str(action.get("kind") or "")
+        action_id = str(action.get("action_id") or "")
+        payload = action.get("payload") if isinstance(action.get("payload"), dict) else {}
+        try:
+            if kind == "reply_later":
+                raw_message = payload.get("message") if isinstance(payload, dict) else None
+                if not isinstance(raw_message, dict):
+                    engine.cancel_deferred_reply_task(action_id)
+                    continue
+                from companion_daemon.models import IncomingMessage
+
+                message = IncomingMessage.model_validate(raw_message)
+                target = _target_for(message, api_url, access_token)
+                frame = ScheduledTurnFrame(
+                    source_action_id=action_id,
+                    canonical_user_id=engine.store.resolve_user(
+                        message.platform, message.platform_user_id
+                    ),
+                    platform=message.platform,
+                    platform_user_id=message.platform_user_id,
+                    observed_at=utc_now(),
+                    idempotency_key=f"napcat-world-deferred:{action_id}",
+                    kind="reply_later",
+                    message=message,
+                    frozen_cadence="cold",
+                )
+                outcome = await CompanionTurn(
+                    engine, QQTurnTransport(target)
+                ).resume_scheduled_reply(
+                    frame,
+                    budget=NAPCAT_SCHEDULED_BUDGET,
+                    context_hint="刚才读到了但被手头的事岔开，现在补回来。",
+                )
+            else:
+                platform_user_id = str(payload.get("platform_user_id") or "")
+                if not platform_user_id:
+                    engine.cancel_conversation_pulse(action_id)
+                    continue
+                target = OneBotReplyTarget(
+                    api_url=api_url,
+                    user_id=int(platform_user_id),
+                    access_token=access_token,
+                )
+
+                frame = ScheduledTurnFrame(
+                    source_action_id=action_id,
+                    canonical_user_id=str(payload.get("canonical_user_id") or "geoff"),
+                    platform=str(payload.get("platform") or "qq"),
+                    platform_user_id=platform_user_id,
+                    observed_at=utc_now(),
+                    idempotency_key=f"napcat-world-pulse:{action_id}",
+                    kind="conversation_pulse",
+                    reply_sent_at=datetime.fromisoformat(str(payload["reply_sent_at"])),
+                    mode=str(payload.get("mode") or "quick_continue"),
+                    frozen_cadence="cold",
+                )
+                outcome = await CompanionTurn(
+                    engine, QQTurnTransport(target)
+                ).deliver_conversation_pulse(frame, budget=NAPCAT_SCHEDULED_BUDGET)
+            if outcome.visible_status == "delivered":
+                recovered += 1
+        except Exception:
+            logger.exception("failed to recover NapCat scheduled action %s", action_id)
+    return recovered
 
 
 def _target_for(
