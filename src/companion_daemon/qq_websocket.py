@@ -506,7 +506,14 @@ class TurnRuntimeObservation:
     # The JSONL exporter deliberately excludes conversation keys, user ids,
     # message text, attachment refs, receipt values and failure details.
     action_ids: tuple[str, ...] = ()
+    message_kinds: tuple[str, ...] = ()
     segment_ids: tuple[str, ...] = ()
+    affective_reading_kinds: tuple[str, ...] = ()
+    expression_affordance_candidate_kinds: tuple[str, ...] = ()
+    selected_affordance_kind: str | None = None
+    user_affect_kinds: tuple[str, ...] = ()
+    user_affect_recorded: bool = False
+    private_impression_recorded: bool = False
     durable_receipt_status: str = "not_attempted"
     recovery_result: str | None = None
 
