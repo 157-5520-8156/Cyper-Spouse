@@ -54,6 +54,8 @@ from .commitment_events import (
     CommitmentClockTransitionPayload,
 )
 from .commitment_reducers import reduce_commitment, reduce_commitment_clock
+from .fact_events import FACT_PAYLOAD_MODELS, FactAuthorizedMutationPayload, FactChangedPayload
+from .fact_reducers import reduce_fact
 from .errors import UnknownEventType
 from .event_catalog import event_contract
 from .life_events import (
@@ -136,6 +138,9 @@ from .schemas import (
     ExternalObservation,
     FrozenModel,
     ExperienceProjection,
+    FactProjection,
+    FactProposalProjection,
+    FactTransitionProjection,
     LedgerProjection,
     MessageObservationRef,
     NpcProjection,
@@ -160,7 +165,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.11"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.12"
 INSTALLED_APPRAISAL_POLICY_REFS = ("policy:appraisal-v1",)
 INSTALLED_APPRAISAL_MATRIX_VERSION = "appraisal-matrix.1"
 INSTALLED_SOURCE_CLUSTERING_VERSION = "source-clustering.1"
@@ -173,6 +178,7 @@ INSTALLED_RELATIONSHIP_POLICY_REFS = ("policy:relationship-v1",)
 INSTALLED_BOUNDARY_POLICY_REFS = ("policy:boundary-v1",)
 INSTALLED_THREAD_POLICY_REFS = ("policy:thread-v1",)
 INSTALLED_COMMITMENT_POLICY_REFS = ("policy:commitment-v1",)
+INSTALLED_FACT_POLICY_REFS = ("policy:fact-v1",)
 
 
 class RevisionClass(StrEnum):
@@ -235,6 +241,10 @@ class ReducerState(FrozenModel):
     commitment_transitions: tuple[CommitmentTransitionProjection, ...] = ()
     commitment_proposals: tuple[CommitmentProposalProjection, ...] = ()
     commitment_proposal_ids: tuple[str, ...] = ()
+    facts: tuple[FactProjection, ...] = ()
+    fact_transitions: tuple[FactTransitionProjection, ...] = ()
+    fact_proposals: tuple[FactProposalProjection, ...] = ()
+    fact_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
@@ -497,6 +507,79 @@ class ReducerState(FrozenModel):
                 if next_item is None:
                     break
                 cursor = next_item
+        fact_ids = tuple(item.fact_id for item in self.facts)
+        if len(fact_ids) != len(set(fact_ids)):
+            raise ValueError("fact ids must be unique")
+        fact_transition_ids = tuple(item.transition_id for item in self.fact_transitions)
+        if len(fact_transition_ids) != len(set(fact_transition_ids)):
+            raise ValueError("fact transition ids must be unique")
+        if any(item.fact_id not in set(fact_ids) for item in self.fact_transitions):
+            raise ValueError("fact transition has no projected fact")
+        if len(self.fact_proposal_ids) != len(set(self.fact_proposal_ids)):
+            raise ValueError("fact proposal ids must be unique")
+        if any(
+            item.proposal_id not in set(self.fact_proposal_ids)
+            for item in self.fact_proposals
+        ):
+            raise ValueError("pending fact proposal is absent from its durable index")
+        active_content = tuple(
+            (
+                item.values.conflict_key,
+                item.values.cardinality,
+                item.values.value_hash,
+            )
+            for item in self.facts
+            if item.values.status == "active"
+        )
+        if len(active_content) != len(set(active_content)):
+            raise ValueError("active fact content identities must be unique")
+        cardinalities: dict[str, str] = {}
+        for transition in self.fact_transitions:
+            slot = transition.values_after.conflict_key
+            prior = cardinalities.setdefault(slot, transition.values_after.cardinality)
+            if prior != transition.values_after.cardinality:
+                raise ValueError("fact slot cardinality cannot change across history")
+        for fact in self.facts:
+            lineage = tuple(
+                item for item in self.fact_transitions if item.fact_id == fact.fact_id
+            )
+            if not lineage or lineage[0].operation != "commit":
+                raise ValueError("fact lineage must begin with commit")
+            if tuple(item.entity_revision for item in lineage) != tuple(
+                range(1, len(lineage) + 1)
+            ):
+                raise ValueError("fact lineage revisions must be contiguous")
+            if lineage[0].values_before is not None or any(
+                current.values_before != previous.values_after
+                for previous, current in zip(lineage, lineage[1:])
+            ):
+                raise ValueError("fact lineage before values are discontinuous")
+            compensated_targets: set[str] = set()
+            for index, transition in enumerate(lineage):
+                target_id = transition.compensates_transition_id
+                if transition.operation != "compensate":
+                    continue
+                target = next(
+                    (
+                        candidate
+                        for candidate in lineage[:index]
+                        if candidate.transition_id == target_id
+                    ),
+                    None,
+                )
+                if target is None or target.operation != "correct":
+                    raise ValueError("fact compensation target must be an earlier correction")
+                if target.transition_id in compensated_targets:
+                    raise ValueError("fact correction cannot be compensated twice")
+                compensated_targets.add(target.transition_id)
+            latest = lineage[-1]
+            if (
+                fact.entity_revision != latest.entity_revision
+                or fact.values != latest.values_after
+                or fact.origin.transition_id != latest.transition_id
+                or fact.semantic_fingerprint != latest.semantic_fingerprint_after
+            ):
+                raise ValueError("fact projection does not match lineage head")
         return self
 
     def semantic_payload(
@@ -541,7 +624,14 @@ class ReducerState(FrozenModel):
             "consumed_authorization_source_ids": self.consumed_authorization_source_ids,
             "observation_refs": self.observation_refs,
             "message_observations": tuple(
-                item.model_dump(mode="json") for item in self.message_observations
+                (
+                    item.model_dump(mode="json")
+                    if reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                    else item.model_dump(
+                        mode="json", exclude={"actor", "channel", "payload_ref"}
+                    )
+                )
+                for item in self.message_observations
             ),
             "operator_observations": tuple(
                 item.model_dump(mode="json") for item in self.operator_observations
@@ -598,17 +688,26 @@ class ReducerState(FrozenModel):
             ),
             "boundaries": tuple(item.model_dump(mode="json") for item in self.boundaries),
         }
-        if reducer_bundle_version in {"world-v2-reducers.10", REDUCER_BUNDLE_VERSION}:
+        if reducer_bundle_version in {
+            "world-v2-reducers.10",
+            "world-v2-reducers.11",
+            REDUCER_BUNDLE_VERSION,
+        }:
             payload["threads"] = tuple(item.model_dump(mode="json") for item in self.threads)
             payload["thread_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.thread_transitions
             )
-        if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+        if reducer_bundle_version in {"world-v2-reducers.11", REDUCER_BUNDLE_VERSION}:
             payload["commitments"] = tuple(
                 item.model_dump(mode="json") for item in self.commitments
             )
             payload["commitment_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.commitment_transitions
+            )
+        if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            payload["facts"] = tuple(item.model_dump(mode="json") for item in self.facts)
+            payload["fact_transitions"] = tuple(
+                item.model_dump(mode="json") for item in self.fact_transitions
             )
         return payload
 
@@ -768,6 +867,30 @@ class _CommitmentProposalStore:
             }
         )
 
+
+class _FactProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        if not isinstance(event, WorldEvent) or not isinstance(proposal, FactProposalProjection):
+            raise TypeError("fact proposal adapter received incompatible values")
+        return _fact_proposal_recorded(state, event, proposal=proposal)
+
+    def find(self, state: ReducerState, proposal_id: str) -> FactProposalProjection | None:
+        return next(
+            (item for item in state.fact_proposals if item.proposal_id == proposal_id),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        return state.model_copy(
+            update={
+                "fact_proposals": tuple(
+                    item for item in state.fact_proposals if item.proposal_id != proposal_id
+                )
+            }
+        )
+
 _TYPED_PROPOSAL_STORES = {
     "proposal-contract:appraisal-legacy.1": _LegacyAppraisalProposalStore(),
     "proposal-contract:affect-legacy.1": _LegacyAffectProposalStore(),
@@ -775,6 +898,7 @@ _TYPED_PROPOSAL_STORES = {
     "proposal-contract:relationship.1": _RelationshipProposalStore(),
     "proposal-contract:thread.1": _ThreadProposalStore(),
     "proposal-contract:commitment.1": _CommitmentProposalStore(),
+    "proposal-contract:fact.1": _FactProposalStore(),
 }
 
 _TYPED_PROPOSAL_REGISTRY = TypedProposalRegistry(
@@ -1147,6 +1271,59 @@ def _commitment_proposal_recorded(
     )
 
 
+def _fact_proposal_recorded(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    proposal: FactProposalProjection | None = None,
+) -> ReducerState:
+    proposal = proposal or FactProposalProjection.model_validate_json(event.payload_json)
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("fact proposal must evaluate the current world revision")
+    if proposal.proposal_id in state.fact_proposal_ids:
+        raise ValueError("fact proposal identity is already registered")
+    proposed_payload = FactChangedPayload.model_validate_json(
+        proposal.proposed_mutation.payload_json
+    )
+    if (
+        proposed_payload.proposal_id != proposal.proposal_id
+        or proposed_payload.change_id != proposal.change_id
+        or proposed_payload.transition_id != proposal.transition_id
+        or proposed_payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or proposed_payload.expected_entity_revision != proposal.expected_entity_revision
+        or proposed_payload.accepted_change_hash != proposal.proposed_change_hash
+        or proposed_payload.evidence_refs != proposal.evidence_refs
+        or proposed_payload.policy_refs != proposal.policy_refs
+    ):
+        raise ValueError("persisted fact proposal body does not match its index")
+    if proposal.policy_refs != INSTALLED_FACT_POLICY_REFS:
+        raise ValueError("fact proposal references an uninstalled policy")
+    _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
+    reduce_fact(
+        state.facts,
+        state.fact_transitions,
+        proposed_payload,
+        event_type=proposal.proposed_mutation.event_type,
+        logical_time=_require_life_time(state, event),
+        message_observations=state.message_observations,
+        operator_observations=state.operator_observations,
+    )
+    return state.model_copy(
+        update={
+            "fact_proposals": (*state.fact_proposals, proposal),
+            "fact_proposal_ids": (*state.fact_proposal_ids, proposal.proposal_id),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
 def _affect_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     proposal = AffectProposalProjection.model_validate_json(event.payload_json)
     if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
@@ -1330,6 +1507,9 @@ def _observation_recorded(state: ReducerState, event: WorldEvent) -> ReducerStat
                         content_payload_hash=observation.payload_hash,
                         event_payload_hash=event.payload_hash,
                         world_revision=len(state.committed_world_event_refs) + 1,
+                        actor=observation.actor,
+                        channel=observation.channel,
+                        payload_ref=observation.payload_ref,
                     ),
                 )
                 if is_message
@@ -1903,6 +2083,25 @@ def _validate_evidence_authority(
             if kind == "settled_world_event" and committed.event_type != "WorldOccurrenceSettled":
                 raise ValueError("settled-world evidence is not a settlement event")
             continue
+        if kind == "committed_fact":
+            committed = authority.get(evidence.ref_id)
+            transition = next(
+                (
+                    item
+                    for item in state.fact_transitions
+                    if item.accepted_event_ref == evidence.ref_id
+                ),
+                None,
+            )
+            if (
+                committed is None
+                or committed.event_type not in FACT_PAYLOAD_MODELS
+                or transition is None
+                or evidence.source_world_revision != committed.world_revision
+                or evidence.immutable_hash != _canonical_model_hash(transition.values_after)
+            ):
+                raise ValueError("committed-fact evidence does not resolve to transition authority")
+            continue
         if kind == "observed_message":
             message = next(
                 (
@@ -1989,7 +2188,6 @@ def _validate_evidence_authority(
             ):
                 raise ValueError("operator evidence hash does not match authority")
             continue
-        # Facts and operator observations are not installed authority stores yet.
         raise ValueError(f"{kind} evidence has no installed authority resolver")
 
 
@@ -2516,6 +2714,78 @@ def _commitment_clock_changed(
     )
 
 
+def _fact_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = FactChangedPayload.model_validate_json(event.payload_json)
+    if payload.policy_refs != INSTALLED_FACT_POLICY_REFS:
+        raise ValueError("fact transition references an uninstalled policy")
+    if payload.fact_after.origin.accepted_event_ref != event.event_id:
+        raise ValueError("fact origin does not identify its mutation event")
+    proposal = _require_authorized_fact(state, payload)
+    facts, transitions = reduce_fact(
+        state.facts,
+        state.fact_transitions,
+        payload,
+        event_type=event.event_type,
+        logical_time=logical_time,
+        message_observations=state.message_observations,
+        operator_observations=state.operator_observations,
+    )
+    return state.model_copy(
+        update={
+            "facts": facts,
+            "fact_transitions": transitions,
+            "fact_proposals": tuple(
+                item for item in state.fact_proposals if item != proposal
+            ),
+        }
+    )
+
+
+def _require_authorized_fact(
+    state: ReducerState,
+    payload: FactAuthorizedMutationPayload,
+) -> FactProposalProjection:
+    proposal = next(
+        (item for item in state.fact_proposals if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    decision = next(
+        (item for item in state.acceptance_decisions if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    if proposal is None:
+        raise ValueError("fact transition requires a persisted typed proposal")
+    if (
+        decision is None
+        or decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+    ):
+        raise ValueError("fact transition requires its accepted decision")
+    if (
+        not state.committed_world_event_refs
+        or state.committed_world_event_refs[-1].event_type != "AcceptanceRecorded"
+        or not state.acceptance_decisions
+        or state.acceptance_decisions[-1] != decision
+    ):
+        raise ValueError("fact transition requires adjacent AcceptanceRecorded authority")
+    if (
+        proposal.transition_kind != getattr(payload, "operation", None)
+        or proposal.change_id != payload.change_id
+        or proposal.transition_id != payload.transition_id
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.expected_entity_revision != payload.expected_entity_revision
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or proposal.evidence_refs != payload.evidence_refs
+        or json.loads(proposal.proposed_mutation.payload_json)
+        != payload.model_dump(mode="json")
+    ):
+        raise ValueError("accepted fact transition does not match its proposal")
+    return proposal
+
+
 def _require_authorized_commitment(
     state: ReducerState,
     payload: CommitmentAuthorizedMutationPayload,
@@ -3015,6 +3285,10 @@ _EVENTS = {
             "PrivateCommitmentDeadlineBroken", RevisionClass.WORLD, _commitment_clock_changed
         ),
         EventDefinition("PrivateCommitmentReleased", RevisionClass.WORLD, _commitment_changed),
+        *(
+            EventDefinition(event_type, RevisionClass.WORLD, _fact_changed)
+            for event_type in FACT_PAYLOAD_MODELS
+        ),
     )
 }
 
@@ -3155,6 +3429,10 @@ def make_projection(
         commitment_transitions=state.commitment_transitions,
         commitment_proposals=state.commitment_proposals,
         commitment_proposal_ids=state.commitment_proposal_ids,
+        facts=state.facts,
+        fact_transitions=state.fact_transitions,
+        fact_proposals=state.fact_proposals,
+        fact_proposal_ids=state.fact_proposal_ids,
         proposal_ids=state.proposal_ids,
         proposal_revisions=state.proposal_revisions,
         acceptance_decisions=state.acceptance_decisions,

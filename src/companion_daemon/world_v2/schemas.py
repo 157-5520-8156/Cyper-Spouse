@@ -631,7 +631,11 @@ class EvidenceRef(FrozenModel):
 
     @model_validator(mode="after")
     def committed_world_evidence_is_revision_pinned(self) -> EvidenceRef:
-        if self.evidence_type in {"committed_world_event", "settled_world_event"}:
+        if self.evidence_type in {
+            "committed_world_event",
+            "settled_world_event",
+            "committed_fact",
+        }:
             if self.source_world_revision is None or self.immutable_hash is None:
                 raise ValueError("world-event evidence requires revision and immutable hash")
         return self
@@ -658,6 +662,11 @@ class MessageObservationRef(FrozenModel):
     content_payload_hash: str = Field(min_length=1)
     event_payload_hash: str = Field(min_length=64, max_length=64)
     world_revision: int = Field(ge=1)
+    # Optional only so persisted <= .11 reducer states remain decodable during
+    # verified migration. New observations always retain the full envelope.
+    actor: str | None = None
+    channel: str | None = None
+    payload_ref: str | None = None
 
 
 class AcceptanceDecisionRef(FrozenModel):
@@ -708,16 +717,199 @@ class CharacterCoreProjection(FrozenModel):
     boundaries: tuple[str, ...] = ()
 
 
+FactCardinality = Literal["single", "set"]
+
+
+class FactAssertionBinding(FrozenModel):
+    source_kind: Literal["observed_message", "operator_observation"]
+    source_ref: str = Field(min_length=1)
+    asserted_subject_ref: str = Field(min_length=1)
+    actor_ref: str | None = Field(default=None, min_length=1)
+    channel: str | None = Field(default=None, min_length=1)
+    payload_ref: str | None = Field(default=None, min_length=1)
+    content_payload_hash: str = Field(min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def source_shape_is_closed(self) -> FactAssertionBinding:
+        retained = (self.actor_ref, self.channel, self.payload_ref)
+        if self.source_kind == "observed_message" and any(item is None for item in retained):
+            raise ValueError("message fact assertion requires the retained whole-message envelope")
+        if self.source_kind == "operator_observation" and any(
+            item is not None for item in retained
+        ):
+            raise ValueError("operator fact assertion cannot claim unretained envelope fields")
+        return self
+
+
+class FactValues(FrozenModel):
+    subject_ref: str = Field(min_length=1)
+    predicate_code: str = Field(min_length=1)
+    cardinality: FactCardinality
+    conflict_key: str = Field(min_length=1)
+    value_ref: str = Field(min_length=1)
+    value_hash: str = Field(min_length=64, max_length=64)
+    assertion_binding: FactAssertionBinding
+    anchor_evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    source_evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    confidence_bp: int = Field(ge=1, le=10_000)
+    privacy_class: PrivacyClass
+    status: Literal["active", "withdrawn"] = "active"
+    withdrawal_reason_code: Literal[
+        "user_request", "source_retracted", "privacy_revoked", "invalid"
+    ] | None = None
+    withdrawal_evidence_ref: str | None = None
+
+    @model_validator(mode="after")
+    def evidence_and_lifecycle_are_explicit(self) -> FactValues:
+        if self.conflict_key != fact_conflict_key(
+            subject_ref=self.subject_ref, predicate_code=self.predicate_code
+        ):
+            raise ValueError("fact conflict key must derive from its semantic slot")
+        if len(self.source_evidence_refs) != len(
+            {(item.evidence_type, item.ref_id) for item in self.source_evidence_refs}
+        ):
+            raise ValueError("fact source evidence refs must be unique")
+        if not set(self.anchor_evidence_refs).issubset(set(self.source_evidence_refs)):
+            raise ValueError("fact anchors must remain in source evidence")
+        if self.status == "withdrawn" and (
+            self.withdrawal_reason_code is None or not self.withdrawal_evidence_ref
+        ):
+            raise ValueError("withdrawn fact requires reason and evidence")
+        if self.status == "active" and (
+            self.withdrawal_reason_code is not None or self.withdrawal_evidence_ref is not None
+        ):
+            raise ValueError("active fact cannot carry withdrawal settlement")
+        return self
+
+
+class FactOrigin(FrozenModel):
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+
+
+def fact_conflict_key(*, subject_ref: str, predicate_code: str) -> str:
+    material = json.dumps(
+        {"subject_ref": subject_ref, "predicate_code": predicate_code},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+    return f"fact-slot:{hashlib.sha256(material.encode()).hexdigest()}"
+
+
+def fact_semantic_fingerprint(
+    *, subject_ref: str, predicate_code: str, cardinality: FactCardinality,
+    conflict_key: str, value_hash: str,
+    assertion_binding: FactAssertionBinding,
+    anchor_evidence_refs: tuple[EvidenceRef, ...], policy_refs: tuple[str, ...],
+) -> str:
+    material = {
+        "subject_ref": subject_ref, "predicate_code": predicate_code,
+        "cardinality": cardinality, "conflict_key": conflict_key,
+        "value_hash": value_hash,
+        "assertion_binding": assertion_binding.model_dump(mode="json"),
+        "anchors": sorted(
+            ({"ref_id": item.ref_id, "evidence_type": item.evidence_type,
+              "source_world_revision": item.source_world_revision,
+              "immutable_hash": item.immutable_hash}
+             for item in anchor_evidence_refs),
+            key=lambda item: (str(item["evidence_type"]), str(item["ref_id"])),
+        ),
+        "policy_refs": sorted(policy_refs),
+    }
+    return hashlib.sha256(json.dumps(
+        material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()).hexdigest()
+
+
 class FactProjection(FrozenModel):
     fact_id: str = Field(min_length=1)
-    subject_ref: str = Field(min_length=1)
-    predicate: str = Field(min_length=1)
-    value_ref: str = Field(min_length=1)
-    source_refs: tuple[str, ...] = Field(min_length=1)
-    confidence_bp: int = Field(ge=0, le=10_000)
-    status: Literal["active", "corrected", "superseded", "expired"]
-    privacy_class: PrivacyClass
+    entity_revision: int = Field(ge=1)
+    semantic_fingerprint: str = Field(min_length=64, max_length=64)
+    values: FactValues
+    origin: FactOrigin
+    committed_at: datetime
     updated_at: datetime
+
+    @model_validator(mode="after")
+    def fingerprint_matches_authority(self) -> FactProjection:
+        expected = fact_semantic_fingerprint(
+            subject_ref=self.values.subject_ref,
+            predicate_code=self.values.predicate_code,
+            cardinality=self.values.cardinality,
+            conflict_key=self.values.conflict_key,
+            value_hash=self.values.value_hash,
+            assertion_binding=self.values.assertion_binding,
+            anchor_evidence_refs=self.values.anchor_evidence_refs,
+            policy_refs=self.origin.policy_refs,
+        )
+        if self.semantic_fingerprint != expected:
+            raise ValueError("fact semantic fingerprint does not match authority")
+        return self
+
+
+class FactTransitionProjection(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    fact_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    operation: Literal["commit", "correct", "withdraw", "compensate"]
+    values_before: FactValues | None
+    values_after: FactValues
+    semantic_fingerprint_after: str = Field(min_length=64, max_length=64)
+    change_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+    accepted_at: datetime
+    compensates_transition_id: str | None = None
+
+    @model_validator(mode="after")
+    def compensation_target_shape_is_explicit(self) -> FactTransitionProjection:
+        if self.operation == "compensate" and not self.compensates_transition_id:
+            raise ValueError("fact compensation history requires its target")
+        if self.operation != "compensate" and self.compensates_transition_id is not None:
+            raise ValueError("ordinary fact history cannot carry a compensation target")
+        return self
+
+
+class FactProposedMutation(FrozenModel):
+    event_type: Literal[
+        "FactCommitted", "FactCorrected", "FactWithdrawn", "FactCorrectionCompensated"
+    ]
+    payload_json: str = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def payload_is_canonical(self) -> FactProposedMutation:
+        decoded = json.loads(self.payload_json)
+        if not isinstance(decoded, dict):
+            raise ValueError("fact mutation payload must be an object")
+        if json.dumps(decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":")) != self.payload_json:
+            raise ValueError("fact mutation payload must use canonical JSON")
+        return self
+
+
+class FactProposalProjection(FrozenModel):
+    proposal_id: str = Field(min_length=1)
+    proposal_kind: Literal["fact_transition"] = "fact_transition"
+    proposal_encoding: Literal["typed-authority-v1"]
+    authority_contract_ref: Literal["proposal-contract:fact.1"]
+    transition_kind: Literal["commit", "correct", "withdraw", "compensate"]
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    expected_entity_revision: int = Field(ge=0)
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    proposed_mutation: FactProposedMutation
+
+    @model_validator(mode="after")
+    def transition_matches_event(self) -> FactProposalProjection:
+        expected = {"commit": "FactCommitted", "correct": "FactCorrected",
+                    "withdraw": "FactWithdrawn",
+                    "compensate": "FactCorrectionCompensated"}[self.transition_kind]
+        if self.proposed_mutation.event_type != expected:
+            raise ValueError("fact proposal transition does not match event")
+        return self
 
 
 class ExperienceProjection(FrozenModel):
@@ -2385,7 +2577,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.11"
+    reducer_bundle_version: str = "world-v2-reducers.12"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -2443,6 +2635,10 @@ class LedgerProjection(FrozenModel):
     commitment_transitions: tuple[CommitmentTransitionProjection, ...] = ()
     commitment_proposals: tuple[CommitmentProposalProjection, ...] = ()
     commitment_proposal_ids: tuple[str, ...] = ()
+    facts: tuple[FactProjection, ...] = ()
+    fact_transitions: tuple[FactTransitionProjection, ...] = ()
+    fact_proposals: tuple[FactProposalProjection, ...] = ()
+    fact_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()

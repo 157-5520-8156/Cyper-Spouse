@@ -730,14 +730,17 @@ def test_sqlite_verified_v9_head_migrates_to_v11(tmp_path) -> None:
             (legacy_hash, "world-v2-reducers.9", WORLD),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.11"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.12"
     assert migrated.project().threads == ()
     assert migrated.rebuild() == migrated.project()
     migrated.close()
 
 
-def test_sqlite_verified_v10_head_with_thread_authority_migrates_to_v11(tmp_path) -> None:
-    path = tmp_path / "thread-v10.sqlite3"
+@pytest.mark.parametrize("legacy_bundle", ["world-v2-reducers.10", "world-v2-reducers.11"])
+def test_sqlite_verified_thread_authority_head_migrates_to_v12(
+    tmp_path, legacy_bundle: str
+) -> None:
+    path = tmp_path / f"thread-{legacy_bundle.rsplit('.', 1)[-1]}.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
     ledger.commit([event("world:v10", "WorldStarted", {})],
                   expected_world_revision=0, expected_deliberation_revision=0)
@@ -761,7 +764,7 @@ def test_sqlite_verified_v10_head_with_thread_authority_migrates_to_v11(tmp_path
         state = ReducerState.model_validate_json(state_json)
         semantic = state.semantic_payload(
             world_id=WORLD, world_revision=world_revision,
-            reducer_bundle_version="world-v2-reducers.10",
+            reducer_bundle_version=legacy_bundle,
         )
         legacy_hash = hashlib.sha256(json.dumps(
             semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")
@@ -769,10 +772,10 @@ def test_sqlite_verified_v10_head_with_thread_authority_migrates_to_v11(tmp_path
         connection.execute(
             "UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ? "
             "WHERE world_id = ?",
-            (legacy_hash, "world-v2-reducers.10", WORLD),
+            (legacy_hash, legacy_bundle, WORLD),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.11"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.12"
     assert migrated.project().threads == expected_thread
     assert migrated.project().commitments == ()
     assert migrated.rebuild() == migrated.project()
