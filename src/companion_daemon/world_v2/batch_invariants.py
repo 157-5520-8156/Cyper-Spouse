@@ -12,12 +12,17 @@ from .appraisal_events import (
     AppraisalContradictedPayload,
     AppraisalSupersededPayload,
 )
+from .affect_events import (
+    AffectBaselineAdjustedPayload,
+    AffectEpisodeOpenedPayload,
+    AffectEpisodeResolvedPayload,
+    AffectEpisodeSupersededPayload,
+    AffectEpisodeUpdatedPayload,
+)
 from .schemas import AppraisalProposalProjection, WorldEvent
 
 
-def validate_commit_batch(
-    events: Sequence[WorldEvent], *, expected_world_revision: int
-) -> None:
+def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revision: int) -> None:
     """Require every settled lived-world occurrence to schedule its appraisal."""
 
     appraisal_triggers: dict[str, list[tuple[str, str, str | None]]] = {}
@@ -43,25 +48,56 @@ def validate_commit_batch(
             event.event_type == "ProposalRecorded"
             and event.payload().get("proposal_kind") == "appraisal_transition"
         ):
-            proposal = AppraisalProposalProjection.model_validate_json(
-                event.payload_json
-            )
+            proposal = AppraisalProposalProjection.model_validate_json(event.payload_json)
             appraisal_proposals.append(proposal)
             if proposal.evaluated_world_revision != expected_world_revision:
-                raise ValueError(
-                    "appraisal proposal must be pinned to the current world revision"
-                )
-    if appraisal_proposals and any(
-        event.event_type != "ProposalRecorded" for event in events
+                raise ValueError("appraisal proposal must be pinned to the current world revision")
+    if appraisal_proposals and any(event.event_type != "ProposalRecorded" for event in events):
+        raise ValueError("appraisal ProposalRecorded requires a separate deliberation commit")
+    affect_proposals = [
+        event.payload()
+        for event in events
+        if event.event_type == "ProposalRecorded"
+        and event.payload().get("proposal_kind") == "affect_transition"
+    ]
+    if any(
+        item.get("evaluated_world_revision") != expected_world_revision for item in affect_proposals
     ):
-        raise ValueError(
-            "appraisal ProposalRecorded requires a separate deliberation commit"
-        )
+        raise ValueError("affect proposal must be pinned to the current world revision")
+    if affect_proposals and any(event.event_type != "ProposalRecorded" for event in events):
+        raise ValueError("affect ProposalRecorded requires a separate deliberation commit")
     authorized_appraisal_models = {
         "AppraisalAccepted": AppraisalAcceptedPayload,
         "AppraisalContradicted": AppraisalContradictedPayload,
         "AppraisalSuperseded": AppraisalSupersededPayload,
     }
+    authorized_affect_models = {
+        "AffectBaselineAdjusted": AffectBaselineAdjustedPayload,
+        "AffectEpisodeOpened": AffectEpisodeOpenedPayload,
+        "AffectEpisodeUpdated": AffectEpisodeUpdatedPayload,
+        "AffectEpisodeResolved": AffectEpisodeResolvedPayload,
+        "AffectEpisodeSuperseded": AffectEpisodeSupersededPayload,
+    }
+    for mutation_index, event in enumerate(events):
+        model = authorized_affect_models.get(event.event_type)
+        if model is None:
+            continue
+        mutation = model.model_validate_json(event.payload_json)
+        matching = [
+            acceptance
+            for acceptance_index, acceptance in acceptances
+            if acceptance_index == mutation_index - 1
+            and acceptance.get("status") == "accepted"
+            and acceptance.get("acceptance_id") == mutation.acceptance_id
+            and acceptance.get("proposal_id") == mutation.proposal_id
+            and acceptance.get("evaluated_world_revision") == mutation.evaluated_world_revision
+            and acceptance.get("accepted_change_id") == mutation.change_id
+            and acceptance.get("accepted_change_hash") == mutation.accepted_change_hash
+        ]
+        if mutation.evaluated_world_revision != expected_world_revision or len(matching) != 1:
+            raise ValueError(
+                "Affect transition requires one adjacent revision-pinned AcceptanceRecorded"
+            )
     for mutation_index, event in enumerate(events):
         model = authorized_appraisal_models.get(event.event_type)
         if model is None:
@@ -74,16 +110,12 @@ def validate_commit_batch(
             and acceptance.get("status") == "accepted"
             and acceptance.get("acceptance_id") == appraisal.acceptance_id
             and acceptance.get("proposal_id") == appraisal.proposal_id
-            and acceptance.get("evaluated_world_revision")
-            == appraisal.evaluated_world_revision
+            and acceptance.get("evaluated_world_revision") == appraisal.evaluated_world_revision
             and acceptance.get("accepted_change_id") == appraisal.change_id
-            and acceptance.get("accepted_change_hash")
-            == appraisal.accepted_change_hash
+            and acceptance.get("accepted_change_hash") == appraisal.accepted_change_hash
         ]
         if appraisal.evaluated_world_revision != expected_world_revision or len(matching) != 1:
-            raise ValueError(
-                "AppraisalAccepted requires one revision-pinned AcceptanceRecorded"
-            )
+            raise ValueError("AppraisalAccepted requires one revision-pinned AcceptanceRecorded")
         if isinstance(appraisal, AppraisalAcceptedPayload):
             outcome_ref = f"appraisal:{appraisal.appraisal.appraisal_id}"
         elif isinstance(appraisal, AppraisalSupersededPayload):
@@ -96,22 +128,21 @@ def validate_commit_batch(
             if item.event_type == "TriggerProcessCompleted"
             and completion_index > mutation_index
             and item.payload().get("trigger_id") == appraisal.trigger_id
-            and item.payload().get("runtime_outcome_ref")
-            == outcome_ref
+            and item.payload().get("runtime_outcome_ref") == outcome_ref
         ]
         if len(completions) != 1:
-            raise ValueError(
-                "AppraisalAccepted must complete its trigger in the same commit"
-            )
+            raise ValueError("AppraisalAccepted must complete its trigger in the same commit")
     for acceptance_index, acceptance in acceptances:
-        if (
-            acceptance.get("status") != "accepted"
-            or not isinstance(acceptance.get("proposal_id"), str)
+        if acceptance.get("status") != "accepted" or not isinstance(
+            acceptance.get("proposal_id"), str
         ):
             continue
         matching_appraisal_mutations: list[int] = []
         for mutation_index, event in enumerate(events):
-            model = authorized_appraisal_models.get(event.event_type)
+            model = {
+                **authorized_appraisal_models,
+                **authorized_affect_models,
+            }.get(event.event_type)
             if model is None or mutation_index <= acceptance_index:
                 continue
             mutation = model.model_validate_json(event.payload_json)
@@ -119,8 +150,7 @@ def validate_commit_batch(
                 mutation.proposal_id == acceptance.get("proposal_id")
                 and mutation.acceptance_id == acceptance.get("acceptance_id")
                 and mutation.change_id == acceptance.get("accepted_change_id")
-                and mutation.accepted_change_hash
-                == acceptance.get("accepted_change_hash")
+                and mutation.accepted_change_hash == acceptance.get("accepted_change_hash")
             ):
                 matching_appraisal_mutations.append(mutation_index)
         matching_settlements = [
@@ -130,8 +160,7 @@ def validate_commit_batch(
             and settlement.outcome_proposal_id == acceptance.get("proposal_id")
             and settlement.acceptance_id == acceptance.get("acceptance_id")
             and settlement.change_id == acceptance.get("accepted_change_id")
-            and settlement.accepted_change_hash
-            == acceptance.get("accepted_change_hash")
+            and settlement.accepted_change_hash == acceptance.get("accepted_change_hash")
         ]
         matching_domain_mutations = [
             *matching_appraisal_mutations,
@@ -146,18 +175,13 @@ def validate_commit_batch(
         raise ValueError("settlements in one commit require unique appraisal triggers")
     for event in events:
         if event.event_type == "ExperienceCommitted":
-            experiences.append(
-                ExperienceCommittedPayload.model_validate_json(event.payload_json)
-            )
+            experiences.append(ExperienceCommittedPayload.model_validate_json(event.payload_json))
         if event.event_type != "TriggerProcessOpened":
             continue
         process = event.payload().get("process")
         if not isinstance(process, dict):
             continue
-        if (
-            process.get("process_kind") == "npc_world_appraisal"
-            and process.get("state") == "open"
-        ):
+        if process.get("process_kind") == "npc_world_appraisal" and process.get("state") == "open":
             trigger_ref = process.get("trigger_ref")
             if isinstance(trigger_ref, str):
                 appraisal_triggers.setdefault(trigger_ref, []).append(
@@ -176,11 +200,9 @@ def validate_commit_batch(
             and acceptance.get("status") == "accepted"
             and acceptance.get("acceptance_id") == settlement.acceptance_id
             and acceptance.get("proposal_id") == settlement.outcome_proposal_id
-            and acceptance.get("evaluated_world_revision")
-            == settlement.evaluated_world_revision
+            and acceptance.get("evaluated_world_revision") == settlement.evaluated_world_revision
             and acceptance.get("accepted_change_id") == settlement.change_id
-            and acceptance.get("accepted_change_hash")
-            == settlement.accepted_change_hash
+            and acceptance.get("accepted_change_hash") == settlement.accepted_change_hash
         ]
         if (
             settlement.evaluated_world_revision != expected_world_revision
@@ -210,13 +232,10 @@ def validate_commit_batch(
         ]
         if len(matching_experiences) > 1:
             raise ValueError(
-                "WorldOccurrenceSettled permits at most one matching committed "
-                "experience"
+                "WorldOccurrenceSettled permits at most one matching committed experience"
             )
 
-    settlement_pairs = {
-        (item.occurrence_id, item.result_id) for item in settlements
-    }
+    settlement_pairs = {(item.occurrence_id, item.result_id) for item in settlements}
     for experience in experiences:
         for occurrence_id in experience.experience.occurrence_refs:
             if not any(
@@ -224,9 +243,7 @@ def validate_commit_batch(
                 and result_id in experience.experience.result_refs
                 for candidate_occurrence, result_id in settlement_pairs
             ):
-                raise ValueError(
-                    "occurrence-backed experience must accompany its settlement"
-                )
+                raise ValueError("occurrence-backed experience must accompany its settlement")
 
 
 def appraisal_trigger_identity(occurrence_id: str, result_id: str) -> str:

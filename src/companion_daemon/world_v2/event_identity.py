@@ -35,9 +35,7 @@ def validate_event_identity(event: WorldEvent) -> None:
         payload=event.payload(),
     )
     if expected is not None and event.idempotency_key != expected:
-        raise ValueError(
-            f"{event.event_type} idempotency key does not match its domain identity"
-        )
+        raise ValueError(f"{event.event_type} idempotency key does not match its domain identity")
 
 
 def _life_identity_components(
@@ -97,6 +95,39 @@ def _life_identity_components(
         return world_id, _nested(payload, "appraisal", "appraisal_id"), payload.get("transition_id")
     if event_type in {"AppraisalContradicted", "AppraisalExpired", "AppraisalSuperseded"}:
         return payload.get("appraisal_id"), payload.get("transition_id")
+    if event_type == "AffectEpisodeOpened":
+        return world_id, _nested(payload, "episode", "episode_id"), payload.get("transition_id")
+    if event_type in {
+        "AffectEpisodeUpdated",
+        "AffectEpisodeResolved",
+    }:
+        return payload.get("episode_id"), payload.get("transition_id")
+    if event_type == "AffectEpisodeDecayed":
+        results = payload.get("component_results")
+        config_digests = (
+            tuple(item.get("config_digest") for item in results if isinstance(item, dict))
+            if isinstance(results, list)
+            else ()
+        )
+        return (
+            payload.get("episode_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("to_logical_time"),
+            config_digests,
+        )
+    if event_type == "AffectEpisodeSuperseded":
+        return (
+            payload.get("episode_id"),
+            _nested(payload, "successor", "episode_id"),
+            payload.get("transition_id"),
+        )
+    if event_type == "AffectBaselineAdjusted":
+        return (
+            world_id,
+            payload.get("dimension"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
     if event_type == "TriggerProcessOpened":
         return world_id, _nested(payload, "process", "trigger_id"), "opened"
     if event_type in {"TriggerProcessClaimed", "TriggerProcessReclaimed"}:

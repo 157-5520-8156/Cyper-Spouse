@@ -90,18 +90,22 @@ def populate_ledger(ledger: WorldLedger | SQLiteWorldLedger) -> None:
     )
     ledger.commit(
         [
-            event("event-account", "BudgetAccountConfigured", {
-                "account": account.model_dump(mode="json")
-            }),
-            event("event-reservation", "BudgetReserved", {
-                "reservation": reservation.model_dump(mode="json")
-            }),
-            event("event-action", "ActionAuthorized", {
-                "action": action.model_dump(mode="json")
-            }),
-            event("event-observation", "ObservationRecorded", {
-                "observation_id": "observation-private"
-            }),
+            event(
+                "event-account",
+                "BudgetAccountConfigured",
+                {"account": account.model_dump(mode="json")},
+            ),
+            event(
+                "event-reservation",
+                "BudgetReserved",
+                {"reservation": reservation.model_dump(mode="json")},
+            ),
+            event("event-action", "ActionAuthorized", {"action": action.model_dump(mode="json")}),
+            event(
+                "event-observation",
+                "ObservationRecorded",
+                {"observation_id": "observation-private"},
+            ),
         ],
         expected_world_revision=0,
         expected_deliberation_revision=0,
@@ -152,9 +156,7 @@ class StaticPrincipalVerifier:
         raise PermissionError("test credential is not authenticated")
 
 
-def bind(
-    access: ProjectionAuthority, projection_request: ProjectionRequest
-) -> ProjectionRequest:
+def bind(access: ProjectionAuthority, projection_request: ProjectionRequest) -> ProjectionRequest:
     credential = _CREDENTIALS.setdefault(projection_request.viewer_id, object())
     return ProjectionCapabilityIssuer(
         authority=access,
@@ -206,9 +208,7 @@ def test_capability_issuer_uses_authenticated_principal_not_requested_identity()
     attacker_credential = object()
 
     class AttackerVerifier:
-        def authenticate(
-            self, credential: object
-        ) -> AuthenticatedProjectionPrincipal:
+        def authenticate(self, credential: object) -> AuthenticatedProjectionPrincipal:
             assert credential is attacker_credential
             return AuthenticatedProjectionPrincipal(
                 principal_id="room:attacker",
@@ -232,7 +232,9 @@ def test_capability_issuer_uses_authenticated_principal_not_requested_identity()
         raise AssertionError("attacker principal must not mint operator capability")
 
 
-def test_platform_projection_requires_status_permission_and_never_exposes_dispatch_material() -> None:
+def test_platform_projection_requires_status_permission_and_never_exposes_dispatch_material() -> (
+    None
+):
     ledger = ledger_with_private_action()
     access = authority(
         ProjectionGrant(
@@ -252,10 +254,13 @@ def test_platform_projection_requires_status_permission_and_never_exposes_dispat
 
     denied = runtime.project(bind(access, request("platform_adapter")))
     allowed = runtime.project(
-        bind(access, request(
-            "platform_adapter",
-            permissions=frozenset({"projection:actions:status"}),
-        ))
+        bind(
+            access,
+            request(
+                "platform_adapter",
+                permissions=frozenset({"projection:actions:status"}),
+            ),
+        )
     )
 
     assert denied.view.action_statuses == ()
@@ -291,10 +296,13 @@ def test_platform_projection_is_scoped_to_granted_action_targets() -> None:
     )
 
     projection = runtime.project(
-        bind(access, request(
-            "platform_adapter",
-            permissions=frozenset({"projection:actions:status"}),
-        ))
+        bind(
+            access,
+            request(
+                "platform_adapter",
+                permissions=frozenset({"projection:actions:status"}),
+            ),
+        )
     )
 
     assert projection.view.action_statuses == ()
@@ -327,11 +335,14 @@ def test_dashboard_diagnostics_redact_payload_and_require_debug_permission_for_r
     )
 
     projection = runtime.project(
-        bind(access, request(
-            "dashboard_operator",
-            permissions=permissions,
-            include_debug_refs=True,
-        ))
+        bind(
+            access,
+            request(
+                "dashboard_operator",
+                permissions=permissions,
+                include_debug_refs=True,
+            ),
+        )
     )
 
     pending = projection.view.pending_actions[0]
@@ -394,9 +405,7 @@ def test_room_and_unknown_viewers_cannot_escalate_by_self_declaring_permissions(
     )
 
     try:
-        runtime.project(
-            request("room_renderer", permissions=malicious, include_debug_refs=True)
-        )
+        runtime.project(request("room_renderer", permissions=malicious, include_debug_refs=True))
     except PermissionError as exc:
         assert "exceeds principal permissions" in str(exc)
     else:
@@ -460,9 +469,7 @@ def test_bound_projection_capability_cannot_be_reused_for_larger_scope() -> None
             world_id=WORLD_ID,
             viewer_id="viewer:dashboard_operator",
             viewer_kind="dashboard_operator",
-            permissions=frozenset(
-                {"projection:diagnostics", "projection:actions:diagnostic"}
-            ),
+            permissions=frozenset({"projection:diagnostics", "projection:actions:diagnostic"}),
             redaction_policy="operator-default-v1",
         )
     )
@@ -471,20 +478,19 @@ def test_bound_projection_capability_cannot_be_reused_for_larger_scope() -> None
         ledger=ledger_with_private_action(),
         projection_authority=access,
     )
-    bound = bind(access,
+    bound = bind(
+        access,
         request(
             "dashboard_operator",
             permissions=frozenset({"projection:diagnostics"}),
-        )
+        ),
     )
     assert bound.authority_token is not None
     assert bound.authority_token not in repr(bound)
     assert "authority_token" not in bound.model_dump(mode="json")
     tampered = bound.model_copy(
         update={
-            "permissions": frozenset(
-                {"projection:diagnostics", "projection:actions:diagnostic"}
-            )
+            "permissions": frozenset({"projection:diagnostics", "projection:actions:diagnostic"})
         }
     )
 
@@ -572,15 +578,18 @@ def test_evaluator_receives_only_redacted_aggregate_state() -> None:
     )
 
     projection = runtime.project(
-        bind(access, request(
-            "evaluator",
-            permissions=frozenset({"projection:evaluator:trace"}),
-        ))
+        bind(
+            access,
+            request(
+                "evaluator",
+                permissions=frozenset({"projection:evaluator:trace"}),
+            ),
+        )
     )
 
-    assert tuple(
-        (item.name, item.count) for item in projection.view.action_state_counts
-    ) == (("authorized", 1),)
+    assert tuple((item.name, item.count) for item in projection.view.action_state_counts) == (
+        ("authorized", 1),
+    )
     serialized = projection.model_dump_json()
     assert "action-private" not in serialized
     assert "user:private" not in serialized
@@ -592,11 +601,13 @@ def test_projection_is_bounded_and_has_no_ledger_side_effects() -> None:
     for index in range(130):
         before = ledger.project()
         ledger.commit(
-            [event(
-                f"event-observation-{index}",
-                "ObservationRecorded",
-                {"observation_id": f"observation-{index:03d}"},
-            )],
+            [
+                event(
+                    f"event-observation-{index}",
+                    "ObservationRecorded",
+                    {"observation_id": f"observation-{index:03d}"},
+                )
+            ],
             expected_world_revision=before.world_revision,
             expected_deliberation_revision=before.deliberation_revision,
         )
@@ -617,11 +628,14 @@ def test_projection_is_bounded_and_has_no_ledger_side_effects() -> None:
     )
 
     projection = runtime.project(
-        bind(access, request(
-            "dashboard_operator",
-            permissions=frozenset({"projection:debug_refs"}),
-            include_debug_refs=True,
-        ))
+        bind(
+            access,
+            request(
+                "dashboard_operator",
+                permissions=frozenset({"projection:debug_refs"}),
+                include_debug_refs=True,
+            ),
+        )
     )
 
     assert len(projection.view.debug_observation_refs) == 100
@@ -644,8 +658,7 @@ def test_action_projection_truncates_deterministically_without_breaking_other_vi
     ledger_projection = ledger_with_private_action().project()
     source = ledger_projection.pending_actions[0]
     pending = tuple(
-        source.model_copy(update={"action_id": f"action-{index}"})
-        for index in range(3)
+        source.model_copy(update={"action_id": f"action-{index}"}) for index in range(3)
     )
     ledger_projection = ledger_projection.model_copy(
         update={"actions": pending, "pending_actions": pending}
@@ -663,11 +676,12 @@ def test_action_projection_truncates_deterministically_without_breaking_other_vi
         authority=operator_access,
         limits=ProjectionLimits(pending_actions=2),
     )
-    operator_request = bind(operator_access,
+    operator_request = bind(
+        operator_access,
         request(
             "dashboard_operator",
             permissions=frozenset({"projection:actions:diagnostic"}),
-        )
+        ),
     )
     operator = compiler.compile(
         ledger_projection,
@@ -715,9 +729,7 @@ def test_context_truncation_never_limits_authority_queries_or_recovery_paging() 
         )
         for index in range(3)
     )
-    projection = base.model_copy(
-        update={"actions": actions, "pending_actions": actions}
-    )
+    projection = base.model_copy(update={"actions": actions, "pending_actions": actions})
     cursor = ProjectionCursor(
         world_revision=projection.world_revision,
         deliberation_revision=projection.deliberation_revision,
@@ -742,19 +754,20 @@ def test_context_truncation_never_limits_authority_queries_or_recovery_paging() 
     ).snapshot(world_id=WORLD_ID, cursor=cursor)
     authority_reader = InternalAuthorityReader(ledger=ledger)
 
-    assert tuple(action.action_id for action in context.pending_actions) == (
-        "action-authority-2",
-    )
+    assert tuple(action.action_id for action in context.pending_actions) == ("action-authority-2",)
     action_window = next(
         item for item in context.slice_windows if item.slice_name == "pending_actions"
     )
     assert action_window.truncated is True
     assert action_window.authority_query_ref == "internal-authority:pending_actions"
-    assert authority_reader.action_by_id(
-        world_id=WORLD_ID,
-        cursor=cursor,
-        action_id="action-authority-0",
-    ) == actions[0]
+    assert (
+        authority_reader.action_by_id(
+            world_id=WORLD_ID,
+            cursor=cursor,
+            action_id="action-authority-0",
+        )
+        == actions[0]
+    )
 
     first = authority_reader.pending_action_page(
         world_id=WORLD_ID,
@@ -789,8 +802,8 @@ def test_projection_hash_binds_reducer_bundle_and_projection_values_are_deeply_f
         )
     )
     compiler = ProjectionCompiler(authority=access)
-    projection_request = bind(access,
-        request("evaluator", permissions=frozenset({"projection:evaluator:trace"}))
+    projection_request = bind(
+        access, request("evaluator", permissions=frozenset({"projection:evaluator:trace"}))
     )
     first = compiler.compile(ledger_projection, projection_request)
     changed_bundle = compiler.compile(
@@ -801,7 +814,7 @@ def test_projection_hash_binds_reducer_bundle_and_projection_values_are_deeply_f
     )
 
     assert first.projection_hash != changed_bundle.projection_hash
-    assert first.reducer_bundle_version == "world-v2-reducers.5"
+    assert first.reducer_bundle_version == "world-v2-reducers.6"
     assert changed_bundle.reducer_bundle_version == "world-v2-reducers.test-next"
     try:
         first.view.action_state_counts[0].count = 99
@@ -831,18 +844,18 @@ def test_internal_snapshot_is_revision_pinned_and_preserves_private_authority() 
     assert len(snapshot.snapshot_hash) == 64
     assert snapshot.pending_actions[0].payload_ref == "encrypted:private-reply"
     assert snapshot.budget_accounts[0].reserved == 100
-    assert tuple(
-        (version.name, version.version) for version in snapshot.reducer_versions
-    ) == (
+    assert tuple((version.name, version.version) for version in snapshot.reducer_versions) == (
         ("schema", "world-v2.1"),
-        ("reducer_bundle", "world-v2-reducers.5"),
+        ("reducer_bundle", "world-v2-reducers.6"),
     )
     assert snapshot.system_health.status == "degraded"
     affect_window = next(
         item for item in snapshot.slice_windows if item.slice_name == "affect_episodes"
     )
-    assert affect_window.availability == "unavailable"
-    assert affect_window.unavailable_reason == "reducer_not_implemented"
+    assert affect_window.availability == "available"
+    assert affect_window.returned_count == 0
+    assert snapshot.affect_baselines == ()
+    assert tuple(item.intensity_bp for item in snapshot.affect_aggregates) == (0,) * 8
     assert snapshot.current_situation is None
     assert snapshot.relationship_state is None
 
@@ -870,11 +883,13 @@ def test_deliberation_audit_changes_snapshot_identity_not_world_semantics() -> N
     before = reader.snapshot(world_id=WORLD_ID)
     head = ledger.project()
     ledger.commit(
-        [event(
-            "event-proposal-audit",
-            "ProposalRecorded",
-            {"proposal_id": "proposal-audit"},
-        )],
+        [
+            event(
+                "event-proposal-audit",
+                "ProposalRecorded",
+                {"proposal_id": "proposal-audit"},
+            )
+        ],
         expected_world_revision=head.world_revision,
         expected_deliberation_revision=head.deliberation_revision,
     )
@@ -923,9 +938,7 @@ def test_historical_snapshot_is_pinned_by_complete_cursor_across_later_audit_eve
 
 def test_internal_snapshot_matches_across_memory_and_sqlite_adapters(tmp_path) -> None:
     memory = ledger_with_private_action()
-    sqlite = SQLiteWorldLedger(
-        path=tmp_path / "world-v2-projection.sqlite3", world_id=WORLD_ID
-    )
+    sqlite = SQLiteWorldLedger(path=tmp_path / "world-v2-projection.sqlite3", world_id=WORLD_ID)
     populate_ledger(sqlite)
 
     memory_snapshot = InternalProjectionReader(ledger=memory).snapshot(world_id=WORLD_ID)
@@ -939,11 +952,13 @@ def test_historical_snapshot_uses_requested_world_revision_with_current_authorit
     ledger = ledger_with_private_action()
     before = ledger.project()
     ledger.commit(
-        [event(
-            "event-observation-later",
-            "ObservationRecorded",
-            {"observation_id": "observation-later"},
-        )],
+        [
+            event(
+                "event-observation-later",
+                "ObservationRecorded",
+                {"observation_id": "observation-later"},
+            )
+        ],
         expected_world_revision=before.world_revision,
         expected_deliberation_revision=before.deliberation_revision,
     )
@@ -969,11 +984,13 @@ def test_viewer_historical_projection_is_redacted_by_current_principal_grant() -
     ledger = ledger_with_private_action()
     before = ledger.project()
     ledger.commit(
-        [event(
-            "event-observation-later",
-            "ObservationRecorded",
-            {"observation_id": "observation-later"},
-        )],
+        [
+            event(
+                "event-observation-later",
+                "ObservationRecorded",
+                {"observation_id": "observation-later"},
+            )
+        ],
         expected_world_revision=before.world_revision,
         expected_deliberation_revision=before.deliberation_revision,
     )

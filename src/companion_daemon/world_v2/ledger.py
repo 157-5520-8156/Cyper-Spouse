@@ -43,6 +43,8 @@ class LedgerPort(Protocol):
 
     def project_at(self, cursor: ProjectionCursor) -> LedgerProjection: ...
 
+    def lookup_event_commit(self, event_id: str) -> tuple[WorldEvent, CommitResult] | None: ...
+
 
 @dataclass(frozen=True, slots=True)
 class _StoredEvent:
@@ -126,9 +128,7 @@ class WorldLedger:
                 raise IdempotencyConflict(f"commit_id {commit_id!r} has different content")
             return existing_commit.result
 
-        validate_commit_batch(
-            events, expected_world_revision=expected_world_revision
-        )
+        validate_commit_batch(events, expected_world_revision=expected_world_revision)
 
         event_ids = [event.event_id for event in events]
         idempotency_keys = [event.idempotency_key for event in events]
@@ -185,9 +185,7 @@ class WorldLedger:
             )
 
         self._events.extend(staged)
-        self._by_idempotency.update(
-            (stored.event.idempotency_key, stored) for stored in staged
-        )
+        self._by_idempotency.update((stored.event.idempotency_key, stored) for stored in staged)
         self._by_event_id.update((stored.event.event_id, stored) for stored in staged)
         self._world_revision = next_world_revision
         self._deliberation_revision = next_deliberation_revision
@@ -246,9 +244,18 @@ class WorldLedger:
             state=state,
         )
 
-    def rebuild(
-        self, *, reducer_bundle_version: str = REDUCER_BUNDLE_VERSION
-    ) -> LedgerProjection:
+    def lookup_event_commit(self, event_id: str) -> tuple[WorldEvent, CommitResult] | None:
+        """Return the immutable event and its original commit result, if present."""
+
+        stored = self._by_event_id.get(event_id)
+        if stored is None:
+            return None
+        for commit in self._commits.values():
+            if event_id in commit.result.event_ids:
+                return stored.event, commit.result
+        raise RuntimeError(f"event {event_id!r} has no owning commit")
+
+    def rebuild(self, *, reducer_bundle_version: str = REDUCER_BUNDLE_VERSION) -> LedgerProjection:
         require_reducer_bundle(reducer_bundle_version)
         state = ReducerState()
         world_revision = 0

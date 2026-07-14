@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 
+from .affect_math import DecayAnchor, DecayProfile, decay_intensity_bp
+from .errors import IdempotencyConflict
 from .ledger import LedgerPort, WorldLedger
 from .event_identity import domain_idempotency_key
 from .projection import ProjectionAuthority, ProjectionCompiler
 from .settlement import SettlementPlanner
 from .schemas import (
     ClockObservation,
+    CommitResult,
     ExternalObservation,
     Observation,
     ProjectionRequest,
@@ -78,6 +81,11 @@ class WorldRuntime:
             commit_id=commit_id,
         )
 
+    async def _lookup_event_commit(self, event_id: str):
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._ledger.lookup_event_commit, event_id)
+        return self._ledger.lookup_event_commit(event_id)
+
     async def ingest(self, observation: Observation) -> RuntimeOutcome:
         if observation.world_id != self._world_id:
             raise ValueError(
@@ -108,7 +116,8 @@ class WorldRuntime:
         async with self._lock:
             before = await self._project_for_write()
             committed = await self._commit(
-                [event], world_revision=before.world_revision,
+                [event],
+                world_revision=before.world_revision,
                 deliberation_revision=before.deliberation_revision,
             )
         return RuntimeOutcome(
@@ -120,6 +129,87 @@ class WorldRuntime:
             status="observed_only",
             projection_hint=f"world-revision:{committed.world_revision}",
         )
+
+    def _affect_decay_events(self, projection, clock: ClockObservation) -> list[WorldEvent]:
+        events: list[WorldEvent] = []
+        baselines = {item.dimension: item.baseline_bp for item in projection.affect_baselines}
+        for episode in projection.affect_episodes:
+            if episode.status != "active":
+                continue
+            results: list[dict[str, object]] = []
+            changed = False
+            for component in episode.components:
+                profile = component.decay_profile
+                after = decay_intensity_bp(
+                    DecayAnchor(
+                        intensity_bp=component.decay_anchor_intensity_bp,
+                        anchored_at=component.decay_anchor_at,
+                        baseline_bp=baselines.get(component.dimension, 0),
+                        residue_bp=component.residue_bp,
+                        decay_not_before=component.decay_not_before,
+                    ),
+                    DecayProfile(
+                        half_life_seconds=profile.half_life_seconds,
+                        floor_bp=profile.floor_bp,
+                        delay_seconds=profile.delay_seconds,
+                        config_version=profile.config_version,
+                        kind=profile.kind,
+                    ),
+                    clock.logical_time_to,
+                )
+                changed = changed or after != component.intensity_bp
+                results.append(
+                    {
+                        "component_id": component.component_id,
+                        "before_intensity_bp": component.intensity_bp,
+                        "after_intensity_bp": after,
+                        "config_version": profile.config_version,
+                        "table_digest": profile.table_digest,
+                        "config_digest": profile.config_digest,
+                    }
+                )
+            if not changed:
+                continue
+            payload = {
+                "change_id": f"change:affect-decay:{episode.episode_id}:{clock.tick_id}",
+                "transition_id": f"transition:affect-decay:{episode.episode_id}:{clock.tick_id}",
+                "expected_entity_revision": episode.entity_revision,
+                "evidence_refs": [
+                    {
+                        "ref_id": f"clock:{clock.logical_time_to.isoformat()}",
+                        "evidence_type": "clock_observation",
+                        "claim_purpose": "current_fact",
+                    }
+                ],
+                "appraisal_refs": [],
+                "policy_refs": ["policy:affect-v1"],
+                "episode_id": episode.episode_id,
+                "from_logical_time": episode.updated_at.isoformat(),
+                "to_logical_time": clock.logical_time_to.isoformat(),
+                "component_results": results,
+            }
+            event_type = "AffectEpisodeDecayed"
+            events.append(
+                WorldEvent.from_payload(
+                    schema_version=clock.schema_version,
+                    event_id=f"event:affect-decay:{episode.episode_id}:{clock.tick_id}",
+                    world_id=self._world_id,
+                    event_type=event_type,
+                    logical_time=clock.logical_time_to,
+                    created_at=clock.created_at,
+                    actor="system:affect-clock",
+                    source="scheduler",
+                    trace_id=clock.trace_id,
+                    causation_id=f"event:trigger:clock:{clock.tick_id}",
+                    correlation_id=clock.correlation_id,
+                    idempotency_key=domain_idempotency_key(
+                        event_type=event_type, world_id=self._world_id, payload=payload
+                    )
+                    or f"affect-decay:{episode.episode_id}:{clock.tick_id}",
+                    payload=payload,
+                )
+            )
+        return events
 
     async def advance(self, clock: ClockObservation) -> RuntimeOutcome:
         if clock.world_id != self._world_id:
@@ -143,11 +233,36 @@ class WorldRuntime:
             payload=clock.model_dump(mode="json"),
         )
         async with self._lock:
+            existing = await self._lookup_event_commit(event.event_id)
+            if existing is not None:
+                persisted, original_commit = existing
+                return self._clock_retry_outcome(
+                    event=event,
+                    persisted=persisted,
+                    original_commit=original_commit,
+                    trigger_id=trigger_id,
+                    tick_id=clock.tick_id,
+                )
             before = await self._project_for_write()
-            committed = await self._commit(
-                [event], world_revision=before.world_revision,
-                deliberation_revision=before.deliberation_revision,
-            )
+            events = [event, *self._affect_decay_events(before, clock)]
+            try:
+                committed = await self._commit(
+                    events,
+                    world_revision=before.world_revision,
+                    deliberation_revision=before.deliberation_revision,
+                )
+            except IdempotencyConflict:
+                raced = await self._lookup_event_commit(event.event_id)
+                if raced is None:
+                    raise
+                persisted, original_commit = raced
+                return self._clock_retry_outcome(
+                    event=event,
+                    persisted=persisted,
+                    original_commit=original_commit,
+                    trigger_id=trigger_id,
+                    tick_id=clock.tick_id,
+                )
         return RuntimeOutcome(
             outcome_id=f"outcome:{trigger_id}",
             trigger_id=trigger_id,
@@ -157,15 +272,35 @@ class WorldRuntime:
             projection_hint=f"world-revision:{committed.world_revision}",
         )
 
+    @staticmethod
+    def _clock_retry_outcome(
+        *,
+        event: WorldEvent,
+        persisted: WorldEvent,
+        original_commit: CommitResult,
+        trigger_id: str,
+        tick_id: str,
+    ) -> RuntimeOutcome:
+        if persisted != event:
+            raise IdempotencyConflict(
+                f"clock tick {tick_id!r} was already committed with different content"
+            )
+        return RuntimeOutcome(
+            outcome_id=f"outcome:{trigger_id}",
+            trigger_id=trigger_id,
+            committed_world_revision=original_commit.world_revision,
+            ledger_sequence=original_commit.ledger_sequence,
+            status="observed_only",
+            projection_hint=f"world-revision:{original_commit.world_revision}",
+        )
+
     async def settle(self, result: ExternalObservation) -> RuntimeOutcome:
         if result.world_id != self._world_id:
             raise ValueError("external observation belongs to another world")
         trigger_id = f"trigger:settlement:{result.source}:{result.source_event_id}"
         async with self._lock:
             before = await self._project_for_write()
-            recording_events = self._settlement.recording_events(
-                result, trigger_id=trigger_id
-            )
+            recording_events = self._settlement.recording_events(result, trigger_id=trigger_id)
             await self._commit(
                 list(recording_events),
                 world_revision=before.world_revision,

@@ -11,9 +11,12 @@ import json
 import secrets
 from typing import Protocol
 
+from .affect_math import relative_baseline_saturation_bp
+
 from .ledger import LedgerPort
 from .schemas import (
     Action,
+    AffectAggregateProjection,
     ActionAuthorityPage,
     BudgetAccount,
     BudgetReservation,
@@ -50,6 +53,7 @@ class ProjectionLimits:
     outcome_observations: int = 128
     experiences: int = 128
     appraisals: int = 128
+    affect_episodes: int = 128
 
     def __post_init__(self) -> None:
         if any(
@@ -66,6 +70,7 @@ class ProjectionLimits:
                 self.outcome_observations,
                 self.experiences,
                 self.appraisals,
+                self.affect_episodes,
             )
         ):
             raise ValueError("projection limits must be positive")
@@ -114,10 +119,7 @@ class ProjectionGrant:
         if not self.permissions <= allowed_permissions[self.viewer_kind]:
             raise ValueError("projection grant contains permissions invalid for its viewer")
         if self.viewer_kind == "platform_adapter":
-            if (
-                "projection:actions:status" in self.permissions
-                and not self.action_targets
-            ):
+            if "projection:actions:status" in self.permissions and not self.action_targets:
                 raise ValueError("platform action-status grant requires target scope")
         elif self.action_targets:
             raise ValueError("only platform grants may declare action target scope")
@@ -164,9 +166,7 @@ class ProjectionAuthority:
             if identity in by_id:
                 raise ValueError(f"duplicate projection principal {grant.viewer_id!r}")
             by_id[identity] = grant
-        if signing_key is not None and (
-            type(signing_key) is not bytes or len(signing_key) < 32
-        ):
+        if signing_key is not None and (type(signing_key) is not bytes or len(signing_key) < 32):
             raise ValueError("projection signing key must be at least 32 immutable bytes")
         if not key_version:
             raise ValueError("projection key version must not be empty")
@@ -205,9 +205,7 @@ class ProjectionAuthority:
                 "capability_expires_at": issued_at + self._capability_ttl,
             }
         )
-        return stamped.model_copy(
-            update={"authority_token": self._token(stamped, grant)}
-        )
+        return stamped.model_copy(update={"authority_token": self._token(stamped, grant)})
 
     def authorize(self, request: ProjectionRequest) -> AuthorizedProjection:
         grant = self._matching_grant(request)
@@ -217,9 +215,7 @@ class ProjectionAuthority:
         now = self._clock()
         if now < request.capability_issued_at or now >= request.capability_expires_at:
             raise PermissionError("projection capability is outside its validity window")
-        expected = self._token(
-            request.model_copy(update={"authority_token": None}), grant
-        )
+        expected = self._token(request.model_copy(update={"authority_token": None}), grant)
         if request.authority_token is None or not hmac.compare_digest(
             request.authority_token, expected
         ):
@@ -243,9 +239,7 @@ class ProjectionAuthority:
         return grant
 
     @staticmethod
-    def _validate_scope(
-        request: ProjectionRequest, grant: ProjectionGrant
-    ) -> None:
+    def _validate_scope(request: ProjectionRequest, grant: ProjectionGrant) -> None:
         if not request.permissions <= grant.permissions:
             raise PermissionError("projection request exceeds principal permissions")
 
@@ -272,9 +266,7 @@ class ProjectionAuthority:
             "grant_revision": grant.grant_revision,
             "key_version": self._key_version,
         }
-        encoded = json.dumps(
-            intent, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
+        encoded = json.dumps(intent, sort_keys=True, separators=(",", ":")).encode("utf-8")
         return hmac.new(self._signing_key, encoded, hashlib.sha256).hexdigest()
 
 
@@ -290,9 +282,7 @@ class ProjectionCapabilityIssuer:
         self._authority = authority
         self._principal_verifier = principal_verifier
 
-    def bind(
-        self, request: ProjectionRequest, *, credential: object
-    ) -> ProjectionRequest:
+    def bind(self, request: ProjectionRequest, *, credential: object) -> ProjectionRequest:
         principal = self._principal_verifier.authenticate(credential)
         return self._authority._bind_authenticated(request, principal)
 
@@ -300,9 +290,7 @@ class ProjectionCapabilityIssuer:
 class InternalProjectionReader:
     """Bounded situation-context reader; never use for Acceptance or recovery."""
 
-    def __init__(
-        self, *, ledger: LedgerPort, limits: ProjectionLimits | None = None
-    ) -> None:
+    def __init__(self, *, ledger: LedgerPort, limits: ProjectionLimits | None = None) -> None:
         self._ledger = ledger
         self._limits = limits or ProjectionLimits()
 
@@ -311,11 +299,7 @@ class InternalProjectionReader:
     ) -> InternalWorldSnapshot:
         if world_id != self._ledger.world_id:
             raise ValueError("requested snapshot belongs to another world")
-        projection = (
-            self._ledger.project()
-            if cursor is None
-            else self._ledger.project_at(cursor)
-        )
+        projection = self._ledger.project() if cursor is None else self._ledger.project_at(cursor)
         active_reservations = tuple(
             reservation
             for reservation in projection.budget_reservations
@@ -323,9 +307,7 @@ class InternalProjectionReader:
         )
         pending_actions = projection.pending_actions[-self._limits.pending_actions :]
         budget_accounts = projection.budget_accounts[-self._limits.budget_accounts :]
-        active_reservations = active_reservations[
-            -self._limits.budget_reservations :
-        ]
+        active_reservations = active_reservations[-self._limits.budget_reservations :]
         pending_external = projection.pending_external_observations[
             -self._limits.pending_external_observations :
         ]
@@ -344,14 +326,46 @@ class InternalProjectionReader:
             limit=self._limits.world_occurrences,
             is_relevant=lambda item: item.status in {"committed", "active"},
         )
-        outcome_observations = projection.outcome_observations[
-            -self._limits.outcome_observations :
-        ]
+        outcome_observations = projection.outcome_observations[-self._limits.outcome_observations :]
         experiences = projection.experiences[-self._limits.experiences :]
-        active_appraisals = tuple(
-            item for item in projection.appraisals if item.status == "active"
-        )
+        active_appraisals = tuple(item for item in projection.appraisals if item.status == "active")
         appraisals = active_appraisals[-self._limits.appraisals :]
+        active_affect_episodes = tuple(
+            item for item in projection.affect_episodes if item.status == "active"
+        )
+        affect_episodes = active_affect_episodes[-self._limits.affect_episodes :]
+        baseline_by_dimension = {
+            item.dimension: item.baseline_bp for item in projection.affect_baselines
+        }
+        affect_aggregates = tuple(
+            AffectAggregateProjection(
+                dimension=dimension,
+                intensity_bp=relative_baseline_saturation_bp(
+                    baseline_by_dimension.get(dimension, 0),
+                    [
+                        component.intensity_bp
+                        for episode in active_affect_episodes
+                        for component in episode.components
+                        if component.dimension == dimension
+                    ],
+                ),
+                active_component_count=sum(
+                    component.dimension == dimension
+                    for episode in active_affect_episodes
+                    for component in episode.components
+                ),
+            )
+            for dimension in (
+                "hurt",
+                "anger",
+                "sadness",
+                "loneliness",
+                "anxiety",
+                "resentment",
+                "warmth",
+                "joy",
+            )
+        )
         slice_windows = (
             self._window(
                 "pending_actions",
@@ -410,6 +424,12 @@ class InternalProjectionReader:
                 returned=len(appraisals),
                 ordering_policy="active-first-then-ledger-recency-v1",
             ),
+            self._window(
+                "affect_episodes",
+                total=len(active_affect_episodes),
+                returned=len(affect_episodes),
+                ordering_policy="active-first-then-ledger-recency-v1",
+            ),
             *(self._unavailable_window(name) for name in self._UNAVAILABLE_SLICES),
         )
         updated_at = projection.logical_time or datetime(1970, 1, 1, tzinfo=UTC)
@@ -442,6 +462,9 @@ class InternalProjectionReader:
             outcome_observations=outcome_observations,
             experiences=experiences,
             appraisals=appraisals,
+            affect_episodes=affect_episodes,
+            affect_baselines=projection.affect_baselines,
+            affect_aggregates=affect_aggregates,
             reducer_versions=(
                 VersionRef(name="schema", version=projection.schema_version),
                 VersionRef(
@@ -452,9 +475,7 @@ class InternalProjectionReader:
             slice_windows=slice_windows,
             system_health=health,
         )
-        snapshot_payload = draft.model_dump(
-            mode="json", exclude={"snapshot_id", "snapshot_hash"}
-        )
+        snapshot_payload = draft.model_dump(mode="json", exclude={"snapshot_id", "snapshot_hash"})
         snapshot_hash = hashlib.sha256(
             json.dumps(
                 snapshot_payload,
@@ -466,8 +487,8 @@ class InternalProjectionReader:
         return draft.model_copy(
             update={
                 "snapshot_id": (
-                f"snapshot:{projection.world_id}:{projection.ledger_sequence}:"
-                f"{snapshot_hash[:16]}"
+                    f"snapshot:{projection.world_id}:{projection.ledger_sequence}:"
+                    f"{snapshot_hash[:16]}"
                 ),
                 "snapshot_hash": snapshot_hash,
             }
@@ -478,7 +499,6 @@ class InternalProjectionReader:
         "facts",
         "current_situation",
         "commitments",
-        "affect_episodes",
         "private_impressions",
         "relationship_state",
         "conversation_threads",
@@ -564,11 +584,7 @@ class InternalAuthorityReader:
             raise ValueError("account_id must not be empty")
         projection = self._at(world_id=world_id, cursor=cursor)
         return next(
-            (
-                account
-                for account in projection.budget_accounts
-                if account.account_id == account_id
-            ),
+            (account for account in projection.budget_accounts if account.account_id == account_id),
             None,
         )
 
@@ -659,9 +675,7 @@ class InternalAuthorityReader:
             world_id=world_id,
             cursor=cursor,
             actions=actions,
-            next_after_action_id=None
-            if complete or not actions
-            else actions[-1].action_id,
+            next_after_action_id=None if complete or not actions else actions[-1].action_id,
             complete=complete,
         )
 
@@ -669,9 +683,7 @@ class InternalAuthorityReader:
         self._validate_world(world_id)
         return self._ledger.project()
 
-    def _at(
-        self, *, world_id: str, cursor: ProjectionCursor
-    ) -> LedgerProjection:
+    def _at(self, *, world_id: str, cursor: ProjectionCursor) -> LedgerProjection:
         self._validate_world(world_id)
         return self._ledger.project_at(cursor)
 
@@ -703,10 +715,7 @@ class ProjectionCompiler:
     def authorize(self, request: ProjectionRequest) -> AuthorizedProjection:
         """Authorize before any ledger read, especially historical replay."""
 
-        if (
-            request.include_debug_refs
-            and "projection:debug_refs" not in request.permissions
-        ):
+        if request.include_debug_refs and "projection:debug_refs" not in request.permissions:
             raise PermissionError("debug refs require explicit requested permission")
         return self._authority.authorize(request)
 
@@ -737,18 +746,14 @@ class ProjectionCompiler:
         action_window = self._action_window(
             total=len(visible_actions), returned=len(bounded_actions)
         )
-        pending = tuple(
-            self._action_view(action, mode=action_mode) for action in bounded_actions
-        )
+        pending = tuple(self._action_view(action, mode=action_mode) for action in bounded_actions)
 
         diagnostics = (
-            request.viewer_kind == "dashboard_operator"
-            and "projection:diagnostics" in permissions
+            request.viewer_kind == "dashboard_operator" and "projection:diagnostics" in permissions
         )
         health = self._health(projection, diagnostics=diagnostics)
         debug_allowed = (
-            request.viewer_kind == "dashboard_operator"
-            and "projection:debug_refs" in permissions
+            request.viewer_kind == "dashboard_operator" and "projection:debug_refs" in permissions
         )
         debug_refs = ()
         debug_window = None
@@ -825,10 +830,7 @@ class ProjectionCompiler:
     def _action_mode(viewer: str, permissions: frozenset[str]) -> str | None:
         if viewer == "platform_adapter" and "projection:actions:status" in permissions:
             return "status"
-        if (
-            viewer == "dashboard_operator"
-            and "projection:actions:diagnostic" in permissions
-        ):
+        if viewer == "dashboard_operator" and "projection:actions:diagnostic" in permissions:
             return "diagnostic"
         return None
 
@@ -844,9 +846,7 @@ class ProjectionCompiler:
             return ()
         actions = projection.pending_actions
         if viewer_kind == "platform_adapter":
-            actions = tuple(
-                action for action in actions if action.target in action_targets
-            )
+            actions = tuple(action for action in actions if action.target in action_targets)
         return actions
 
     @staticmethod
@@ -865,9 +865,7 @@ class ProjectionCompiler:
         *,
         request: ProjectionRequest,
         permissions: frozenset[str],
-        pending: tuple[
-            PlatformActionStatusProjection | DiagnosticActionProjection, ...
-        ],
+        pending: tuple[PlatformActionStatusProjection | DiagnosticActionProjection, ...],
         health: ProjectionSystemHealth,
         debug_refs: tuple[str, ...],
         projection: LedgerProjection,
@@ -893,8 +891,7 @@ class ProjectionCompiler:
                 counts[action.state] = counts.get(action.state, 0) + 1
         return EvaluatorProjectionView(
             action_state_counts=tuple(
-                NamedCount(name=name, count=count)
-                for name, count in sorted(counts.items())
+                NamedCount(name=name, count=count) for name, count in sorted(counts.items())
             )
         )
 
@@ -918,9 +915,7 @@ class ProjectionCompiler:
         raise ValueError("action projection mode is not visible")
 
     @staticmethod
-    def _health(
-        projection: LedgerProjection, *, diagnostics: bool
-    ) -> ProjectionSystemHealth:
+    def _health(projection: LedgerProjection, *, diagnostics: bool) -> ProjectionSystemHealth:
         if not diagnostics:
             return ProjectionSystemHealth()
         return ProjectionSystemHealth(
@@ -929,12 +924,8 @@ class ProjectionCompiler:
             action_count=len(projection.actions),
             pending_action_count=len(projection.pending_actions),
             budget_account_count=len(projection.budget_accounts),
-            reserved_budget=sum(
-                account.reserved for account in projection.budget_accounts
-            ),
+            reserved_budget=sum(account.reserved for account in projection.budget_accounts),
             spent_budget=sum(account.spent for account in projection.budget_accounts),
-            pending_external_result_count=len(
-                projection.pending_external_observations
-            ),
+            pending_external_result_count=len(projection.pending_external_observations),
             reconciliation_count=len(projection.reconciliations),
         )

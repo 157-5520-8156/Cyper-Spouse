@@ -56,13 +56,82 @@ def test_sqlite_ledger_survives_restart_and_retries_atomic_commit(tmp_path) -> N
     reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     assert reopened.project().observation_refs == ("obs-1", "obs-2")
     assert reopened.rebuild() == reopened.project()
-    assert reopened.commit(
-        events,
+    assert (
+        reopened.commit(
+            events,
+            commit_id="commit-1",
+            expected_world_revision=0,
+            expected_deliberation_revision=0,
+        )
+        == committed
+    )
+    assert reopened.project().world_revision == 2
+    reopened.close()
+
+
+@pytest.mark.parametrize(
+    "tamper_sql",
+    [
+        "UPDATE world_v2_commits SET request_hash = 'bad' WHERE commit_id = 'commit-1'",
+        """UPDATE world_v2_commits
+           SET result_json = '{"world_revision":999,"deliberation_revision":0,
+                               "ledger_sequence":999,"event_ids":["event-X"]}'
+           WHERE commit_id = 'commit-1'""",
+    ],
+)
+def test_lookup_event_commit_rejects_tampered_commit_metadata(tmp_path, tamper_sql) -> None:
+    path = tmp_path / "world-v2.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [event("event-1", "obs-1")],
         commit_id="commit-1",
         expected_world_revision=0,
         expected_deliberation_revision=0,
-    ) == committed
-    assert reopened.project().world_revision == 2
+    )
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(tamper_sql)
+
+    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    with pytest.raises(LedgerIntegrityError, match="commit (request hash|result)"):
+        reopened.lookup_event_commit("event-1")
+    reopened.close()
+
+
+def test_lookup_event_commit_rejects_coordinated_predecessor_revision_tampering(
+    tmp_path,
+) -> None:
+    path = tmp_path / "world-v2.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    first = ledger.commit(
+        [event("event-1", "obs-1")],
+        commit_id="commit-1",
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    ledger.commit(
+        [event("event-2", "obs-2")],
+        commit_id="commit-2",
+        expected_world_revision=first.world_revision,
+        expected_deliberation_revision=first.deliberation_revision,
+    )
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE world_v2_events SET world_revision = world_revision + 100"
+        )
+        connection.execute(
+            """UPDATE world_v2_commits
+               SET result_json = replace(result_json, '"world_revision":2',
+                                                       '"world_revision":102')
+               WHERE commit_id = 'commit-2'"""
+        )
+
+    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    with pytest.raises(LedgerIntegrityError, match="revisions are discontinuous"):
+        reopened.lookup_event_commit("event-2")
     reopened.close()
 
 
@@ -156,10 +225,13 @@ def test_sqlite_rebuild_selects_only_installed_replay_artifacts(tmp_path) -> Non
         expected_deliberation_revision=0,
     )
 
-    assert ledger.rebuild(
-        target_schema_version="world-v2.1",
-        reducer_bundle_version="world-v2-reducers.5",
-    ) == ledger.project()
+    assert (
+        ledger.rebuild(
+            target_schema_version="world-v2.1",
+            reducer_bundle_version="world-v2-reducers.6",
+        )
+        == ledger.project()
+    )
     with pytest.raises(ValueError, match="not installed"):
         ledger.rebuild(reducer_bundle_version="world-v1-reducers.9")
     with pytest.raises(ValueError, match="target schema.*not installed"):
@@ -198,9 +270,11 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             "outcome_observations",
             "experiences",
             "committed_world_event_refs",
-                "appraisals",
-                "message_observations",
-                "operator_observations",
+            "appraisals",
+            "affect_baselines",
+            "affect_episodes",
+            "message_observations",
+            "operator_observations",
         ):
             legacy_payload.pop(key)
         legacy_hash = hashlib.sha256(
@@ -220,9 +294,7 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
                 legacy_hash,
             ),
         )
-        connection.execute(
-            "ALTER TABLE world_v2_heads DROP COLUMN reducer_bundle_version"
-        )
+        connection.execute("ALTER TABLE world_v2_heads DROP COLUMN reducer_bundle_version")
 
     reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     assert reopened.project() == expected
@@ -234,7 +306,7 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             "SELECT reducer_bundle_version, state_json FROM world_v2_heads"
         ).fetchone()
         assert migrated is not None
-        assert migrated[0] == "world-v2-reducers.5"
+        assert migrated[0] == "world-v2-reducers.6"
         assert "pending_actions" in json.loads(migrated[1])
 
 
@@ -269,6 +341,8 @@ def test_sqlite_atomically_migrates_verified_v2_head_to_life_bundle(tmp_path) ->
             "experiences",
             "committed_world_event_refs",
             "appraisals",
+            "affect_baselines",
+            "affect_episodes",
             "message_observations",
             "operator_observations",
         ):
@@ -317,6 +391,8 @@ def test_sqlite_atomically_migrates_verified_v3_head_to_appraisal_bundle(tmp_pat
             reducer_bundle_version="world-v2-reducers.3",
         )
         payload.pop("appraisals")
+        payload.pop("affect_baselines")
+        payload.pop("affect_episodes")
         payload.pop("message_observations")
         payload.pop("operator_observations")
         for ref in payload["committed_world_event_refs"]:
@@ -358,6 +434,62 @@ def test_sqlite_rejects_unreleased_v4_bundle_instead_of_reinterpreting_it(
         SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
 
 
+def test_sqlite_migrates_v5_head_without_affect_projection_fields(tmp_path) -> None:
+    path = tmp_path / "world-v2-v5-head.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [event("event-v5-migration", "obs-v5-migration")],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    expected = ledger.project()
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        raw_state = json.loads(
+            connection.execute(
+                "SELECT state_json FROM world_v2_heads WHERE world_id = ?",
+                ("world-sqlite-test",),
+            ).fetchone()[0]
+        )
+        state = ReducerState.model_validate_json(json.dumps(raw_state, separators=(",", ":")))
+        semantic = state.semantic_payload(
+            world_id="world-sqlite-test",
+            world_revision=1,
+            reducer_bundle_version="world-v2-reducers.5",
+        )
+        semantic.pop("affect_baselines")
+        semantic.pop("affect_episodes")
+        legacy_hash = hashlib.sha256(
+            json.dumps(
+                semantic,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        raw_state.pop("affect_baselines", None)
+        raw_state.pop("affect_episodes", None)
+        raw_state.pop("affect_proposals", None)
+        raw_state.pop("affect_proposal_ids", None)
+        connection.execute(
+            """UPDATE world_v2_heads
+               SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?
+               WHERE world_id = ?""",
+            (
+                json.dumps(raw_state, separators=(",", ":")),
+                legacy_hash,
+                "world-v2-reducers.5",
+                "world-sqlite-test",
+            ),
+        )
+
+    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    assert reopened.project() == expected
+    assert reopened.rebuild() == expected
+    reopened.close()
+
+
 @pytest.mark.parametrize(
     ("case", "legacy_payload"),
     [
@@ -387,9 +519,7 @@ def test_sqlite_isolates_legacy_v3_unbound_acceptance_audit(
     path = tmp_path / f"world-v2-v3-legacy-acceptance-{case}.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
 
-    def audit_event(
-        event_id: str, event_type: str, payload: dict[str, object]
-    ) -> WorldEvent:
+    def audit_event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldEvent:
         identity = domain_idempotency_key(
             event_type=event_type,
             world_id="world-sqlite-test",
@@ -491,6 +621,8 @@ def test_sqlite_isolates_legacy_v3_unbound_acceptance_audit(
             reducer_bundle_version="world-v2-reducers.3",
         )
         semantic.pop("appraisals")
+        semantic.pop("affect_baselines")
+        semantic.pop("affect_episodes")
         semantic.pop("message_observations")
         semantic.pop("operator_observations")
         for ref in semantic["committed_world_event_refs"]:
@@ -529,9 +661,7 @@ def test_sqlite_project_normalizes_malformed_head_as_integrity_error(tmp_path) -
     ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     ledger.close()
     with sqlite3.connect(path) as connection:
-        connection.execute(
-            "UPDATE world_v2_heads SET world_revision = 'not-an-integer'"
-        )
+        connection.execute("UPDATE world_v2_heads SET world_revision = 'not-an-integer'")
 
     with pytest.raises(LedgerIntegrityError, match="cursor"):
         SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
@@ -695,15 +825,21 @@ def test_budget_overrun_with_other_reservations_survives_restart(tmp_path) -> No
     ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     ledger.commit(
         [
-            domain_event("event-account", "BudgetAccountConfigured", {
-                "account": account.model_dump(mode="json")
-            }),
-            domain_event("event-reservation-1", "BudgetReserved", {
-                "reservation": first.model_dump(mode="json")
-            }),
-            domain_event("event-reservation-2", "BudgetReserved", {
-                "reservation": second.model_dump(mode="json")
-            }),
+            domain_event(
+                "event-account",
+                "BudgetAccountConfigured",
+                {"account": account.model_dump(mode="json")},
+            ),
+            domain_event(
+                "event-reservation-1",
+                "BudgetReserved",
+                {"reservation": first.model_dump(mode="json")},
+            ),
+            domain_event(
+                "event-reservation-2",
+                "BudgetReserved",
+                {"reservation": second.model_dump(mode="json")},
+            ),
         ],
         expected_world_revision=0,
         expected_deliberation_revision=0,
@@ -718,9 +854,13 @@ def test_budget_overrun_with_other_reservations_survives_restart(tmp_path) -> No
         cost_delta=120,
     )
     ledger.commit(
-        [domain_event("event-settlement", "BudgetSettled", {
-            "settlement": settlement.model_dump(mode="json")
-        })],
+        [
+            domain_event(
+                "event-settlement",
+                "BudgetSettled",
+                {"settlement": settlement.model_dump(mode="json")},
+            )
+        ],
         expected_world_revision=3,
         expected_deliberation_revision=0,
     )

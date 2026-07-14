@@ -20,7 +20,7 @@ def test_catalog_covers_every_reducer_event_with_stable_revision_metadata() -> N
         assert contract.producer
         assert contract.payload_contract
         assert contract.schema_version == "world-v2.1"
-        assert contract.reducer_bundle == "world-v2-reducers.5"
+        assert contract.reducer_bundle == "world-v2-reducers.6"
         assert contract.upcaster == "world-v2-upcasters.1"
         assert contract.idempotency_identity
         schema = contract.json_schema()
@@ -64,6 +64,21 @@ def test_audit_event_does_not_claim_world_revision_or_domain_evidence() -> None:
     assert contract.revision_class == "deliberation"
     assert contract.evidence_types == ("model_result", "context_capsule")
     assert contract.compensations == ()
+
+
+def test_affect_baseline_catalog_matches_installed_evidence_resolvers() -> None:
+    contract = event_contract("AffectBaselineAdjusted")
+
+    assert contract.evidence_types == (
+        "observed_message",
+        "committed_world_event",
+        "committed_experience",
+        "settled_world_event",
+        "settled_external_result",
+        "active_plan",
+        "operator_observation",
+        "clock_observation",
+    )
 
 
 def test_machine_payload_contract_rejects_missing_required_fields() -> None:

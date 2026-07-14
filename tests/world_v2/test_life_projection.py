@@ -51,9 +51,7 @@ def evidence(
         ref_id=ref_id,
         evidence_type=evidence_type,
         claim_purpose=claim_purpose,
-        immutable_hash=(
-            OPERATOR_HASH if evidence_type == "operator_observation" else None
-        ),
+        immutable_hash=(OPERATOR_HASH if evidence_type == "operator_observation" else None),
     ).model_dump(mode="json")
 
 
@@ -82,13 +80,9 @@ def register_operator_observations(ledger: LedgerPort, *refs: str) -> None:
     )
 
 
-def world_evidence(
-    ledger: LedgerPort, event_id: str, claim_purpose: str
-) -> dict[str, object]:
+def world_evidence(ledger: LedgerPort, event_id: str, claim_purpose: str) -> dict[str, object]:
     committed = next(
-        ref
-        for ref in ledger.project().committed_world_event_refs
-        if ref.event_id == event_id
+        ref for ref in ledger.project().committed_world_event_refs if ref.event_id == event_id
     )
     return EvidenceRef(
         ref_id=event_id,
@@ -347,9 +341,7 @@ def seed_through_proposal(ledger: LedgerPort) -> str:
         observed_at=NOW + timedelta(minutes=3),
         confidence_bp=9_000,
     )
-    observation_evidence = world_evidence(
-        ledger, "occurrence-activated", "current_fact"
-    )
+    observation_evidence = world_evidence(ledger, "occurrence-activated", "current_fact")
     commit(
         ledger,
         [
@@ -416,9 +408,7 @@ def seed_through_proposal(ledger: LedgerPort) -> str:
 
 def settlement_batch() -> list[WorldEvent]:
     settled_at = NOW + timedelta(minutes=5)
-    settled_evidence = evidence(
-        "operator:tea-good", "operator_observation", "past_experience"
-    )
+    settled_evidence = evidence("operator:tea-good", "operator_observation", "past_experience")
     accepted_change_hash = outcome_mutation_hash(
         change_id="change:outcome-proposed",
         occurrence_id="occurrence-tea",
@@ -519,13 +509,18 @@ def assert_completed_vertical(ledger: LedgerPort) -> None:
     assert projection.world_occurrences[0].result_id == "result-tea-good"
     assert projection.experiences[0].experience_id == "experience-tea"
     assert projection.trigger_processes[0].process_kind == "npc_world_appraisal"
-    assert ledger.project_at(
-        ProjectionCursor(
-            world_revision=7,
-            deliberation_revision=3,
-            ledger_sequence=10,
+    assert (
+        ledger.project_at(
+            ProjectionCursor(
+                world_revision=7,
+                deliberation_revision=3,
+                ledger_sequence=10,
+            )
         )
-    ).world_occurrences[0].status == "active"
+        .world_occurrences[0]
+        .status
+        == "active"
+    )
     snapshot = InternalProjectionReader(ledger=ledger).snapshot(world_id=WORLD_ID)
     assert snapshot.npcs[0].npc_id == "lin"
     assert snapshot.plans[0].plan_id == "plan-tea"
@@ -589,9 +584,12 @@ def test_sqlite_state_hash_rejects_tampered_proposal_audit(tmp_path: Path) -> No
     with pytest.raises(LedgerIntegrityError, match="state hash"):
         SQLiteWorldLedger(path=path, world_id=WORLD_ID)
     with sqlite3.connect(path) as connection:
-        assert connection.execute(
-            "SELECT semantic_hash FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
-        ).fetchone()[0] == semantic_hash
+        assert (
+            connection.execute(
+                "SELECT semantic_hash FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
+            ).fetchone()[0]
+            == semantic_hash
+        )
 
 
 def test_occurrence_cannot_settle_without_matching_appraisal_trigger() -> None:
@@ -677,7 +675,13 @@ def test_claimed_world_trigger_can_commit_multi_hypothesis_appraisal() -> None:
     )
     commit(
         ledger,
-        [event("appraisal-claimed", "TriggerProcessClaimed", {"process": claimed.model_dump(mode="json")})],
+        [
+            event(
+                "appraisal-claimed",
+                "TriggerProcessClaimed",
+                {"process": claimed.model_dump(mode="json")},
+            )
+        ],
     )
     settlement_ref = next(
         ref
@@ -879,6 +883,8 @@ def test_sqlite_migrates_a_real_v3_life_trigger_with_derived_provenance(
             reducer_bundle_version="world-v2-reducers.3",
         )
         legacy_payload.pop("appraisals")
+        legacy_payload.pop("affect_baselines")
+        legacy_payload.pop("affect_episodes")
         legacy_payload.pop("message_observations")
         legacy_payload.pop("operator_observations")
         for ref in legacy_payload["committed_world_event_refs"]:
@@ -972,11 +978,11 @@ def test_outcome_proposal_cannot_escape_committed_candidate_matrix() -> None:
             ),
             "observation_refs": ["observation-tea"],
             "evidence_refs": [
-                    world_evidence(
-                        ledger,
-                        "occurrence-activated",
-                        "current_fact",
-                    )
+                world_evidence(
+                    ledger,
+                    "occurrence-activated",
+                    "current_fact",
+                )
             ],
             "confidence_bp": 8_500,
             "expires_at": (NOW + timedelta(minutes=8)).isoformat(),
@@ -1126,9 +1132,7 @@ def test_activity_lifecycle_is_revisioned_and_terminal() -> None:
     ledger = WorldLedger.in_memory(world_id=WORLD_ID)
     seed_through_proposal(ledger)
     register_operator_observations(ledger, "operator:activity")
-    evidence_refs = [
-        evidence("operator:activity", "operator_observation", "current_fact")
-    ]
+    evidence_refs = [evidence("operator:activity", "operator_observation", "current_fact")]
     transitions = (
         ("ActivityStarted", 1, "activity-started"),
         ("ActivityPaused", 2, "activity-paused"),

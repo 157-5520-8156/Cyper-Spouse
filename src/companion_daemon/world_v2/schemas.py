@@ -183,9 +183,7 @@ class ProjectionRequest(FrozenModel):
     schema_version: SchemaVersion
     request_id: str = Field(min_length=1)
     world_id: str = Field(min_length=1)
-    viewer_kind: Literal[
-        "platform_adapter", "dashboard_operator", "room_renderer", "evaluator"
-    ]
+    viewer_kind: Literal["platform_adapter", "dashboard_operator", "room_renderer", "evaluator"]
     viewer_id: str = Field(min_length=1)
     permissions: frozenset[
         Literal[
@@ -229,9 +227,7 @@ class ProjectionRequest(FrozenModel):
             value is not None for value in historical
         ):
             raise ValueError("historical projection requires a complete cursor")
-        if (self.capability_issued_at is None) != (
-            self.capability_expires_at is None
-        ):
+        if (self.capability_issued_at is None) != (self.capability_expires_at is None):
             raise ValueError("projection capability timestamps must be complete")
         if (
             self.capability_issued_at is not None
@@ -355,7 +351,11 @@ class TriggerProcess(FrozenModel):
     trigger_id: str = Field(min_length=1)
     trigger_ref: str = Field(min_length=1)
     process_kind: Literal[
-        "observation", "clock", "settlement", "recovery", "npc_world_appraisal",
+        "observation",
+        "clock",
+        "settlement",
+        "recovery",
+        "npc_world_appraisal",
         "interaction_appraisal",
     ]
     source_evidence_ref: str | None = None
@@ -389,9 +389,7 @@ class BudgetReservation(FrozenModel):
     reservation_id: str = Field(min_length=1)
     account_id: str = Field(min_length=1)
     action_id: str = Field(min_length=1)
-    category: Literal[
-        "chat", "repair", "audit", "proactive", "vision", "audio", "image", "tool"
-    ]
+    category: Literal["chat", "repair", "audit", "proactive", "vision", "audio", "image", "tool"]
     amount_limit: int = Field(ge=0)
     state: Literal["reserved", "settled", "released"] = "reserved"
     settled_cost: int = Field(default=0, ge=0)
@@ -400,9 +398,7 @@ class BudgetReservation(FrozenModel):
 class BudgetAccount(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
     account_id: str = Field(min_length=1)
-    category: Literal[
-        "chat", "repair", "audit", "proactive", "vision", "audio", "image", "tool"
-    ]
+    category: Literal["chat", "repair", "audit", "proactive", "vision", "audio", "image", "tool"]
     window_id: str = Field(min_length=1)
     limit: int = Field(ge=0)
     reserved: int = Field(default=0, ge=0)
@@ -587,10 +583,7 @@ class EvaluatorProjectionView(FrozenModel):
 
 
 ViewerProjection = (
-    PlatformProjectionView
-    | OperatorProjectionView
-    | RoomProjectionView
-    | EvaluatorProjectionView
+    PlatformProjectionView | OperatorProjectionView | RoomProjectionView | EvaluatorProjectionView
 )
 
 
@@ -599,9 +592,7 @@ class WorldProjection(FrozenModel):
     world_id: str
     world_revision: int = Field(ge=0)
     ledger_sequence: int = Field(ge=0)
-    viewer_kind: Literal[
-        "platform_adapter", "dashboard_operator", "room_renderer", "evaluator"
-    ]
+    viewer_kind: Literal["platform_adapter", "dashboard_operator", "room_renderer", "evaluator"]
     redaction_policy: str = Field(min_length=1)
     projection_policy_version: str = "world-v2-projection-policy.1"
     reducer_bundle_version: str = Field(min_length=1)
@@ -641,9 +632,7 @@ class EvidenceRef(FrozenModel):
     def committed_world_evidence_is_revision_pinned(self) -> EvidenceRef:
         if self.evidence_type in {"committed_world_event", "settled_world_event"}:
             if self.source_world_revision is None or self.immutable_hash is None:
-                raise ValueError(
-                    "world-event evidence requires revision and immutable hash"
-                )
+                raise ValueError("world-event evidence requires revision and immutable hash")
         return self
 
 
@@ -687,8 +676,7 @@ class AcceptanceDecisionRef(FrozenModel):
         ):
             raise ValueError("accepted decision requires complete change authority")
         if self.status != "accepted" and (
-            self.accepted_change_id is not None
-            or self.accepted_change_hash is not None
+            self.accepted_change_id is not None or self.accepted_change_hash is not None
         ):
             raise ValueError("non-accepted decision cannot carry accepted change authority")
         return self
@@ -865,17 +853,34 @@ class WorldOccurrenceProjection(FrozenModel):
 class AppraisalHypothesis(FrozenModel):
     hypothesis_id: str = Field(min_length=1)
     meaning: Literal[
-        "ordinary", "care", "support", "shared_joy", "goal_progress",
-        "uncertainty", "misunderstanding", "disappointment", "dismissal",
-        "boundary_violation", "dehumanization", "coercion", "control_pressure",
-        "betrayal", "loss", "user_withdrawing", "user_confused", "repair_attempt",
-        "reliability_confirmed", "reliability_broken", "restorative_solitude",
-        "creative_satisfaction", "social_warmth", "goal_strain", "npc_conflict",
+        "ordinary",
+        "care",
+        "support",
+        "shared_joy",
+        "goal_progress",
+        "uncertainty",
+        "misunderstanding",
+        "disappointment",
+        "dismissal",
+        "boundary_violation",
+        "dehumanization",
+        "coercion",
+        "control_pressure",
+        "betrayal",
+        "loss",
+        "user_withdrawing",
+        "user_confused",
+        "repair_attempt",
+        "reliability_confirmed",
+        "reliability_broken",
+        "restorative_solitude",
+        "creative_satisfaction",
+        "social_warmth",
+        "goal_strain",
+        "npc_conflict",
         "family_connection",
     ]
-    attribution: Literal[
-        "user", "companion", "npc", "situation", "third_party", "unknown"
-    ]
+    attribution: Literal["user", "companion", "npc", "situation", "third_party", "unknown"]
     controllability: Literal["controllable", "partly_controllable", "uncontrollable"]
     severity: Literal["low", "moderate", "high", "acute"]
     weight_bp: int = Field(ge=1, le=10_000)
@@ -994,9 +999,7 @@ class AppraisalProposalProjection(FrozenModel):
 
 
 class AppraisalProposedMutation(FrozenModel):
-    event_type: Literal[
-        "AppraisalAccepted", "AppraisalContradicted", "AppraisalSuperseded"
-    ]
+    event_type: Literal["AppraisalAccepted", "AppraisalContradicted", "AppraisalSuperseded"]
     payload_json: str = Field(min_length=2)
 
     @model_validator(mode="after")
@@ -1032,43 +1035,252 @@ class CommitmentStateProjection(FrozenModel):
     privacy_class: PrivacyClass = "private"
 
 
+def affect_decay_config_digest(
+    *,
+    kind: str,
+    half_life_seconds: int,
+    floor_bp: int,
+    delay_seconds: int,
+    config_version: str,
+    algorithm_version: str = "affect-decay-exp2-q48-binary-rhe-v1",
+    table_digest: str = "6a3abe39937394f738dcd1563189086020127b7e1e7189868c84ae3f890ee49f",
+    rounding_mode: str = "round-half-even",
+) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "algorithm_version": algorithm_version,
+                "config_version": config_version,
+                "delay_seconds": delay_seconds,
+                "floor_bp": floor_bp,
+                "half_life_seconds": half_life_seconds,
+                "kind": kind,
+                "rounding_mode": rounding_mode,
+                "table_digest": table_digest,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 class AffectDecayProfileProjection(FrozenModel):
-    kind: str = Field(min_length=1)
+    kind: Literal["exponential_half_life"] = "exponential_half_life"
     half_life_seconds: int = Field(gt=0)
     floor_bp: int = Field(ge=0, le=10_000)
     delay_seconds: int = Field(default=0, ge=0)
     config_version: str = Field(min_length=1)
+    algorithm_version: Literal["affect-decay-exp2-q48-binary-rhe-v1"] = (
+        "affect-decay-exp2-q48-binary-rhe-v1"
+    )
+    table_digest: Literal["6a3abe39937394f738dcd1563189086020127b7e1e7189868c84ae3f890ee49f"] = (
+        "6a3abe39937394f738dcd1563189086020127b7e1e7189868c84ae3f890ee49f"
+    )
+    rounding_mode: Literal["round-half-even"] = "round-half-even"
+    config_digest: str = Field(min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def config_digest_binds_every_decay_parameter(self) -> AffectDecayProfileProjection:
+        expected = affect_decay_config_digest(
+            kind=self.kind,
+            half_life_seconds=self.half_life_seconds,
+            floor_bp=self.floor_bp,
+            delay_seconds=self.delay_seconds,
+            config_version=self.config_version,
+            algorithm_version=self.algorithm_version,
+            table_digest=self.table_digest,
+            rounding_mode=self.rounding_mode,
+        )
+        if self.config_digest != expected:
+            raise ValueError("affect decay config digest does not match parameters")
+        return self
 
 
-class AffectComponentProjection(FrozenModel):
+class AffectBaselineProjection(FrozenModel):
+    dimension: Literal[
+        "hurt", "anger", "sadness", "loneliness", "anxiety", "resentment", "warmth", "joy"
+    ]
+    baseline_bp: int = Field(ge=0, le=10_000)
+    calibration_revision: int = Field(ge=0)
+    policy_version: str = Field(min_length=1)
+    last_calibrated_at: datetime
+    calibrated_through: datetime
+    last_calibration_basis_hash: str = Field(min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def calibration_times_are_ordered(self) -> AffectBaselineProjection:
+        for value in (self.last_calibrated_at, self.calibrated_through):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError("affect baseline times must be timezone-aware")
+        if self.calibrated_through > self.last_calibrated_at:
+            raise ValueError("baseline cannot be calibrated through the future")
+        return self
+
+
+class AffectCalibrationEpisodeRef(FrozenModel):
+    episode_id: str = Field(min_length=1)
+    terminal_entity_revision: int = Field(ge=2)
+    component_id: str = Field(min_length=1)
+
+
+class AffectAggregateProjection(FrozenModel):
     dimension: Literal[
         "hurt", "anger", "sadness", "loneliness", "anxiety", "resentment", "warmth", "joy"
     ]
     intensity_bp: int = Field(ge=0, le=10_000)
-    baseline_bp: int = Field(ge=0, le=10_000)
-    source_cluster: str = Field(min_length=1)
+    active_component_count: int = Field(ge=0)
+
+
+class AffectComponentProjection(FrozenModel):
+    component_id: str = Field(min_length=1)
+    dimension: Literal[
+        "hurt", "anger", "sadness", "loneliness", "anxiety", "resentment", "warmth", "joy"
+    ]
+    source_cluster_ref: str = Field(min_length=1)
+    appraisal_refs: tuple[AppraisalMeaningRef, ...] = Field(min_length=1)
+    intensity_bp: int = Field(ge=0, le=10_000)
+    decay_anchor_intensity_bp: int = Field(ge=0, le=10_000)
     opened_at: datetime
+    decay_anchor_at: datetime
+    decay_not_before: datetime
+    last_stimulus_at: datetime
     last_updated_at: datetime
     decay_profile: AffectDecayProfileProjection
     residue_bp: int = Field(ge=0, le=10_000)
 
     @model_validator(mode="after")
     def component_time_moves_forward(self) -> AffectComponentProjection:
-        if self.last_updated_at < self.opened_at:
-            raise ValueError("affect component update precedes opening")
+        times = (
+            self.opened_at,
+            self.decay_anchor_at,
+            self.decay_not_before,
+            self.last_stimulus_at,
+            self.last_updated_at,
+        )
+        if any(item.tzinfo is None or item.utcoffset() is None for item in times):
+            raise ValueError("affect component times must be timezone-aware")
+        if any(item < self.opened_at for item in times[1:]):
+            raise ValueError("affect component transition precedes opening")
+        lower_bound = max(self.decay_profile.floor_bp, self.residue_bp)
+        if self.intensity_bp < lower_bound or self.decay_anchor_intensity_bp < lower_bound:
+            raise ValueError("affect intensity cannot fall below floor or residue")
         return self
+
+
+class AffectOrigin(FrozenModel):
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    matrix_catalog_version: str = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
 
 
 class AffectEpisodeProjection(FrozenModel):
     episode_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    origin: AffectOrigin
     components: tuple[AffectComponentProjection, ...] = Field(min_length=1)
-    source_refs: tuple[str, ...] = Field(min_length=1)
-    appraisal_refs: tuple[AppraisalMeaningRef, ...] = ()
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     opened_at: datetime
     updated_at: datetime
     status: Literal["active", "resolved", "superseded"]
     privacy_class: PrivacyClass = "private"
     expression_history_refs: tuple[str, ...] = ()
+    closed_at: datetime | None = None
+    resolution_refs: tuple[EvidenceRef, ...] = ()
+    supersedes_episode_id: str | None = None
+    superseded_by_episode_id: str | None = None
+
+    @model_validator(mode="after")
+    def affect_episode_is_structurally_consistent(self) -> AffectEpisodeProjection:
+        if self.opened_at.tzinfo is None or self.opened_at.utcoffset() is None:
+            raise ValueError("affect episode opened_at must be timezone-aware")
+        if self.updated_at.tzinfo is None or self.updated_at.utcoffset() is None:
+            raise ValueError("affect episode updated_at must be timezone-aware")
+        if self.updated_at < self.opened_at:
+            raise ValueError("affect episode update precedes opening")
+        component_ids = tuple(item.component_id for item in self.components)
+        component_keys = tuple(
+            (item.dimension, item.source_cluster_ref) for item in self.components
+        )
+        if len(component_ids) != len(set(component_ids)):
+            raise ValueError("affect component identities must be unique")
+        if len(component_keys) != len(set(component_keys)):
+            raise ValueError("affect component dimension/source keys must be unique")
+        if any(item.opened_at < self.opened_at for item in self.components):
+            raise ValueError("affect component cannot predate its episode")
+        if self.status == "active" and (
+            self.closed_at is not None
+            or self.resolution_refs
+            or self.superseded_by_episode_id is not None
+        ):
+            raise ValueError("active affect episode cannot contain terminal state")
+        if self.status != "active" and self.closed_at is None:
+            raise ValueError("terminal affect episode requires closed_at")
+        if self.status == "resolved" and not self.resolution_refs:
+            raise ValueError("resolved affect episode requires resolution evidence")
+        if self.status != "resolved" and self.resolution_refs:
+            raise ValueError("only resolved affect episode carries resolution evidence")
+        if self.status == "superseded" and not self.superseded_by_episode_id:
+            raise ValueError("superseded affect episode requires successor identity")
+        if self.status != "superseded" and self.superseded_by_episode_id:
+            raise ValueError("only superseded affect episode carries successor identity")
+        return self
+
+
+class AffectProposedMutation(FrozenModel):
+    event_type: Literal[
+        "AffectEpisodeOpened",
+        "AffectEpisodeUpdated",
+        "AffectEpisodeResolved",
+        "AffectEpisodeSuperseded",
+        "AffectBaselineAdjusted",
+    ]
+    payload_json: str = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def payload_is_a_canonical_object(self) -> AffectProposedMutation:
+        try:
+            payload = json.loads(self.payload_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("proposed affect mutation payload is not JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("proposed affect mutation payload must be an object")
+        canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if canonical != self.payload_json:
+            raise ValueError("proposed affect mutation payload must use canonical JSON")
+        return self
+
+
+class AffectProposalProjection(FrozenModel):
+    proposal_id: str = Field(min_length=1)
+    proposal_kind: Literal["affect_transition"] = "affect_transition"
+    transition_kind: Literal["open", "update", "resolve", "supersede", "baseline_adjust"]
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    expected_entity_revision: int = Field(ge=0)
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    appraisal_refs: tuple[AppraisalMeaningRef, ...] = ()
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    proposed_mutation: AffectProposedMutation
+
+    @model_validator(mode="after")
+    def mutation_type_matches_transition(self) -> AffectProposalProjection:
+        expected = {
+            "open": "AffectEpisodeOpened",
+            "update": "AffectEpisodeUpdated",
+            "resolve": "AffectEpisodeResolved",
+            "supersede": "AffectEpisodeSuperseded",
+            "baseline_adjust": "AffectBaselineAdjusted",
+        }[self.transition_kind]
+        if self.proposed_mutation.event_type != expected:
+            raise ValueError("proposed affect mutation type does not match transition")
+        if len(self.policy_refs) != len(set(self.policy_refs)):
+            raise ValueError("affect proposal policy refs must be unique")
+        return self
 
 
 class PrivateImpressionProjection(FrozenModel):
@@ -1095,9 +1307,9 @@ class RelationshipVariablesProjection(FrozenModel):
 
 class RelationshipStateProjection(FrozenModel):
     subject_ref: str = Field(min_length=1)
-    stage: Literal[
-        "stranger", "acquaintance", "friend", "close_friend", "ambiguous", "lover"
-    ] = "stranger"
+    stage: Literal["stranger", "acquaintance", "friend", "close_friend", "ambiguous", "lover"] = (
+        "stranger"
+    )
     variables: RelationshipVariablesProjection = Field(
         default_factory=RelationshipVariablesProjection
     )
@@ -1214,6 +1426,8 @@ class InternalWorldSnapshot(FrozenModel):
     plans: tuple[PlanStateProjection, ...] = ()
     commitments: tuple[CommitmentStateProjection, ...] = ()
     affect_episodes: tuple[AffectEpisodeProjection, ...] = ()
+    affect_baselines: tuple[AffectBaselineProjection, ...] = ()
+    affect_aggregates: tuple[AffectAggregateProjection, ...] = ()
     private_impressions: tuple[PrivateImpressionProjection, ...] = ()
     relationship_state: RelationshipStateProjection | None = None
     conversation_threads: tuple[ConversationThreadProjection, ...] = ()
@@ -1298,7 +1512,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.5"
+    reducer_bundle_version: str = "world-v2-reducers.6"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -1324,8 +1538,12 @@ class LedgerProjection(FrozenModel):
     outcome_observations: tuple[OutcomeObservationProjection, ...] = ()
     experiences: tuple[ExperienceProjection, ...] = ()
     appraisals: tuple[AppraisalProjection, ...] = ()
+    affect_baselines: tuple[AffectBaselineProjection, ...] = ()
+    affect_episodes: tuple[AffectEpisodeProjection, ...] = ()
     appraisal_proposals: tuple[AppraisalProposalProjection, ...] = ()
     appraisal_proposal_ids: tuple[str, ...] = ()
+    affect_proposals: tuple[AffectProposalProjection, ...] = ()
+    affect_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
@@ -1335,9 +1553,10 @@ class LedgerProjection(FrozenModel):
     @model_validator(mode="after")
     def pending_index_matches_actions(self) -> LedgerProjection:
         terminal = {"delivered", "failed", "unknown", "cancelled", "expired"}
-        expected = tuple(
-            action for action in self.actions if action.state not in terminal
-        )
+        expected = tuple(action for action in self.actions if action.state not in terminal)
         if self.pending_actions != expected:
             raise ValueError("pending_actions must equal the non-terminal action index")
+        dimensions = tuple(item.dimension for item in self.affect_baselines)
+        if len(dimensions) != len(set(dimensions)):
+            raise ValueError("affect baseline dimensions must be unique")
         return self

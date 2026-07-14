@@ -171,17 +171,13 @@ class SQLiteWorldLedger:
                 "TEXT NOT NULL DEFAULT 'world-v2-reducers.1'"
             )
         if "state_hash" not in columns:
-            self._connection.execute(
-                "ALTER TABLE world_v2_heads ADD COLUMN state_hash TEXT"
-            )
+            self._connection.execute("ALTER TABLE world_v2_heads ADD COLUMN state_hash TEXT")
 
     @staticmethod
     def _encode_state(state: ReducerState) -> str:
         return state.model_dump_json()
 
-    def _state_hash(
-        self, state: ReducerState, cursor: ProjectionCursor
-    ) -> str:
+    def _state_hash(self, state: ReducerState, cursor: ProjectionCursor) -> str:
         encoded = json.dumps(
             {
                 "cursor": cursor.model_dump(mode="json"),
@@ -272,6 +268,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.1",
                 "world-v2-reducers.2",
                 "world-v2-reducers.3",
+                "world-v2-reducers.5",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -283,9 +280,7 @@ class SQLiteWorldLedger:
                     world_revision=world_revision,
                     reducer_bundle_version=installed,
                 )
-                if not hmac.compare_digest(
-                    legacy_hash, str(head["semantic_hash"])
-                ):
+                if not hmac.compare_digest(legacy_hash, str(head["semantic_hash"])):
                     raise LedgerIntegrityError("legacy head semantic hash is invalid")
             rebuilt = self._replay_locked(
                 target_cursor=cursor,
@@ -374,6 +369,14 @@ class SQLiteWorldLedger:
             "world-v2-reducers.1",
             "world-v2-reducers.2",
             "world-v2-reducers.3",
+            "world-v2-reducers.5",
+        }:
+            payload.pop("affect_baselines", None)
+            payload.pop("affect_episodes", None)
+        if reducer_bundle_version in {
+            "world-v2-reducers.1",
+            "world-v2-reducers.2",
+            "world-v2-reducers.3",
         }:
             payload.pop("appraisals", None)
         encoded = json.dumps(
@@ -408,8 +411,12 @@ class SQLiteWorldLedger:
             outcome_observations=projection.outcome_observations,
             experiences=projection.experiences,
             appraisals=projection.appraisals,
+            affect_baselines=projection.affect_baselines,
+            affect_episodes=projection.affect_episodes,
             appraisal_proposals=projection.appraisal_proposals,
             appraisal_proposal_ids=projection.appraisal_proposal_ids,
+            affect_proposals=projection.affect_proposals,
+            affect_proposal_ids=projection.affect_proposal_ids,
             proposal_ids=projection.proposal_ids,
             proposal_revisions=projection.proposal_revisions,
             acceptance_decisions=projection.acceptance_decisions,
@@ -461,22 +468,18 @@ class SQLiteWorldLedger:
         connection.execute("BEGIN IMMEDIATE")
         try:
             existing = connection.execute(
-                """SELECT request_hash, result_json FROM world_v2_commits
+                """SELECT commit_id FROM world_v2_commits
                    WHERE world_id = ? AND commit_id = ?""",
                 (self._world_id, commit_id),
             ).fetchone()
             if existing is not None:
-                if existing["request_hash"] != request_hash:
-                    raise IdempotencyConflict(
-                        f"commit_id {commit_id!r} has different content"
-                    )
-                result = CommitResult.model_validate_json(existing["result_json"])
+                _, result, persisted_request_hash = self._verified_commit_locked(commit_id)
+                if not hmac.compare_digest(persisted_request_hash, request_hash):
+                    raise IdempotencyConflict(f"commit_id {commit_id!r} has different content")
                 connection.commit()
                 return result
 
-            validate_commit_batch(
-                events, expected_world_revision=expected_world_revision
-            )
+            validate_commit_batch(events, expected_world_revision=expected_world_revision)
 
             placeholders = ",".join("?" for _ in events)
             duplicate = connection.execute(
@@ -634,6 +637,122 @@ class SQLiteWorldLedger:
                 reducer_bundle_version=REDUCER_BUNDLE_VERSION,
             )
 
+    def lookup_event_commit(self, event_id: str) -> tuple[WorldEvent, CommitResult] | None:
+        """Return verified persisted bytes and the result of their original commit."""
+
+        with self._thread_lock:
+            row = self._connection.execute(
+                """SELECT commit_id FROM world_v2_events
+                   WHERE world_id = ? AND event_id = ?""",
+                (self._world_id, event_id),
+            ).fetchone()
+            if row is None:
+                return None
+            events, result, _ = self._verified_commit_locked(str(row["commit_id"]))
+            event = next((item for item in events if item.event_id == event_id), None)
+            if event is None:
+                raise LedgerIntegrityError("event is absent from its owning commit")
+            return event, result
+
+    def _verified_commit_locked(
+        self, commit_id: str
+    ) -> tuple[tuple[WorldEvent, ...], CommitResult, str]:
+        """Rebuild one commit result from verified immutable event rows."""
+
+        commit_row = self._connection.execute(
+            """SELECT request_hash, result_json FROM world_v2_commits
+               WHERE world_id = ? AND commit_id = ?""",
+            (self._world_id, commit_id),
+        ).fetchone()
+        if commit_row is None:
+            raise LedgerIntegrityError("event owning commit is missing")
+        rows = tuple(
+            self._connection.execute(
+                """SELECT * FROM world_v2_events
+                   WHERE world_id = ? AND commit_id = ?
+                   ORDER BY ledger_sequence""",
+                (self._world_id, commit_id),
+            )
+        )
+        if not rows:
+            raise LedgerIntegrityError("commit has no event rows")
+        events: list[WorldEvent] = []
+        try:
+            first_sequence = int(rows[0]["ledger_sequence"])
+            if first_sequence == 1:
+                expected_sequence = 0
+                expected_world_revision = 0
+                expected_deliberation_revision = 0
+            else:
+                previous = self._connection.execute(
+                    """SELECT ledger_sequence, world_revision, deliberation_revision
+                       FROM world_v2_events
+                       WHERE world_id = ? AND ledger_sequence = ?""",
+                    (self._world_id, first_sequence - 1),
+                ).fetchone()
+                if previous is None:
+                    raise LedgerIntegrityError("commit event rows are not contiguous")
+                previous_cursor = ProjectionCursor(
+                    ledger_sequence=int(previous["ledger_sequence"]),
+                    world_revision=int(previous["world_revision"]),
+                    deliberation_revision=int(previous["deliberation_revision"]),
+                )
+                verified_prefix = self._replay_locked(
+                    target_cursor=previous_cursor,
+                    target_schema_version=CURRENT_SCHEMA_VERSION,
+                    reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+                )
+                expected_sequence = verified_prefix.ledger_sequence
+                expected_world_revision = verified_prefix.world_revision
+                expected_deliberation_revision = verified_prefix.deliberation_revision
+            for row in rows:
+                event_json = row["event_json"]
+                if not isinstance(event_json, str):
+                    raise LedgerIntegrityError("persisted event bytes are invalid")
+                actual_hash = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
+                if not hmac.compare_digest(actual_hash, str(row["event_hash"])):
+                    raise LedgerIntegrityError("event envelope hash mismatch")
+                event = WorldEvent.model_validate_json(event_json)
+                validate_event_identity(event)
+                if (
+                    event.world_id != self._world_id
+                    or event.event_id != row["event_id"]
+                    or event.idempotency_key != row["idempotency_key"]
+                ):
+                    raise LedgerIntegrityError("event envelope does not match its ledger row")
+                expected_sequence += 1
+                definition = event_definition(event.event_type)
+                if definition.revision_class is RevisionClass.WORLD:
+                    expected_world_revision += 1
+                else:
+                    expected_deliberation_revision += 1
+                if (
+                    int(row["ledger_sequence"]) != expected_sequence
+                    or int(row["world_revision"]) != expected_world_revision
+                    or int(row["deliberation_revision"]) != expected_deliberation_revision
+                ):
+                    raise LedgerIntegrityError("commit event revisions are discontinuous")
+                events.append(event)
+            calculated_request_hash = commit_request_hash(events)
+            persisted_request_hash = str(commit_row["request_hash"])
+            if not hmac.compare_digest(calculated_request_hash, persisted_request_hash):
+                raise LedgerIntegrityError("commit request hash does not match event rows")
+            last = rows[-1]
+            rebuilt_result = CommitResult(
+                world_revision=int(last["world_revision"]),
+                deliberation_revision=int(last["deliberation_revision"]),
+                ledger_sequence=int(last["ledger_sequence"]),
+                event_ids=tuple(event.event_id for event in events),
+            )
+            persisted_result = CommitResult.model_validate_json(commit_row["result_json"])
+            if persisted_result != rebuilt_result:
+                raise LedgerIntegrityError("commit result does not match event rows")
+        except LedgerIntegrityError:
+            raise
+        except Exception as exc:
+            raise LedgerIntegrityError("persisted commit is invalid") from exc
+        return tuple(events), rebuilt_result, persisted_request_hash
+
     def _project_locked(self) -> LedgerProjection:
         try:
             head = self._connection.execute(
@@ -662,9 +781,7 @@ class SQLiteWorldLedger:
                 state=state,
             )
             if projection.semantic_hash != head["semantic_hash"]:
-                raise LedgerIntegrityError(
-                    "head semantic hash does not match persisted state"
-                )
+                raise LedgerIntegrityError("head semantic hash does not match persisted state")
             return projection
         except LedgerIntegrityError:
             raise
@@ -739,9 +856,7 @@ class SQLiteWorldLedger:
                     settlement_sources=legacy_settlement_sources,
                     trigger_sources=legacy_trigger_sources,
                 )
-                event = upcast_event(
-                    raw_event, target_schema_version=target_schema_version
-                )
+                event = upcast_event(raw_event, target_schema_version=target_schema_version)
                 if event.event_type == "AcceptanceRecorded":
                     try:
                         # Old bundles allowed arbitrary audit extensions on an

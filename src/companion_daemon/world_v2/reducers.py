@@ -12,6 +12,24 @@ from typing import Any
 from pydantic import model_validator
 
 from .action_lifecycle import TERMINAL_ACTION_STATES, transition_action
+from .affect_events import (
+    AFFECT_PAYLOAD_MODELS,
+    AffectBaselineAdjustedPayload,
+    AffectAuthorizedMutationPayload,
+    AffectEpisodeDecayedPayload,
+    AffectEpisodeOpenedPayload,
+    AffectEpisodeResolvedPayload,
+    AffectEpisodeSupersededPayload,
+    AffectEpisodeUpdatedPayload,
+)
+from .affect_reducers import (
+    adjust_affect_baseline,
+    decay_affect_episode,
+    open_affect_episode,
+    resolve_affect_episode,
+    supersede_affect_episode,
+    update_affect_episode,
+)
 from .appraisal_events import (
     AppraisalAcceptedPayload,
     AppraisalContradictedPayload,
@@ -56,7 +74,11 @@ from .schemas import (
     ActionDispatchClaim,
     ActionReconciliation,
     ActionState,
+    AffectBaselineProjection,
+    AffectEpisodeProjection,
+    AffectProposalProjection,
     AppraisalProjection,
+    AppraisalMeaningRef,
     AppraisalProposalProjection,
     AcceptanceDecisionRef,
     BudgetAccount,
@@ -84,10 +106,14 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.5"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.6"
 INSTALLED_APPRAISAL_POLICY_REFS = ("policy:appraisal-v1",)
 INSTALLED_APPRAISAL_MATRIX_VERSION = "appraisal-matrix.1"
 INSTALLED_SOURCE_CLUSTERING_VERSION = "source-clustering.1"
+INSTALLED_AFFECT_POLICY_REFS = ("policy:affect-v1",)
+INSTALLED_AFFECT_BASELINE_POLICY_REFS = ("policy:affect-baseline-v1",)
+INSTALLED_AFFECT_MATRIX_VERSION = "affect-matrix.1"
+INSTALLED_AFFECT_MERGE_WINDOW_SECONDS = 900
 
 
 class RevisionClass(StrEnum):
@@ -118,8 +144,12 @@ class ReducerState(FrozenModel):
     experiences: tuple[ExperienceProjection, ...] = ()
     outcome_proposals: tuple[OutcomeProposalProjection, ...] = ()
     appraisals: tuple[AppraisalProjection, ...] = ()
+    affect_baselines: tuple[AffectBaselineProjection, ...] = ()
+    affect_episodes: tuple[AffectEpisodeProjection, ...] = ()
     appraisal_proposals: tuple[AppraisalProposalProjection, ...] = ()
     appraisal_proposal_ids: tuple[str, ...] = ()
+    affect_proposals: tuple[AffectProposalProjection, ...] = ()
+    affect_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
@@ -127,12 +157,13 @@ class ReducerState(FrozenModel):
     @model_validator(mode="after")
     def pending_index_matches_actions(self) -> ReducerState:
         expected = tuple(
-            action
-            for action in self.actions
-            if action.state not in TERMINAL_ACTION_STATES
+            action for action in self.actions if action.state not in TERMINAL_ACTION_STATES
         )
         if self.pending_actions != expected:
             raise ValueError("pending_actions must equal the non-terminal action index")
+        dimensions = tuple(item.dimension for item in self.affect_baselines)
+        if len(dimensions) != len(set(dimensions)):
+            raise ValueError("affect baseline dimensions must be unique")
         return self
 
     def semantic_payload(
@@ -155,8 +186,7 @@ class ReducerState(FrozenModel):
                 item.model_dump(mode="json") for item in self.operator_observations
             ),
             "committed_world_event_refs": tuple(
-                ref.model_dump(mode="json")
-                for ref in self.committed_world_event_refs
+                ref.model_dump(mode="json") for ref in self.committed_world_event_refs
             ),
             "logical_time": self.logical_time.isoformat() if self.logical_time else None,
             "actions": tuple(action.model_dump(mode="json") for action in self.actions),
@@ -164,8 +194,7 @@ class ReducerState(FrozenModel):
                 action.model_dump(mode="json") for action in self.pending_actions
             ),
             "budget_reservations": tuple(
-                reservation.model_dump(mode="json")
-                for reservation in self.budget_reservations
+                reservation.model_dump(mode="json") for reservation in self.budget_reservations
             ),
             "budget_accounts": tuple(
                 account.model_dump(mode="json") for account in self.budget_accounts
@@ -177,26 +206,25 @@ class ReducerState(FrozenModel):
                 settlement.model_dump(mode="json") for settlement in self.budget_settlements
             ),
             "reconciliations": tuple(
-                reconciliation.model_dump(mode="json")
-                for reconciliation in self.reconciliations
+                reconciliation.model_dump(mode="json") for reconciliation in self.reconciliations
             ),
             "npcs": tuple(npc.model_dump(mode="json") for npc in self.npcs),
             "plans": tuple(plan.model_dump(mode="json") for plan in self.plans),
             "world_occurrences": tuple(
-                occurrence.model_dump(mode="json")
-                for occurrence in self.world_occurrences
+                occurrence.model_dump(mode="json") for occurrence in self.world_occurrences
             ),
             "outcome_observations": tuple(
-                observation.model_dump(mode="json")
-                for observation in self.outcome_observations
+                observation.model_dump(mode="json") for observation in self.outcome_observations
             ),
             "experiences": tuple(
-                experience.model_dump(mode="json")
-                for experience in self.experiences
+                experience.model_dump(mode="json") for experience in self.experiences
             ),
-            "appraisals": tuple(
-                appraisal.model_dump(mode="json")
-                for appraisal in self.appraisals
+            "appraisals": tuple(appraisal.model_dump(mode="json") for appraisal in self.appraisals),
+            "affect_baselines": tuple(
+                baseline.model_dump(mode="json") for baseline in self.affect_baselines
+            ),
+            "affect_episodes": tuple(
+                episode.model_dump(mode="json") for episode in self.affect_episodes
             ),
         }
 
@@ -222,11 +250,12 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
         raise ValueError("ProposalRecorded requires proposal_id")
     if proposal_id in state.proposal_ids:
         raise ValueError("proposal identity is already registered")
-    if raw.get("proposal_kind") != "appraisal_transition":
+    if raw.get("proposal_kind") not in {
+        "appraisal_transition",
+        "affect_transition",
+    }:
         evaluated = raw.get("evaluated_world_revision")
-        if isinstance(evaluated, int) and evaluated != len(
-            state.committed_world_event_refs
-        ):
+        if isinstance(evaluated, int) and evaluated != len(state.committed_world_event_refs):
             raise ValueError("proposal must evaluate the current world revision")
         return state.model_copy(
             update={
@@ -244,6 +273,8 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
                 ),
             }
         )
+    if raw.get("proposal_kind") == "affect_transition":
+        return _affect_proposal_recorded(state, event)
     proposal = AppraisalProposalProjection.model_validate_json(event.payload_json)
     if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
         raise ValueError("appraisal proposal must evaluate the current world revision")
@@ -256,17 +287,13 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
         "AppraisalContradicted": AppraisalContradictedPayload,
         "AppraisalSuperseded": AppraisalSupersededPayload,
     }[proposal.proposed_mutation.event_type]
-    proposed_payload = proposed_model.model_validate_json(
-        proposal.proposed_mutation.payload_json
-    )
+    proposed_payload = proposed_model.model_validate_json(proposal.proposed_mutation.payload_json)
     if (
         proposed_payload.proposal_id != proposal.proposal_id
         or proposed_payload.change_id != proposal.change_id
         or proposed_payload.trigger_id != proposal.trigger_id
-        or proposed_payload.evaluated_world_revision
-        != proposal.evaluated_world_revision
-        or proposed_payload.expected_entity_revision
-        != proposal.expected_entity_revision
+        or proposed_payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or proposed_payload.expected_entity_revision != proposal.expected_entity_revision
         or proposed_payload.accepted_change_hash != proposal.proposed_change_hash
         or proposed_payload.evidence_refs != proposal.evidence_refs
         or proposed_payload.policy_refs != proposal.policy_refs
@@ -285,11 +312,7 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     ):
         raise ValueError("appraisal proposal requires its claimed source-bound trigger")
     source_evidence = next(
-        (
-            ref
-            for ref in proposal.evidence_refs
-            if ref.ref_id == proposal.source_evidence_ref
-        ),
+        (ref for ref in proposal.evidence_refs if ref.ref_id == proposal.source_evidence_ref),
         None,
     )
     expected_source_kind = (
@@ -319,13 +342,70 @@ def _proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     )
 
 
+def _affect_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    proposal = AffectProposalProjection.model_validate_json(event.payload_json)
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("affect proposal must evaluate the current world revision")
+    if proposal.proposal_id in state.affect_proposal_ids:
+        raise ValueError("affect proposal identity is already registered")
+    installed_policy = (
+        INSTALLED_AFFECT_BASELINE_POLICY_REFS
+        if proposal.transition_kind == "baseline_adjust"
+        else INSTALLED_AFFECT_POLICY_REFS
+    )
+    if proposal.policy_refs != installed_policy:
+        raise ValueError("affect proposal references an uninstalled policy")
+    proposed_model = AFFECT_PAYLOAD_MODELS[proposal.proposed_mutation.event_type]
+    proposed_payload = proposed_model.model_validate_json(proposal.proposed_mutation.payload_json)
+    if not isinstance(proposed_payload, AffectAuthorizedMutationPayload):
+        raise ValueError("mechanical affect decay cannot be proposed by deliberation")
+    if (
+        proposed_payload.proposal_id != proposal.proposal_id
+        or proposed_payload.change_id != proposal.change_id
+        or proposed_payload.transition_id != proposal.transition_id
+        or proposed_payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or proposed_payload.expected_entity_revision != proposal.expected_entity_revision
+        or proposed_payload.accepted_change_hash != proposal.proposed_change_hash
+        or proposed_payload.evidence_refs != proposal.evidence_refs
+        or proposed_payload.appraisal_refs != proposal.appraisal_refs
+        or proposed_payload.policy_refs != proposal.policy_refs
+    ):
+        raise ValueError("persisted affect proposal body does not match its index")
+    _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
+    _validate_appraisal_meaning_refs(state.appraisals, proposal.appraisal_refs)
+    if isinstance(proposed_payload, AffectBaselineAdjustedPayload):
+        if state.logical_time is None:
+            raise ValueError("baseline proposal requires authoritative logical time")
+        adjust_affect_baseline(
+            state.affect_baselines,
+            state.affect_episodes,
+            proposed_payload,
+            logical_time=state.logical_time,
+        )
+    return state.model_copy(
+        update={
+            "affect_proposals": (*state.affect_proposals, proposal),
+            "affect_proposal_ids": (
+                *state.affect_proposal_ids,
+                proposal.proposal_id,
+            ),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
 def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     raw = event.payload()
     proposal_id = raw.get("proposal_id")
     evaluated_world_revision = raw.get("evaluated_world_revision")
-    if not isinstance(proposal_id, str) or not isinstance(
-        evaluated_world_revision, int
-    ):
+    if not isinstance(proposal_id, str) or not isinstance(evaluated_world_revision, int):
         raise ValueError("AcceptanceRecorded requires proposal and evaluated revision")
     if proposal_id not in state.proposal_ids:
         raise ValueError("AcceptanceRecorded references an unknown proposal")
@@ -345,40 +425,31 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
     if acceptance_id is not None and (
         not isinstance(acceptance_id, str)
         or not acceptance_id
-        or any(
-            item.acceptance_id == acceptance_id
-            for item in state.acceptance_decisions
-        )
+        or any(item.acceptance_id == acceptance_id for item in state.acceptance_decisions)
     ):
         raise ValueError("acceptance identity is already registered or invalid")
     status = raw.get("status")
     if status not in {"accepted", "rejected", "stale"}:
         raise ValueError("AcceptanceRecorded has an invalid status")
     current_world_revision = len(state.committed_world_event_refs)
-    if status in {"accepted", "rejected"} and (
-        evaluated_world_revision != current_world_revision
-    ):
+    if status in {"accepted", "rejected"} and (evaluated_world_revision != current_world_revision):
         raise ValueError("accepted or rejected decision must evaluate the current world")
     if status == "stale" and evaluated_world_revision >= current_world_revision:
         raise ValueError("stale decision must evaluate an older world revision")
     appraisal = next(
-        (
-            item
-            for item in state.appraisal_proposals
-            if item.proposal_id == proposal_id
-        ),
+        (item for item in state.appraisal_proposals if item.proposal_id == proposal_id),
         None,
     )
     outcome = next(
-        (
-            item
-            for item in state.outcome_proposals
-            if item.outcome_proposal_id == proposal_id
-        ),
+        (item for item in state.outcome_proposals if item.outcome_proposal_id == proposal_id),
+        None,
+    )
+    affect = next(
+        (item for item in state.affect_proposals if item.proposal_id == proposal_id),
         None,
     )
     if status == "accepted":
-        authority = appraisal or outcome
+        authority = appraisal or outcome or affect
         if authority is None:
             raise ValueError("accepted decision requires a typed proposal")
         if (
@@ -399,13 +470,14 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         update={
             "acceptance_decisions": (*state.acceptance_decisions, decision),
             "appraisal_proposals": (
-                tuple(
-                    item
-                    for item in state.appraisal_proposals
-                    if item.proposal_id != proposal_id
-                )
+                tuple(item for item in state.appraisal_proposals if item.proposal_id != proposal_id)
                 if status in {"rejected", "stale"}
                 else state.appraisal_proposals
+            ),
+            "affect_proposals": (
+                tuple(item for item in state.affect_proposals if item.proposal_id != proposal_id)
+                if status in {"rejected", "stale"}
+                else state.affect_proposals
             ),
         }
     )
@@ -498,16 +570,12 @@ def _clock_advanced(state: ReducerState, event: WorldEvent) -> ReducerState:
     return state.model_copy(update={"logical_time": target})
 
 
-def _operator_observation_recorded(
-    state: ReducerState, event: WorldEvent
-) -> ReducerState:
+def _operator_observation_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     payload = event.payload()
     observation_id = payload.get("observation_id")
     if not isinstance(observation_id, str) or not observation_id:
         raise ValueError("OperatorObservationRecorded requires observation_id")
-    if any(
-        item.observation_id == observation_id for item in state.operator_observations
-    ):
+    if any(item.observation_id == observation_id for item in state.operator_observations):
         raise ValueError("operator observation identity is already registered")
     observation_hash = payload.get("observation_hash")
     if not isinstance(observation_hash, str):
@@ -536,9 +604,7 @@ def _action_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
         raise ValueError("ActionAuthorized requires authorized state")
     if any(existing.action_id == action.action_id for existing in state.actions):
         raise ValueError(f"action {action.action_id!r} is already registered")
-    if any(
-        existing.idempotency_key == action.idempotency_key for existing in state.actions
-    ):
+    if any(existing.idempotency_key == action.idempotency_key for existing in state.actions):
         raise ValueError(f"action idempotency_key {action.idempotency_key!r} already exists")
     reservation = next(
         (
@@ -562,10 +628,7 @@ def _action_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
 
 def _budget_reserved(state: ReducerState, event: WorldEvent) -> ReducerState:
     reservation = _model_from_payload(event, "reservation", BudgetReservation)
-    if any(
-        item.reservation_id == reservation.reservation_id
-        for item in state.budget_reservations
-    ):
+    if any(item.reservation_id == reservation.reservation_id for item in state.budget_reservations):
         raise ValueError(f"budget reservation {reservation.reservation_id!r} already exists")
     if reservation.state != "reserved":
         raise ValueError("BudgetReserved requires reserved state")
@@ -703,18 +766,14 @@ def _required_action_id(event: WorldEvent) -> str:
     return action_id
 
 
-def _replace_action(
-    state: ReducerState, *, index: int, action: Action
-) -> ReducerState:
+def _replace_action(state: ReducerState, *, index: int, action: Action) -> ReducerState:
     actions = (
         *state.actions[:index],
         action,
         *state.actions[index + 1 :],
     )
     pending = tuple(
-        candidate
-        for candidate in actions
-        if candidate.state not in TERMINAL_ACTION_STATES
+        candidate for candidate in actions if candidate.state not in TERMINAL_ACTION_STATES
     )
     return state.model_copy(
         update={
@@ -761,17 +820,12 @@ def _execution_receipt_recorded(state: ReducerState, event: WorldEvent) -> Reduc
     receipt = _model_from_payload(event, "receipt", ExecutionReceipt)
     if any(item.receipt_id == receipt.receipt_id for item in state.execution_receipts):
         raise ValueError(f"execution receipt {receipt.receipt_id!r} already exists")
-    return state.model_copy(
-        update={"execution_receipts": (*state.execution_receipts, receipt)}
-    )
+    return state.model_copy(update={"execution_receipts": (*state.execution_receipts, receipt)})
 
 
 def _budget_settlement_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     settlement = _model_from_payload(event, "settlement", BudgetSettlement)
-    if any(
-        item.settlement_id == settlement.settlement_id
-        for item in state.budget_settlements
-    ):
+    if any(item.settlement_id == settlement.settlement_id for item in state.budget_settlements):
         raise ValueError(f"budget result {settlement.result_id!r} already exists")
     reservation_index = next(
         (
@@ -840,13 +894,10 @@ def _budget_settlement_recorded(state: ReducerState, event: WorldEvent) -> Reduc
 def _reconciliation_required(state: ReducerState, event: WorldEvent) -> ReducerState:
     reconciliation = _model_from_payload(event, "reconciliation", ActionReconciliation)
     if any(
-        item.reconciliation_id == reconciliation.reconciliation_id
-        for item in state.reconciliations
+        item.reconciliation_id == reconciliation.reconciliation_id for item in state.reconciliations
     ):
         raise ValueError(f"reconciliation {reconciliation.result_id!r} already exists")
-    return state.model_copy(
-        update={"reconciliations": (*state.reconciliations, reconciliation)}
-    )
+    return state.model_copy(update={"reconciliations": (*state.reconciliations, reconciliation)})
 
 
 def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -874,11 +925,7 @@ def _trigger_process_completed(state: ReducerState, event: WorldEvent) -> Reduce
     if not isinstance(completed_at_raw, str):
         raise ValueError("TriggerProcessCompleted requires completed_at")
     completed_at = datetime.fromisoformat(completed_at_raw)
-    if not (
-        process.claim_lease.acquired_at
-        <= completed_at
-        <= process.claim_lease.expires_at
-    ):
+    if not (process.claim_lease.acquired_at <= completed_at <= process.claim_lease.expires_at):
         raise ValueError("trigger completion occurred outside its claim lease")
     completed = process.model_copy(
         update={
@@ -979,9 +1026,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         )
     if process.process_kind in {"npc_world_appraisal", "interaction_appraisal"}:
         raise ValueError("appraisal trigger must be opened before it is claimed")
-    return state.model_copy(
-        update={"trigger_processes": (*state.trigger_processes, process)}
-    )
+    return state.model_copy(update={"trigger_processes": (*state.trigger_processes, process)})
 
 
 def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -996,9 +1041,7 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             raise ValueError("interaction appraisal trigger requires an observed message")
         if (
             process.trigger_id
-            != interaction_appraisal_trigger_identity(
-                event.world_id, process.source_evidence_ref
-            )
+            != interaction_appraisal_trigger_identity(event.world_id, process.source_evidence_ref)
             or process.trigger_ref != f"interaction:{process.source_evidence_ref}"
         ):
             raise ValueError("interaction appraisal trigger identity is not deterministic")
@@ -1020,9 +1063,7 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             raise ValueError("npc appraisal trigger requires a settled world event")
     if any(item.trigger_id == process.trigger_id for item in state.trigger_processes):
         raise ValueError(f"trigger {process.trigger_id!r} already exists")
-    return state.model_copy(
-        update={"trigger_processes": (*state.trigger_processes, process)}
-    )
+    return state.model_copy(update={"trigger_processes": (*state.trigger_processes, process)})
 
 
 def _life_payload(event: WorldEvent, model_type):
@@ -1120,8 +1161,7 @@ def _validate_evidence_authority(
                     item
                     for item in state.execution_receipts
                     if item.is_terminal
-                    and evidence.ref_id
-                    in {item.receipt_id, item.result_id, item.source_event_id}
+                    and evidence.ref_id in {item.receipt_id, item.result_id, item.source_event_id}
                 ),
                 None,
             )
@@ -1180,9 +1220,7 @@ def _npc_registered(state: ReducerState, event: WorldEvent) -> ReducerState:
 def _activity_planned(state: ReducerState, event: WorldEvent) -> ReducerState:
     _require_life_time(state, event)
     payload = _validated_life_payload(state, event, ActivityPlannedPayload)
-    return state.model_copy(
-        update={"plans": plan_activity(state.plans, state.npcs, payload)}
-    )
+    return state.model_copy(update={"plans": plan_activity(state.plans, state.npcs, payload)})
 
 
 def _activity_transitioned(
@@ -1206,9 +1244,7 @@ def _activity_transitioned(
     )
 
 
-def _world_occurrence_committed(
-    state: ReducerState, event: WorldEvent
-) -> ReducerState:
+def _world_occurrence_committed(state: ReducerState, event: WorldEvent) -> ReducerState:
     _require_life_time(state, event)
     payload = _validated_life_payload(state, event, WorldOccurrenceCommittedPayload)
     return state.model_copy(
@@ -1223,26 +1259,16 @@ def _world_occurrence_committed(
     )
 
 
-def _world_occurrence_activated(
-    state: ReducerState, event: WorldEvent
-) -> ReducerState:
+def _world_occurrence_activated(state: ReducerState, event: WorldEvent) -> ReducerState:
     _require_life_time(state, event)
     payload = _validated_life_payload(state, event, WorldOccurrenceActivatedPayload)
     return state.model_copy(
-        update={
-            "world_occurrences": activate_occurrence(
-                state.world_occurrences, payload
-            )
-        }
+        update={"world_occurrences": activate_occurrence(state.world_occurrences, payload)}
     )
 
 
-def _outcome_observation_recorded(
-    state: ReducerState, event: WorldEvent
-) -> ReducerState:
-    payload = _validated_life_payload(
-        state, event, OutcomeObservationRecordedPayload
-    )
+def _outcome_observation_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = _validated_life_payload(state, event, OutcomeObservationRecordedPayload)
     occurrences, observations = record_outcome_observation(
         state.world_occurrences,
         state.outcome_observations,
@@ -1258,9 +1284,7 @@ def _outcome_observation_recorded(
     )
 
 
-def _world_occurrence_settled(
-    state: ReducerState, event: WorldEvent
-) -> ReducerState:
+def _world_occurrence_settled(state: ReducerState, event: WorldEvent) -> ReducerState:
     payload = _validated_life_payload(state, event, WorldOccurrenceSettledPayload)
     return state.model_copy(
         update={
@@ -1275,9 +1299,7 @@ def _world_occurrence_settled(
     )
 
 
-def _outcome_proposal_recorded(
-    state: ReducerState, event: WorldEvent
-) -> ReducerState:
+def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     _require_life_time(state, event)
     payload = _validated_life_payload(state, event, OutcomeProposalRecordedPayload)
     if payload.evaluated_world_revision != len(state.committed_world_event_refs):
@@ -1320,9 +1342,7 @@ def _experience_committed(state: ReducerState, event: WorldEvent) -> ReducerStat
 def _world_occurrence_terminated(
     state: ReducerState, event: WorldEvent, *, target_status: str
 ) -> ReducerState:
-    payload = _validated_life_payload(
-        state, event, WorldOccurrenceTerminalPayload
-    )
+    payload = _validated_life_payload(state, event, WorldOccurrenceTerminalPayload)
     return state.model_copy(
         update={
             "world_occurrences": terminate_occurrence(
@@ -1342,38 +1362,44 @@ def _appraisal_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
         raise ValueError("appraisal origin must reference its accepted event")
     _require_installed_appraisal_origin(payload.appraisal)
     proposal = _require_authorized_appraisal(state, payload, transition_kind="accept")
-    return state.model_copy(update={
-        "appraisals": accept_appraisal(
-            state.appraisals, payload, logical_time=_require_life_time(state, event)
-        ),
-        "appraisal_proposals": tuple(
-            item for item in state.appraisal_proposals if item != proposal
-        ),
-    })
+    return state.model_copy(
+        update={
+            "appraisals": accept_appraisal(
+                state.appraisals, payload, logical_time=_require_life_time(state, event)
+            ),
+            "appraisal_proposals": tuple(
+                item for item in state.appraisal_proposals if item != proposal
+            ),
+        }
+    )
 
 
 def _appraisal_contradicted(state: ReducerState, event: WorldEvent) -> ReducerState:
     payload = _validated_life_payload(state, event, AppraisalContradictedPayload)
     _validate_evidence_authority(state, payload.evidence_refs, require_all=True)
-    proposal = _require_authorized_appraisal(
-        state, payload, transition_kind="contradict"
+    proposal = _require_authorized_appraisal(state, payload, transition_kind="contradict")
+    return state.model_copy(
+        update={
+            "appraisals": contradict_appraisal(
+                state.appraisals, payload, logical_time=_require_life_time(state, event)
+            ),
+            "appraisal_proposals": tuple(
+                item for item in state.appraisal_proposals if item != proposal
+            ),
+        }
     )
-    return state.model_copy(update={
-        "appraisals": contradict_appraisal(
-            state.appraisals, payload, logical_time=_require_life_time(state, event)
-        ),
-        "appraisal_proposals": tuple(
-            item for item in state.appraisal_proposals if item != proposal
-        ),
-    })
 
 
 def _appraisal_expired(state: ReducerState, event: WorldEvent) -> ReducerState:
     payload = _validated_life_payload(state, event, AppraisalExpiredPayload)
     _validate_evidence_authority(state, payload.evidence_refs, require_all=True)
-    return state.model_copy(update={"appraisals": expire_appraisal(
-        state.appraisals, payload, logical_time=_require_life_time(state, event)
-    )})
+    return state.model_copy(
+        update={
+            "appraisals": expire_appraisal(
+                state.appraisals, payload, logical_time=_require_life_time(state, event)
+            )
+        }
+    )
 
 
 def _appraisal_superseded(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -1382,26 +1408,198 @@ def _appraisal_superseded(state: ReducerState, event: WorldEvent) -> ReducerStat
     if payload.successor.origin.accepted_event_ref != event.event_id:
         raise ValueError("successor appraisal origin must reference its accepted event")
     _require_installed_appraisal_origin(payload.successor)
-    proposal = _require_authorized_appraisal(
-        state, payload, transition_kind="supersede"
+    proposal = _require_authorized_appraisal(state, payload, transition_kind="supersede")
+    return state.model_copy(
+        update={
+            "appraisals": supersede_appraisal(
+                state.appraisals, payload, logical_time=_require_life_time(state, event)
+            ),
+            "appraisal_proposals": tuple(
+                item for item in state.appraisal_proposals if item != proposal
+            ),
+        }
     )
-    return state.model_copy(update={
-        "appraisals": supersede_appraisal(
-            state.appraisals, payload, logical_time=_require_life_time(state, event)
-        ),
-        "appraisal_proposals": tuple(
-            item for item in state.appraisal_proposals if item != proposal
-        ),
-    })
+
+
+def _affect_episode_opened(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = _validated_life_payload(state, event, AffectEpisodeOpenedPayload)
+    if payload.episode.origin.accepted_event_ref != event.event_id:
+        raise ValueError("affect origin must reference its accepted event")
+    _require_installed_affect_origin(payload.episode)
+    proposal = _require_authorized_affect(state, payload, transition_kind="open")
+    return state.model_copy(
+        update={
+            "affect_episodes": open_affect_episode(
+                state.affect_episodes,
+                payload,
+                appraisals=state.appraisals,
+                logical_time=_require_life_time(state, event),
+                merge_window_seconds=INSTALLED_AFFECT_MERGE_WINDOW_SECONDS,
+                baselines=state.affect_baselines,
+            ),
+            "affect_proposals": tuple(item for item in state.affect_proposals if item != proposal),
+        }
+    )
+
+
+def _affect_episode_updated(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = _validated_life_payload(state, event, AffectEpisodeUpdatedPayload)
+    proposal = _require_authorized_affect(state, payload, transition_kind="update")
+    return state.model_copy(
+        update={
+            "affect_episodes": update_affect_episode(
+                state.affect_episodes,
+                payload,
+                appraisals=state.appraisals,
+                logical_time=_require_life_time(state, event),
+                merge_window_seconds=INSTALLED_AFFECT_MERGE_WINDOW_SECONDS,
+                baselines=state.affect_baselines,
+            ),
+            "affect_proposals": tuple(item for item in state.affect_proposals if item != proposal),
+        }
+    )
+
+
+def _affect_episode_decayed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = _validated_life_payload(state, event, AffectEpisodeDecayedPayload)
+    return state.model_copy(
+        update={
+            "affect_episodes": decay_affect_episode(
+                state.affect_episodes,
+                payload,
+                logical_time=_require_life_time(state, event),
+                baselines=state.affect_baselines,
+            )
+        }
+    )
+
+
+def _affect_episode_resolved(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = _validated_life_payload(state, event, AffectEpisodeResolvedPayload)
+    proposal = _require_authorized_affect(state, payload, transition_kind="resolve")
+    return state.model_copy(
+        update={
+            "affect_episodes": resolve_affect_episode(
+                state.affect_episodes,
+                payload,
+                logical_time=_require_life_time(state, event),
+            ),
+            "affect_proposals": tuple(item for item in state.affect_proposals if item != proposal),
+        }
+    )
+
+
+def _affect_episode_superseded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = _validated_life_payload(state, event, AffectEpisodeSupersededPayload)
+    if payload.successor.origin.accepted_event_ref != event.event_id:
+        raise ValueError("successor affect origin must reference its accepted event")
+    _require_installed_affect_origin(payload.successor)
+    proposal = _require_authorized_affect(state, payload, transition_kind="supersede")
+    return state.model_copy(
+        update={
+            "affect_episodes": supersede_affect_episode(
+                state.affect_episodes,
+                payload,
+                appraisals=state.appraisals,
+                logical_time=_require_life_time(state, event),
+                merge_window_seconds=INSTALLED_AFFECT_MERGE_WINDOW_SECONDS,
+                baselines=state.affect_baselines,
+            ),
+            "affect_proposals": tuple(item for item in state.affect_proposals if item != proposal),
+        }
+    )
+
+
+def _affect_baseline_adjusted(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = _validated_life_payload(state, event, AffectBaselineAdjustedPayload)
+    _require_life_time(state, event)
+    if payload.policy_refs != INSTALLED_AFFECT_BASELINE_POLICY_REFS:
+        raise ValueError("baseline adjustment references an uninstalled policy")
+    proposal = _require_authorized_affect(state, payload, transition_kind="baseline_adjust")
+    return state.model_copy(
+        update={
+            "affect_baselines": adjust_affect_baseline(
+                state.affect_baselines,
+                state.affect_episodes,
+                payload,
+                logical_time=state.logical_time,
+            ),
+            "affect_proposals": tuple(item for item in state.affect_proposals if item != proposal),
+        }
+    )
+
+
+def _require_authorized_affect(
+    state: ReducerState,
+    payload: AffectAuthorizedMutationPayload,
+    *,
+    transition_kind: str,
+) -> AffectProposalProjection:
+    proposal = next(
+        (item for item in state.affect_proposals if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    decision = next(
+        (item for item in state.acceptance_decisions if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    if proposal is None:
+        raise ValueError("affect transition requires a persisted proposal")
+    if (
+        decision is None
+        or decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+    ):
+        raise ValueError("affect transition requires its accepted decision")
+    if (
+        proposal.transition_kind != transition_kind
+        or proposal.change_id != payload.change_id
+        or proposal.transition_id != payload.transition_id
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.expected_entity_revision != payload.expected_entity_revision
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or proposal.evidence_refs != payload.evidence_refs
+        or proposal.appraisal_refs != payload.appraisal_refs
+        or proposal.policy_refs != payload.policy_refs
+        or json.loads(proposal.proposed_mutation.payload_json) != payload.model_dump(mode="json")
+    ):
+        raise ValueError("accepted affect transition does not match its proposal")
+    return proposal
+
+
+def _validate_appraisal_meaning_refs(
+    appraisals: tuple[AppraisalProjection, ...],
+    refs: tuple[AppraisalMeaningRef, ...],
+) -> None:
+    for ref in refs:
+        appraisal = next(
+            (item for item in appraisals if item.appraisal_id == ref.appraisal_id),
+            None,
+        )
+        if (
+            appraisal is None
+            or appraisal.status != "active"
+            or appraisal.source_cluster_ref != ref.source_cluster_ref
+            or appraisal.origin.change_id != ref.accepted_change_id
+            or appraisal.origin.transition_id != ref.accepted_transition_id
+            or not any(item.hypothesis_id == ref.hypothesis_id for item in appraisal.hypotheses)
+        ):
+            raise ValueError("affect appraisal meaning does not resolve to authority")
+
+
+def _require_installed_affect_origin(episode: AffectEpisodeProjection) -> None:
+    if (
+        episode.origin.matrix_catalog_version != INSTALLED_AFFECT_MATRIX_VERSION
+        or episode.origin.policy_refs != INSTALLED_AFFECT_POLICY_REFS
+    ):
+        raise ValueError("affect origin references an uninstalled matrix policy")
 
 
 def _require_authorized_appraisal(
     state: ReducerState,
-    payload: (
-        AppraisalAcceptedPayload
-        | AppraisalContradictedPayload
-        | AppraisalSupersededPayload
-    ),
+    payload: (AppraisalAcceptedPayload | AppraisalContradictedPayload | AppraisalSupersededPayload),
     *,
     transition_kind: str,
 ) -> AppraisalProposalProjection:
@@ -1410,11 +1608,7 @@ def _require_authorized_appraisal(
         None,
     )
     proposal = next(
-        (
-            item
-            for item in state.appraisal_proposals
-            if item.proposal_id == payload.proposal_id
-        ),
+        (item for item in state.appraisal_proposals if item.proposal_id == payload.proposal_id),
         None,
     )
     if (
@@ -1436,8 +1630,7 @@ def _require_authorized_appraisal(
         or proposal.proposed_change_hash != payload.accepted_change_hash
         or proposal.evidence_refs != payload.evidence_refs
         or proposal.policy_refs != payload.policy_refs
-        or json.loads(proposal.proposed_mutation.payload_json)
-        != payload.model_dump(mode="json")
+        or json.loads(proposal.proposed_mutation.payload_json) != payload.model_dump(mode="json")
     ):
         raise ValueError("accepted appraisal transition does not match its proposal")
     return proposal
@@ -1445,10 +1638,8 @@ def _require_authorized_appraisal(
 
 def _require_installed_appraisal_origin(appraisal: AppraisalProjection) -> None:
     if (
-        appraisal.origin.matrix_catalog_version
-        != INSTALLED_APPRAISAL_MATRIX_VERSION
-        or appraisal.origin.clustering_policy_version
-        != INSTALLED_SOURCE_CLUSTERING_VERSION
+        appraisal.origin.matrix_catalog_version != INSTALLED_APPRAISAL_MATRIX_VERSION
+        or appraisal.origin.clustering_policy_version != INSTALLED_SOURCE_CLUSTERING_VERSION
     ):
         raise ValueError("appraisal origin references an uninstalled matrix policy")
 
@@ -1489,24 +1680,16 @@ _EVENTS = {
             RevisionClass.DELIBERATION,
             _trigger_process_reclaimed,
         ),
-        EventDefinition(
-            "BudgetAccountConfigured", RevisionClass.WORLD, _budget_account_configured
-        ),
+        EventDefinition("BudgetAccountConfigured", RevisionClass.WORLD, _budget_account_configured),
         EventDefinition("BudgetReserved", RevisionClass.WORLD, _budget_reserved),
         EventDefinition(
             "ExecutionReceiptRecorded",
             RevisionClass.WORLD,
             _execution_receipt_recorded,
         ),
-        EventDefinition(
-            "BudgetSettled", RevisionClass.WORLD, _budget_settlement_recorded
-        ),
-        EventDefinition(
-            "BudgetReleased", RevisionClass.WORLD, _budget_settlement_recorded
-        ),
-        EventDefinition(
-            "BudgetAdjusted", RevisionClass.WORLD, _budget_settlement_recorded
-        ),
+        EventDefinition("BudgetSettled", RevisionClass.WORLD, _budget_settlement_recorded),
+        EventDefinition("BudgetReleased", RevisionClass.WORLD, _budget_settlement_recorded),
+        EventDefinition("BudgetAdjusted", RevisionClass.WORLD, _budget_settlement_recorded),
         EventDefinition(
             "ActionReconciliationRequired",
             RevisionClass.WORLD,
@@ -1569,12 +1752,8 @@ _EVENTS = {
             partial(_action_transitioned, target="expired"),
         ),
         EventDefinition("ProposalRecorded", RevisionClass.DELIBERATION, _proposal_recorded),
-        EventDefinition(
-            "AcceptanceRecorded", RevisionClass.WORLD, _acceptance_recorded
-        ),
-        EventDefinition(
-            "LegacyAcceptanceAuditRecorded", RevisionClass.WORLD, _audit_only
-        ),
+        EventDefinition("AcceptanceRecorded", RevisionClass.WORLD, _acceptance_recorded),
+        EventDefinition("LegacyAcceptanceAuditRecorded", RevisionClass.WORLD, _audit_only),
         EventDefinition("NpcRegistered", RevisionClass.WORLD, _npc_registered),
         EventDefinition("ActivityPlanned", RevisionClass.WORLD, _activity_planned),
         EventDefinition(
@@ -1647,9 +1826,7 @@ _EVENTS = {
             RevisionClass.WORLD,
             _world_occurrence_settled,
         ),
-        EventDefinition(
-            "ExperienceCommitted", RevisionClass.WORLD, _experience_committed
-        ),
+        EventDefinition("ExperienceCommitted", RevisionClass.WORLD, _experience_committed),
         EventDefinition(
             "WorldOccurrenceCancelled",
             RevisionClass.WORLD,
@@ -1661,13 +1838,19 @@ _EVENTS = {
             partial(_world_occurrence_terminated, target_status="expired"),
         ),
         EventDefinition("AppraisalAccepted", RevisionClass.WORLD, _appraisal_accepted),
-        EventDefinition(
-            "AppraisalContradicted", RevisionClass.WORLD, _appraisal_contradicted
-        ),
+        EventDefinition("AppraisalContradicted", RevisionClass.WORLD, _appraisal_contradicted),
         EventDefinition("AppraisalExpired", RevisionClass.WORLD, _appraisal_expired),
+        EventDefinition("AppraisalSuperseded", RevisionClass.WORLD, _appraisal_superseded),
+        EventDefinition("AffectEpisodeOpened", RevisionClass.WORLD, _affect_episode_opened),
+        EventDefinition("AffectEpisodeUpdated", RevisionClass.WORLD, _affect_episode_updated),
+        EventDefinition("AffectEpisodeDecayed", RevisionClass.WORLD, _affect_episode_decayed),
+        EventDefinition("AffectEpisodeResolved", RevisionClass.WORLD, _affect_episode_resolved),
         EventDefinition(
-            "AppraisalSuperseded", RevisionClass.WORLD, _appraisal_superseded
+            "AffectEpisodeSuperseded",
+            RevisionClass.WORLD,
+            _affect_episode_superseded,
         ),
+        EventDefinition("AffectBaselineAdjusted", RevisionClass.WORLD, _affect_baseline_adjusted),
     )
 }
 
@@ -1776,8 +1959,12 @@ def make_projection(
         outcome_observations=state.outcome_observations,
         experiences=state.experiences,
         appraisals=state.appraisals,
+        affect_baselines=state.affect_baselines,
+        affect_episodes=state.affect_episodes,
         appraisal_proposals=state.appraisal_proposals,
         appraisal_proposal_ids=state.appraisal_proposal_ids,
+        affect_proposals=state.affect_proposals,
+        affect_proposal_ids=state.affect_proposal_ids,
         proposal_ids=state.proposal_ids,
         proposal_revisions=state.proposal_revisions,
         acceptance_decisions=state.acceptance_decisions,

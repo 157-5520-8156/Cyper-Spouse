@@ -17,6 +17,7 @@ from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from .errors import UnknownEventType
 from .appraisal_events import APPRAISAL_PAYLOAD_MODELS
+from .affect_events import AFFECT_PAYLOAD_MODELS
 from .life_events import LIFE_PAYLOAD_MODELS
 from .schemas import (
     Action,
@@ -48,7 +49,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.5"
+    reducer_bundle: str = "world-v2-reducers.6"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -67,16 +68,16 @@ class EventContract:
         schema = self.payload_model.model_json_schema()
         schema["$schema"] = "https://json-schema.org/draft/2020-12/schema"
         schema["x-world-event"] = {
-                "event_type": self.event_type,
-                "producer": self.producer,
-                "revision_class": self.revision_class,
-                "allowed_predecessors": list(self.allowed_predecessors),
-                "evidence_types": list(self.evidence_types),
-                "successors": list(self.successors),
-                "compensations": list(self.compensations),
-                "idempotency_identity": self.idempotency_identity,
-                "reducer_bundle": self.reducer_bundle,
-                "upcaster": self.upcaster,
+            "event_type": self.event_type,
+            "producer": self.producer,
+            "revision_class": self.revision_class,
+            "allowed_predecessors": list(self.allowed_predecessors),
+            "evidence_types": list(self.evidence_types),
+            "successors": list(self.successors),
+            "compensations": list(self.compensations),
+            "idempotency_identity": self.idempotency_identity,
+            "reducer_bundle": self.reducer_bundle,
+            "upcaster": self.upcaster,
         }
         return schema
 
@@ -199,9 +200,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "BudgetAdjusted": _payload_model(
             "BudgetAdjustedPayload", {"settlement": (BudgetSettlement, ...)}
         ),
-        "ActionAuthorized": _payload_model(
-            "ActionAuthorizedPayload", {"action": (Action, ...)}
-        ),
+        "ActionAuthorized": _payload_model("ActionAuthorizedPayload", {"action": (Action, ...)}),
         "ActionScheduled": _payload_model("ActionScheduledPayload", {"action_id": _ID}),
         "ActionClaimed": _payload_model(
             "ActionClaimedPayload", {"action_id": _ID, "claim_lease": (ClaimLease, ...)}
@@ -216,8 +215,12 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **{
             event_type: _action_settlement_payload(f"{event_type}Payload")
             for event_type in (
-                "ActionProviderAccepted", "ActionDelivered", "ActionFailed",
-                "ActionUnknown", "ActionCancelled", "ActionExpired",
+                "ActionProviderAccepted",
+                "ActionDelivered",
+                "ActionFailed",
+                "ActionUnknown",
+                "ActionCancelled",
+                "ActionExpired",
             )
         },
         "ExecutionReceiptRecorded": _payload_model(
@@ -228,6 +231,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         ),
         **LIFE_PAYLOAD_MODELS,
         **APPRAISAL_PAYLOAD_MODELS,
+        **AFFECT_PAYLOAD_MODELS,
     }
 )
 
@@ -246,6 +250,12 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ProposalRecorded": "world_id+trigger_id+proposal_id",
         "AcceptanceRecorded": "world_id+proposal_id+evaluated_world_revision",
         "LegacyAcceptanceAuditRecorded": "migration-only:original-event-id",
+        "AffectEpisodeOpened": "world_id+episode_id+transition_id",
+        "AffectEpisodeUpdated": "episode_id+transition_id",
+        "AffectEpisodeDecayed": "episode_id+expected_revision+to_logical_time+config",
+        "AffectEpisodeResolved": "episode_id+transition_id",
+        "AffectEpisodeSuperseded": "episode_id+successor_episode_id+transition_id",
+        "AffectBaselineAdjusted": "world_id+dimension+calibration_revision+transition_id",
         "BudgetAccountConfigured": "account_id+window_id",
         "BudgetReserved": "reservation_id",
         "BudgetSettled": "reservation_id+result_id+terminal",
@@ -640,11 +650,27 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     successors=successors,
                 )
                 for event_type, predecessors, successors in (
-                    ("ActivityStarted", ("ActivityPlanned", "ActivityResumed"), ("ActivityPaused", "ActivityCompleted", "ActivityAbandoned")),
-                    ("ActivityPaused", ("ActivityStarted", "ActivityResumed"), ("ActivityResumed", "ActivityAbandoned")),
-                    ("ActivityResumed", ("ActivityPaused",), ("ActivityPaused", "ActivityCompleted", "ActivityAbandoned")),
+                    (
+                        "ActivityStarted",
+                        ("ActivityPlanned", "ActivityResumed"),
+                        ("ActivityPaused", "ActivityCompleted", "ActivityAbandoned"),
+                    ),
+                    (
+                        "ActivityPaused",
+                        ("ActivityStarted", "ActivityResumed"),
+                        ("ActivityResumed", "ActivityAbandoned"),
+                    ),
+                    (
+                        "ActivityResumed",
+                        ("ActivityPaused",),
+                        ("ActivityPaused", "ActivityCompleted", "ActivityAbandoned"),
+                    ),
                     ("ActivityCompleted", ("ActivityStarted", "ActivityResumed"), ()),
-                    ("ActivityAbandoned", ("ActivityPlanned", "ActivityStarted", "ActivityPaused", "ActivityResumed"), ("ActivityPlanned",)),
+                    (
+                        "ActivityAbandoned",
+                        ("ActivityPlanned", "ActivityStarted", "ActivityPaused", "ActivityResumed"),
+                        ("ActivityPlanned",),
+                    ),
                 )
             ),
             _contract(
@@ -653,7 +679,11 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "world",
                 "WorldOccurrenceCommittedPayload",
                 evidence_types=("active_plan", "committed_world_event"),
-                successors=("WorldOccurrenceActivated", "WorldOccurrenceCancelled", "WorldOccurrenceExpired"),
+                successors=(
+                    "WorldOccurrenceActivated",
+                    "WorldOccurrenceCancelled",
+                    "WorldOccurrenceExpired",
+                ),
             ),
             _contract(
                 "WorldOccurrenceCancelled",
@@ -760,6 +790,72 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "AppraisalSupersededPayload",
                 allowed_predecessors=("AppraisalAccepted", "AppraisalContradicted"),
                 evidence_types=("observed_message", "committed_world_event"),
+            ),
+            _contract(
+                "AffectEpisodeOpened",
+                "proposal_acceptance",
+                "world",
+                "AffectEpisodeOpenedPayload",
+                allowed_predecessors=("AcceptanceRecorded", "AppraisalAccepted"),
+                evidence_types=("observed_message", "committed_world_event"),
+                successors=(
+                    "AffectEpisodeUpdated",
+                    "AffectEpisodeDecayed",
+                    "AffectEpisodeResolved",
+                    "AffectEpisodeSuperseded",
+                ),
+            ),
+            _contract(
+                "AffectEpisodeUpdated",
+                "proposal_acceptance",
+                "world",
+                "AffectEpisodeUpdatedPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=("observed_message", "committed_world_event"),
+            ),
+            _contract(
+                "AffectEpisodeDecayed",
+                "world_runtime",
+                "world",
+                "AffectEpisodeDecayedPayload",
+                allowed_predecessors=(
+                    "ClockAdvanced",
+                    "AffectEpisodeDecayed",
+                ),
+                evidence_types=("clock_observation",),
+            ),
+            _contract(
+                "AffectEpisodeResolved",
+                "proposal_acceptance",
+                "world",
+                "AffectEpisodeResolvedPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=("observed_message", "committed_world_event"),
+            ),
+            _contract(
+                "AffectEpisodeSuperseded",
+                "proposal_acceptance",
+                "world",
+                "AffectEpisodeSupersededPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=("observed_message", "committed_world_event"),
+            ),
+            _contract(
+                "AffectBaselineAdjusted",
+                "proposal_acceptance",
+                "world",
+                "AffectBaselineAdjustedPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=(
+                    "observed_message",
+                    "committed_world_event",
+                    "committed_experience",
+                    "settled_world_event",
+                    "settled_external_result",
+                    "active_plan",
+                    "operator_observation",
+                    "clock_observation",
+                ),
             ),
         )
     }
