@@ -241,6 +241,7 @@ from .schemas import (
     WorldOccurrenceProjection,
     WorldEvent,
     validate_actor_authority_event_bindings,
+    validate_plan_authority_state,
 )
 
 
@@ -449,6 +450,13 @@ class ReducerState(FrozenModel):
             global_proposal_ids=self.proposal_ids,
             actor_authority_transitions=self.actor_authority_transitions,
             committed_events=self.committed_world_event_refs,
+        )
+        validate_plan_authority_state(
+            self.plans,
+            self.committed_world_event_refs,
+            logical_time=self.logical_time,
+            allow_legacy_missing=(info.context or {}).get("source_reducer_bundle")
+            in _LEGACY_ACTOR_BINDING_BUNDLES,
         )
         dimensions = tuple(item.dimension for item in self.affect_baselines)
         if len(dimensions) != len(set(dimensions)):
@@ -1000,7 +1008,16 @@ class ReducerState(FrozenModel):
                 reconciliation.model_dump(mode="json") for reconciliation in self.reconciliations
             ),
             "npcs": tuple(npc.model_dump(mode="json") for npc in self.npcs),
-            "plans": tuple(plan.model_dump(mode="json") for plan in self.plans),
+            "plans": tuple(
+                (
+                    plan.model_dump(mode="json")
+                    if reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                    else plan.model_dump(
+                        mode="json", exclude={"owner_actor_ref", "authority_origin"}
+                    )
+                )
+                for plan in self.plans
+            ),
             "world_occurrences": tuple(
                 (
                     occurrence.model_dump(mode="json")
@@ -3202,6 +3219,18 @@ def _canonical_model_hash(value: FrozenModel) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _canonical_plan_evidence_hash(plan: PlanStateProjection) -> str:
+    if plan.owner_actor_ref != "legacy:unknown-owner":
+        return _canonical_model_hash(plan)
+    encoded = json.dumps(
+        plan.model_dump(mode="json", exclude={"owner_actor_ref", "authority_origin"}),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def _validate_evidence_authority(
     state: ReducerState,
     evidence_refs: tuple[EvidenceRef, ...],
@@ -3311,7 +3340,7 @@ def _validate_evidence_authority(
                 raise ValueError("active-plan evidence does not resolve to authority")
             if (
                 evidence.source_world_revision is not None
-                or evidence.immutable_hash != _canonical_model_hash(candidate)
+                or evidence.immutable_hash != _canonical_plan_evidence_hash(candidate)
             ):
                 raise ValueError("active-plan evidence hash does not match authority")
             continue
@@ -3376,10 +3405,28 @@ def _npc_registered(state: ReducerState, event: WorldEvent) -> ReducerState:
     return state.model_copy(update={"npcs": register_npc(state.npcs, payload)})
 
 
-def _activity_planned(state: ReducerState, event: WorldEvent) -> ReducerState:
-    _require_life_time(state, event)
+def _activity_planned(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    allow_legacy_missing_owner: bool = False,
+) -> ReducerState:
+    logical_time = _require_life_time(state, event)
     payload = _validated_life_payload(state, event, ActivityPlannedPayload)
-    return state.model_copy(update={"plans": plan_activity(state.plans, state.npcs, payload)})
+    return state.model_copy(
+        update={
+            "plans": plan_activity(
+                state.plans,
+                state.npcs,
+                payload,
+                event_ref=event.event_id,
+                event_payload_hash=event.payload_hash,
+                accepted_world_revision=len(state.committed_world_event_refs) + 1,
+                logical_time=logical_time,
+                allow_legacy_missing_owner=allow_legacy_missing_owner,
+            )
+        }
+    )
 
 
 def _activity_transitioned(
@@ -3388,6 +3435,7 @@ def _activity_transitioned(
     *,
     target_status: str,
     allowed_statuses: frozenset[str],
+    allow_legacy_unowned_transition: bool = False,
 ) -> ReducerState:
     payload = _validated_life_payload(state, event, ActivityTransitionPayload)
     return state.model_copy(
@@ -3398,6 +3446,11 @@ def _activity_transitioned(
                 target_status=target_status,
                 allowed_statuses=allowed_statuses,
                 logical_time=_require_life_time(state, event),
+                event_type=event.event_type,
+                event_ref=event.event_id,
+                event_payload_hash=event.payload_hash,
+                accepted_world_revision=len(state.committed_world_event_refs) + 1,
+                allow_legacy_unowned_transition=allow_legacy_unowned_transition,
             )
         }
     )
@@ -5134,10 +5187,30 @@ def event_types() -> frozenset[str]:
     return frozenset(_EVENTS)
 
 
-def reduce_event(state: ReducerState, event: WorldEvent) -> ReducerState:
+def reduce_event(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    allow_legacy_plan_owner: bool = False,
+) -> ReducerState:
     event_contract(event.event_type).validate_payload(event.payload())
     definition = event_definition(event.event_type)
-    reduced = definition.reducer(state, event)
+    if event.event_type == "ActivityPlanned" and allow_legacy_plan_owner:
+        reduced = _activity_planned(
+            state, event, allow_legacy_missing_owner=allow_legacy_plan_owner
+        )
+    elif event.event_type in {
+        "ActivityStarted",
+        "ActivityPaused",
+        "ActivityResumed",
+        "ActivityCompleted",
+        "ActivityAbandoned",
+    } and allow_legacy_plan_owner:
+        reduced = definition.reducer(
+            state, event, allow_legacy_unowned_transition=True
+        )
+    else:
+        reduced = definition.reducer(state, event)
     if definition.revision_class is RevisionClass.WORLD:
         return reduced.model_copy(
             update={

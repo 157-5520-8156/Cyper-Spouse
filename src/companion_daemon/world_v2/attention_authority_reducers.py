@@ -39,6 +39,8 @@ from .schemas import (
     PlanStateProjection,
     TriggerProcess,
     WorldOccurrenceProjection,
+    plan_authority_binding_hash,
+    plan_authority_projection_hash,
 )
 
 
@@ -243,6 +245,7 @@ def reduce_v2_attention(
         after,
         pinned_world_revision=payload.evaluated_world_revision,
         plans=plans,
+        committed_events=committed_events,
         world_occurrences=world_occurrences,
         triggers=triggers,
     )
@@ -320,6 +323,7 @@ def _resolve_focus(
     *,
     pinned_world_revision: int,
     plans: tuple[PlanStateProjection, ...],
+    committed_events: tuple[CommittedWorldEventRef, ...],
     world_occurrences: tuple[WorldOccurrenceProjection, ...],
     triggers: tuple[TriggerProcess, ...],
 ) -> str:
@@ -330,11 +334,47 @@ def _resolve_focus(
         raise ValueError("Attention focus actor or pinned revision is not exact")
     if isinstance(binding, PlanAttentionFocusBinding):
         source = next((item for item in plans if item.plan_id == binding.plan_id), None)
+        origin = source.authority_origin if source is not None else None
+        owner = source.owner_actor_ref if source is not None else None
+        event = (
+            next(
+                (
+                    item
+                    for item in committed_events
+                    if origin is not None and item.event_id == origin.accepted_event_ref
+                ),
+                None,
+            )
+            if origin is not None
+            else None
+        )
         if (
             source is None
             or source.entity_revision != binding.entity_revision
             or source.status != "active"
-            or after.actor_ref not in source.participant_refs
+            or owner != after.actor_ref
+            or owner == "legacy:unknown-owner"
+            or origin is None
+            or event is None
+            or event.event_type != origin.accepted_event_type
+            or event.event_type not in {"ActivityStarted", "ActivityResumed"}
+            or event.world_revision != origin.accepted_world_revision
+            or event.payload_hash != origin.accepted_payload_hash
+            or event.logical_time != origin.accepted_at
+            or origin.authority_projection_hash != plan_authority_projection_hash(source)
+            or origin.binding_hash
+            != plan_authority_binding_hash(
+                plan_id=source.plan_id,
+                owner_actor_ref=owner,
+                entity_revision=source.entity_revision,
+                transition_id=origin.transition_id,
+                event_type=event.event_type,
+                accepted_event_ref=event.event_id,
+                accepted_world_revision=event.world_revision,
+                accepted_payload_hash=event.payload_hash,
+                accepted_at=event.logical_time,
+                projection_hash=origin.authority_projection_hash,
+            )
             or canonical_projection_hash(source) != binding.projection_hash
         ):
             raise ValueError("Attention Plan focus is not exact current active authority")

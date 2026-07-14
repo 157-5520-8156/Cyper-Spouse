@@ -62,8 +62,11 @@ from companion_daemon.world_v2.schemas import (
     ActorAuthorityValues,
     ClockTransitionProjection,
     CommittedWorldEventRef,
+    PlanAuthorityOrigin,
     PlanStateProjection,
     TriggerProcess,
+    plan_authority_binding_hash,
+    plan_authority_projection_hash,
 )
 from companion_daemon.world_v2.schema_core import EvidenceRef
 
@@ -323,6 +326,13 @@ def test_mode_change_resets_since_and_allows_same_tick() -> None:
 
 def test_typed_plan_focus_must_resolve_exact_current_active_projection() -> None:
     authority, authority_event, cause = operator_authority()
+    plan_event = CommittedWorldEventRef(
+        event_id="event:plan:started",
+        event_type="ActivityStarted",
+        world_revision=6,
+        payload_hash="e" * 64,
+        logical_time=NOW,
+    )
     plan = PlanStateProjection(
         plan_id="plan:work",
         activity_id="activity:work",
@@ -339,7 +349,32 @@ def test_typed_plan_focus_must_resolve_exact_current_active_projection() -> None
         importance_bp=7000,
         participant_refs=(ACTOR,),
         privacy_class="private",
+        owner_actor_ref=ACTOR,
+        last_transitioned_at=NOW,
     )
+    projection_hash = plan_authority_projection_hash(plan)
+    plan_origin = PlanAuthorityOrigin(
+        transition_id="transition:plan:started",
+        accepted_event_type="ActivityStarted",
+        accepted_event_ref=plan_event.event_id,
+        accepted_world_revision=plan_event.world_revision,
+        accepted_payload_hash=plan_event.payload_hash,
+        accepted_at=NOW,
+        authority_projection_hash=projection_hash,
+        binding_hash=plan_authority_binding_hash(
+            plan_id="plan:work",
+            owner_actor_ref=ACTOR,
+            entity_revision=2,
+            transition_id="transition:plan:started",
+            event_type=plan_event.event_type,
+            accepted_event_ref=plan_event.event_id,
+            accepted_world_revision=plan_event.world_revision,
+            accepted_payload_hash=plan_event.payload_hash,
+            accepted_at=NOW,
+            projection_hash=projection_hash,
+        ),
+    )
+    plan = plan.model_copy(update={"authority_origin": plan_origin})
     binding = PlanAttentionFocusBinding(
         actor_ref=ACTOR,
         focus_ref=plan.plan_id,
@@ -361,9 +396,29 @@ def test_typed_plan_focus_must_resolve_exact_current_active_projection() -> None
     heads, _ = reduce_v2_attention(
         (), (), payload(after, cause=cause),
         event_type="V2AttentionChanged", event_id="event:attention:focus", logical_time=NOW,
-        actor_authorities=(authority,), committed_events=(authority_event,), plans=(plan,),
+        actor_authorities=(authority,), committed_events=(authority_event, plan_event), plans=(plan,),
     )
     assert heads[0].values.focus_binding == binding
+
+    forged_origin = plan_origin.model_copy(update={"accepted_event_type": "ActivityPaused"})
+    forged_plan = plan.model_copy(update={"authority_origin": forged_origin})
+    forged_binding = binding.model_copy(
+        update={"projection_hash": canonical_projection_hash(forged_plan)}
+    )
+    forged_values = values.model_copy(update={"focus_binding": forged_binding})
+    forged_after = projection(
+        1, forged_values, event_ref="event:attention:focus", updated_at=NOW
+    )
+    with pytest.raises(ValueError, match="Plan focus"):
+        reduce_v2_attention(
+            (), (), payload(forged_after, cause=cause),
+            event_type="V2AttentionChanged",
+            event_id="event:attention:focus",
+            logical_time=NOW,
+            actor_authorities=(authority,),
+            committed_events=(authority_event, plan_event),
+            plans=(forged_plan,),
+        )
 
     stale = plan.model_copy(update={"status": "completed"})
     with pytest.raises(ValueError, match="Plan focus"):

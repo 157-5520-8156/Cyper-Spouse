@@ -43,6 +43,8 @@ from .schemas import (
     CommittedWorldEventRef,
     LedgerProjection,
     PlanStateProjection,
+    plan_authority_binding_hash,
+    plan_authority_projection_hash,
 )
 
 
@@ -229,10 +231,8 @@ def request_from_ledger_projection(
 ) -> SituationCompileRequest:
     """Build the production compiler input from one validated ledger projection.
 
-    Plan heads intentionally remain absent here because the legacy Plan
-    projection does not freeze an accepted event origin.  A caller may only add
-    Plans through ``BoundPlanHead`` after an exact internal source resolver has
-    supplied that missing binding; this adapter never guesses one.
+    Legacy Plan heads without explicit owner authority remain absent.  Current
+    heads are included only from their exact immutable accepted-event origin.
     """
 
     event_by_id: dict[str, CommittedWorldEventRef] = {}
@@ -252,6 +252,11 @@ def request_from_ledger_projection(
 
     locations = tuple(item for item in projection.locations if item.actor_ref == actor_ref)
     attentions = tuple(item for item in projection.attentions if item.actor_ref == actor_ref)
+    plans = tuple(
+        item
+        for item in projection.plans
+        if item.owner_actor_ref == actor_ref and item.authority_origin is not None
+    )
     if len(locations) > 1 or len(attentions) > 1:
         raise ValueError("Situation projection contains multiple singleton actor heads")
     logical_source: SourceBinding | None = None
@@ -295,6 +300,7 @@ def request_from_ledger_projection(
             for item in projection.commitments
             if item.values.owner_ref == actor_ref
         ),
+        *(item.authority_origin.accepted_event_ref for item in plans),
     }
     if locations:
         required_event_ids.add(locations[0].origin.accepted_event_ref)
@@ -343,6 +349,15 @@ def request_from_ledger_projection(
         if attentions
         else None
     )
+    bound_plans = tuple(
+        BoundPlanHead(
+            source=source(item.authority_origin.accepted_event_ref),
+            actor_ref=actor_ref,
+            projection_hash=_digest(item.model_dump(mode="json")),
+            head=item,
+        )
+        for item in plans
+    )
     consumed_events = tuple(
         sorted(event_by_id.values(), key=lambda item: (item.world_revision, item.event_id))
     )
@@ -358,6 +373,7 @@ def request_from_ledger_projection(
         location=location,
         resources=resources,
         attention=attention,
+        plans=bound_plans,
         commitments=commitments,
     )
     return SituationCompileRequest(
@@ -480,8 +496,6 @@ class SituationAuthoritySnapshot(FrozenModel):
     def heads_share_snapshot_authority(self) -> SituationAuthoritySnapshot:
         if self.attention_expiry_due:
             raise ValueError("attention_expiry_authority_not_installed")
-        if self.plans:
-            raise ValueError("plan_owner_authority_not_installed")
         event_by_id = {item.event_id: item for item in self.committed_events}
         if len(event_by_id) != len(self.committed_events):
             raise ValueError("Situation snapshot contains duplicate committed events")
@@ -565,6 +579,47 @@ class SituationAuthoritySnapshot(FrozenModel):
                 raise ValueError("Situation authority head comes from a future revision")
             if item.actor_ref != self.actor_ref:
                 raise ValueError("Situation authority head belongs to another actor")
+        plan_event_types = {
+            "planned": {"ActivityPlanned"},
+            "active": {"ActivityStarted", "ActivityResumed"},
+            "paused": {"ActivityPaused"},
+            "completed": {"ActivityCompleted"},
+            "abandoned": {"ActivityAbandoned"},
+        }
+        for item in self.plans:
+            origin = item.head.authority_origin
+            owner = item.head.owner_actor_ref
+            if origin is None or owner is None or owner == "legacy:unknown-owner":
+                raise ValueError("Situation Plan lacks current owner authority")
+            if item.actor_ref != owner:
+                raise ValueError("Plan wrapper does not bind its authoritative owner")
+            if item.source.event_ref != origin.accepted_event_ref:
+                raise ValueError("Situation Plan source does not match authority origin")
+            _require_exact_source(item.source, event_by_id)
+            source_event = event_by_id[item.source.event_ref]
+            if (
+                source_event.event_type != origin.accepted_event_type
+                or source_event.event_type not in plan_event_types[item.head.status]
+                or source_event.world_revision != origin.accepted_world_revision
+                or source_event.payload_hash != origin.accepted_payload_hash
+                or source_event.logical_time != origin.accepted_at
+                or origin.authority_projection_hash
+                != plan_authority_projection_hash(item.head)
+                or origin.binding_hash
+                != plan_authority_binding_hash(
+                    plan_id=item.head.plan_id,
+                    owner_actor_ref=owner,
+                    entity_revision=item.head.entity_revision,
+                    transition_id=origin.transition_id,
+                    event_type=source_event.event_type,
+                    accepted_event_ref=source_event.event_id,
+                    accepted_world_revision=source_event.world_revision,
+                    accepted_payload_hash=source_event.payload_hash,
+                    accepted_at=source_event.logical_time,
+                    projection_hash=origin.authority_projection_hash,
+                )
+            ):
+                raise ValueError("Situation Plan authority binding is invalid")
         for item in self.commitments:
             if item.actor_ref != item.head.values.owner_ref:
                 raise ValueError("Commitment wrapper does not bind its authoritative owner")

@@ -500,7 +500,7 @@ def test_legacy_plans_fail_closed_until_owner_authority_is_installed() -> None:
         _plan("plan:b", 7000, "npc:b"),
         _plan("plan:a", 7000, "npc:a"),
     )
-    with pytest.raises(ValidationError, match="plan_owner_authority_not_installed"):
+    with pytest.raises(ValidationError, match="Plan lacks current owner authority"):
         _request(plans=plans)
 
 

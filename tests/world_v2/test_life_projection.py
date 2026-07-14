@@ -28,6 +28,7 @@ from companion_daemon.world_v2.schemas import (
     AppraisalOrigin,
     AppraisalProjection,
     ClaimLease,
+    CommittedWorldEventRef,
     DueWindow,
     EvidenceRef,
     ExperienceOccurrenceSettlementBinding,
@@ -39,6 +40,7 @@ from companion_daemon.world_v2.schemas import (
     NpcProjection,
     OutcomeObservationProjection,
     OutcomeProposalProjection,
+    PlanAuthorityOrigin,
     PlanStateProjection,
     ProjectionCursor,
     ProposalRevisionRef,
@@ -48,6 +50,9 @@ from companion_daemon.world_v2.schemas import (
     WorldEvent,
     WorldOccurrenceProjection,
     experience_semantic_fingerprint,
+    plan_authority_binding_hash,
+    plan_authority_projection_hash,
+    validate_plan_authority_state,
 )
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.typed_proposals import AmbiguousTypedProposalAuthority
@@ -269,6 +274,7 @@ def seed_through_proposal(ledger: LedgerPort) -> str:
         ),
         participant_refs=("npc:lin",),
         location_ref="room:kitchen",
+        owner_actor_ref="actor:companion",
     )
     commit(
         ledger,
@@ -1351,6 +1357,11 @@ def test_activity_lifecycle_is_revisioned_and_terminal() -> None:
         )
     plan = ledger.project().plans[0]
     assert (plan.status, plan.entity_revision) == ("completed", 5)
+    assert plan.owner_actor_ref == "actor:companion"
+    assert plan.authority_origin is not None
+    assert plan.authority_origin.accepted_event_type == "ActivityCompleted"
+    assert plan.authority_origin.accepted_event_ref == "activity-completed"
+    assert plan.authority_origin.accepted_world_revision == ledger.project().world_revision
 
     projection = ledger.project()
     with pytest.raises(ValueError, match="cannot transition"):
@@ -1374,3 +1385,299 @@ def test_activity_lifecycle_is_revisioned_and_terminal() -> None:
             expected_world_revision=projection.world_revision,
             expected_deliberation_revision=projection.deliberation_revision,
         )
+
+
+def test_plan_authority_allows_later_transition_of_earlier_plan_but_rejects_same_tick_swap() -> None:
+    def head(
+        plan_id: str,
+        *,
+        revision: int,
+        event: CommittedWorldEventRef,
+        status: str,
+    ) -> PlanStateProjection:
+        owner = "actor:companion"
+        transition_id = f"transition:{event.event_id}"
+        plan = PlanStateProjection(
+            plan_id=plan_id,
+            activity_id=f"activity:{plan_id}",
+            entity_revision=revision,
+            activity_kind="work",
+            evidence_refs=(
+                EvidenceRef(
+                    ref_id=f"evidence:{plan_id}",
+                    evidence_type="observed_message",
+                    claim_purpose="future_plan",
+                ),
+            ),
+            status=status,
+            importance_bp=5_000,
+            last_transitioned_at=(event.logical_time if status != "planned" else None),
+            owner_actor_ref=owner,
+        )
+        projection_hash = plan_authority_projection_hash(plan)
+        return plan.model_copy(
+            update={"authority_origin": PlanAuthorityOrigin(
+                transition_id=transition_id,
+                accepted_event_type=event.event_type,
+                accepted_event_ref=event.event_id,
+                accepted_world_revision=event.world_revision,
+                accepted_payload_hash=event.payload_hash,
+                accepted_at=event.logical_time,
+                authority_projection_hash=projection_hash,
+                binding_hash=plan_authority_binding_hash(
+                    plan_id=plan_id,
+                    owner_actor_ref=owner,
+                    entity_revision=revision,
+                    transition_id=transition_id,
+                    event_type=event.event_type,
+                    accepted_event_ref=event.event_id,
+                    accepted_world_revision=event.world_revision,
+                    accepted_payload_hash=event.payload_hash,
+                    accepted_at=event.logical_time,
+                    projection_hash=projection_hash,
+                ),
+            )},
+        )
+
+    event_b = CommittedWorldEventRef(
+        event_id="event:plan-b",
+        event_type="ActivityPlanned",
+        world_revision=2,
+        payload_hash="b" * 64,
+        logical_time=LIFE_TIME,
+    )
+    event_a_later = CommittedWorldEventRef(
+        event_id="event:plan-a-started",
+        event_type="ActivityStarted",
+        world_revision=3,
+        payload_hash="a" * 64,
+        logical_time=LIFE_TIME,
+    )
+    plan_a = head("plan:a", revision=2, event=event_a_later, status="active")
+    plan_b = head("plan:b", revision=1, event=event_b, status="planned")
+    validate_plan_authority_state(
+        (plan_a, plan_b),
+        (event_b, event_a_later),
+        logical_time=LIFE_TIME,
+    )
+    with pytest.raises(ValueError, match="exactly bind|projection hash|binding hash"):
+        validate_plan_authority_state(
+            (
+                plan_a.model_copy(update={"authority_origin": plan_b.authority_origin}),
+                plan_b.model_copy(update={"authority_origin": plan_a.authority_origin}),
+            ),
+            (event_b, event_a_later),
+            logical_time=LIFE_TIME,
+        )
+
+    for update in (
+        {"activity_kind": "forged"},
+        {"importance_bp": 9_999},
+        {"participant_refs": ("actor:other",)},
+        {"privacy_class": "public"},
+        {
+            "evidence_refs": (
+                EvidenceRef(
+                    ref_id="evidence:forged",
+                    evidence_type="observed_message",
+                    claim_purpose="future_plan",
+                ),
+            )
+        },
+    ):
+        with pytest.raises(ValueError, match="projection hash"):
+            validate_plan_authority_state(
+                (plan_a.model_copy(update=update), plan_b),
+                (event_b, event_a_later),
+                logical_time=LIFE_TIME,
+            )
+
+
+def test_sqlite_migrates_ownerless_v15_plan_lifecycle_and_reopens(tmp_path: Path) -> None:
+    path = tmp_path / "legacy-plan-lifecycle.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
+    advance_life_clock(ledger)
+    commit(
+        ledger,
+        [
+            event(
+                "message-legacy-plan",
+                "ObservationRecorded",
+                {
+                    "schema_version": "world-v2.1",
+                    "observation_kind": "message",
+                    "observation_id": "message:legacy-plan",
+                    "world_id": WORLD_ID,
+                    "logical_time": LIFE_TIME.isoformat(),
+                    "created_at": LIFE_TIME.isoformat(),
+                    "trace_id": "trace:life",
+                    "causation_id": "cause:message-legacy-plan",
+                    "correlation_id": "correlation:life",
+                    "source": "life-test",
+                    "source_event_id": "source:message-legacy-plan",
+                    "actor": "system:life-test",
+                    "channel": "direct_message",
+                    "payload_ref": "payload:message-legacy-plan",
+                    "payload_hash": "d" * 64,
+                    "received_at": LIFE_TIME.isoformat(),
+                },
+            )
+        ],
+    )
+    message = ledger.project().message_observations[0]
+    plan_evidence = EvidenceRef(
+        ref_id=message.observation_id,
+        evidence_type="observed_message",
+        claim_purpose="future_plan",
+        source_world_revision=message.world_revision,
+        immutable_hash=message.event_payload_hash,
+    )
+    plan = PlanStateProjection(
+        plan_id="plan:legacy-lifecycle",
+        activity_id="activity:legacy-lifecycle",
+        entity_revision=1,
+        activity_kind="work",
+        evidence_refs=(plan_evidence,),
+        status="planned",
+        importance_bp=5_000,
+        owner_actor_ref="actor:companion",
+    )
+    commit(
+        ledger,
+        [
+            event(
+                "legacy-plan-created",
+                "ActivityPlanned",
+                {
+                    **mutation(
+                        "legacy-plan-created",
+                        expected_revision=0,
+                        evidence_refs=[plan_evidence.model_dump(mode="json")],
+                    ),
+                    "plan": plan.model_dump(mode="json"),
+                },
+            )
+        ],
+    )
+    for event_type, revision, event_id in (
+        ("ActivityStarted", 1, "legacy-plan-started"),
+        ("ActivityPaused", 2, "legacy-plan-paused"),
+    ):
+        commit(
+            ledger,
+            [
+                event(
+                    event_id,
+                    event_type,
+                    {
+                        **mutation(
+                            event_id,
+                            expected_revision=revision,
+                            evidence_refs=[plan_evidence.model_dump(mode="json")],
+                        ),
+                        "plan_id": plan.plan_id,
+                        "transitioned_at": LIFE_TIME.isoformat(),
+                        "reason_ref": f"reason:{event_id}",
+                    },
+                )
+            ],
+        )
+    expected_cursor = ProjectionCursor(
+        world_revision=ledger.project().world_revision,
+        deliberation_revision=0,
+        ledger_sequence=ledger.project().ledger_sequence,
+    )
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT event_json FROM world_v2_events WHERE event_id = ?",
+            ("legacy-plan-created",),
+        ).fetchone()
+        raw_event = json.loads(row["event_json"])
+        raw_payload = json.loads(raw_event["payload_json"])
+        raw_payload["plan"].pop("owner_actor_ref")
+        raw_payload["plan"].pop("authority_origin")
+        raw_event["payload_json"] = json.dumps(
+            raw_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        raw_event["payload_hash"] = hashlib.sha256(
+            raw_event["payload_json"].encode()
+        ).hexdigest()
+        event_json = json.dumps(
+            raw_event, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        connection.execute(
+            "UPDATE world_v2_events SET event_json = ?, event_hash = ? WHERE event_id = ?",
+            (
+                event_json,
+                hashlib.sha256(event_json.encode()).hexdigest(),
+                "legacy-plan-created",
+            ),
+        )
+        head = connection.execute(
+            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
+        ).fetchone()
+        raw_state = json.loads(head["state_json"])
+        strip_v16_state_fields(raw_state)
+        for ref in raw_state["committed_world_event_refs"]:
+            if ref["event_id"] == "legacy-plan-created":
+                ref["payload_hash"] = raw_event["payload_hash"]
+        legacy_state = ReducerState.model_validate_json(
+            json.dumps(raw_state, ensure_ascii=False, separators=(",", ":")),
+            context={"source_reducer_bundle": "world-v2-reducers.15"},
+        )
+        legacy_payload = legacy_state.semantic_payload(
+            world_id=WORLD_ID,
+            world_revision=expected_cursor.world_revision,
+            reducer_bundle_version="world-v2-reducers.15",
+        )
+        legacy_hash = hashlib.sha256(
+            json.dumps(
+                legacy_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+        connection.execute(
+            """UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?,
+               reducer_bundle_version = ? WHERE world_id = ?""",
+            (
+                json.dumps(raw_state, ensure_ascii=False, separators=(",", ":")),
+                legacy_hash,
+                "world-v2-reducers.15",
+                WORLD_ID,
+            ),
+        )
+
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
+    migrated = reopened.project()
+    assert migrated.plans[0].status == "paused"
+    assert migrated.plans[0].owner_actor_ref == "legacy:unknown-owner"
+    assert migrated.plans[0].authority_origin is None
+    with pytest.raises(ValueError, match="live activity transition"):
+        commit(
+            reopened,
+            [
+                event(
+                    "live-resume-legacy-plan",
+                    "ActivityResumed",
+                    {
+                        **mutation(
+                            "live-resume-legacy-plan",
+                            expected_revision=3,
+                            evidence_refs=[plan_evidence.model_dump(mode="json")],
+                        ),
+                        "plan_id": plan.plan_id,
+                        "transitioned_at": LIFE_TIME.isoformat(),
+                        "reason_ref": "reason:live-resume",
+                    },
+                )
+            ],
+        )
+    assert reopened.rebuild() == migrated
+    assert reopened.project_at(expected_cursor) == migrated
+    reopened.close()
+    assert SQLiteWorldLedger(path=path, world_id=WORLD_ID).project() == migrated

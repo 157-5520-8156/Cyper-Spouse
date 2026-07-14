@@ -1517,6 +1517,47 @@ class SituationStateProjection(FrozenModel):
     visibility: PrivacyClass = "private"
 
 
+class PlanAuthorityOrigin(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    accepted_event_type: str = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+    accepted_world_revision: int = Field(ge=1)
+    accepted_payload_hash: str = Field(min_length=64, max_length=64)
+    accepted_at: datetime
+    authority_projection_hash: str = Field(min_length=64, max_length=64)
+    binding_hash: str = Field(min_length=64, max_length=64)
+
+
+def plan_authority_binding_hash(
+    *,
+    plan_id: str,
+    owner_actor_ref: str,
+    entity_revision: int,
+    transition_id: str,
+    event_type: str,
+    accepted_event_ref: str,
+    accepted_world_revision: int,
+    accepted_payload_hash: str,
+    accepted_at: datetime,
+    projection_hash: str,
+) -> str:
+    material = {
+        "accepted_at": accepted_at.isoformat(),
+        "accepted_event_ref": accepted_event_ref,
+        "accepted_payload_hash": accepted_payload_hash,
+        "accepted_world_revision": accepted_world_revision,
+        "entity_revision": entity_revision,
+        "event_type": event_type,
+        "owner_actor_ref": owner_actor_ref,
+        "plan_id": plan_id,
+        "projection_hash": projection_hash,
+        "transition_id": transition_id,
+    }
+    return hashlib.sha256(
+        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 class PlanStateProjection(FrozenModel):
     plan_id: str = Field(min_length=1)
     activity_id: str = Field(min_length=1)
@@ -1533,6 +1574,91 @@ class PlanStateProjection(FrozenModel):
     last_transitioned_at: datetime | None = None
     terminal_reason_ref: str | None = None
     privacy_class: PrivacyClass = "private"
+    owner_actor_ref: str | None = Field(default=None, min_length=1)
+    authority_origin: PlanAuthorityOrigin | None = None
+
+
+def plan_authority_projection_hash(plan: PlanStateProjection) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            plan.model_dump(mode="json", exclude={"authority_origin"}),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def validate_plan_authority_state(
+    plans: tuple[PlanStateProjection, ...],
+    committed_events: tuple[CommittedWorldEventRef, ...],
+    *,
+    logical_time: datetime | None,
+    allow_legacy_missing: bool = False,
+) -> None:
+    event_by_id = {item.event_id: item for item in committed_events}
+    expected_type = {
+        "planned": {"ActivityPlanned"},
+        "active": {"ActivityStarted", "ActivityResumed"},
+        "paused": {"ActivityPaused"},
+        "completed": {"ActivityCompleted"},
+        "abandoned": {"ActivityAbandoned"},
+    }
+    accepted_revisions: list[int] = []
+    accepted_refs: list[str] = []
+    transition_ids: list[str] = []
+    for plan in plans:
+        owner = plan.owner_actor_ref
+        origin = plan.authority_origin
+        if owner == "legacy:unknown-owner" and origin is None:
+            continue
+        if owner is None or origin is None:
+            if allow_legacy_missing and owner is None and origin is None:
+                continue
+            raise ValueError("Plan requires explicit owner and exact authority origin")
+        event = event_by_id.get(origin.accepted_event_ref)
+        if (
+            event is None
+            or event.event_type != origin.accepted_event_type
+            or event.event_type not in expected_type[plan.status]
+            or event.world_revision != origin.accepted_world_revision
+            or event.payload_hash != origin.accepted_payload_hash
+            or event.logical_time != origin.accepted_at
+        ):
+            raise ValueError("Plan authority origin does not exactly bind its committed event")
+        projection_hash = plan_authority_projection_hash(plan)
+        if origin.authority_projection_hash != projection_hash:
+            raise ValueError("Plan authority projection hash is invalid")
+        expected_hash = plan_authority_binding_hash(
+            plan_id=plan.plan_id,
+            owner_actor_ref=owner,
+            entity_revision=plan.entity_revision,
+            transition_id=origin.transition_id,
+            event_type=event.event_type,
+            accepted_event_ref=event.event_id,
+            accepted_world_revision=event.world_revision,
+            accepted_payload_hash=event.payload_hash,
+            accepted_at=event.logical_time,
+            projection_hash=projection_hash,
+        )
+        if origin.binding_hash != expected_hash:
+            raise ValueError("Plan authority binding hash is invalid")
+        if plan.status == "planned":
+            if plan.entity_revision != 1 or plan.last_transitioned_at is not None:
+                raise ValueError("planned Plan authority lifecycle is inconsistent")
+        elif plan.last_transitioned_at != origin.accepted_at:
+            raise ValueError("Plan lifecycle time does not match accepted authority")
+        if logical_time is None or origin.accepted_at > logical_time:
+            raise ValueError("Plan authority is ahead of authoritative logical time")
+        accepted_revisions.append(origin.accepted_world_revision)
+        accepted_refs.append(origin.accepted_event_ref)
+        transition_ids.append(origin.transition_id)
+    if len(accepted_revisions) != len(set(accepted_revisions)):
+        raise ValueError("Plan authority event revisions must be unique")
+    if len(accepted_refs) != len(set(accepted_refs)):
+        raise ValueError("Plan accepted event refs must be unique")
+    if len(transition_ids) != len(set(transition_ids)):
+        raise ValueError("Plan authority transition ids must be unique")
 
 
 class NpcProjection(FrozenModel):
@@ -3761,5 +3887,10 @@ class LedgerProjection(FrozenModel):
             global_proposal_ids=self.proposal_ids,
             actor_authority_transitions=self.actor_authority_transitions,
             committed_events=self.committed_world_event_refs,
+        )
+        validate_plan_authority_state(
+            self.plans,
+            self.committed_world_event_refs,
+            logical_time=self.logical_time,
         )
         return self

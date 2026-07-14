@@ -143,6 +143,30 @@ def test_v15_reader_rejects_injected_v16_outcome_field() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("owner_actor_ref", "actor:forged"),
+        ("authority_origin", {"accepted_event_ref": "event:forged"}),
+    ),
+)
+def test_v15_reader_rejects_injected_plan_authority_field(
+    field: str, value: object
+) -> None:
+    fixture = _fixture()
+    state_json = fixture["state_json"]
+    assert isinstance(state_json, str)
+    raw = json.loads(state_json)
+    raw["plans"] = [{field: value}]
+
+    with pytest.raises(LedgerIntegrityError, match="legacy head state is invalid"):
+        _legacy_verifier()._legacy_semantic_hash(
+            state_json=json.dumps(raw, ensure_ascii=False, separators=(",", ":")),
+            world_revision=V15_WORLD_REVISION,
+            reducer_bundle_version="world-v2-reducers.15",
+        )
+
+
 def test_event_backed_v15_sqlite_migrates_reopens_and_replays_v16(
     tmp_path: Path,
 ) -> None:

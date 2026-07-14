@@ -221,6 +221,15 @@ class SQLiteWorldLedger:
                     REFERENCES world_v2_commits(world_id, commit_id)
                     DEFERRABLE INITIALLY DEFERRED
             );
+            CREATE TABLE IF NOT EXISTS world_v2_legacy_plan_events (
+                world_id TEXT NOT NULL,
+                event_id TEXT NOT NULL,
+                source_reducer_bundle TEXT NOT NULL,
+                PRIMARY KEY (world_id, event_id),
+                FOREIGN KEY (world_id, event_id)
+                    REFERENCES world_v2_events(world_id, event_id)
+                    DEFERRABLE INITIALLY DEFERRED
+            );
             """
         )
         columns = {
@@ -354,6 +363,7 @@ class SQLiteWorldLedger:
                 )
                 if not hmac.compare_digest(legacy_hash, str(head["semantic_hash"])):
                     raise LedgerIntegrityError("legacy head semantic hash is invalid")
+                self._mark_legacy_ownerless_plan_events_locked(installed)
             rebuilt = self._replay_locked(
                 target_cursor=cursor,
                 target_schema_version=CURRENT_SCHEMA_VERSION,
@@ -386,6 +396,56 @@ class SQLiteWorldLedger:
             connection.rollback()
             raise
 
+    def _mark_legacy_ownerless_plan_events_locked(self, source_bundle: str) -> None:
+        rows = tuple(self._connection.execute(
+            "SELECT event_id, event_json FROM world_v2_events WHERE world_id = ?",
+            (self._world_id,),
+        ))
+        decoded: list[tuple[str, dict[str, object], dict[str, object]]] = []
+        ownerless_plan_ids: set[str] = set()
+        for row in rows:
+            try:
+                raw_event = json.loads(str(row["event_json"]))
+                payload = json.loads(str(raw_event.get("payload_json", "")))
+            except Exception:
+                continue
+            if not isinstance(raw_event, dict) or not isinstance(payload, dict):
+                continue
+            decoded.append((str(row["event_id"]), raw_event, payload))
+            plan = payload.get("plan")
+            if (
+                raw_event.get("event_type") == "ActivityPlanned"
+                and isinstance(plan, dict)
+                and "owner_actor_ref" not in plan
+            ):
+                plan_id = plan.get("plan_id")
+                if isinstance(plan_id, str):
+                    ownerless_plan_ids.add(plan_id)
+        lifecycle_types = {
+            "ActivityStarted",
+            "ActivityPaused",
+            "ActivityResumed",
+            "ActivityCompleted",
+            "ActivityAbandoned",
+        }
+        for event_id, raw_event, payload in decoded:
+            plan = payload.get("plan")
+            is_ownerless_create = (
+                raw_event.get("event_type") == "ActivityPlanned"
+                and isinstance(plan, dict)
+                and plan.get("plan_id") in ownerless_plan_ids
+            )
+            is_ownerless_transition = (
+                raw_event.get("event_type") in lifecycle_types
+                and payload.get("plan_id") in ownerless_plan_ids
+            )
+            if is_ownerless_create or is_ownerless_transition:
+                self._connection.execute(
+                    """INSERT OR IGNORE INTO world_v2_legacy_plan_events
+                       (world_id, event_id, source_reducer_bundle) VALUES (?, ?, ?)""",
+                    (self._world_id, event_id, source_bundle),
+                )
+
     def _legacy_semantic_hash(
         self,
         *,
@@ -417,6 +477,13 @@ class SQLiteWorldLedger:
                 raise ValueError(
                     "legacy ActorAuthority transition cannot claim a v16 event binding"
                 )
+            plans = raw_state.get("plans", [])
+            plan_authority_keys = {"owner_actor_ref", "authority_origin"}
+            if isinstance(plans, list) and any(
+                isinstance(plan, dict) and plan_authority_keys.intersection(plan)
+                for plan in plans
+            ):
+                raise ValueError("legacy Plan cannot claim v16 owner authority")
             occurrences = raw_state.get("world_occurrences", [])
             if isinstance(occurrences, list) and any(
                 isinstance(occurrence, dict)
@@ -1149,6 +1216,13 @@ class SQLiteWorldLedger:
         ledger_sequence = 0
         legacy_trigger_sources: dict[str, str] = {}
         legacy_settlement_sources: dict[str, str] = {}
+        legacy_plan_event_ids = {
+            str(row["event_id"])
+            for row in self._connection.execute(
+                "SELECT event_id FROM world_v2_legacy_plan_events WHERE world_id = ?",
+                (self._world_id,),
+            )
+        }
         rows = self._connection.execute(
             """SELECT * FROM world_v2_events WHERE world_id = ?
                ORDER BY ledger_sequence""",
@@ -1211,7 +1285,11 @@ class SQLiteWorldLedger:
             ):
                 raise LedgerIntegrityError("persisted event revisions are discontinuous")
             try:
-                state = reduce_event(state, event)
+                state = reduce_event(
+                    state,
+                    event,
+                    allow_legacy_plan_owner=event.event_id in legacy_plan_event_ids,
+                )
             except Exception as exc:
                 raise LedgerIntegrityError("persisted event cannot be reduced") from exc
         if (

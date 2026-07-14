@@ -29,8 +29,11 @@ from .schemas import (
     NpcProjection,
     OutcomeObservationProjection,
     OutcomeProposalProjection,
+    PlanAuthorityOrigin,
     PlanStateProjection,
     WorldOccurrenceProjection,
+    plan_authority_binding_hash,
+    plan_authority_projection_hash,
 )
 
 
@@ -59,6 +62,12 @@ def plan_activity(
     plans: tuple[PlanStateProjection, ...],
     npcs: tuple[NpcProjection, ...],
     payload: ActivityPlannedPayload,
+    *,
+    event_ref: str,
+    event_payload_hash: str,
+    accepted_world_revision: int,
+    logical_time: datetime,
+    allow_legacy_missing_owner: bool = False,
 ) -> tuple[PlanStateProjection, ...]:
     if any(plan.plan_id == payload.plan.plan_id for plan in plans):
         raise ValueError(f"plan {payload.plan.plan_id!r} already exists")
@@ -84,7 +93,41 @@ def plan_activity(
         )
         if predecessor is None or predecessor.status != "abandoned":
             raise ValueError("replacement plan requires an abandoned predecessor")
-    return (*plans, payload.plan)
+    owner = payload.plan.owner_actor_ref
+    if owner is None:
+        if allow_legacy_missing_owner:
+            return (
+                *plans,
+                payload.plan.model_copy(update={"owner_actor_ref": "legacy:unknown-owner"}),
+            )
+        raise ValueError("ActivityPlanned requires an explicit owner_actor_ref")
+    if owner == "legacy:unknown-owner":
+        raise ValueError("live ActivityPlanned cannot claim legacy unknown owner")
+    if payload.plan.authority_origin is not None:
+        raise ValueError("ActivityPlanned draft cannot inject authority_origin")
+    projection_hash = plan_authority_projection_hash(payload.plan)
+    origin = PlanAuthorityOrigin(
+        transition_id=payload.transition_id,
+        accepted_event_type="ActivityPlanned",
+        accepted_event_ref=event_ref,
+        accepted_world_revision=accepted_world_revision,
+        accepted_payload_hash=event_payload_hash,
+        accepted_at=logical_time,
+        authority_projection_hash=projection_hash,
+        binding_hash=plan_authority_binding_hash(
+            plan_id=payload.plan.plan_id,
+            owner_actor_ref=owner,
+            entity_revision=payload.plan.entity_revision,
+            transition_id=payload.transition_id,
+            event_type="ActivityPlanned",
+            accepted_event_ref=event_ref,
+            accepted_world_revision=accepted_world_revision,
+            accepted_payload_hash=event_payload_hash,
+            accepted_at=logical_time,
+            projection_hash=projection_hash,
+        ),
+    )
+    return (*plans, payload.plan.model_copy(update={"authority_origin": origin}))
 
 
 def transition_activity(
@@ -94,6 +137,11 @@ def transition_activity(
     target_status: str,
     allowed_statuses: frozenset[str],
     logical_time: datetime,
+    event_type: str,
+    event_ref: str,
+    event_payload_hash: str,
+    accepted_world_revision: int,
+    allow_legacy_unowned_transition: bool = False,
 ) -> tuple[PlanStateProjection, ...]:
     index = next(
         (index for index, plan in enumerate(plans) if plan.plan_id == payload.plan_id),
@@ -107,6 +155,8 @@ def transition_activity(
         raise ValueError(f"cannot transition {plan.status!r} activity to {target_status!r}")
     if payload.transitioned_at > logical_time:
         raise ValueError("activity transition is ahead of logical time")
+    if payload.transitioned_at != logical_time:
+        raise ValueError("activity transition must be pinned to authoritative logical time")
     if payload.transitioned_at.tzinfo is None or payload.transitioned_at.utcoffset() is None:
         raise ValueError("activity transition time must be timezone-aware")
     if (
@@ -114,9 +164,28 @@ def transition_activity(
         and payload.transitioned_at < plan.last_transitioned_at
     ):
         raise ValueError("activity transition time cannot move backwards")
+    if plan.owner_actor_ref == "legacy:unknown-owner" and plan.authority_origin is None:
+        if not allow_legacy_unowned_transition:
+            raise ValueError("live activity transition requires current Plan owner authority")
+        updated = plan.model_copy(
+            update={
+                "entity_revision": plan.entity_revision + 1,
+                "status": target_status,
+                "last_transitioned_at": payload.transitioned_at,
+                "terminal_reason_ref": (
+                    payload.reason_ref
+                    if target_status in {"completed", "abandoned"}
+                    else None
+                ),
+            }
+        )
+        return (*plans[:index], updated, *plans[index + 1 :])
+    if plan.owner_actor_ref is None or plan.authority_origin is None:
+        raise ValueError("activity transition requires installed Plan owner authority")
+    next_revision = plan.entity_revision + 1
     updated = plan.model_copy(
         update={
-            "entity_revision": plan.entity_revision + 1,
+            "entity_revision": next_revision,
             "status": target_status,
             "last_transitioned_at": payload.transitioned_at,
             "terminal_reason_ref": (
@@ -126,6 +195,29 @@ def transition_activity(
             ),
         }
     )
+    projection_hash = plan_authority_projection_hash(updated)
+    origin = PlanAuthorityOrigin(
+        transition_id=payload.transition_id,
+        accepted_event_type=event_type,
+        accepted_event_ref=event_ref,
+        accepted_world_revision=accepted_world_revision,
+        accepted_payload_hash=event_payload_hash,
+        accepted_at=logical_time,
+        authority_projection_hash=projection_hash,
+        binding_hash=plan_authority_binding_hash(
+            plan_id=plan.plan_id,
+            owner_actor_ref=plan.owner_actor_ref,
+            entity_revision=next_revision,
+            transition_id=payload.transition_id,
+            event_type=event_type,
+            accepted_event_ref=event_ref,
+            accepted_world_revision=accepted_world_revision,
+            accepted_payload_hash=event_payload_hash,
+            accepted_at=logical_time,
+            projection_hash=projection_hash,
+        ),
+    )
+    updated = updated.model_copy(update={"authority_origin": origin})
     return (*plans[:index], updated, *plans[index + 1 :])
 
 

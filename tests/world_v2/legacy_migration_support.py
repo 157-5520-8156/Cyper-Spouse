@@ -36,6 +36,12 @@ def strip_v16_state_fields(raw: dict[str, object]) -> dict[str, object]:
                 transition.pop("accepted_event_ref", None)
                 transition.pop("accepted_world_revision", None)
                 transition.pop("accepted_payload_hash", None)
+    plans = raw.get("plans")
+    if isinstance(plans, list):
+        for plan in plans:
+            if isinstance(plan, dict):
+                plan.pop("owner_actor_ref", None)
+                plan.pop("authority_origin", None)
     occurrences = raw.get("world_occurrences")
     if isinstance(occurrences, list):
         for occurrence in occurrences:
