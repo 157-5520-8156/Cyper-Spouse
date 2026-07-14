@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 import hashlib
 import json
+import sqlite3
 
 import pytest
 
@@ -19,6 +20,7 @@ from companion_daemon.world_v2.commitment_reducers import (
 )
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.ledger import WorldLedger
+from companion_daemon.world_v2.reducers import ReducerState
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.schemas import (
     CommitmentOrigin,
@@ -555,6 +557,33 @@ def test_sqlite_commitment_roundtrip_and_rebuild(tmp_path) -> None:
     assert reopened.project() == expected
     assert reopened.rebuild() == expected
     reopened.close()
+    with sqlite3.connect(path) as connection:
+        state_json, world_revision = connection.execute(
+            "SELECT state_json, world_revision FROM world_v2_heads WHERE world_id = ?",
+            (WORLD,),
+        ).fetchone()
+        state = ReducerState.model_validate_json(state_json)
+        semantic = state.semantic_payload(
+            world_id=WORLD,
+            world_revision=world_revision,
+            reducer_bundle_version="world-v2-reducers.11",
+        )
+        legacy_hash = hashlib.sha256(json.dumps(
+            semantic,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()).hexdigest()
+        connection.execute(
+            "UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ? "
+            "WHERE world_id = ?",
+            (legacy_hash, "world-v2-reducers.11", WORLD),
+        )
+    migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.13"
+    assert migrated.project().commitments == expected.commitments
+    assert migrated.rebuild() == migrated.project()
+    migrated.close()
 
 
 def test_clock_jump_past_window_records_due_then_break_with_same_clock_authority() -> None:

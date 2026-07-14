@@ -15,6 +15,10 @@ from companion_daemon.world_v2.errors import IdempotencyConflict
 from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.ledger import LedgerPort, WorldLedger
 from companion_daemon.world_v2.life_events import outcome_mutation_hash
+from companion_daemon.world_v2.experience_events import (
+    ExperienceCommittedPayload,
+    experience_mutation_hash,
+)
 from companion_daemon.world_v2.projection import InternalProjectionReader
 from companion_daemon.world_v2.reducers import ReducerState, reduce_event
 from companion_daemon.world_v2.schemas import (
@@ -24,7 +28,12 @@ from companion_daemon.world_v2.schemas import (
     ClaimLease,
     DueWindow,
     EvidenceRef,
+    ExperienceOccurrenceSettlementBinding,
+    ExperienceOrigin,
     ExperienceProjection,
+    ExperienceProposalProjection,
+    ExperienceProposedMutation,
+    ExperienceValues,
     NpcProjection,
     OutcomeObservationProjection,
     OutcomeProposalProjection,
@@ -36,6 +45,7 @@ from companion_daemon.world_v2.schemas import (
     TriggerProcess,
     WorldEvent,
     WorldOccurrenceProjection,
+    experience_semantic_fingerprint,
 )
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.typed_proposals import AmbiguousTypedProposalAuthority
@@ -407,6 +417,7 @@ def seed_through_proposal(ledger: LedgerPort) -> str:
             )
         ],
     )
+    commit(ledger, [experience_proposal_event()])
     assert ledger.project().semantic_hash == semantic_hash_before_proposal
     return semantic_hash_before_proposal
 
@@ -502,18 +513,84 @@ def settlement_batch() -> list[WorldEvent]:
         result_payload_hash="sha256:tea-good",
         observation_refs=("observation-tea",),
     )
-    experience = ExperienceProjection(
-        experience_id="experience-tea",
-        entity_revision=1,
+    settlement_event = event(
+        "occurrence-settled",
+        "WorldOccurrenceSettled",
+        {
+            **mutation(
+                "occurrence-settled",
+                expected_revision=3,
+                evidence_refs=[settled_evidence],
+            ),
+            "change_id": "change:outcome-proposed",
+            "acceptance_id": "acceptance:outcome-proposal-tea",
+            "evaluated_world_revision": 7,
+            "accepted_change_hash": accepted_change_hash,
+            "occurrence_id": "occurrence-tea",
+            "outcome_proposal_id": "outcome-proposal-tea",
+            "candidate_result_ref": "result:tea-good",
+            "result_id": "result-tea-good",
+            "observation_refs": ["observation-tea"],
+            "result_payload_ref": "payload:tea-good",
+            "result_payload_hash": "sha256:tea-good",
+            "settled_at": settled_at.isoformat(),
+            "appraisal_trigger_ref": appraisal_trigger_identity(
+                "occurrence-tea", "result-tea-good"
+            ),
+        },
+        at=settled_at,
+    )
+    source_binding = ExperienceOccurrenceSettlementBinding(
+        authority_event_ref=settlement_event.event_id,
+        authority_world_revision=9,
+        authority_payload_hash=settlement_event.payload_hash,
+        occurrence_id="occurrence-tea",
+        occurrence_entity_revision=4,
+        result_id="result-tea-good",
+        result_payload_ref="payload:tea-good",
+        result_payload_hash="sha256:tea-good",
+    )
+    values = ExperienceValues(
         summary_ref="summary:tea-good",
-        evidence_refs=(EvidenceRef.model_validate(settled_evidence),),
+        summary_payload_hash="d" * 64,
         occurred_from=NOW + timedelta(minutes=2),
         occurred_to=settled_at,
         participant_refs=("npc:lin",),
-        occurrence_refs=("occurrence-tea",),
-        result_refs=("result-tea-good",),
+        source_bindings=(source_binding,),
         privacy_class="private",
     )
+    origin = ExperienceOrigin(
+        change_id="change:experience-tea",
+        transition_id="transition:experience-tea",
+        policy_refs=("policy:experience-v1",),
+        accepted_event_ref="experience-committed",
+    )
+    experience = ExperienceProjection(
+        experience_id="experience-tea",
+        entity_revision=1,
+        authority_contract_version="experience.1",
+        semantic_fingerprint=experience_semantic_fingerprint(
+            values=values, policy_refs=origin.policy_refs
+        ),
+        values=values,
+        origin=origin,
+    )
+    experience_raw = {
+        "change_id": origin.change_id,
+        "transition_id": origin.transition_id,
+        "expected_entity_revision": 0,
+        "evidence_refs": (
+            EvidenceRef.model_validate_json(json.dumps(settled_evidence)),
+        ),
+        "policy_refs": origin.policy_refs,
+        "acceptance_id": "acceptance:experience-tea",
+        "proposal_id": "proposal:experience-tea",
+        "evaluated_world_revision": 7,
+        "accepted_change_hash": "0" * 64,
+        "experience": experience,
+    }
+    experience_raw["accepted_change_hash"] = experience_mutation_hash(experience_raw)
+    experience_payload = ExperienceCommittedPayload.model_validate(experience_raw)
     trigger = TriggerProcess(
         trigger_id=appraisal_trigger_identity("occurrence-tea", "result-tea-good"),
         trigger_ref=appraisal_trigger_identity("occurrence-tea", "result-tea-good"),
@@ -536,44 +613,24 @@ def settlement_batch() -> list[WorldEvent]:
             },
             at=settled_at,
         ),
+        settlement_event,
         event(
-            "occurrence-settled",
-            "WorldOccurrenceSettled",
+            "experience-accepted",
+            "AcceptanceRecorded",
             {
-                **mutation(
-                    "occurrence-settled",
-                    expected_revision=3,
-                    evidence_refs=[settled_evidence],
-                ),
-                "change_id": "change:outcome-proposed",
-                "acceptance_id": "acceptance:outcome-proposal-tea",
-                "evaluated_world_revision": 7,
-                "accepted_change_hash": accepted_change_hash,
-                "occurrence_id": "occurrence-tea",
-                "outcome_proposal_id": "outcome-proposal-tea",
-                "candidate_result_ref": "result:tea-good",
-                "result_id": "result-tea-good",
-                "observation_refs": ["observation-tea"],
-                "result_payload_ref": "payload:tea-good",
-                "result_payload_hash": "sha256:tea-good",
-                "settled_at": settled_at.isoformat(),
-                "appraisal_trigger_ref": appraisal_trigger_identity(
-                    "occurrence-tea", "result-tea-good"
-                ),
+                "status": "accepted",
+                "acceptance_id": experience_payload.acceptance_id,
+                "proposal_id": experience_payload.proposal_id,
+                "evaluated_world_revision": experience_payload.evaluated_world_revision,
+                "accepted_change_id": experience_payload.change_id,
+                "accepted_change_hash": experience_payload.accepted_change_hash,
             },
             at=settled_at,
         ),
         event(
             "experience-committed",
             "ExperienceCommitted",
-            {
-                **mutation(
-                    "experience-committed",
-                    expected_revision=0,
-                    evidence_refs=[settled_evidence],
-                ),
-                "experience": experience.model_dump(mode="json"),
-            },
+            experience_payload.model_dump(mode="json"),
             at=settled_at,
         ),
         event(
@@ -583,6 +640,39 @@ def settlement_batch() -> list[WorldEvent]:
             at=settled_at,
         ),
     ]
+
+
+def experience_proposal_event() -> WorldEvent:
+    payload = ExperienceCommittedPayload.model_validate_json(
+        settlement_batch()[3].payload_json
+    )
+    proposal = ExperienceProposalProjection(
+        proposal_id=payload.proposal_id,
+        proposal_encoding="typed-authority-v1",
+        authority_contract_ref="proposal-contract:experience.1",
+        transition_kind="commit",
+        change_id=payload.change_id,
+        transition_id=payload.transition_id,
+        evaluated_world_revision=payload.evaluated_world_revision,
+        expected_entity_revision=0,
+        proposed_change_hash=payload.accepted_change_hash,
+        evidence_refs=payload.evidence_refs,
+        policy_refs=payload.policy_refs,
+        proposed_mutation=ExperienceProposedMutation(
+            payload_json=json.dumps(
+                payload.model_dump(mode="json"),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        ),
+    )
+    return event(
+        "experience-proposed",
+        "ProposalRecorded",
+        proposal.model_dump(mode="json"),
+        at=LIFE_TIME,
+    )
 
 
 def assert_completed_vertical(ledger: LedgerPort) -> None:
@@ -679,7 +769,7 @@ def test_occurrence_cannot_settle_without_matching_appraisal_trigger() -> None:
     seed_through_proposal(ledger)
 
     with pytest.raises(ValueError, match="exactly one matching"):
-        commit(ledger, settlement_batch()[:3])
+        commit(ledger, settlement_batch()[:4])
 
     assert ledger.project().world_occurrences[0].status == "active"
     assert ledger.project().experiences == ()
@@ -701,7 +791,7 @@ def test_occurrence_can_settle_without_materializing_optional_experience() -> No
     seed_through_proposal(ledger)
     batch = settlement_batch()
 
-    commit(ledger, [batch[0], batch[1], batch[3]])
+    commit(ledger, [batch[0], batch[1], batch[4]])
     assert ledger.project().world_occurrences[0].status == "settled"
     assert ledger.project().experiences == ()
 
@@ -1117,7 +1207,7 @@ def test_outcome_proposal_cannot_escape_committed_candidate_matrix() -> None:
             "TriggerProcessOpened",
             {
                 "process": {
-                    **batch[3].payload()["process"],
+                    **batch[4].payload()["process"],
                     "source_evidence_ref": "invalid-occurrence-settled",
                 }
             },

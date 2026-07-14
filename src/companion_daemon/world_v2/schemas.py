@@ -635,6 +635,7 @@ class EvidenceRef(FrozenModel):
             "committed_world_event",
             "settled_world_event",
             "committed_fact",
+            "committed_experience",
         }:
             if self.source_world_revision is None or self.immutable_hash is None:
                 raise ValueError("world-event evidence requires revision and immutable hash")
@@ -912,21 +913,49 @@ class FactProposalProjection(FrozenModel):
         return self
 
 
-class ExperienceProjection(FrozenModel):
+class LegacyExperienceEvidenceRef(FrozenModel):
+    """Wide reader for pre-A2 evidence that was not revision/hash pinned."""
+
+    ref_id: str = Field(min_length=1)
+    evidence_type: Literal[
+        "committed_fact",
+        "committed_experience",
+        "committed_world_event",
+        "settled_world_event",
+        "settled_external_result",
+        "observed_message",
+        "active_plan",
+        "operator_observation",
+        "clock_observation",
+    ]
+    claim_purpose: Literal[
+        "current_fact",
+        "past_experience",
+        "future_plan",
+        "private_hypothesis",
+        "action_authorization",
+        "conversation_continuity",
+    ]
+    source_world_revision: int | None = Field(default=None, ge=1)
+    immutable_hash: str | None = Field(default=None, min_length=64, max_length=64)
+
+
+class LegacyExperienceProjection(FrozenModel):
+    authority_contract_version: Literal["legacy-unverified"] = "legacy-unverified"
     experience_id: str = Field(min_length=1)
     entity_revision: int = Field(ge=1)
     summary_ref: str = Field(min_length=1)
-    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    evidence_refs: tuple[LegacyExperienceEvidenceRef, ...] = Field(min_length=1)
     occurred_from: datetime
     occurred_to: datetime
     participant_refs: tuple[str, ...] = Field(min_length=1)
     occurrence_refs: tuple[str, ...] = ()
     result_refs: tuple[str, ...] = ()
     privacy_class: PrivacyClass
-    status: Literal["committed", "superseded"] = "committed"
+    status: Literal["legacy-unverified"] = "legacy-unverified"
 
     @model_validator(mode="after")
-    def experience_has_settled_origin(self) -> ExperienceProjection:
+    def experience_has_settled_origin(self) -> LegacyExperienceProjection:
         if self.occurred_to < self.occurred_from:
             raise ValueError("experience occurrence window is reversed")
         if not self.occurrence_refs and not self.result_refs:
@@ -945,6 +974,153 @@ class ExperienceProjection(FrozenModel):
         ):
             raise ValueError("experience requires evidence of something that occurred")
         return self
+
+
+class ExperienceOccurrenceSettlementBinding(FrozenModel):
+    source_kind: Literal["occurrence_settlement"] = "occurrence_settlement"
+    authority_event_ref: str = Field(min_length=1)
+    authority_world_revision: int = Field(ge=1)
+    authority_payload_hash: str = Field(min_length=64, max_length=64)
+    occurrence_id: str = Field(min_length=1)
+    occurrence_entity_revision: int = Field(ge=1)
+    result_id: str = Field(min_length=1)
+    result_payload_ref: str = Field(min_length=1)
+    result_payload_hash: str = Field(min_length=1)
+
+
+class ExperienceExecutionReceiptBinding(FrozenModel):
+    source_kind: Literal["execution_receipt"] = "execution_receipt"
+    receipt_id: str = Field(min_length=1)
+    receipt_hash: str = Field(min_length=64, max_length=64)
+    action_id: str = Field(min_length=1)
+    action_payload_hash: str = Field(min_length=1)
+    result_id: str = Field(min_length=1)
+    observed_state: Literal["delivered", "failed", "cancelled", "expired", "unknown"]
+    raw_payload_hash: str = Field(min_length=1)
+
+
+ExperienceSourceBinding = (
+    ExperienceOccurrenceSettlementBinding | ExperienceExecutionReceiptBinding
+)
+
+
+class ExperienceValues(FrozenModel):
+    summary_ref: str = Field(min_length=1)
+    summary_payload_hash: str = Field(min_length=64, max_length=64)
+    occurred_from: datetime
+    occurred_to: datetime
+    participant_refs: tuple[str, ...] = Field(min_length=1)
+    # A2 settlement accepts exactly one authoritative source.  Exposing a
+    # multi-source shape would be misleading because occurrence settlements
+    # are committed one at a time and the acceptance bridge cannot authorize
+    # several future settlement revisions atomically yet.
+    source_bindings: tuple[ExperienceSourceBinding, ...] = Field(
+        min_length=1, max_length=1
+    )
+    privacy_class: PrivacyClass
+
+    @model_validator(mode="after")
+    def sources_and_window_are_closed(self) -> ExperienceValues:
+        if self.occurred_to < self.occurred_from:
+            raise ValueError("experience occurrence window is reversed")
+        if len(self.participant_refs) != len(set(self.participant_refs)):
+            raise ValueError("experience participant refs must be unique")
+        identities = tuple(
+            (item.source_kind, item.authority_event_ref)
+            if isinstance(item, ExperienceOccurrenceSettlementBinding)
+            else (item.source_kind, item.receipt_id)
+            for item in self.source_bindings
+        )
+        if len(identities) != len(set(identities)):
+            raise ValueError("experience source identities must be unique")
+        return self
+
+
+class ExperienceOrigin(FrozenModel):
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+
+
+def experience_semantic_fingerprint(
+    *, values: ExperienceValues, policy_refs: tuple[str, ...]
+) -> str:
+    material = {
+        "values": values.model_dump(mode="json"),
+        "policy_refs": sorted(policy_refs),
+    }
+    encoded = json.dumps(
+        material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+class ExperienceProjection(FrozenModel):
+    experience_id: str = Field(min_length=1)
+    entity_revision: Literal[1] = 1
+    authority_contract_version: Literal["experience.1"] = "experience.1"
+    semantic_fingerprint: str = Field(min_length=64, max_length=64)
+    values: ExperienceValues
+    origin: ExperienceOrigin
+    status: Literal["committed"] = "committed"
+
+    @model_validator(mode="after")
+    def fingerprint_matches_immutable_authority(self) -> ExperienceProjection:
+        expected = experience_semantic_fingerprint(
+            values=self.values, policy_refs=self.origin.policy_refs
+        )
+        if self.semantic_fingerprint != expected:
+            raise ValueError("experience semantic fingerprint does not match authority")
+        return self
+
+
+class ExperienceTransitionProjection(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    experience_id: str = Field(min_length=1)
+    entity_revision: Literal[1] = 1
+    values_after: ExperienceValues
+    semantic_fingerprint_after: str = Field(min_length=64, max_length=64)
+    change_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+    accepted_at: datetime
+
+
+ExperienceAuthorityProjection = ExperienceProjection | LegacyExperienceProjection
+
+
+class ExperienceProposedMutation(FrozenModel):
+    event_type: Literal["ExperienceCommitted"] = "ExperienceCommitted"
+    payload_json: str = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def payload_is_canonical(self) -> ExperienceProposedMutation:
+        decoded = json.loads(self.payload_json)
+        if not isinstance(decoded, dict):
+            raise ValueError("experience mutation payload must be an object")
+        canonical = json.dumps(
+            decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        if canonical != self.payload_json:
+            raise ValueError("experience mutation payload must use canonical JSON")
+        return self
+
+
+class ExperienceProposalProjection(FrozenModel):
+    proposal_id: str = Field(min_length=1)
+    proposal_kind: Literal["experience_transition"] = "experience_transition"
+    proposal_encoding: Literal["typed-authority-v1"]
+    authority_contract_ref: Literal["proposal-contract:experience.1"]
+    transition_kind: Literal["commit"] = "commit"
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    expected_entity_revision: Literal[0] = 0
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    proposed_mutation: ExperienceProposedMutation
 
 
 class SituationStateProjection(FrozenModel):
@@ -1040,6 +1216,9 @@ class WorldOccurrenceProjection(FrozenModel):
     result_payload_ref: str | None = None
     result_payload_hash: str | None = None
     settled_at: datetime | None = None
+    settlement_event_ref: str | None = None
+    settlement_world_revision: int | None = Field(default=None, ge=1)
+    settlement_payload_hash: str | None = Field(default=None, min_length=64, max_length=64)
     terminal_reason_ref: str | None = None
 
 
@@ -2481,7 +2660,7 @@ class InternalWorldSnapshot(FrozenModel):
     projection_policy_version: str = Field(min_length=1)
     character_core: CharacterCoreProjection | None = None
     facts: tuple[FactProjection, ...] = ()
-    experiences: tuple[ExperienceProjection, ...] = ()
+    experiences: tuple[ExperienceAuthorityProjection, ...] = ()
     appraisals: tuple[AppraisalProjection, ...] = ()
     npcs: tuple[NpcProjection, ...] = ()
     world_occurrences: tuple[WorldOccurrenceProjection, ...] = ()
@@ -2577,7 +2756,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.12"
+    reducer_bundle_version: str = "world-v2-reducers.13"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -2613,7 +2792,10 @@ class LedgerProjection(FrozenModel):
     plans: tuple[PlanStateProjection, ...] = ()
     world_occurrences: tuple[WorldOccurrenceProjection, ...] = ()
     outcome_observations: tuple[OutcomeObservationProjection, ...] = ()
-    experiences: tuple[ExperienceProjection, ...] = ()
+    experiences: tuple[ExperienceAuthorityProjection, ...] = ()
+    experience_transitions: tuple[ExperienceTransitionProjection, ...] = ()
+    experience_proposals: tuple[ExperienceProposalProjection, ...] = ()
+    experience_proposal_ids: tuple[str, ...] = ()
     appraisals: tuple[AppraisalProjection, ...] = ()
     affect_baselines: tuple[AffectBaselineProjection, ...] = ()
     affect_episodes: tuple[AffectEpisodeProjection, ...] = ()

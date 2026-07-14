@@ -6,13 +6,14 @@ from collections.abc import Sequence
 import hashlib
 import json
 
-from .life_events import ExperienceCommittedPayload, WorldOccurrenceSettledPayload
+from .experience_events import ExperienceCommittedPayload
+from .life_events import WorldOccurrenceSettledPayload
 from .appraisal_events import (
     AppraisalAcceptedPayload,
     AppraisalContradictedPayload,
     AppraisalSupersededPayload,
 )
-from .schemas import WorldEvent
+from .schemas import ExperienceOccurrenceSettlementBinding, WorldEvent
 from .typed_proposal_families import (
     family_for_mutation,
     family_for_record,
@@ -183,8 +184,12 @@ def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revisi
         matching_experiences = [
             item
             for item in experiences
-            if settlement.occurrence_id in item.experience.occurrence_refs
-            and settlement.result_id in item.experience.result_refs
+            if any(
+                isinstance(binding, ExperienceOccurrenceSettlementBinding)
+                and binding.occurrence_id == settlement.occurrence_id
+                and binding.result_id == settlement.result_id
+                for binding in item.experience.values.source_bindings
+            )
         ]
         if len(matching_experiences) > 1:
             raise ValueError(
@@ -193,12 +198,11 @@ def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revisi
 
     settlement_pairs = {(item.occurrence_id, item.result_id) for item in settlements}
     for experience in experiences:
-        for occurrence_id in experience.experience.occurrence_refs:
-            if not any(
-                occurrence_id == candidate_occurrence
-                and result_id in experience.experience.result_refs
-                for candidate_occurrence, result_id in settlement_pairs
-            ):
+        for binding in experience.experience.values.source_bindings:
+            if isinstance(binding, ExperienceOccurrenceSettlementBinding) and (
+                binding.occurrence_id,
+                binding.result_id,
+            ) not in settlement_pairs:
                 raise ValueError("occurrence-backed experience must accompany its settlement")
 
     for mutation_index, binding in typed_mutations:

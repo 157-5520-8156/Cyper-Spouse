@@ -56,12 +56,16 @@ from .commitment_events import (
 from .commitment_reducers import reduce_commitment, reduce_commitment_clock
 from .fact_events import FACT_PAYLOAD_MODELS, FactAuthorizedMutationPayload, FactChangedPayload
 from .fact_reducers import reduce_fact
+from .experience_events import (
+    ExperienceAuthorizedMutationPayload,
+    ExperienceCommittedPayload,
+    LegacyExperienceCommittedPayload,
+)
 from .errors import UnknownEventType
 from .event_catalog import event_contract
 from .life_events import (
     ActivityPlannedPayload,
     ActivityTransitionPayload,
-    ExperienceCommittedPayload,
     NpcRegisteredPayload,
     OutcomeObservationRecordedPayload,
     OutcomeProposalRecordedPayload,
@@ -73,6 +77,7 @@ from .life_events import (
 from .life_reducers import (
     activate_occurrence,
     commit_experience,
+    commit_legacy_experience,
     commit_occurrence,
     plan_activity,
     record_outcome_observation,
@@ -138,6 +143,11 @@ from .schemas import (
     ExternalObservation,
     FrozenModel,
     ExperienceProjection,
+    ExperienceAuthorityProjection,
+    ExperienceTransitionProjection,
+    ExperienceProposalProjection,
+    ExperienceOccurrenceSettlementBinding,
+    LegacyExperienceProjection,
     FactProjection,
     FactProposalProjection,
     FactTransitionProjection,
@@ -165,7 +175,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.12"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.13"
 INSTALLED_APPRAISAL_POLICY_REFS = ("policy:appraisal-v1",)
 INSTALLED_APPRAISAL_MATRIX_VERSION = "appraisal-matrix.1"
 INSTALLED_SOURCE_CLUSTERING_VERSION = "source-clustering.1"
@@ -179,6 +189,22 @@ INSTALLED_BOUNDARY_POLICY_REFS = ("policy:boundary-v1",)
 INSTALLED_THREAD_POLICY_REFS = ("policy:thread-v1",)
 INSTALLED_COMMITMENT_POLICY_REFS = ("policy:commitment-v1",)
 INSTALLED_FACT_POLICY_REFS = ("policy:fact-v1",)
+INSTALLED_EXPERIENCE_POLICY_REFS = ("policy:experience-v1",)
+
+
+def _experience_semantic_dump(
+    experience: ExperienceProjection | LegacyExperienceProjection,
+    *,
+    reducer_bundle_version: str,
+) -> dict[str, Any]:
+    dumped = experience.model_dump(mode="json")
+    if (
+        reducer_bundle_version != REDUCER_BUNDLE_VERSION
+        and isinstance(experience, LegacyExperienceProjection)
+    ):
+        dumped.pop("authority_contract_version", None)
+        dumped["status"] = "committed"
+    return dumped
 
 
 class RevisionClass(StrEnum):
@@ -218,7 +244,8 @@ class ReducerState(FrozenModel):
     plans: tuple[PlanStateProjection, ...] = ()
     world_occurrences: tuple[WorldOccurrenceProjection, ...] = ()
     outcome_observations: tuple[OutcomeObservationProjection, ...] = ()
-    experiences: tuple[ExperienceProjection, ...] = ()
+    experiences: tuple[ExperienceAuthorityProjection, ...] = ()
+    experience_transitions: tuple[ExperienceTransitionProjection, ...] = ()
     outcome_proposals: tuple[OutcomeProposalProjection, ...] = ()
     appraisals: tuple[AppraisalProjection, ...] = ()
     affect_baselines: tuple[AffectBaselineProjection, ...] = ()
@@ -245,6 +272,8 @@ class ReducerState(FrozenModel):
     fact_transitions: tuple[FactTransitionProjection, ...] = ()
     fact_proposals: tuple[FactProposalProjection, ...] = ()
     fact_proposal_ids: tuple[str, ...] = ()
+    experience_proposals: tuple[ExperienceProposalProjection, ...] = ()
+    experience_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
@@ -580,6 +609,51 @@ class ReducerState(FrozenModel):
                 or fact.semantic_fingerprint != latest.semantic_fingerprint_after
             ):
                 raise ValueError("fact projection does not match lineage head")
+        experience_ids = tuple(item.experience_id for item in self.experiences)
+        if len(experience_ids) != len(set(experience_ids)):
+            raise ValueError("experience ids must be unique")
+        transition_ids = tuple(item.transition_id for item in self.experience_transitions)
+        if len(transition_ids) != len(set(transition_ids)):
+            raise ValueError("experience transition ids must be unique")
+        hardened_ids = {
+            item.experience_id
+            for item in self.experiences
+            if isinstance(item, ExperienceProjection)
+        }
+        if any(
+            item.experience_id not in hardened_ids
+            for item in self.experience_transitions
+        ):
+            raise ValueError("experience transition has no hardened projection")
+        for experience in self.experiences:
+            transitions = tuple(
+                item
+                for item in self.experience_transitions
+                if item.experience_id == experience.experience_id
+            )
+            if isinstance(experience, LegacyExperienceProjection):
+                if transitions:
+                    raise ValueError("legacy experience cannot gain fabricated lineage")
+                continue
+            if len(transitions) != 1:
+                raise ValueError("immutable experience requires exactly one commit transition")
+            transition = transitions[0]
+            if (
+                transition.transition_id != experience.origin.transition_id
+                or transition.values_after != experience.values
+                or transition.semantic_fingerprint_after
+                != experience.semantic_fingerprint
+                or transition.accepted_event_ref
+                != experience.origin.accepted_event_ref
+            ):
+                raise ValueError("experience projection does not match commit lineage")
+        if len(self.experience_proposal_ids) != len(set(self.experience_proposal_ids)):
+            raise ValueError("experience proposal ids must be unique")
+        if any(
+            item.proposal_id not in set(self.experience_proposal_ids)
+            for item in self.experience_proposals
+        ):
+            raise ValueError("pending experience proposal is absent from durable index")
         return self
 
     def semantic_payload(
@@ -626,7 +700,8 @@ class ReducerState(FrozenModel):
             "message_observations": tuple(
                 (
                     item.model_dump(mode="json")
-                    if reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                    if reducer_bundle_version
+                    in {"world-v2-reducers.12", REDUCER_BUNDLE_VERSION}
                     else item.model_dump(
                         mode="json", exclude={"actor", "channel", "payload_ref"}
                     )
@@ -662,13 +737,28 @@ class ReducerState(FrozenModel):
             "npcs": tuple(npc.model_dump(mode="json") for npc in self.npcs),
             "plans": tuple(plan.model_dump(mode="json") for plan in self.plans),
             "world_occurrences": tuple(
-                occurrence.model_dump(mode="json") for occurrence in self.world_occurrences
+                (
+                    occurrence.model_dump(mode="json")
+                    if reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                    else occurrence.model_dump(
+                        mode="json",
+                        exclude={
+                            "settlement_event_ref",
+                            "settlement_world_revision",
+                            "settlement_payload_hash",
+                        },
+                    )
+                )
+                for occurrence in self.world_occurrences
             ),
             "outcome_observations": tuple(
                 observation.model_dump(mode="json") for observation in self.outcome_observations
             ),
             "experiences": tuple(
-                experience.model_dump(mode="json") for experience in self.experiences
+                _experience_semantic_dump(
+                    experience, reducer_bundle_version=reducer_bundle_version
+                )
+                for experience in self.experiences
             ),
             "appraisals": tuple(appraisal.model_dump(mode="json") for appraisal in self.appraisals),
             "affect_baselines": tuple(
@@ -691,23 +781,32 @@ class ReducerState(FrozenModel):
         if reducer_bundle_version in {
             "world-v2-reducers.10",
             "world-v2-reducers.11",
+            "world-v2-reducers.12",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["threads"] = tuple(item.model_dump(mode="json") for item in self.threads)
             payload["thread_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.thread_transitions
             )
-        if reducer_bundle_version in {"world-v2-reducers.11", REDUCER_BUNDLE_VERSION}:
+        if reducer_bundle_version in {
+            "world-v2-reducers.11",
+            "world-v2-reducers.12",
+            REDUCER_BUNDLE_VERSION,
+        }:
             payload["commitments"] = tuple(
                 item.model_dump(mode="json") for item in self.commitments
             )
             payload["commitment_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.commitment_transitions
             )
-        if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+        if reducer_bundle_version in {"world-v2-reducers.12", REDUCER_BUNDLE_VERSION}:
             payload["facts"] = tuple(item.model_dump(mode="json") for item in self.facts)
             payload["fact_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.fact_transitions
+            )
+        if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            payload["experience_transitions"] = tuple(
+                item.model_dump(mode="json") for item in self.experience_transitions
             )
         return payload
 
@@ -891,6 +990,40 @@ class _FactProposalStore:
             }
         )
 
+
+class _ExperienceProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        if not isinstance(event, WorldEvent) or not isinstance(
+            proposal, ExperienceProposalProjection
+        ):
+            raise TypeError("experience proposal adapter received incompatible values")
+        return _experience_proposal_recorded(state, event, proposal=proposal)
+
+    def find(
+        self, state: ReducerState, proposal_id: str
+    ) -> ExperienceProposalProjection | None:
+        return next(
+            (
+                item
+                for item in state.experience_proposals
+                if item.proposal_id == proposal_id
+            ),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        return state.model_copy(
+            update={
+                "experience_proposals": tuple(
+                    item
+                    for item in state.experience_proposals
+                    if item.proposal_id != proposal_id
+                )
+            }
+        )
+
 _TYPED_PROPOSAL_STORES = {
     "proposal-contract:appraisal-legacy.1": _LegacyAppraisalProposalStore(),
     "proposal-contract:affect-legacy.1": _LegacyAffectProposalStore(),
@@ -899,6 +1032,7 @@ _TYPED_PROPOSAL_STORES = {
     "proposal-contract:thread.1": _ThreadProposalStore(),
     "proposal-contract:commitment.1": _CommitmentProposalStore(),
     "proposal-contract:fact.1": _FactProposalStore(),
+    "proposal-contract:experience.1": _ExperienceProposalStore(),
 }
 
 _TYPED_PROPOSAL_REGISTRY = TypedProposalRegistry(
@@ -1324,6 +1458,55 @@ def _fact_proposal_recorded(
     )
 
 
+def _experience_proposal_recorded(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    proposal: ExperienceProposalProjection | None = None,
+) -> ReducerState:
+    proposal = proposal or ExperienceProposalProjection.model_validate_json(event.payload_json)
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("experience proposal must evaluate the current world revision")
+    if proposal.proposal_id in state.experience_proposal_ids:
+        raise ValueError("experience proposal identity is already registered")
+    payload = ExperienceCommittedPayload.model_validate_json(
+        proposal.proposed_mutation.payload_json
+    )
+    if (
+        payload.proposal_id != proposal.proposal_id
+        or payload.change_id != proposal.change_id
+        or payload.transition_id != proposal.transition_id
+        or payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or payload.expected_entity_revision != proposal.expected_entity_revision
+        or payload.accepted_change_hash != proposal.proposed_change_hash
+        or payload.evidence_refs != proposal.evidence_refs
+        or payload.policy_refs != proposal.policy_refs
+    ):
+        raise ValueError("persisted experience proposal body does not match its index")
+    if proposal.policy_refs != INSTALLED_EXPERIENCE_POLICY_REFS:
+        raise ValueError("experience proposal references an uninstalled policy")
+    # Proposal evidence is present-tense rationale. Future settlement bindings
+    # remain only inside the accepted canonical body until mutation time.
+    _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
+    return state.model_copy(
+        update={
+            "experience_proposals": (*state.experience_proposals, proposal),
+            "experience_proposal_ids": (
+                *state.experience_proposal_ids,
+                proposal.proposal_id,
+            ),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
 def _affect_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     proposal = AffectProposalProjection.model_validate_json(event.payload_json)
     if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
@@ -1414,7 +1597,39 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
     if status not in {"accepted", "rejected", "stale"}:
         raise ValueError("AcceptanceRecorded has an invalid status")
     current_world_revision = len(state.committed_world_event_refs)
-    if status in {"accepted", "rejected"} and (evaluated_world_revision != current_world_revision):
+    experience_proposal = next(
+        (
+            item
+            for item in state.experience_proposals
+            if item.proposal_id == proposal_id
+        ),
+        None,
+    )
+    settlement_bridge = False
+    if (
+        status == "accepted"
+        and experience_proposal is not None
+        and current_world_revision == evaluated_world_revision + 2
+        and len(state.committed_world_event_refs) >= 2
+    ):
+        proposed = ExperienceCommittedPayload.model_validate_json(
+            experience_proposal.proposed_mutation.payload_json
+        )
+        latest = state.committed_world_event_refs[-1]
+        settlement_bridge = (
+            state.committed_world_event_refs[-2].event_type == "AcceptanceRecorded"
+            and latest.event_type == "WorldOccurrenceSettled"
+            and any(
+            isinstance(binding, ExperienceOccurrenceSettlementBinding)
+            and binding.authority_event_ref == latest.event_id
+            and binding.authority_world_revision == latest.world_revision
+            and binding.authority_payload_hash == latest.payload_hash
+            for binding in proposed.experience.values.source_bindings
+            )
+        )
+    if status in {"accepted", "rejected"} and (
+        evaluated_world_revision != current_world_revision and not settlement_bridge
+    ):
         raise ValueError("accepted or rejected decision must evaluate the current world")
     if status == "stale" and evaluated_world_revision >= current_world_revision:
         raise ValueError("stale decision must evaluate an older world revision")
@@ -2121,14 +2336,39 @@ def _validate_evidence_authority(
             continue
         if kind == "committed_experience":
             candidate = next(
-                (item for item in state.experiences if item.experience_id == evidence.ref_id),
+                (
+                    item
+                    for item in state.experiences
+                    if isinstance(item, ExperienceProjection)
+                    and item.origin.accepted_event_ref == evidence.ref_id
+                ),
                 None,
             )
-            if candidate is None or candidate.status != "committed":
+            committed = authority.get(evidence.ref_id)
+            transition = next(
+                (
+                    item
+                    for item in state.experience_transitions
+                    if item.accepted_event_ref == evidence.ref_id
+                    and candidate is not None
+                    and item.experience_id == candidate.experience_id
+                ),
+                None,
+            )
+            if (
+                candidate is None
+                or candidate.status != "committed"
+                or committed is None
+                or committed.event_type != "ExperienceCommitted"
+                or transition is None
+                or transition.values_after != candidate.values
+            ):
                 raise ValueError("experience evidence does not resolve to authority")
             if (
-                evidence.source_world_revision is not None
-                or evidence.immutable_hash != _canonical_model_hash(candidate)
+                evidence.source_world_revision != committed.world_revision
+                or evidence.immutable_hash != _canonical_model_hash(
+                    transition.values_after
+                )
             ):
                 raise ValueError("experience evidence hash does not match authority")
             continue
@@ -2282,6 +2522,9 @@ def _world_occurrence_settled(state: ReducerState, event: WorldEvent) -> Reducer
                 state.outcome_proposals,
                 payload,
                 logical_time=_require_life_time(state, event),
+                settlement_event_ref=event.event_id,
+                settlement_world_revision=len(state.committed_world_event_refs) + 1,
+                settlement_payload_hash=event.payload_hash,
             )
         }
     )
@@ -2313,18 +2556,105 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
 
 
 def _experience_committed(state: ReducerState, event: WorldEvent) -> ReducerState:
-    payload = _validated_life_payload(state, event, ExperienceCommittedPayload)
+    logical_time = _require_life_time(state, event)
+    payload = ExperienceCommittedPayload.model_validate_json(event.payload_json)
+    if payload.policy_refs != INSTALLED_EXPERIENCE_POLICY_REFS:
+        raise ValueError("experience commit references an uninstalled policy")
+    if payload.experience.origin.accepted_event_ref != event.event_id:
+        raise ValueError("experience origin does not identify its accepted mutation event")
+    if any(
+        item.transition_id == payload.transition_id
+        for item in state.experience_transitions
+    ):
+        raise ValueError("experience transition identity is already registered")
+    proposal = _require_authorized_experience(state, payload)
     return state.model_copy(
         update={
             "experiences": commit_experience(
                 state.experiences,
                 state.world_occurrences,
+                state.plans,
+                state.committed_world_event_refs,
                 state.execution_receipts,
+                state.actions,
+                state.facts,
                 payload,
-                logical_time=_require_life_time(state, event),
-            )
+                logical_time=logical_time,
+            ),
+            "experience_transitions": (
+                *state.experience_transitions,
+                ExperienceTransitionProjection(
+                    transition_id=payload.transition_id,
+                    experience_id=payload.experience.experience_id,
+                    values_after=payload.experience.values,
+                    semantic_fingerprint_after=payload.experience.semantic_fingerprint,
+                    change_id=payload.change_id,
+                    policy_refs=payload.policy_refs,
+                    accepted_event_ref=event.event_id,
+                    accepted_at=logical_time,
+                ),
+            ),
+            "experience_proposals": tuple(
+                item for item in state.experience_proposals if item != proposal
+            ),
         }
     )
+
+
+def _legacy_experience_committed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = LegacyExperienceCommittedPayload.model_validate_json(event.payload_json)
+    return state.model_copy(
+        update={"experiences": commit_legacy_experience(state.experiences, payload)}
+    )
+
+
+def _require_authorized_experience(
+    state: ReducerState,
+    payload: ExperienceAuthorizedMutationPayload,
+) -> ExperienceProposalProjection:
+    proposal = next(
+        (
+            item
+            for item in state.experience_proposals
+            if item.proposal_id == payload.proposal_id
+        ),
+        None,
+    )
+    decision = next(
+        (
+            item
+            for item in state.acceptance_decisions
+            if item.proposal_id == payload.proposal_id
+        ),
+        None,
+    )
+    if proposal is None:
+        raise ValueError("experience commit requires a persisted typed proposal")
+    if (
+        decision is None
+        or decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+    ):
+        raise ValueError("experience commit requires its accepted decision")
+    if (
+        not state.acceptance_decisions
+        or state.acceptance_decisions[-1] != decision
+    ):
+        raise ValueError("experience commit requires adjacent AcceptanceRecorded authority")
+    if (
+        proposal.change_id != payload.change_id
+        or proposal.transition_id != payload.transition_id
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.expected_entity_revision != payload.expected_entity_revision
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or proposal.evidence_refs != payload.evidence_refs
+        or json.loads(proposal.proposed_mutation.payload_json)
+        != payload.model_dump(mode="json")
+    ):
+        raise ValueError("accepted experience commit does not match its proposal")
+    return proposal
 
 
 def _world_occurrence_terminated(
@@ -3238,6 +3568,11 @@ _EVENTS = {
         ),
         EventDefinition("ExperienceCommitted", RevisionClass.WORLD, _experience_committed),
         EventDefinition(
+            "LegacyExperienceCommitted",
+            RevisionClass.WORLD,
+            _legacy_experience_committed,
+        ),
+        EventDefinition(
             "WorldOccurrenceCancelled",
             RevisionClass.WORLD,
             partial(_world_occurrence_terminated, target_status="cancelled"),
@@ -3408,6 +3743,9 @@ def make_projection(
         world_occurrences=state.world_occurrences,
         outcome_observations=state.outcome_observations,
         experiences=state.experiences,
+        experience_transitions=state.experience_transitions,
+        experience_proposals=state.experience_proposals,
+        experience_proposal_ids=state.experience_proposal_ids,
         appraisals=state.appraisals,
         affect_baselines=state.affect_baselines,
         affect_episodes=state.affect_episodes,

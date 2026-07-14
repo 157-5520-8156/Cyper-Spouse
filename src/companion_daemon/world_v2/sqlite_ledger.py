@@ -80,6 +80,39 @@ def _upcast_legacy_appraisal_trigger(
     }
 
 
+def _upcast_legacy_experience(raw_event: dict[str, object]) -> dict[str, object]:
+    """Mark pre-A2 Experience bytes as migration-only, unverified authority."""
+
+    if raw_event.get("event_type") != "ExperienceCommitted":
+        return raw_event
+    payload_json = raw_event.get("payload_json")
+    if not isinstance(payload_json, str):
+        return raw_event
+    payload = json.loads(payload_json)
+    if not isinstance(payload, dict):
+        return raw_event
+    experience = payload.get("experience")
+    if not isinstance(experience, dict) or "authority_contract_version" in experience:
+        return raw_event
+    marked = {
+        **experience,
+        "authority_contract_version": "legacy-unverified",
+        "status": "legacy-unverified",
+    }
+    encoded = json.dumps(
+        {**payload, "experience": marked},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        **raw_event,
+        "event_type": "LegacyExperienceCommitted",
+        "payload_json": encoded,
+        "payload_hash": hashlib.sha256(encoded.encode()).hexdigest(),
+    }
+
+
 class SQLiteWorldLedger:
     """Independent crash-consistent persistence adapter for a single World v2 world."""
 
@@ -275,6 +308,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.9",
                 "world-v2-reducers.10",
                 "world-v2-reducers.11",
+                "world-v2-reducers.12",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -332,6 +366,19 @@ class SQLiteWorldLedger:
             if not isinstance(raw_state, dict):
                 raise ValueError("legacy state is not an object")
             raw_state = dict(raw_state)
+            experiences = raw_state.get("experiences", [])
+            if isinstance(experiences, list):
+                raw_state["experiences"] = [
+                    {
+                        **experience,
+                        "authority_contract_version": "legacy-unverified",
+                        "status": "legacy-unverified",
+                    }
+                    if isinstance(experience, dict)
+                    and "authority_contract_version" not in experience
+                    else experience
+                    for experience in experiences
+                ]
             actions = raw_state.get("actions", [])
             terminal = {"delivered", "failed", "unknown", "cancelled", "expired"}
             raw_state["pending_actions"] = [
@@ -439,6 +486,7 @@ class SQLiteWorldLedger:
             payload.pop("thread_transitions", None)
         if reducer_bundle_version not in {
             "world-v2-reducers.11",
+            "world-v2-reducers.12",
             REDUCER_BUNDLE_VERSION,
         }:
             payload.pop("commitments", None)
@@ -486,6 +534,9 @@ class SQLiteWorldLedger:
             world_occurrences=projection.world_occurrences,
             outcome_observations=projection.outcome_observations,
             experiences=projection.experiences,
+            experience_transitions=projection.experience_transitions,
+            experience_proposals=projection.experience_proposals,
+            experience_proposal_ids=projection.experience_proposal_ids,
             appraisals=projection.appraisals,
             affect_baselines=projection.affect_baselines,
             affect_episodes=projection.affect_episodes,
@@ -950,6 +1001,7 @@ class SQLiteWorldLedger:
                     settlement_sources=legacy_settlement_sources,
                     trigger_sources=legacy_trigger_sources,
                 )
+                raw_event = _upcast_legacy_experience(raw_event)
                 event = upcast_event(raw_event, target_schema_version=target_schema_version)
                 if event.event_type == "AcceptanceRecorded":
                     try:

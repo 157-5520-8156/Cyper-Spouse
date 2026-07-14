@@ -10,7 +10,6 @@ from pydantic import Field, model_validator
 
 from .schemas import (
     EvidenceRef,
-    ExperienceProjection,
     FrozenModel,
     NpcProjection,
     OutcomeObservationProjection,
@@ -196,18 +195,6 @@ def outcome_mutation_hash(
     return hashlib.sha256(encoded).hexdigest()
 
 
-class ExperienceCommittedPayload(DomainMutationPayload):
-    experience: ExperienceProjection
-
-    @model_validator(mode="after")
-    def creates_committed_experience(self) -> ExperienceCommittedPayload:
-        if self.expected_entity_revision != 0 or self.experience.entity_revision != 1:
-            raise ValueError("ExperienceCommitted must create entity revision one")
-        if self.experience.status != "committed":
-            raise ValueError("ExperienceCommitted requires committed state")
-        return self
-
-
 LIFE_PAYLOAD_MODELS = {
     "NpcRegistered": NpcRegisteredPayload,
     "ActivityPlanned": ActivityPlannedPayload,
@@ -221,7 +208,6 @@ LIFE_PAYLOAD_MODELS = {
     "OutcomeObservationRecorded": OutcomeObservationRecordedPayload,
     "OutcomeProposalRecorded": OutcomeProposalRecordedPayload,
     "WorldOccurrenceSettled": WorldOccurrenceSettledPayload,
-    "ExperienceCommitted": ExperienceCommittedPayload,
     "WorldOccurrenceCancelled": WorldOccurrenceTerminalPayload,
     "WorldOccurrenceExpired": WorldOccurrenceTerminalPayload,
 }

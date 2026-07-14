@@ -22,6 +22,10 @@ from .actor_authority_events import ACTOR_AUTHORITY_PAYLOAD_MODELS
 from .authorization_events import AUTHORIZATION_PAYLOAD_MODELS
 from .commitment_events import COMMITMENT_PAYLOAD_MODELS
 from .fact_events import FACT_PAYLOAD_MODELS
+from .experience_events import (
+    EXPERIENCE_PAYLOAD_MODELS,
+    LegacyExperienceCommittedPayload,
+)
 from .life_events import LIFE_PAYLOAD_MODELS
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .thread_events import THREAD_MECHANICAL_PAYLOAD_MODELS, THREAD_PAYLOAD_MODELS
@@ -55,7 +59,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.12"
+    reducer_bundle: str = "world-v2-reducers.13"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -242,6 +246,8 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **THREAD_PAYLOAD_MODELS,
         **COMMITMENT_PAYLOAD_MODELS,
         **FACT_PAYLOAD_MODELS,
+        **EXPERIENCE_PAYLOAD_MODELS,
+        "LegacyExperienceCommitted": LegacyExperienceCommittedPayload,
         **THREAD_MECHANICAL_PAYLOAD_MODELS,
         **ACTOR_AUTHORITY_PAYLOAD_MODELS,
         **AUTHORIZATION_PAYLOAD_MODELS,
@@ -300,6 +306,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "OutcomeProposalRecorded": "world_id+outcome_proposal_id",
         "WorldOccurrenceSettled": "occurrence_id+result_id+expected_entity_revision",
         "ExperienceCommitted": "world_id+experience_id",
+        "LegacyExperienceCommitted": "migration-only:original-event-id",
         "WorldOccurrenceCancelled": "occurrence_id+transition_id",
         "WorldOccurrenceExpired": "occurrence_id+transition_id",
         "AppraisalAccepted": "world_id+appraisal_id+transition_id",
@@ -857,8 +864,14 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "proposal_acceptance",
                 "world",
                 "ExperienceCommittedPayload",
-                allowed_predecessors=("WorldOccurrenceSettled",),
+                allowed_predecessors=("AcceptanceRecorded",),
                 evidence_types=("settled_world_event", "settled_external_result"),
+            ),
+            _contract(
+                "LegacyExperienceCommitted",
+                "bundle_migration",
+                "world",
+                "LegacyExperienceCommittedPayload",
             ),
             _contract(
                 "AppraisalAccepted",

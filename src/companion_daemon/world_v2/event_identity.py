@@ -28,8 +28,11 @@ def domain_idempotency_key(
 
 
 def validate_event_identity(event: WorldEvent) -> None:
-    if event.event_type == "LegacyAcceptanceAuditRecorded":
-        raise ValueError("legacy acceptance audit events are migration-only")
+    if event.event_type in {
+        "LegacyAcceptanceAuditRecorded",
+        "LegacyExperienceCommitted",
+    }:
+        raise ValueError("legacy audit/experience events are migration-only")
     expected = domain_idempotency_key(
         event_type=event.event_type,
         world_id=event.world_id,

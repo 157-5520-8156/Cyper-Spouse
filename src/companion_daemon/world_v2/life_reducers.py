@@ -7,7 +7,6 @@ from datetime import datetime
 from .life_events import (
     ActivityPlannedPayload,
     ActivityTransitionPayload,
-    ExperienceCommittedPayload,
     NpcRegisteredPayload,
     OutcomeObservationRecordedPayload,
     OutcomeProposalRecordedPayload,
@@ -16,8 +15,15 @@ from .life_events import (
     WorldOccurrenceSettledPayload,
     WorldOccurrenceTerminalPayload,
 )
+from .experience_events import ExperienceCommittedPayload, LegacyExperienceCommittedPayload
 from .schemas import (
+    Action,
+    ExperienceAuthorityProjection,
+    ExperienceExecutionReceiptBinding,
+    ExperienceOccurrenceSettlementBinding,
     ExperienceProjection,
+    FactProjection,
+    LegacyExperienceProjection,
     CommittedWorldEventRef,
     ExecutionReceipt,
     NpcProjection,
@@ -258,6 +264,9 @@ def settle_occurrence(
     payload: WorldOccurrenceSettledPayload,
     *,
     logical_time: datetime,
+    settlement_event_ref: str,
+    settlement_world_revision: int,
+    settlement_payload_hash: str,
 ) -> tuple[WorldOccurrenceProjection, ...]:
     index, occurrence = _occurrence(occurrences, payload.occurrence_id)
     _expect_revision(occurrence.entity_revision, payload.expected_entity_revision)
@@ -324,6 +333,9 @@ def settle_occurrence(
             "result_payload_ref": payload.result_payload_ref,
             "result_payload_hash": payload.result_payload_hash,
             "settled_at": payload.settled_at,
+            "settlement_event_ref": settlement_event_ref,
+            "settlement_world_revision": settlement_world_revision,
+            "settlement_payload_hash": settlement_payload_hash,
         }
     )
     return _replace(occurrences, index, updated)
@@ -368,54 +380,240 @@ def record_outcome_proposal(
 
 
 def commit_experience(
-    experiences: tuple[ExperienceProjection, ...],
+    experiences: tuple[ExperienceAuthorityProjection, ...],
     occurrences: tuple[WorldOccurrenceProjection, ...],
+    plans: tuple[PlanStateProjection, ...],
+    committed_events: tuple[CommittedWorldEventRef, ...],
     execution_receipts: tuple[ExecutionReceipt, ...],
+    actions: tuple[Action, ...],
+    facts: tuple[FactProjection, ...],
     payload: ExperienceCommittedPayload,
     *,
     logical_time: datetime,
-) -> tuple[ExperienceProjection, ...]:
+) -> tuple[ExperienceAuthorityProjection, ...]:
     experience = payload.experience
     if any(item.experience_id == experience.experience_id for item in experiences):
         raise ValueError(f"experience {experience.experience_id!r} already exists")
-    if experience.occurred_to > logical_time:
+    if experience.values.occurred_to > logical_time:
         raise ValueError("experience is ahead of authoritative logical time")
-    settled_occurrences = {
-        occurrence.occurrence_id: occurrence
-        for occurrence in occurrences
-        if occurrence.status == "settled"
+    _validate_experience_evidence_privacy(
+        payload, experiences, facts, occurrences, plans
+    )
+    identities = {
+        (item.source_kind, item.authority_event_ref)
+        if isinstance(item, ExperienceOccurrenceSettlementBinding)
+        else (item.source_kind, item.receipt_id)
+        for candidate in experiences
+        if isinstance(candidate, ExperienceProjection)
+        for item in candidate.values.source_bindings
     }
-    occurrence_participants: set[str] = set()
-    for occurrence_ref in experience.occurrence_refs:
-        occurrence = settled_occurrences.get(occurrence_ref)
-        if occurrence is None:
-            raise ValueError("experience references an occurrence that is not settled")
-        if occurrence.result_id not in experience.result_refs:
-            raise ValueError("experience omits its occurrence settlement result")
-        occurrence_participants.update(occurrence.participant_refs)
+    proposed_identities = {
+        (item.source_kind, item.authority_event_ref)
+        if isinstance(item, ExperienceOccurrenceSettlementBinding)
+        else (item.source_kind, item.receipt_id)
+        for item in experience.values.source_bindings
+    }
+    if identities & proposed_identities:
+        raise ValueError("experience source authority is already committed elsewhere")
+    participants: set[str] = set()
+    for binding in experience.values.source_bindings:
+        if isinstance(binding, ExperienceOccurrenceSettlementBinding):
+            committed = next(
+                (
+                    item
+                    for item in committed_events
+                    if item.event_id == binding.authority_event_ref
+                ),
+                None,
+            )
+            occurrence = next(
+                (
+                    item
+                    for item in occurrences
+                    if item.occurrence_id == binding.occurrence_id
+                ),
+                None,
+            )
+            if (
+                committed is None
+                or committed.event_type != "WorldOccurrenceSettled"
+                or committed.world_revision != binding.authority_world_revision
+                or committed.payload_hash != binding.authority_payload_hash
+                or occurrence is None
+                or occurrence.status != "settled"
+                or occurrence.entity_revision != binding.occurrence_entity_revision
+                or occurrence.result_id != binding.result_id
+                or occurrence.result_payload_ref != binding.result_payload_ref
+                or occurrence.result_payload_hash != binding.result_payload_hash
+                or occurrence.settlement_event_ref != binding.authority_event_ref
+                or occurrence.settlement_world_revision != binding.authority_world_revision
+                or occurrence.settlement_payload_hash != binding.authority_payload_hash
+            ):
+                raise ValueError("experience occurrence binding does not resolve exact settlement authority")
+            if (
+                occurrence.activated_at is None
+                or occurrence.settled_at is None
+                or experience.values.occurred_from > occurrence.activated_at
+                or experience.values.occurred_to < occurrence.settled_at
+            ):
+                raise ValueError("experience time window does not cover occurrence authority")
+            if _PRIVACY_RANK[experience.values.privacy_class] < _PRIVACY_RANK[
+                occurrence.visibility
+            ]:
+                raise ValueError("experience cannot weaken occurrence privacy")
+            participants.update(occurrence.participant_refs)
+            continue
+        if not isinstance(binding, ExperienceExecutionReceiptBinding):
+            raise TypeError("unsupported experience source binding")
+        receipt = next(
+            (item for item in execution_receipts if item.receipt_id == binding.receipt_id),
+            None,
+        )
+        action = next((item for item in actions if item.action_id == binding.action_id), None)
         if (
-            occurrence.activated_at is None
-            or occurrence.settled_at is None
-            or experience.occurred_from > occurrence.activated_at
-            or experience.occurred_to < occurrence.settled_at
+            receipt is None
+            or not receipt.is_terminal
+            or receipt.action_id != binding.action_id
+            or receipt.result_id != binding.result_id
+            or receipt.observed_state != binding.observed_state
+            or receipt.raw_payload_hash != binding.raw_payload_hash
+            or _canonical_model_hash(receipt) != binding.receipt_hash
+            or action is None
+            or action.payload_hash != binding.action_payload_hash
+            or action.state != binding.observed_state
         ):
-            raise ValueError("experience time window does not cover occurrence")
-        if _PRIVACY_RANK[experience.privacy_class] < _PRIVACY_RANK[occurrence.visibility]:
-            raise ValueError("experience cannot weaken occurrence privacy")
-    if experience.occurrence_refs and set(experience.participant_refs) != occurrence_participants:
-        raise ValueError("experience participants must match source occurrences")
-    if not experience.occurrence_refs:
-        terminal_result_ids = {
-            receipt.result_id for receipt in execution_receipts if receipt.is_terminal
-        }
-        if not set(experience.result_refs) <= terminal_result_ids:
-            raise ValueError("experience has no verified settled source")
-        if not any(
-            evidence.evidence_type == "settled_external_result"
-            for evidence in experience.evidence_refs
+            raise ValueError("experience receipt binding does not resolve exact receipt authority")
+        if (
+            receipt.received_at < action.logical_time
+            or receipt.received_at < action.created_at
         ):
-            raise ValueError("external-result experience lacks matching evidence")
+            raise ValueError("experience receipt authority chronology is reversed")
+        if (
+            experience.values.occurred_from > action.logical_time
+            or experience.values.occurred_to < action.logical_time
+            or experience.values.occurred_from > receipt.received_at
+            or experience.values.occurred_to < receipt.received_at
+        ):
+            raise ValueError("experience time window does not cover action and receipt authority")
+        participants.add(action.actor)
+        if _PRIVACY_RANK[experience.values.privacy_class] < _PRIVACY_RANK["private"]:
+            raise ValueError("external-result experience must remain private")
+    if set(experience.values.participant_refs) != participants:
+        raise ValueError("experience participants must exactly match source authority actors")
     return (*experiences, experience)
+
+
+def _validate_experience_evidence_privacy(
+    payload: ExperienceCommittedPayload,
+    experiences: tuple[ExperienceAuthorityProjection, ...],
+    facts: tuple[FactProjection, ...],
+    occurrences: tuple[WorldOccurrenceProjection, ...],
+    plans: tuple[PlanStateProjection, ...],
+) -> None:
+    source_minimum = {
+        "committed_fact": 0,
+        "committed_world_event": 0,
+        "settled_world_event": 0,
+        "clock_observation": 0,
+        "observed_message": 2,
+        "committed_experience": 2,
+        "settled_external_result": 2,
+        "active_plan": 2,
+        "operator_observation": 3,
+    }
+    purpose_minimum = {
+        "current_fact": 0,
+        "past_experience": 2,
+        "future_plan": 2,
+        "conversation_continuity": 2,
+        "private_hypothesis": 3,
+        "action_authorization": 3,
+    }
+    requirements: list[int] = []
+    for item in payload.evidence_refs:
+        source_floor = source_minimum.get(item.evidence_type, 4)
+        if item.evidence_type == "committed_fact":
+            fact = next(
+                (
+                    candidate
+                    for candidate in facts
+                    if candidate.origin.accepted_event_ref == item.ref_id
+                ),
+                None,
+            )
+            if fact is None:
+                raise ValueError("experience privacy cannot resolve committed fact")
+            source_floor = max(source_floor, _PRIVACY_RANK[fact.values.privacy_class])
+        elif item.evidence_type == "committed_experience":
+            prior = next(
+                (
+                    candidate
+                    for candidate in experiences
+                    if isinstance(candidate, ExperienceProjection)
+                    and candidate.origin.accepted_event_ref == item.ref_id
+                ),
+                None,
+            )
+            if prior is None:
+                raise ValueError("experience privacy cannot resolve committed experience")
+            source_floor = max(
+                source_floor, _PRIVACY_RANK[prior.values.privacy_class]
+            )
+        elif item.evidence_type == "active_plan":
+            plan = next(
+                (candidate for candidate in plans if candidate.plan_id == item.ref_id),
+                None,
+            )
+            if plan is None:
+                raise ValueError("experience privacy cannot resolve active plan")
+            source_floor = max(source_floor, _PRIVACY_RANK[plan.privacy_class])
+        elif item.evidence_type in {
+            "committed_world_event",
+            "settled_world_event",
+        }:
+            occurrence = next(
+                (
+                    candidate
+                    for candidate in occurrences
+                    if candidate.settlement_event_ref == item.ref_id
+                ),
+                None,
+            )
+            if item.evidence_type == "settled_world_event" and occurrence is None:
+                raise ValueError("experience privacy cannot resolve settled occurrence")
+            if occurrence is not None:
+                source_floor = max(
+                    source_floor, _PRIVACY_RANK[occurrence.visibility]
+                )
+        requirements.append(
+            max(source_floor, purpose_minimum[item.claim_purpose])
+        )
+    required = max(requirements)
+    if _PRIVACY_RANK[payload.experience.values.privacy_class] < required:
+        raise ValueError("experience evidence/privacy matrix rejects broad visibility")
+
+
+def commit_legacy_experience(
+    experiences: tuple[ExperienceAuthorityProjection, ...],
+    payload: LegacyExperienceCommittedPayload,
+) -> tuple[ExperienceAuthorityProjection, ...]:
+    experience: LegacyExperienceProjection = payload.experience
+    if any(item.experience_id == experience.experience_id for item in experiences):
+        raise ValueError("legacy experience identity already exists")
+    return (*experiences, experience)
+
+
+def _canonical_model_hash(value: ExecutionReceipt) -> str:
+    import hashlib
+    import json
+
+    encoded = json.dumps(
+        value.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _expect_revision(actual: int, expected: int) -> None:
