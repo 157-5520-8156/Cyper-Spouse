@@ -40,6 +40,7 @@ from .experience_events import (
 from .life_events import LIFE_PAYLOAD_MODELS
 from .memory_events import MEMORY_CANDIDATE_PAYLOAD_MODELS
 from .proposal_audit_schemas import ModelResultRecordedPayload, ProposalRecordedV2Payload
+from .acceptance_manifest import parse_acceptance_manifest_v2
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .thread_events import THREAD_MECHANICAL_PAYLOAD_MODELS, THREAD_PAYLOAD_MODELS
 from .schemas import (
@@ -72,7 +73,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.17"
+    reducer_bundle: str = "world-v2-reducers.18"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -105,12 +106,24 @@ class EventContract:
         return schema
 
     def validate_payload(self, payload: Mapping[str, object]) -> None:
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and "manifest_version" in payload
+            and payload.get("manifest_version") != "acceptance-manifest.2"
+        ):
+            raise ValueError("acceptance_manifest.unsupported_manifest_version")
         model = (
             ProposalRecordedV2Payload
             if self.event_type == "ProposalRecorded"
             and payload.get("audit_contract") == "proposal-envelope-audit.1"
             else self.payload_model
         )
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version") == "acceptance-manifest.2"
+        ):
+            parse_acceptance_manifest_v2(dict(payload))
+            return
         model.model_validate_json(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         )
@@ -296,7 +309,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "TriggerProcessCompleted": "world_id+trigger_id+attempt_id+completed",
         "ProposalRecorded": "world_id+trigger_id+proposal_id",
         "ModelResultRecorded": "world_id+model_call_id+model_result_ref",
-        "AcceptanceRecorded": "world_id+proposal_id+evaluated_world_revision",
+        "AcceptanceRecorded": "v2:world_id+manifest_version+acceptance_id;legacy:proposal+revision",
         "LegacyAcceptanceAuditRecorded": "migration-only:original-event-id",
         "AffectEpisodeOpened": "world_id+episode_id+transition_id",
         "AffectEpisodeUpdated": "episode_id+transition_id",

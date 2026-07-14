@@ -11,9 +11,20 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
+
+from .proposal_envelope import ActionLayer, ProposalInput, ProposalKind
 
 
 ACCEPTANCE_MANIFEST_VERSION = "acceptance-manifest.2"
@@ -42,6 +53,7 @@ _MODEL_ERROR_CODES = frozenset(
         "accepted_without_effects",
         "domain_authority_incomplete",
         "hash_mismatch",
+        "invalid_revision",
     }
 )
 
@@ -95,53 +107,177 @@ def _json_string_bytes(value: str) -> int:
 
 class AcceptanceManifestProposalV2(_FrozenModel):
     proposal_id: str = Field(min_length=1, max_length=256)
-    proposal_kind: str = Field(min_length=1, max_length=128)
-    authority_contract_ref: str = Field(min_length=1, max_length=256)
-    change_id: str = Field(min_length=1, max_length=256)
-    proposed_change_hash: HexDigest = Field(min_length=64, max_length=64)
-    mutation_event_type: str = Field(min_length=1, max_length=128)
+    proposal_kind: ProposalKind
+    audit_contract: Literal["proposal-envelope-audit.1"] = "proposal-envelope-audit.1"
+    proposal_event_ref: str = Field(min_length=1)
+    proposal_event_payload_hash: HexDigest = Field(min_length=64, max_length=64)
+    proposal_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    evaluated_world_revision: int = Field(ge=0)
+    changes: tuple["AcceptanceChangeAuthorityV2", ...] = Field(default=(), max_length=64)
+    action_intents: tuple["AcceptanceActionAuthorityV2", ...] = Field(
+        default=(), max_length=64
+    )
 
-    @field_validator("proposed_change_hash")
+    @field_validator("proposal_event_payload_hash")
     @classmethod
-    def change_hash_is_exact(cls, value: str) -> str:
-        return _validate_digest(value, label="proposed change hash")
+    def event_hash_is_exact(cls, value: str) -> str:
+        return _validate_digest(value, label="proposal event payload hash")
+
+
+class AcceptanceChangeAuthorityV2(_FrozenModel):
+    change_id: str = Field(min_length=1, max_length=256)
+    kind: str = Field(min_length=1, max_length=64)
+    target_id: str = Field(min_length=1, max_length=512)
+    transition: str = Field(min_length=1, max_length=64)
+    expected_entity_revision: int | None = Field(default=None, ge=0)
+    evidence_refs: tuple[str, ...] = Field(default=(), max_length=64)
+    preconditions: tuple[str, ...] = Field(default=(), max_length=64)
+    policy_refs: tuple[str, ...] = Field(default=(), max_length=64)
+    payload_schema: str = Field(min_length=1, max_length=128)
+    payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    full_change_authority_hash: HexDigest = Field(min_length=64, max_length=64)
+
+    @field_validator("full_change_authority_hash")
+    @classmethod
+    def hashes_are_exact(cls, value: str) -> str:
+        return _validate_digest(value, label="change authority hash")
+
+
+class AcceptanceActionAuthorityV2(_FrozenModel):
+    intent_id: str = Field(min_length=1, max_length=256)
+    kind: str = Field(min_length=1, max_length=64)
+    layer: ActionLayer
+    target: str = Field(min_length=1, max_length=512)
+    causal_change_id: str | None = Field(default=None, max_length=256)
+    beat_ref: str | None = Field(default=None, max_length=512)
+    dependencies: tuple[str, ...] = Field(default=(), max_length=64)
+    due_window: tuple[datetime, datetime] | None = None
+    payload_ref: str = Field(min_length=1, max_length=512)
+    payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    full_action_authority_hash: HexDigest = Field(min_length=64, max_length=64)
+
+    @field_validator("full_action_authority_hash")
+    @classmethod
+    def authority_hash_is_exact(cls, value: str) -> str:
+        return _validate_digest(value, label="action authority hash")
+
+    @model_validator(mode="after")
+    def due_window_is_forward(self) -> AcceptanceActionAuthorityV2:
+        if self.due_window is not None and self.due_window[1] <= self.due_window[0]:
+            raise _model_error("invalid_role_shape", "action due window must move forward")
+        return self
+
+
+_PROPOSAL_ADAPTER = TypeAdapter(ProposalInput)
+
+
+def derive_acceptance_manifest_proposal_v2(
+    *,
+    proposal_json: str,
+    proposal_event_ref: str,
+    proposal_event_payload_hash: str,
+) -> AcceptanceManifestProposalV2:
+    """Re-derive the complete inert authority summary from canonical Proposal bytes."""
+
+    proposal = _PROPOSAL_ADAPTER.validate_json(proposal_json, strict=True)
+    changes = tuple(
+        AcceptanceChangeAuthorityV2(
+            change_id=change.change_id,
+            kind=change.kind,
+            target_id=change.target_id,
+            transition=change.transition,
+            expected_entity_revision=change.expected_entity_revision,
+            evidence_refs=change.evidence_refs,
+            preconditions=change.preconditions,
+            policy_refs=change.policy_refs,
+            payload_schema=change.payload.payload_schema,
+            payload_hash=change.payload.payload_hash,
+            full_change_authority_hash=hashlib.sha256(
+                _canonical_json(
+                    {
+                        "contract": "manifest-change-authority.1",
+                        "change": change.model_dump(mode="json"),
+                    }
+                ).encode()
+            ).hexdigest(),
+        )
+        for change in proposal.proposed_changes
+    )
+    actions = tuple(
+        AcceptanceActionAuthorityV2(
+            intent_id=intent.intent_id,
+            kind=intent.kind,
+            layer=intent.layer,
+            target=intent.target,
+            causal_change_id=intent.causal_change_id,
+            beat_ref=intent.beat_ref,
+            dependencies=intent.dependencies,
+            due_window=intent.due_window,
+            payload_ref=intent.payload_ref,
+            payload_hash=intent.payload_hash,
+            full_action_authority_hash=hashlib.sha256(
+                _canonical_json(
+                    {
+                        "contract": "manifest-action-authority.1",
+                        "action_intent": intent.model_dump(mode="json"),
+                    }
+                ).encode()
+            ).hexdigest(),
+        )
+        for intent in proposal.action_intents
+    )
+    return AcceptanceManifestProposalV2(
+        proposal_id=proposal.proposal_id,
+        proposal_kind=proposal.proposal_kind,
+        proposal_event_ref=proposal_event_ref,
+        proposal_event_payload_hash=proposal_event_payload_hash,
+        proposal_hash=proposal.proposal_hash,
+        evaluated_world_revision=proposal.evaluated_world_revision,
+        changes=changes,
+        action_intents=actions,
+    )
+
+
+class EffectAuthorityRefV2(_FrozenModel):
+    proposal_id: str = Field(min_length=1, max_length=256)
+    authority_kind: Literal["change", "action_intent"]
+    authority_id: str = Field(min_length=1, max_length=256)
+    authority_hash: HexDigest = Field(min_length=64, max_length=64)
+
+    @field_validator("authority_hash")
+    @classmethod
+    def authority_hash_is_exact(cls, value: str) -> str:
+        return _validate_digest(value, label="effect authority hash")
 
 
 class AcceptanceAuthorizedEffectV2(_FrozenModel):
     ordinal: int = Field(ge=0, lt=MAX_MANIFEST_EFFECTS)
     role: AuthorizedEffectRole
-    event_id: str = Field(min_length=1, max_length=256)
+    event_id: str = Field(min_length=1)
     event_type: str = Field(min_length=1, max_length=128)
     payload_hash: HexDigest = Field(min_length=64, max_length=64)
-    proposal_refs: tuple[str, ...] = Field(min_length=1, max_length=MAX_EFFECT_PROPOSAL_REFS)
-    change_id: str | None = Field(default=None, min_length=1, max_length=256)
-    accepted_change_hash: HexDigest | None = Field(default=None, min_length=64, max_length=64)
+    authority_refs: tuple[EffectAuthorityRefV2, ...] = Field(
+        min_length=1, max_length=MAX_EFFECT_PROPOSAL_REFS
+    )
 
     @field_validator("payload_hash")
     @classmethod
     def payload_hash_is_exact(cls, value: str) -> str:
         return _validate_digest(value, label="authorized effect payload hash")
 
-    @field_validator("accepted_change_hash")
-    @classmethod
-    def accepted_hash_is_exact(cls, value: str | None) -> str | None:
-        if value is not None:
-            _validate_digest(value, label="accepted change hash")
-        return value
-
     @model_validator(mode="after")
     def role_contract_is_closed(self) -> AcceptanceAuthorizedEffectV2:
-        if self.proposal_refs != tuple(sorted(set(self.proposal_refs))):
+        keys = tuple(
+            (ref.proposal_id, ref.authority_kind, ref.authority_id)
+            for ref in self.authority_refs
+        )
+        if keys != tuple(sorted(set(keys))):
             raise _model_error(
                 "noncanonical_proposal_refs",
-                "effect proposal refs must be sorted and unique",
+                "effect authority refs must be sorted and unique",
             )
         if self.role == "domain_mutation":
-            if (
-                len(self.proposal_refs) != 1
-                or self.change_id is None
-                or self.accepted_change_hash is None
-            ):
+            if len(self.authority_refs) != 1 or self.authority_refs[0].authority_kind != "change":
                 raise _model_error(
                     "invalid_role_shape",
                     "domain mutation requires one proposal and complete change authority",
@@ -151,11 +287,6 @@ class AcceptanceAuthorizedEffectV2(_FrozenModel):
                     "invalid_role_shape",
                     "budget/action event types cannot claim the domain mutation role",
                 )
-        elif self.change_id is not None or self.accepted_change_hash is not None:
-            raise _model_error(
-                "invalid_role_shape",
-                "non-domain effects cannot carry accepted change authority",
-            )
         if self.role == "budget_reservation" and self.event_type != "BudgetReserved":
             raise _model_error(
                 "invalid_role_shape",
@@ -166,6 +297,11 @@ class AcceptanceAuthorizedEffectV2(_FrozenModel):
                 "invalid_role_shape",
                 "action authorization role requires ActionAuthorized",
             )
+        if self.role == "action_authorization" and (
+            len(self.authority_refs) != 1
+            or self.authority_refs[0].authority_kind != "action_intent"
+        ):
+            raise _model_error("invalid_role_shape", "action effect requires one action intent")
         return self
 
 
@@ -180,21 +316,6 @@ def canonical_acceptance_manifest_hash(value: BaseModel | dict[str, object]) -> 
     raw.pop("manifest_hash", None)
     raw.setdefault("manifest_version", ACCEPTANCE_MANIFEST_VERSION)
     raw.setdefault("authorized_effects", ())
-    effects = raw.get("authorized_effects")
-    if isinstance(effects, (list, tuple)):
-        normalized_effects = []
-        for effect in effects:
-            if isinstance(effect, BaseModel):
-                normalized = effect.model_dump(mode="json")
-            elif isinstance(effect, dict):
-                normalized = dict(effect)
-            else:
-                normalized_effects.append(effect)
-                continue
-            normalized.setdefault("change_id", None)
-            normalized.setdefault("accepted_change_hash", None)
-            normalized_effects.append(normalized)
-        raw["authorized_effects"] = tuple(normalized_effects)
     try:
         encoded = _canonical_json(raw).encode()
     except (TypeError, ValueError, UnicodeError) as exc:
@@ -229,12 +350,11 @@ class AcceptanceManifestV2(_FrozenModel):
             raise _model_error(
                 "noncanonical_proposals", "manifest proposals must be sorted and unique"
             )
-        change_ids = tuple(item.change_id for item in self.proposals)
-        if len(change_ids) != len(set(change_ids)):
-            raise _model_error(
-                "duplicate_change_id",
-                "manifest proposals cannot alias the same change ID",
-            )
+        if any(
+            proposal.evaluated_world_revision != self.evaluated_world_revision
+            for proposal in self.proposals
+        ):
+            raise _model_error("invalid_revision", "manifest proposal revisions must agree")
         ordinals = tuple(item.ordinal for item in self.authorized_effects)
         if ordinals != tuple(range(len(self.authorized_effects))):
             raise _model_error(
@@ -245,29 +365,40 @@ class AcceptanceManifestV2(_FrozenModel):
             raise _model_error(
                 "duplicate_effect_event", "authorized effect event IDs must be unique"
             )
-        proposal_id_set = set(proposal_ids)
-        if any(
-            not set(effect.proposal_refs).issubset(proposal_id_set)
-            for effect in self.authorized_effects
-        ):
-            raise _model_error(
-                "unknown_effect_proposal",
-                "authorized effect references a proposal outside the manifest",
+        authorities: dict[tuple[str, str, str], str] = {}
+        for proposal in self.proposals:
+            authorities.update(
+                {
+                    (proposal.proposal_id, "change", change.change_id):
+                    change.full_change_authority_hash
+                    for change in proposal.changes
+                }
             )
-        proposal_by_id = {item.proposal_id: item for item in self.proposals}
+            authorities.update(
+                {
+                    (proposal.proposal_id, "action_intent", action.intent_id):
+                    action.full_action_authority_hash
+                    for action in proposal.action_intents
+                }
+            )
+        used_domain: set[tuple[str, str, str]] = set()
+        used_action: set[tuple[str, str, str]] = set()
         for effect in self.authorized_effects:
-            if effect.role != "domain_mutation":
-                continue
-            proposal = proposal_by_id[effect.proposal_refs[0]]
-            if (
-                effect.change_id != proposal.change_id
-                or effect.accepted_change_hash != proposal.proposed_change_hash
-                or effect.event_type != proposal.mutation_event_type
-            ):
-                raise _model_error(
-                    "mutation_binding_mismatch",
-                    "domain effect does not match its proposal authority",
-                )
+            for ref in effect.authority_refs:
+                key = (ref.proposal_id, ref.authority_kind, ref.authority_id)
+                if authorities.get(key) != ref.authority_hash:
+                    raise _model_error(
+                        "mutation_binding_mismatch",
+                        "effect authority ref does not exactly match the proposal summary",
+                    )
+                used = used_domain if effect.role == "domain_mutation" else used_action
+                if effect.role in {"domain_mutation", "action_authorization"}:
+                    if key in used:
+                        raise _model_error(
+                            "mutation_binding_mismatch",
+                            "effect authority cannot be authorized twice for one role",
+                        )
+                    used.add(key)
         if self.status in {"rejected", "stale"} and self.authorized_effects:
             raise _model_error(
                 "effects_for_nonaccepted",
@@ -277,25 +408,15 @@ class AcceptanceManifestV2(_FrozenModel):
             raise _model_error(
                 "accepted_without_effects", "accepted manifest requires authorized effects"
             )
-        if self.status == "accepted":
-            domain_proposal_ids = tuple(
-                effect.proposal_refs[0]
-                for effect in self.authorized_effects
-                if effect.role == "domain_mutation"
-            )
-            if tuple(sorted(domain_proposal_ids)) != proposal_ids:
-                raise _model_error(
-                    "domain_authority_incomplete",
-                    "accepted manifest requires exactly one domain mutation per proposal",
-                )
         if self.manifest_hash != canonical_acceptance_manifest_hash(self):
             raise _model_error("hash_mismatch", "manifest hash is not canonical")
         return self
 
 
 class AcceptanceManifestRefV2(_FrozenModel):
-    acceptance_event_ref: str = Field(min_length=1, max_length=256)
-    accepted_at_world_revision: int = Field(ge=1)
+    acceptance_event_ref: str = Field(min_length=1)
+    acceptance_event_payload_hash: HexDigest = Field(min_length=64, max_length=64)
+    recorded_at_world_revision: int = Field(ge=1)
     acceptance_id: str = Field(min_length=1, max_length=256)
     status: AcceptanceStatus
     evaluated_world_revision: int = Field(ge=0)
@@ -306,6 +427,11 @@ class AcceptanceManifestRefV2(_FrozenModel):
         default=(), max_length=MAX_MANIFEST_EFFECTS
     )
     manifest_hash: HexDigest = Field(min_length=64, max_length=64)
+
+    @field_validator("acceptance_event_payload_hash")
+    @classmethod
+    def event_payload_hash_is_exact(cls, value: str) -> str:
+        return _validate_digest(value, label="acceptance event payload hash")
 
     @model_validator(mode="after")
     def retained_manifest_is_still_valid(self) -> AcceptanceManifestRefV2:
@@ -325,11 +451,13 @@ class AcceptanceManifestRefV2(_FrozenModel):
         manifest: AcceptanceManifestV2,
         *,
         acceptance_event_ref: str,
-        accepted_at_world_revision: int,
+        acceptance_event_payload_hash: str,
+        recorded_at_world_revision: int,
     ) -> AcceptanceManifestRefV2:
         return cls(
             acceptance_event_ref=acceptance_event_ref,
-            accepted_at_world_revision=accepted_at_world_revision,
+            acceptance_event_payload_hash=acceptance_event_payload_hash,
+            recorded_at_world_revision=recorded_at_world_revision,
             acceptance_id=manifest.acceptance_id,
             status=manifest.status,
             evaluated_world_revision=manifest.evaluated_world_revision,
@@ -452,7 +580,7 @@ def _preflight_limits(raw: object) -> None:
     for effect in effects:
         if not isinstance(effect, dict):
             raise AcceptanceManifestError("invalid_shape", "manifest effect must be an object")
-        refs = effect.get("proposal_refs")
+        refs = effect.get("authority_refs")
         if isinstance(refs, (list, tuple)) and len(refs) > MAX_EFFECT_PROPOSAL_REFS:
             raise AcceptanceManifestError("limit_exceeded", "effect proposal-ref limit exceeded")
 
@@ -502,9 +630,25 @@ def _trusted_validation_error_code(exc: ValidationError) -> str:
 def _is_installed_hash_location(location: tuple[object, ...]) -> bool:
     if location == ("manifest_hash",):
         return True
-    return (
+    if (
         len(location) == 3
         and location[0] in {"proposals", "authorized_effects"}
         and type(location[1]) is int
-        and location[2] in {"proposed_change_hash", "payload_hash", "accepted_change_hash"}
+        and location[2]
+        in {"proposal_event_payload_hash", "proposal_hash", "payload_hash"}
+    ):
+        return True
+    return (
+        len(location) == 5
+        and location[0] in {"proposals", "authorized_effects"}
+        and type(location[1]) is int
+        and location[2] in {"changes", "action_intents", "authority_refs"}
+        and type(location[3]) is int
+        and location[4]
+        in {
+            "payload_hash",
+            "full_change_authority_hash",
+            "full_action_authority_hash",
+            "authority_hash",
+        }
     )

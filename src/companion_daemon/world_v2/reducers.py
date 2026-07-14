@@ -55,6 +55,11 @@ from .actor_authority_events import ActorAuthorityMutationPayload
 from .actor_authority_reducers import reduce_actor_authority
 from .authorization_events import AUTHORIZATION_PAYLOAD_MODELS, authorization_domain
 from .authorization_reducers import reduce_authorization
+from .acceptance_manifest import (
+    AcceptanceManifestRefV2,
+    derive_acceptance_manifest_proposal_v2,
+    parse_acceptance_manifest_v2,
+)
 from .batch_invariants import interaction_appraisal_trigger_identity
 from .commitment_events import (
     COMMITMENT_ACCEPTED_PAYLOAD_MODELS,
@@ -253,7 +258,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.17"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.18"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -287,6 +292,7 @@ def _experience_semantic_dump(
             "world-v2-reducers.14",
             "world-v2-reducers.15",
             "world-v2-reducers.16",
+            "world-v2-reducers.17",
             REDUCER_BUNDLE_VERSION,
         }
         and isinstance(experience, LegacyExperienceProjection)
@@ -302,7 +308,11 @@ def _actor_authority_transition_semantic_dump(
     reducer_bundle_version: str,
 ) -> dict[str, Any]:
     dumped = transition.model_dump(mode="json")
-    if reducer_bundle_version not in {"world-v2-reducers.16", REDUCER_BUNDLE_VERSION}:
+    if reducer_bundle_version not in {
+        "world-v2-reducers.16",
+        "world-v2-reducers.17",
+        REDUCER_BUNDLE_VERSION,
+    }:
         dumped.pop("accepted_event_ref", None)
         dumped.pop("accepted_world_revision", None)
         dumped.pop("accepted_payload_hash", None)
@@ -405,6 +415,7 @@ class ReducerState(FrozenModel):
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     model_result_audits: tuple[ModelResultAuditProjection, ...] = ()
     proposal_audits: tuple[ProposalAuditProjection, ...] = ()
+    acceptance_manifests_v2: tuple[AcceptanceManifestRefV2, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
 
     @model_validator(mode="after")
@@ -985,6 +996,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.14",
                         "world-v2-reducers.15",
                         "world-v2-reducers.16",
+                        "world-v2-reducers.17",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else item.model_dump(
@@ -1024,7 +1036,11 @@ class ReducerState(FrozenModel):
                 (
                     plan.model_dump(mode="json")
                     if reducer_bundle_version
-                    in {"world-v2-reducers.16", REDUCER_BUNDLE_VERSION}
+                    in {
+                        "world-v2-reducers.16",
+                        "world-v2-reducers.17",
+                        REDUCER_BUNDLE_VERSION,
+                    }
                     else plan.model_dump(
                         mode="json", exclude={"owner_actor_ref", "authority_origin"}
                     )
@@ -1035,7 +1051,11 @@ class ReducerState(FrozenModel):
                 (
                     occurrence.model_dump(mode="json")
                     if reducer_bundle_version
-                    in {"world-v2-reducers.16", REDUCER_BUNDLE_VERSION}
+                    in {
+                        "world-v2-reducers.16",
+                        "world-v2-reducers.17",
+                        REDUCER_BUNDLE_VERSION,
+                    }
                     else occurrence.model_dump(
                         mode="json", exclude={"settled_outcome_ref"}
                     )
@@ -1092,6 +1112,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.14",
             "world-v2-reducers.15",
             "world-v2-reducers.16",
+            "world-v2-reducers.17",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["threads"] = tuple(item.model_dump(mode="json") for item in self.threads)
@@ -1105,6 +1126,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.14",
             "world-v2-reducers.15",
             "world-v2-reducers.16",
+            "world-v2-reducers.17",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["commitments"] = tuple(
@@ -1119,6 +1141,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.14",
             "world-v2-reducers.15",
             "world-v2-reducers.16",
+            "world-v2-reducers.17",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["facts"] = tuple(item.model_dump(mode="json") for item in self.facts)
@@ -1130,6 +1153,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.14",
             "world-v2-reducers.15",
             "world-v2-reducers.16",
+            "world-v2-reducers.17",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["experience_transitions"] = tuple(
@@ -1139,6 +1163,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.14",
             "world-v2-reducers.15",
             "world-v2-reducers.16",
+            "world-v2-reducers.17",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["memory_candidates"] = tuple(
@@ -1151,6 +1176,7 @@ class ReducerState(FrozenModel):
         if reducer_bundle_version in {
             "world-v2-reducers.15",
             "world-v2-reducers.16",
+            "world-v2-reducers.17",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["character_core"] = (
@@ -1161,7 +1187,11 @@ class ReducerState(FrozenModel):
             payload["character_core_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.character_core_transitions
             )
-        if reducer_bundle_version in {"world-v2-reducers.16", REDUCER_BUNDLE_VERSION}:
+        if reducer_bundle_version in {
+            "world-v2-reducers.16",
+            "world-v2-reducers.17",
+            REDUCER_BUNDLE_VERSION,
+        }:
             payload["clock_transition_history"] = tuple(
                 item.model_dump(mode="json")
                 for item in self.clock_transition_history
@@ -2612,10 +2642,19 @@ def _affect_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reducer
 
 def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     raw = event.payload()
+    if (
+        "manifest_version" in raw
+        and raw.get("manifest_version") != "acceptance-manifest.2"
+    ):
+        raise ValueError("acceptance_manifest.unsupported_manifest_version")
+    if raw.get("manifest_version") == "acceptance-manifest.2":
+        return _acceptance_manifest_v2_recorded(state, event)
     proposal_id = raw.get("proposal_id")
     evaluated_world_revision = raw.get("evaluated_world_revision")
     if not isinstance(proposal_id, str) or not isinstance(evaluated_world_revision, int):
         raise ValueError("AcceptanceRecorded requires proposal and evaluated revision")
+    if any(audit.proposal_id == proposal_id for audit in state.proposal_audits):
+        raise ValueError("acceptance_manifest.v2_proposal_requires_manifest")
     if proposal_id not in state.proposal_ids:
         raise ValueError("AcceptanceRecorded references an unknown proposal")
     if any(item.proposal_id == proposal_id for item in state.acceptance_decisions):
@@ -2707,6 +2746,83 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
             raise TypeError("typed proposal registry returned an incompatible state")
         return discarded
     return decided_state
+
+
+def _acceptance_manifest_v2_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    manifest = parse_acceptance_manifest_v2(event.payload())
+    current_world_revision = len(state.committed_world_event_refs)
+    if manifest.status == "rejected":
+        if manifest.evaluated_world_revision != current_world_revision:
+            raise ValueError("rejected manifest must evaluate the current world")
+    elif manifest.status == "stale":
+        if manifest.evaluated_world_revision >= current_world_revision:
+            raise ValueError("stale manifest must evaluate an older world revision")
+    else:  # parse_acceptance_manifest_v2 currently fails closed before this branch.
+        raise ValueError("acceptance_manifest.accepted_not_enabled")
+    if any(
+        item.acceptance_id == manifest.acceptance_id
+        for item in state.acceptance_manifests_v2
+    ) or any(
+        item.acceptance_id == manifest.acceptance_id
+        for item in state.acceptance_decisions
+    ):
+        raise ValueError("acceptance identity is already registered")
+
+    audit_by_id = {item.proposal_id: item for item in state.proposal_audits}
+    for binding in manifest.proposals:
+        audit = audit_by_id.get(binding.proposal_id)
+        if audit is None:
+            raise ValueError("acceptance manifest references an unknown ProposalAudit")
+        if any(
+            decision.proposal_id == binding.proposal_id
+            for decision in state.acceptance_decisions
+        ):
+            raise ValueError("proposal already has an acceptance decision")
+        expected_binding = derive_acceptance_manifest_proposal_v2(
+            proposal_json=audit.proposal_json,
+            proposal_event_ref=audit.event_ref,
+            proposal_event_payload_hash=audit.event_payload_hash,
+        )
+        if binding != expected_binding or (
+            binding.evaluated_world_revision != manifest.evaluated_world_revision
+        ):
+            raise ValueError("acceptance manifest does not exactly bind ProposalAudit")
+
+    decisions = tuple(
+        AcceptanceDecisionRef(
+            proposal_id=binding.proposal_id,
+            evaluated_world_revision=binding.evaluated_world_revision,
+            acceptance_id=manifest.acceptance_id,
+            status=manifest.status,
+            manifest_version=manifest.manifest_version,
+            manifest_hash=manifest.manifest_hash,
+            acceptance_event_ref=event.event_id,
+            acceptance_event_payload_hash=event.payload_hash,
+        )
+        for binding in manifest.proposals
+    )
+    updated = state.model_copy(
+        update={
+            "acceptance_decisions": (*state.acceptance_decisions, *decisions),
+            "acceptance_manifests_v2": (
+                *state.acceptance_manifests_v2,
+                AcceptanceManifestRefV2.from_manifest(
+                    manifest,
+                    acceptance_event_ref=event.event_id,
+                    acceptance_event_payload_hash=event.payload_hash,
+                    recorded_at_world_revision=current_world_revision + 1,
+                ),
+            ),
+        }
+    )
+    for binding in manifest.proposals:
+        discarded = _TYPED_PROPOSAL_REGISTRY.discard_decided(updated, binding.proposal_id)
+        if not isinstance(discarded, ReducerState):
+            raise TypeError("typed proposal registry returned an incompatible state")
+        updated = discarded
+    return updated
 
 
 def _world_started(state: ReducerState, _event: WorldEvent) -> ReducerState:
@@ -5480,6 +5596,7 @@ def make_projection(
         proposal_revisions=state.proposal_revisions,
         model_result_audits=state.model_result_audits,
         proposal_audits=state.proposal_audits,
+        acceptance_manifests_v2=state.acceptance_manifests_v2,
         acceptance_decisions=state.acceptance_decisions,
         outcome_proposals=state.outcome_proposals,
         semantic_hash=semantic_hash(

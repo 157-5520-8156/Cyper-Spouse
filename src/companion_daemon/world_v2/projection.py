@@ -15,6 +15,7 @@ from .affect_math import relative_baseline_saturation_bp
 
 from .ledger import LedgerPort
 from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditProjection
+from .acceptance_manifest import AcceptanceManifestRefV2
 from .schemas import (
     Action,
     AffectAggregateProjection,
@@ -620,6 +621,25 @@ class InternalAuthorityReader:
         projection = self._at(world_id=world_id, cursor=cursor)
         return next(
             (audit for audit in projection.proposal_audits if audit.proposal_id == proposal_id),
+            None,
+        )
+
+    def acceptance_manifest_by_id(
+        self,
+        *,
+        world_id: str,
+        cursor: ProjectionCursor,
+        acceptance_id: str,
+    ) -> AcceptanceManifestRefV2 | None:
+        if not acceptance_id:
+            raise ValueError("acceptance_id must not be empty")
+        projection = self._at(world_id=world_id, cursor=cursor)
+        return next(
+            (
+                manifest
+                for manifest in projection.acceptance_manifests_v2
+                if manifest.acceptance_id == acceptance_id
+            ),
             None,
         )
 

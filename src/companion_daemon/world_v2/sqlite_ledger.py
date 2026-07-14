@@ -53,6 +53,7 @@ _V16_ONLY_STATE_KEYS = frozenset(
     }
 )
 _V17_ONLY_STATE_KEYS = frozenset({"model_result_audits", "proposal_audits"})
+_V18_ONLY_STATE_KEYS = frozenset({"acceptance_manifests_v2"})
 
 
 def _upcast_legacy_appraisal_trigger(
@@ -352,6 +353,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.14",
                 "world-v2-reducers.15",
                 "world-v2-reducers.16",
+                "world-v2-reducers.17",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -460,6 +462,13 @@ class SQLiteWorldLedger:
             if not isinstance(raw_state, dict):
                 raise ValueError("legacy state is not an object")
             raw_state = dict(raw_state)
+            injected_v18_keys = tuple(
+                key
+                for key in _V18_ONLY_STATE_KEYS.intersection(raw_state)
+                if raw_state.get(key) not in (None, [], {})
+            )
+            if injected_v18_keys:
+                raise ValueError("legacy head cannot claim v18 manifest fields")
             injected_v17_keys = tuple(
                 sorted(
                     key
@@ -467,12 +476,15 @@ class SQLiteWorldLedger:
                     if raw_state.get(key) not in (None, [], {})
                 )
             )
-            if injected_v17_keys:
+            if injected_v17_keys and reducer_bundle_version != "world-v2-reducers.17":
                 raise ValueError(
                     f"legacy head cannot claim v17 audit fields {injected_v17_keys!r}"
                 )
             injected_v16_keys = tuple(sorted(_V16_ONLY_STATE_KEYS.intersection(raw_state)))
-            if injected_v16_keys and reducer_bundle_version != "world-v2-reducers.16":
+            if injected_v16_keys and reducer_bundle_version not in {
+                "world-v2-reducers.16",
+                "world-v2-reducers.17",
+            }:
                 raise ValueError(
                     f"legacy head cannot claim v16 authority fields {injected_v16_keys!r}"
                 )
@@ -483,7 +495,8 @@ class SQLiteWorldLedger:
                 "accepted_payload_hash",
             }
             if (
-                reducer_bundle_version != "world-v2-reducers.16"
+                reducer_bundle_version
+                not in {"world-v2-reducers.16", "world-v2-reducers.17"}
                 and isinstance(actor_transitions, list)
                 and any(
                 isinstance(transition, dict)
@@ -497,7 +510,8 @@ class SQLiteWorldLedger:
             plans = raw_state.get("plans", [])
             plan_authority_keys = {"owner_actor_ref", "authority_origin"}
             if (
-                reducer_bundle_version != "world-v2-reducers.16"
+                reducer_bundle_version
+                not in {"world-v2-reducers.16", "world-v2-reducers.17"}
                 and isinstance(plans, list)
                 and any(
                     isinstance(plan, dict) and plan_authority_keys.intersection(plan)
@@ -507,7 +521,8 @@ class SQLiteWorldLedger:
                 raise ValueError("legacy Plan cannot claim v16 owner authority")
             occurrences = raw_state.get("world_occurrences", [])
             if (
-                reducer_bundle_version != "world-v2-reducers.16"
+                reducer_bundle_version
+                not in {"world-v2-reducers.16", "world-v2-reducers.17"}
                 and isinstance(occurrences, list)
                 and any(
                     isinstance(occurrence, dict)
@@ -644,6 +659,7 @@ class SQLiteWorldLedger:
             "world-v2-reducers.14",
             "world-v2-reducers.15",
             "world-v2-reducers.16",
+            "world-v2-reducers.17",
             REDUCER_BUNDLE_VERSION,
         }:
             payload.pop("commitments", None)
@@ -748,6 +764,7 @@ class SQLiteWorldLedger:
             proposal_revisions=projection.proposal_revisions,
             model_result_audits=projection.model_result_audits,
             proposal_audits=projection.proposal_audits,
+            acceptance_manifests_v2=projection.acceptance_manifests_v2,
             acceptance_decisions=projection.acceptance_decisions,
             outcome_proposals=projection.outcome_proposals,
         )
@@ -1280,6 +1297,7 @@ class SQLiteWorldLedger:
                 raw_event = _upcast_legacy_experience(raw_event)
                 event = upcast_event(raw_event, target_schema_version=target_schema_version)
                 if event.event_type == "AcceptanceRecorded":
+                    has_manifest_version = "manifest_version" in event.payload()
                     try:
                         # Old bundles allowed arbitrary audit extensions on an
                         # Acceptance.  Keep it authoritative only when the
@@ -1288,6 +1306,8 @@ class SQLiteWorldLedger:
                         # revision-bearing, migration-only audit fact.
                         reduce_event(state, event)
                     except Exception:
+                        if has_manifest_version:
+                            raise
                         event = upcast_event(
                             {
                                 **raw_event,

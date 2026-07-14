@@ -2,6 +2,10 @@ from __future__ import annotations
 
 import pytest
 
+from companion_daemon.world_v2.acceptance_manifest import (
+    AcceptanceManifestError,
+    canonical_acceptance_manifest_hash,
+)
 from companion_daemon.world_v2.event_catalog import (
     event_contract,
     event_contracts,
@@ -20,7 +24,7 @@ def test_catalog_covers_every_reducer_event_with_stable_revision_metadata() -> N
         assert contract.producer
         assert contract.payload_contract
         assert contract.schema_version == "world-v2.1"
-        assert contract.reducer_bundle == "world-v2-reducers.17"
+        assert contract.reducer_bundle == "world-v2-reducers.18"
         assert contract.upcaster == "world-v2-upcasters.1"
         assert contract.idempotency_identity
         schema = contract.json_schema()
@@ -64,6 +68,63 @@ def test_audit_event_does_not_claim_world_revision_or_domain_evidence() -> None:
     assert contract.revision_class == "deliberation"
     assert contract.evidence_types == ("model_result", "context_capsule")
     assert contract.compensations == ()
+
+
+def test_acceptance_catalog_fails_closed_for_valid_accepted_manifest_shape() -> None:
+    payload: dict[str, object] = {
+        "manifest_version": "acceptance-manifest.2",
+        "acceptance_id": "acceptance:catalog:accepted",
+        "status": "accepted",
+        "evaluated_world_revision": 0,
+        "proposals": (
+            {
+                "proposal_id": "proposal:catalog:1",
+                "proposal_kind": "decision",
+                "audit_contract": "proposal-envelope-audit.1",
+                "proposal_event_ref": "event:proposal:catalog:1",
+                "proposal_event_payload_hash": "a" * 64,
+                "proposal_hash": "sha256:" + "b" * 64,
+                "evaluated_world_revision": 0,
+                "changes": (
+                    {
+                        "change_id": "change:catalog:1",
+                        "kind": "fact_transition",
+                        "target_id": "fact:catalog:1",
+                        "transition": "commit",
+                        "expected_entity_revision": 0,
+                        "evidence_refs": (),
+                        "preconditions": (),
+                        "policy_refs": (),
+                        "payload_schema": "fact_transition.v1",
+                        "payload_hash": "sha256:" + "e" * 64,
+                        "full_change_authority_hash": "d" * 64,
+                    },
+                ),
+                "action_intents": (),
+            },
+        ),
+        "authorized_effects": (
+            {
+                "ordinal": 0,
+                "role": "domain_mutation",
+                "event_id": "event:effect:catalog:1",
+                "event_type": "FactCommitted",
+                "payload_hash": "c" * 64,
+                "authority_refs": (
+                    {
+                        "proposal_id": "proposal:catalog:1",
+                        "authority_kind": "change",
+                        "authority_id": "change:catalog:1",
+                        "authority_hash": "d" * 64,
+                    },
+                ),
+            },
+        ),
+    }
+    payload["manifest_hash"] = canonical_acceptance_manifest_hash(payload)
+
+    with pytest.raises(AcceptanceManifestError, match="accepted_not_enabled"):
+        event_contract("AcceptanceRecorded").validate_payload(payload)
 
 
 def test_affect_baseline_catalog_matches_installed_evidence_resolvers() -> None:

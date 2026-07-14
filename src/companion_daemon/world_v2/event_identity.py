@@ -45,6 +45,12 @@ def validate_event_identity(event: WorldEvent) -> None:
 def _life_identity_components(
     event_type: str, world_id: str, payload: dict[str, Any]
 ) -> tuple[object, ...] | None:
+    if (
+        event_type == "AcceptanceRecorded"
+        and "manifest_version" in payload
+        and payload.get("manifest_version") != "acceptance-manifest.2"
+    ):
+        raise ValueError("acceptance_manifest.unsupported_manifest_version")
     proposal_family = family_for_record(event_type, payload)
     if proposal_family is not None:
         return proposal_family.codec.record_identity(
@@ -132,6 +138,11 @@ def _life_identity_components(
         and payload.get("audit_contract") == "proposal-envelope-audit.1"
     ):
         return world_id, payload.get("trigger_ref"), payload.get("proposal_id")
+    if (
+        event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version") == "acceptance-manifest.2"
+    ):
+        return world_id, payload.get("manifest_version"), payload.get("acceptance_id")
     if (
         event_type == "AcceptanceRecorded"
         and payload.get("proposal_id") is not None

@@ -12,6 +12,7 @@ from .proposal_audit_schemas import (
     ModelResultRecordedPayload,
     ProposalRecordedV2Payload,
 )
+from .acceptance_manifest import parse_acceptance_manifest_v2
 from .appraisal_events import (
     AppraisalAcceptedPayload,
     AppraisalContradictedPayload,
@@ -28,6 +29,7 @@ def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revisi
     """Require every settled lived-world occurrence to schedule its appraisal."""
 
     _validate_deliberation_audit_transaction(events)
+    _validate_acceptance_manifest_v2_batch(events)
 
     appraisal_triggers: dict[str, list[tuple[str, str, str | None]]] = {}
     experiences: list[ExperienceCommittedPayload] = []
@@ -292,6 +294,31 @@ def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> No
         or proposal.proposal_hash != final.proposal_hash
     ):
         raise ValueError("ProposalRecorded v2 does not bind the final model attempt")
+
+
+def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None:
+    unknown = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and "manifest_version" in event.payload()
+        and event.payload().get("manifest_version") != "acceptance-manifest.2"
+    ]
+    if unknown:
+        raise ValueError("acceptance_manifest.unsupported_manifest_version")
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == "acceptance-manifest.2"
+    ]
+    if not manifests:
+        return
+    if len(events) != 1 or len(manifests) != 1:
+        raise ValueError("AcceptanceManifest v2 must be the only event in its commit")
+    manifest = parse_acceptance_manifest_v2(manifests[0].payload())
+    if manifest.status != "accepted" and manifest.authorized_effects:
+        raise ValueError("non-accepted manifest cannot carry effects")
 
 
 def appraisal_trigger_identity(occurrence_id: str, result_id: str) -> str:

@@ -6,6 +6,9 @@ import json
 
 import pytest
 from pydantic import ValidationError
+from companion_daemon.world_v2.acceptance_manifest import (
+    derive_acceptance_manifest_proposal_v2,
+)
 
 from companion_daemon.world_v2.proposal_envelope import (
     AppraisalSummary,
@@ -181,6 +184,65 @@ def test_decision_is_frozen_extra_forbid_and_has_stable_canonical_hash() -> None
         DecisionProposal.model_validate({**proposal.model_dump(), "secret_reasoning": "chain"})
     with pytest.raises(ValidationError):
         DecisionProposal.model_validate({**proposal.model_dump(), "brief_rationale": "x" * 241})
+
+
+def test_manifest_authority_summary_derives_every_change_and_action_field() -> None:
+    proposal = _decision()
+    summary = derive_acceptance_manifest_proposal_v2(
+        proposal_json=proposal.model_dump_json(),
+        proposal_event_ref="event:proposal:" + "x" * 300,
+        proposal_event_payload_hash="a" * 64,
+    )
+    change = summary.changes[0]
+    source_change = proposal.proposed_changes[0]
+    assert (
+        change.change_id,
+        change.kind,
+        change.target_id,
+        change.transition,
+        change.expected_entity_revision,
+        change.evidence_refs,
+        change.preconditions,
+        change.policy_refs,
+        change.payload_schema,
+        change.payload_hash,
+    ) == (
+        source_change.change_id,
+        source_change.kind,
+        source_change.target_id,
+        source_change.transition,
+        source_change.expected_entity_revision,
+        source_change.evidence_refs,
+        source_change.preconditions,
+        source_change.policy_refs,
+        source_change.payload.payload_schema,
+        source_change.payload.payload_hash,
+    )
+    action = summary.action_intents[0]
+    source_action = proposal.action_intents[0]
+    assert (
+        action.intent_id,
+        action.kind,
+        action.layer,
+        action.target,
+        action.causal_change_id,
+        action.beat_ref,
+        action.dependencies,
+        action.due_window,
+        action.payload_ref,
+        action.payload_hash,
+    ) == (
+        source_action.intent_id,
+        source_action.kind,
+        source_action.layer,
+        source_action.target,
+        source_action.causal_change_id,
+        source_action.beat_ref,
+        source_action.dependencies,
+        source_action.due_window,
+        source_action.payload_ref,
+        source_action.payload_hash,
+    )
 
 
 @pytest.mark.parametrize(

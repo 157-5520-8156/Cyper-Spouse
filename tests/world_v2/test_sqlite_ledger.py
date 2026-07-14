@@ -233,7 +233,7 @@ def test_sqlite_rebuild_selects_only_installed_replay_artifacts(tmp_path) -> Non
     assert (
         ledger.rebuild(
             target_schema_version="world-v2.1",
-            reducer_bundle_version="world-v2-reducers.17",
+            reducer_bundle_version="world-v2-reducers.18",
         )
         == ledger.project()
     )
@@ -330,7 +330,7 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             "SELECT reducer_bundle_version, state_json FROM world_v2_heads"
         ).fetchone()
         assert migrated is not None
-        assert migrated[0] == "world-v2-reducers.17"
+        assert migrated[0] == "world-v2-reducers.18"
         assert "pending_actions" in json.loads(migrated[1])
 
 

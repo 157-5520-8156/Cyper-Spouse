@@ -40,6 +40,7 @@ from .resource_authority_schemas import (
     validate_v2_resource_authority_state,
 )
 from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditProjection
+from .acceptance_manifest import AcceptanceManifestRefV2
 from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
 
 
@@ -674,6 +675,12 @@ class AcceptanceDecisionRef(FrozenModel):
     status: Literal["accepted", "rejected", "stale"]
     accepted_change_id: str | None = None
     accepted_change_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    manifest_version: Literal["acceptance-manifest.2"] | None = None
+    manifest_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    acceptance_event_ref: str | None = None
+    acceptance_event_payload_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
 
     @model_validator(mode="after")
     def accepted_decision_has_a_complete_change(self) -> AcceptanceDecisionRef:
@@ -687,6 +694,15 @@ class AcceptanceDecisionRef(FrozenModel):
             self.accepted_change_id is not None or self.accepted_change_hash is not None
         ):
             raise ValueError("non-accepted decision cannot carry accepted change authority")
+        manifest_fields = (
+            self.manifest_hash,
+            self.acceptance_event_ref,
+            self.acceptance_event_payload_hash,
+        )
+        if self.manifest_version is None and any(value is not None for value in manifest_fields):
+            raise ValueError("legacy decision cannot carry partial manifest audit")
+        if self.manifest_version is not None and any(value is None for value in manifest_fields):
+            raise ValueError("v2 decision requires complete manifest audit")
         return self
 
 
@@ -3742,7 +3758,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.17"
+    reducer_bundle_version: str = "world-v2-reducers.18"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -3836,6 +3852,7 @@ class LedgerProjection(FrozenModel):
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     model_result_audits: tuple[ModelResultAuditProjection, ...] = ()
     proposal_audits: tuple[ProposalAuditProjection, ...] = ()
+    acceptance_manifests_v2: tuple[AcceptanceManifestRefV2, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
     outcome_proposals: tuple[OutcomeProposalProjection, ...] = ()
     semantic_hash: str

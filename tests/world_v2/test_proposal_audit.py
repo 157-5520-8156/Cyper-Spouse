@@ -12,8 +12,14 @@ from companion_daemon.world_v2.deliberation import (
     ModelResultAudit,
     ModelRoute,
 )
+from companion_daemon.world_v2.acceptance_manifest import (
+    AcceptanceManifestV2,
+    canonical_acceptance_manifest_hash,
+    derive_acceptance_manifest_proposal_v2,
+)
+from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.ledger import WorldLedger
-from companion_daemon.world_v2.errors import ConcurrencyConflict
+from companion_daemon.world_v2.errors import ConcurrencyConflict, LedgerIntegrityError
 from companion_daemon.world_v2.projection import InternalAuthorityReader
 from companion_daemon.world_v2.proposal_audit import ProposalAuditContext, ProposalAuditRecorder
 from companion_daemon.world_v2.proposal_envelope import DecisionProposal
@@ -178,11 +184,86 @@ def _failed_result() -> DeliberationResult:
     )
 
 
+def _second_result() -> DeliberationResult:
+    base = _result()
+    proposal = base.proposal.model_copy(update={"proposal_id": "proposal:audit:2"})
+    call_id = "model-call:audit:2"
+    response_hash = _hash("response:2")
+    audit = ModelResultAudit(
+        model_call_id=call_id,
+        model_result_ref=f"model-result:{_digest({'model_call_id': call_id, 'response_hash': response_hash})}",
+        attempt_id="attempt:audit:2",
+        route=base.audit.route,
+        model_id="model:test",
+        model_version="1",
+        request_hash=_hash("request:2"),
+        response_hash=response_hash,
+        status="proposal_validated",
+        input_tokens=5,
+        output_tokens=6,
+    )
+    result_id = f"deliberation:{_digest({'capsule_id': base.capsule_id, 'proposal_hash': proposal.proposal_hash, 'attempt_audits': [audit.model_dump(mode='json')]})}"
+    return DeliberationResult(
+        result_id=result_id,
+        capsule_id=base.capsule_id,
+        proposal=proposal,
+        audit=audit,
+        attempt_audits=(audit,),
+    )
+
+
 def _started(ledger: WorldLedger | SQLiteWorldLedger) -> None:
     ledger.commit(
         [_event("event:world:start", "WorldStarted", {})],
         expected_world_revision=0,
         expected_deliberation_revision=0,
+    )
+
+
+def _acceptance_event(
+    ledger: WorldLedger | SQLiteWorldLedger,
+    *,
+    status: str,
+    acceptance_id: str,
+    effects: tuple[dict[str, object], ...] = (),
+) -> WorldEvent:
+    audits = ledger.project().proposal_audits
+    bindings = tuple(
+        derive_acceptance_manifest_proposal_v2(
+            proposal_json=audit.proposal_json,
+            proposal_event_ref=audit.event_ref,
+            proposal_event_payload_hash=audit.event_payload_hash,
+        )
+        for audit in audits
+    )
+    raw: dict[str, object] = {
+        "manifest_version": "acceptance-manifest.2",
+        "acceptance_id": acceptance_id,
+        "status": status,
+        "evaluated_world_revision": audits[0].evaluated_world_revision,
+        "proposals": tuple(binding.model_dump(mode="json") for binding in bindings),
+        "authorized_effects": effects,
+    }
+    raw["manifest_hash"] = canonical_acceptance_manifest_hash(raw)
+    AcceptanceManifestV2.model_validate(raw)
+    identity = domain_idempotency_key(
+        event_type="AcceptanceRecorded", world_id=WORLD, payload=raw
+    )
+    assert identity is not None
+    return WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id=f"event:{acceptance_id}",
+        world_id=WORLD,
+        event_type="AcceptanceRecorded",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="system:acceptance",
+        source="test",
+        trace_id="trace:acceptance-v2",
+        causation_id=audits[-1].event_ref,
+        correlation_id=acceptance_id,
+        idempotency_key=identity,
+        payload=raw,
     )
 
 
@@ -327,6 +408,207 @@ def test_audit_preserves_stale_proposal_after_world_advances() -> None:
 
 
 @pytest.mark.parametrize("sqlite", [False, True])
+def test_acceptance_manifest_v2_rejected_closes_exact_proposal_audit(
+    tmp_path, sqlite: bool
+) -> None:
+    ledger = (
+        SQLiteWorldLedger(path=tmp_path / "acceptance-v2.sqlite3", world_id=WORLD)
+        if sqlite
+        else WorldLedger.in_memory(world_id=WORLD)
+    )
+    _started(ledger)
+    audited = ProposalAuditRecorder(ledger=ledger).record(_result(), _context())
+    event = _acceptance_event(
+        ledger, status="rejected", acceptance_id="acceptance:v2:rejected"
+    )
+    ledger.commit(
+        [event],
+        expected_world_revision=audited.world_revision,
+        expected_deliberation_revision=audited.deliberation_revision,
+    )
+    projection = ledger.project()
+    assert projection.actions == () and projection.budget_reservations == ()
+    assert projection.acceptance_decisions[0].status == "rejected"
+    reader = InternalAuthorityReader(ledger=ledger)
+    assert reader.acceptance_manifest_by_id(
+        world_id=WORLD,
+        cursor=reader.current_cursor(world_id=WORLD),
+        acceptance_id="acceptance:v2:rejected",
+    ).acceptance_event_payload_hash == event.payload_hash
+    if sqlite:
+        ledger.close()
+        reopened = SQLiteWorldLedger(
+            path=tmp_path / "acceptance-v2.sqlite3", world_id=WORLD
+        )
+        assert reopened.rebuild().acceptance_manifests_v2 == projection.acceptance_manifests_v2
+
+
+def test_acceptance_manifest_v2_stale_closes_old_proposal_and_accepted_fails_closed() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    ledger.commit(
+        [_event("event:world:before-audit", "WorldStarted", {})],
+        expected_world_revision=1,
+        expected_deliberation_revision=0,
+    )
+    audited = ProposalAuditRecorder(ledger=ledger).record(
+        _result(), _context(commit_world_revision=2)
+    )
+    stale = _acceptance_event(ledger, status="stale", acceptance_id="acceptance:v2:stale")
+    ledger.commit(
+        [stale],
+        expected_world_revision=2,
+        expected_deliberation_revision=audited.deliberation_revision,
+    )
+    assert ledger.project().acceptance_decisions[0].status == "stale"
+
+
+
+def test_acceptance_manifest_v2_rejects_unknown_version_and_forged_audit_binding() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    audited = ProposalAuditRecorder(ledger=ledger).record(_result(), _context())
+    valid = _acceptance_event(
+        ledger, status="rejected", acceptance_id="acceptance:v2:tamper"
+    )
+    raw = valid.payload()
+    proposal = dict(raw["proposals"][0])
+    proposal["proposal_hash"] = "sha256:" + "0" * 64
+    raw["proposals"] = (proposal,)
+    raw["manifest_hash"] = canonical_acceptance_manifest_hash(raw)
+    encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    forged = valid.model_copy(
+        update={"payload_json": encoded, "payload_hash": _hash(encoded)}
+    )
+    with pytest.raises(ValueError, match="exactly bind"):
+        ledger.commit(
+            [forged],
+            expected_world_revision=1,
+            expected_deliberation_revision=audited.deliberation_revision,
+        )
+
+    raw["manifest_version"] = "acceptance-manifest.999"
+    raw["manifest_hash"] = canonical_acceptance_manifest_hash(raw)
+    encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    unknown = valid.model_copy(
+        update={"payload_json": encoded, "payload_hash": _hash(encoded)}
+    )
+    with pytest.raises(ValueError, match="unsupported_manifest_version"):
+        ledger.commit(
+            [unknown],
+            expected_world_revision=1,
+            expected_deliberation_revision=audited.deliberation_revision,
+        )
+    assert ledger.project().acceptance_decisions == ()
+
+
+@pytest.mark.parametrize("sqlite", [False, True])
+def test_v2_proposal_cannot_be_closed_by_legacy_acceptance(
+    tmp_path, sqlite: bool
+) -> None:
+    ledger = (
+        SQLiteWorldLedger(path=tmp_path / "legacy-bypass.sqlite3", world_id=WORLD)
+        if sqlite
+        else WorldLedger.in_memory(world_id=WORLD)
+    )
+    _started(ledger)
+    audited = ProposalAuditRecorder(ledger=ledger).record(_result(), _context())
+    payload = {
+        "proposal_id": "proposal:audit:1",
+        "evaluated_world_revision": 1,
+        "acceptance_id": "acceptance:legacy:bypass",
+        "status": "rejected",
+    }
+    identity = domain_idempotency_key(
+        event_type="AcceptanceRecorded", world_id=WORLD, payload=payload
+    )
+    assert identity is not None
+    event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:acceptance:legacy:bypass",
+        world_id=WORLD,
+        event_type="AcceptanceRecorded",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="system:acceptance",
+        source="test",
+        trace_id="trace:legacy:bypass",
+        causation_id="cause:legacy:bypass",
+        correlation_id="correlation:legacy:bypass",
+        idempotency_key=identity,
+        payload=payload,
+    )
+    with pytest.raises(ValueError, match="v2_proposal_requires_manifest"):
+        ledger.commit(
+            [event],
+            expected_world_revision=1,
+            expected_deliberation_revision=audited.deliberation_revision,
+        )
+    assert ledger.project().acceptance_decisions == ()
+
+
+def test_v2_rejected_closure_preserves_source_event_refs_longer_than_256() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    events = ProposalAuditRecorder(ledger=ledger).build_events(_result(), _context())
+    long_proposal_ref = "event:proposal:" + "p" * 300
+    proposal_event = events[-1].model_copy(update={"event_id": long_proposal_ref})
+    committed = ledger.commit(
+        [events[0], proposal_event],
+        expected_world_revision=1,
+        expected_deliberation_revision=0,
+    )
+    assert ledger.project().proposal_audits[0].event_ref == long_proposal_ref
+    acceptance = _acceptance_event(
+        ledger, status="rejected", acceptance_id="acceptance:v2:long-ref"
+    ).model_copy(update={"event_id": "event:acceptance:" + "a" * 300})
+    ledger.commit(
+        [acceptance],
+        expected_world_revision=1,
+        expected_deliberation_revision=committed.deliberation_revision,
+    )
+    retained = ledger.project().acceptance_manifests_v2[0]
+    assert retained.proposals[0].proposal_event_ref == long_proposal_ref
+    assert len(retained.acceptance_event_ref) > 256
+
+
+def test_acceptance_manifest_v2_multi_proposal_is_atomic_on_second_binding_tamper() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    _started(ledger)
+    first = ProposalAuditRecorder(ledger=ledger).record(_result(), _context())
+    ProposalAuditRecorder(ledger=ledger).record(
+        _second_result(), _context(deliberation_revision=first.deliberation_revision)
+    )
+    valid = _acceptance_event(
+        ledger, status="rejected", acceptance_id="acceptance:v2:multi"
+    )
+    raw = valid.payload()
+    proposals = list(raw["proposals"])
+    proposals[1] = {**proposals[1], "proposal_event_payload_hash": "0" * 64}
+    raw["proposals"] = proposals
+    raw["manifest_hash"] = canonical_acceptance_manifest_hash(raw)
+    encoded = json.dumps(raw, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    forged = valid.model_copy(
+        update={"payload_json": encoded, "payload_hash": _hash(encoded)}
+    )
+    with pytest.raises(ValueError, match="exactly bind"):
+        ledger.commit(
+            [forged],
+            expected_world_revision=1,
+            expected_deliberation_revision=4,
+        )
+    assert ledger.project().acceptance_decisions == ()
+
+    ledger.commit(
+        [valid], expected_world_revision=1, expected_deliberation_revision=4
+    )
+    assert tuple(item.proposal_id for item in ledger.project().acceptance_decisions) == (
+        "proposal:audit:1",
+        "proposal:audit:2",
+    )
+
+
+@pytest.mark.parametrize("sqlite", [False, True])
 def test_audit_transaction_rejects_split_half_extra_wrong_order_and_mixed_lineage(
     tmp_path, sqlite: bool
 ) -> None:
@@ -359,7 +641,7 @@ def test_audit_transaction_rejects_split_half_extra_wrong_order_and_mixed_lineag
         assert ledger.project().proposal_audits == ()
 
 
-def test_v16_sqlite_head_migrates_to_v17_without_forged_audit_indexes(tmp_path) -> None:
+def test_v16_sqlite_head_migrates_to_v18_without_forged_audit_indexes(tmp_path) -> None:
     path = tmp_path / "audit-migration.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
     _started(ledger)
@@ -399,9 +681,115 @@ def test_v16_sqlite_head_migrates_to_v17_without_forged_audit_indexes(tmp_path) 
     connection.close()
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.17"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.18"
     assert migrated.project().semantic_hash == before.semantic_hash
     assert migrated.project().model_result_audits == ()
+
+
+def test_v17_sqlite_head_migrates_to_v18_preserving_proposal_audit(tmp_path) -> None:
+    path = tmp_path / "manifest-v18-migration.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    _started(ledger)
+    ProposalAuditRecorder(ledger=ledger).record(_result(), _context())
+    before = ledger.project()
+    ledger.close()
+    with sqlite3.connect(path) as connection:
+        state_json = connection.execute(
+            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
+        ).fetchone()[0]
+        state = json.loads(state_json)
+        state.pop("acceptance_manifests_v2", None)
+        legacy_state = ReducerState.model_validate_json(json.dumps(state))
+        legacy_payload = legacy_state.semantic_payload(
+            world_id=WORLD,
+            world_revision=before.world_revision,
+            reducer_bundle_version="world-v2-reducers.17",
+        )
+        legacy_hash = _hash(
+            json.dumps(
+                legacy_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        )
+        connection.execute(
+            "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?, state_hash = ? WHERE world_id = ?",
+            (
+                json.dumps(state, sort_keys=True, separators=(",", ":")),
+                legacy_hash,
+                "world-v2-reducers.17",
+                "legacy-state-hash",
+                WORLD,
+            ),
+        )
+    migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.18"
+    assert migrated.project().proposal_audits == before.proposal_audits
+    assert migrated.project().acceptance_manifests_v2 == ()
+
+
+def test_sqlite_v2_acceptance_replay_never_downgrades_invalid_manifest_to_legacy(
+    tmp_path,
+) -> None:
+    path = tmp_path / "acceptance-v2-replay.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    _started(ledger)
+    audited = ProposalAuditRecorder(ledger=ledger).record(_result(), _context())
+    event = _acceptance_event(
+        ledger, status="rejected", acceptance_id="acceptance:v2:replay"
+    )
+    ledger.commit(
+        [event],
+        expected_world_revision=1,
+        expected_deliberation_revision=audited.deliberation_revision,
+    )
+    ledger.close()
+    with sqlite3.connect(path) as connection:
+        row = connection.execute(
+            "SELECT event_json FROM world_v2_events WHERE event_id = ?", (event.event_id,)
+        ).fetchone()
+        envelope = json.loads(row[0])
+        payload = json.loads(envelope["payload_json"])
+        payload["manifest_version"] = "acceptance-manifest.999"
+        payload_json = json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        envelope["payload_json"] = payload_json
+        envelope["payload_hash"] = _hash(payload_json)
+        event_json = json.dumps(
+            envelope, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        connection.execute(
+            "UPDATE world_v2_events SET event_json = ?, event_hash = ? WHERE event_id = ?",
+            (event_json, _hash(event_json), event.event_id),
+        )
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    with pytest.raises(LedgerIntegrityError):
+        reopened.rebuild()
+
+
+def test_v17_head_cannot_claim_v18_acceptance_manifest_projection(tmp_path) -> None:
+    path = tmp_path / "forged-v17-manifest.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    _started(ledger)
+    audited = ProposalAuditRecorder(ledger=ledger).record(_result(), _context())
+    event = _acceptance_event(
+        ledger, status="rejected", acceptance_id="acceptance:v2:forged-v17"
+    )
+    ledger.commit(
+        [event],
+        expected_world_revision=1,
+        expected_deliberation_revision=audited.deliberation_revision,
+    )
+    ledger.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE world_v2_heads SET reducer_bundle_version = ?, state_hash = ? WHERE world_id = ?",
+            ("world-v2-reducers.17", "legacy-state-hash", WORLD),
+        )
+    with pytest.raises(LedgerIntegrityError):
+        SQLiteWorldLedger(path=path, world_id=WORLD)
 
 
 def test_audit_revalidates_constructed_and_rejects_oversize_or_tampered_bytes() -> None:
