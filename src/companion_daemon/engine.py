@@ -161,6 +161,7 @@ from companion_daemon.world_interaction_rules import (
     classify_repair_appraisal,
 )
 from companion_daemon.world_conversation import (
+    asks_for_memory_recall,
     asks_for_source_detail,
     best_matching_grounded_source,
     build_safe_failure_candidate,
@@ -2911,6 +2912,7 @@ class CompanionEngine:
                 not query_scope.asks_current_scene
                 and not query_scope.asks_experience
                 and not asks_for_source_detail(message.text)
+                and not asks_for_memory_recall(message.text)
             ):
                 grounded_fallback = None
             elif occurrence_candidate:
@@ -2957,7 +2959,10 @@ class CompanionEngine:
                         },
                         user_id=user_id,
                     )
-            elif query_scope.target in {"user", "conversation"} and retrieved_sources:
+            elif (
+                query_scope.target in {"user", "conversation"}
+                or asks_for_memory_recall(message.text)
+            ) and retrieved_sources:
                 recall_source = best_matching_grounded_source(
                     message.text, retrieved_sources
                 )

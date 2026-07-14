@@ -66,7 +66,7 @@ class TurnTakingPolicy:
             else self.short_wait_seconds
         )
         conversational_wait = (
-            min(self.long_wait_seconds, 2.0)
+            min(self.long_wait_seconds, 0.8)
             if heat == "hot"
             else min(self.long_wait_seconds, 3.5)
             if heat == "warm"
@@ -136,7 +136,13 @@ class TurnTakingPolicy:
             )
 
         if _looks_like_continuation(latest):
-            wait = self.long_burst_seconds if turn.pending_count >= 3 else conversational_wait
+            wait = (
+                self.long_burst_seconds
+                if turn.pending_count >= 3
+                else max(1.5, conversational_wait)
+                if heat == "hot"
+                else conversational_wait
+            )
             return TurnDecision(
                 TurnState.COLLECTING,
                 ReplyTiming.LONG_WAIT,

@@ -198,6 +198,11 @@ def build_safe_failure_candidate(
         source_text = str(grounded.get("reply_text") or "").strip()
         if _normalized_echo(source_text) == _normalized_echo(user_text):
             grounded = None
+        elif (
+            not asks_for_memory_recall(user_text)
+            and not asks_for_source_detail(user_text)
+        ):
+            grounded = None
         elif source_text and (
             bool(grounded.get("_user_sourced"))
             or any(
@@ -321,10 +326,10 @@ _SAFE_SPEECH_ACT_VARIANTS = {
         "现在下结论太早了，我只按能确认的部分回应。",
     ),
     "statement": (
-        "我在这儿；刚才没接好的地方，我不会装作已经懂了。",
-        "我先按你已经说出的部分回应，不替它补没说出的部分。",
-        "这句我先按能确认的部分回应。",
-        "我暂时不替它补上没说出的部分。",
+        "嗯，我在，刚才接得慢了一点。",
+        "我听到了，刚才这下有点卡住。",
+        "在的。刚才慢了一拍，我接上。",
+        "嗯，我看到你这句了。",
     ),
 }
 
@@ -386,6 +391,12 @@ def asks_for_source_detail(user_text: str) -> bool:
     return any(
         marker in user_text
         for marker in ("是谁", "为什么", "顺利吗", "怎么认识", "具体怎么", "说了什么")
+    )
+
+
+def asks_for_memory_recall(user_text: str) -> bool:
+    return bool(
+        re.search(r"(?:还记得|记得|之前|上次|以前|记录|说过|提过|刚才.*说)", user_text)
     )
 
 

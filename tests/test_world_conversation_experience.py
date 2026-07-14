@@ -1147,6 +1147,37 @@ def test_safe_failure_keeps_the_current_user_speech_act(
     assert candidate["claims"] == []
 
 
+def test_safe_failure_does_not_recite_old_memory_for_current_chat() -> None:
+    candidate = build_safe_failure_candidate(
+        "是这样的",
+        {
+            "reply_text": "今天在家就开始不能睡懒觉了",
+            "_user_sourced": True,
+            "mentioned_event_ids": ["message:old"],
+            "claims": [{"source_id": "message:old", "text": "今天在家就开始不能睡懒觉了"}],
+        },
+        speech_act="statement",
+    )
+
+    assert "我记得你之前提过" not in str(candidate["reply_text"])
+    assert candidate["mentioned_event_ids"] == []
+    assert candidate["claims"] == []
+
+
+def test_statement_safe_failure_uses_chatty_ack_not_audit_language() -> None:
+    candidate = build_safe_failure_candidate(
+        "对的哦",
+        None,
+        speech_act="statement",
+        variant_key="qq:hot-timeout",
+    )
+
+    reply = str(candidate["reply_text"])
+    assert "能确认" not in reply
+    assert "不替它补" not in reply
+    assert "我在" in reply or "听到了" in reply or "看到" in reply
+
+
 @pytest.mark.asyncio
 async def test_world_reply_never_echoes_the_current_user_message_as_its_answer(
     tmp_path: Path,

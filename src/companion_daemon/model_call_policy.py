@@ -191,10 +191,11 @@ class TurnModelCallBudget:
         grounding: GroundingAuditDecision,
         circuit: ProviderCircuitState,
     ) -> ModelCallDecision:
-        # Reserve roughly one second of the five-second user-visible hot-turn
-        # budget for Guard, Action staging and transport dispatch.  A slower
-        # provider result is less valuable than a prompt local convergence.
-        timeout = {"hot": 3.5, "warm": 10.0, "cold": 15.0}.get(
+        # Keep hot turns responsive, but do not force a visible template
+        # fallback just because the provider took slightly over three seconds.
+        # QQ's hot response budget reserves the remaining time for guard,
+        # Action staging and transport dispatch.
+        timeout = {"hot": 5.0, "warm": 10.0, "cold": 15.0}.get(
             turn.cadence.heat, 15.0
         )
         max_calls = min(

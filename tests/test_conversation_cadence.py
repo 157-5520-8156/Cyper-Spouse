@@ -72,6 +72,18 @@ def test_hot_longform_opener_is_quick_but_explicit_wait_cue_still_waits() -> Non
     assert explicit_wait.reason == "user_thinking_or_hesitating"
 
 
+def test_hot_uncertain_short_turn_preserves_generation_budget() -> None:
+    policy = TurnTakingPolicy(short_wait_seconds=2.5, long_wait_seconds=5.5)
+
+    decision = policy.decide(
+        TurnInput(1, "是这样的", "是这样的"),
+        cadence=_hot(),
+    )
+
+    assert decision.reason == "probably_still_typing"
+    assert decision.wait_seconds <= 0.8
+
+
 @pytest.mark.parametrize(
     ("state_patch", "text", "expected_attention", "reason_fragment"),
     [
