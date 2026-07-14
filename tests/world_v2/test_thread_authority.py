@@ -730,7 +730,7 @@ def test_sqlite_verified_v9_head_migrates_to_v11(tmp_path) -> None:
             (legacy_hash, "world-v2-reducers.9", WORLD),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.13"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.14"
     assert migrated.project().threads == ()
     assert migrated.rebuild() == migrated.project()
     migrated.close()
@@ -775,7 +775,7 @@ def test_sqlite_verified_thread_authority_head_migrates_to_v12(
             (legacy_hash, legacy_bundle, WORLD),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.13"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.14"
     assert migrated.project().threads == expected_thread
     assert migrated.project().commitments == ()
     assert migrated.rebuild() == migrated.project()

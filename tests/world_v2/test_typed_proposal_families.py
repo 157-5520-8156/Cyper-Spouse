@@ -28,6 +28,7 @@ def test_installed_family_manifest_owns_all_current_typed_proposals() -> None:
         "proposal-contract:commitment.1",
         "proposal-contract:experience.1",
         "proposal-contract:fact.1",
+        "proposal-contract:memory-candidate.1",
         "proposal-contract:outcome-legacy.1",
         "proposal-contract:relationship.1",
         "proposal-contract:thread.1",

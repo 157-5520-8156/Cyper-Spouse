@@ -27,6 +27,7 @@ from .experience_events import (
     LegacyExperienceCommittedPayload,
 )
 from .life_events import LIFE_PAYLOAD_MODELS
+from .memory_events import MEMORY_CANDIDATE_PAYLOAD_MODELS
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .thread_events import THREAD_MECHANICAL_PAYLOAD_MODELS, THREAD_PAYLOAD_MODELS
 from .schemas import (
@@ -59,7 +60,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.13"
+    reducer_bundle: str = "world-v2-reducers.14"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -247,6 +248,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **COMMITMENT_PAYLOAD_MODELS,
         **FACT_PAYLOAD_MODELS,
         **EXPERIENCE_PAYLOAD_MODELS,
+        **MEMORY_CANDIDATE_PAYLOAD_MODELS,
         "LegacyExperienceCommitted": LegacyExperienceCommittedPayload,
         **THREAD_MECHANICAL_PAYLOAD_MODELS,
         **ACTOR_AUTHORITY_PAYLOAD_MODELS,
@@ -328,6 +330,10 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         **{
             event_type: "world_id+fact_id+expected_entity_revision+transition_id"
             for event_type in FACT_PAYLOAD_MODELS
+        },
+        **{
+            event_type: "world_id+candidate_id+expected_entity_revision+transition_id"
+            for event_type in MEMORY_CANDIDATE_PAYLOAD_MODELS
         },
         "ActorAuthorityBootstrapped": "world_id+authority_id+transition_id",
         "ActorAuthorityRotated": "world_id+authority_id+expected_entity_revision+transition_id",
@@ -872,6 +878,21 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "bundle_migration",
                 "world",
                 "LegacyExperienceCommittedPayload",
+            ),
+            *(
+                _contract(
+                    event_type,
+                    "proposal_acceptance",
+                    "world",
+                    payload_model.__name__,
+                    allowed_predecessors=("AcceptanceRecorded",),
+                    evidence_types=(
+                        "committed_fact",
+                        "committed_experience",
+                        "committed_world_event",
+                    ),
+                )
+                for event_type, payload_model in MEMORY_CANDIDATE_PAYLOAD_MODELS.items()
             ),
             _contract(
                 "AppraisalAccepted",

@@ -666,7 +666,7 @@ def test_sqlite_migrates_verified_v6_head_to_relationship_bundle(tmp_path) -> No
         )
 
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert reopened.project().reducer_bundle_version == "world-v2-reducers.13"
+    assert reopened.project().reducer_bundle_version == "world-v2-reducers.14"
     assert reopened.project() == expected
     reopened.close()
 

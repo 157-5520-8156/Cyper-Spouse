@@ -2370,6 +2370,375 @@ class ThreadProposalProjection(FrozenModel):
         return self
 
 
+MemorySourceKind = Literal["fact", "experience", "terminal_thread"]
+MemoryCandidateStatus = Literal["pending", "active", "rejected", "forgotten"]
+MemoryRetentionRationale = Literal[
+    "identity_relevance",
+    "relationship_continuity",
+    "boundary_relevance",
+    "unfinished_business",
+    "repeated_pattern",
+    "future_utility",
+    "emotional_salience",
+    "world_continuity",
+]
+MemoryCueKind = Literal[
+    "identity",
+    "relationship",
+    "boundary",
+    "unfinished_business",
+    "repeated_pattern",
+    "future_utility",
+    "emotional_residue",
+    "world_continuity",
+]
+MEMORY_SALIENCE_MATRIX_VERSION = "memory-salience-matrix.1"
+_MEMORY_SALIENCE_WEIGHTS = {
+    "autobiographical_relevance_bp": 15,
+    "relationship_relevance_bp": 15,
+    "emotional_residue_bp": 10,
+    "unfinished_business_bp": 15,
+    "recurrence_bp": 15,
+    "novelty_bp": 5,
+    "future_utility_bp": 15,
+    "world_continuity_bp": 10,
+}
+MEMORY_SALIENCE_MATRIX_DIGEST = hashlib.sha256(
+    json.dumps(
+        {
+            "version": MEMORY_SALIENCE_MATRIX_VERSION,
+            "weights": _MEMORY_SALIENCE_WEIGHTS,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+).hexdigest()
+
+
+class MemorySourceBinding(FrozenModel):
+    source_kind: MemorySourceKind
+    source_id: str = Field(min_length=1)
+    source_entity_revision: int = Field(ge=1)
+    authority_event_ref: str = Field(min_length=1)
+    authority_world_revision: int = Field(ge=1)
+    authority_payload_hash: str = Field(min_length=64, max_length=64)
+    source_values_hash: str = Field(min_length=64, max_length=64)
+
+    @property
+    def authority_identity(self) -> tuple[str, str, int]:
+        return self.source_kind, self.source_id, self.source_entity_revision
+
+
+def memory_source_authority_id(binding: MemorySourceBinding) -> str:
+    encoded = json.dumps(
+        binding.model_dump(mode="json"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+class MemorySalienceVector(FrozenModel):
+    autobiographical_relevance_bp: int = Field(ge=0, le=10_000)
+    relationship_relevance_bp: int = Field(ge=0, le=10_000)
+    emotional_residue_bp: int = Field(ge=0, le=10_000)
+    unfinished_business_bp: int = Field(ge=0, le=10_000)
+    recurrence_bp: int = Field(ge=0, le=10_000)
+    novelty_bp: int = Field(ge=0, le=10_000)
+    future_utility_bp: int = Field(ge=0, le=10_000)
+    world_continuity_bp: int = Field(ge=0, le=10_000)
+    matrix_version: Literal["memory-salience-matrix.1"] = (
+        MEMORY_SALIENCE_MATRIX_VERSION
+    )
+    matrix_digest: str = Field(min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def matrix_artifact_is_installed(self) -> MemorySalienceVector:
+        if self.matrix_digest != MEMORY_SALIENCE_MATRIX_DIGEST:
+            raise ValueError("memory salience matrix artifact is not installed")
+        return self
+
+
+def memory_retrieval_strength_bp(salience: MemorySalienceVector) -> int:
+    weighted = sum(
+        getattr(salience, field) * weight
+        for field, weight in _MEMORY_SALIENCE_WEIGHTS.items()
+    )
+    return weighted // sum(_MEMORY_SALIENCE_WEIGHTS.values())
+
+
+class MemoryCandidateValues(FrozenModel):
+    summary_ref: str = Field(min_length=1)
+    summary_payload_hash: str = Field(min_length=64, max_length=64)
+    cue_kind: MemoryCueKind
+    source_bindings: tuple[MemorySourceBinding, ...] = Field(min_length=1)
+    consumed_source_authority_ids: tuple[str, ...] = Field(min_length=1)
+    retention_rationales: tuple[MemoryRetentionRationale, ...] = Field(min_length=1)
+    future_use_refs: tuple[str, ...] = ()
+    privacy_ceiling: PrivacyClass
+    salience: MemorySalienceVector
+    review_due_at: datetime | None = None
+    status: MemoryCandidateStatus
+    retrieval_strength_bp: int = Field(ge=0, le=10_000)
+    reinforcement_count: int = Field(ge=0)
+    last_reinforced_at: datetime | None = None
+    reviewed_at: datetime | None = None
+    forgotten_at: datetime | None = None
+
+    @model_validator(mode="after")
+    def lifecycle_and_sources_are_explicit(self) -> MemoryCandidateValues:
+        identities = tuple(item.authority_identity for item in self.source_bindings)
+        if len(identities) != len(set(identities)):
+            raise ValueError("memory source authority identities must be unique")
+        event_refs = tuple(item.authority_event_ref for item in self.source_bindings)
+        if len(event_refs) != len(set(event_refs)):
+            raise ValueError("memory source authority events must not be aliased")
+        if len(self.consumed_source_authority_ids) != len(
+            set(self.consumed_source_authority_ids)
+        ):
+            raise ValueError("memory consumed source authority ids must be unique")
+        current_authorities = {
+            memory_source_authority_id(item) for item in self.source_bindings
+        }
+        if not current_authorities.issubset(set(self.consumed_source_authority_ids)):
+            raise ValueError("memory current sources must remain in consumed authority lineage")
+        if len(self.retention_rationales) != len(set(self.retention_rationales)):
+            raise ValueError("memory retention rationales must be unique")
+        if len(self.future_use_refs) != len(set(self.future_use_refs)):
+            raise ValueError("memory future-use refs must be unique")
+        if self.reinforcement_count == 0 and self.last_reinforced_at is not None:
+            raise ValueError("unreinforced memory cannot have a reinforcement time")
+        if self.reinforcement_count > 0 and self.last_reinforced_at is None:
+            raise ValueError("reinforced memory requires its last reinforcement time")
+        if self.status == "pending" and (
+            self.reviewed_at is not None or self.forgotten_at is not None
+        ):
+            raise ValueError("pending memory cannot be reviewed or forgotten")
+        if self.status == "active" and (
+            self.reviewed_at is None or self.forgotten_at is not None
+        ):
+            raise ValueError("active memory requires review and cannot be forgotten")
+        if self.status == "active" and self.retrieval_strength_bp == 0:
+            raise ValueError("active memory requires nonzero retrieval strength")
+        if self.status in {"pending", "active"} and self.retrieval_strength_bp != (
+            memory_retrieval_strength_bp(self.salience)
+        ):
+            raise ValueError("memory retrieval strength must be policy-derived from salience")
+        if self.status == "rejected" and (
+            self.reviewed_at is None
+            or self.forgotten_at is not None
+            or self.retrieval_strength_bp != 0
+        ):
+            raise ValueError("rejected memory must be reviewed and inactive")
+        if self.status == "forgotten" and (
+            self.reviewed_at is None
+            or self.forgotten_at is None
+            or self.retrieval_strength_bp != 0
+        ):
+            raise ValueError("forgotten memory must retain explicit terminal timing")
+        return self
+
+
+def memory_candidate_semantic_fingerprint(
+    *, values: MemoryCandidateValues, policy_refs: tuple[str, ...]
+) -> str:
+    material = {
+        "summary_ref": values.summary_ref,
+        "summary_payload_hash": values.summary_payload_hash,
+        "cue_kind": values.cue_kind,
+        "source_bindings": tuple(
+            item.model_dump(mode="json") for item in values.source_bindings
+        ),
+        "retention_rationales": sorted(values.retention_rationales),
+        "future_use_refs": sorted(values.future_use_refs),
+        "privacy_ceiling": values.privacy_ceiling,
+        "salience": values.salience.model_dump(mode="json"),
+        "review_due_at": (
+            values.review_due_at.isoformat() if values.review_due_at else None
+        ),
+        "policy_refs": sorted(policy_refs),
+    }
+    return hashlib.sha256(
+        json.dumps(
+            material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+
+
+def memory_source_cluster_fingerprint(
+    *, values: MemoryCandidateValues, policy_refs: tuple[str, ...]
+) -> str:
+    material = {
+        "cue_kind": values.cue_kind,
+        "stable_source_lineages": sorted(
+            (item.source_kind, item.source_id) for item in values.source_bindings
+        ),
+        "policy_refs": sorted(policy_refs),
+    }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+class MemoryCandidateOrigin(FrozenModel):
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+
+
+class MemoryCandidateProjection(FrozenModel):
+    candidate_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    semantic_fingerprint: str = Field(min_length=64, max_length=64)
+    source_cluster_fingerprint: str = Field(min_length=64, max_length=64)
+    source_cluster_lineage: tuple[str, ...] = Field(min_length=1)
+    values: MemoryCandidateValues
+    origin: MemoryCandidateOrigin
+    opened_at: datetime
+    updated_at: datetime
+
+    @model_validator(mode="after")
+    def semantic_identity_is_source_bound(self) -> MemoryCandidateProjection:
+        expected = memory_candidate_semantic_fingerprint(
+            values=self.values, policy_refs=self.origin.policy_refs
+        )
+        if self.semantic_fingerprint != expected:
+            raise ValueError("memory candidate fingerprint does not match sources")
+        expected_cluster = memory_source_cluster_fingerprint(
+            values=self.values, policy_refs=self.origin.policy_refs
+        )
+        if self.source_cluster_fingerprint != expected_cluster:
+            raise ValueError("memory candidate source cluster fingerprint is invalid")
+        if (
+            len(self.source_cluster_lineage) != len(set(self.source_cluster_lineage))
+            or self.source_cluster_lineage[-1] != self.source_cluster_fingerprint
+        ):
+            raise ValueError("memory candidate source cluster lineage is invalid")
+        if self.opened_at > self.updated_at:
+            raise ValueError("memory candidate update cannot precede opening")
+        for instant in (
+            self.values.last_reinforced_at,
+            self.values.reviewed_at,
+            self.values.forgotten_at,
+        ):
+            if instant is not None and not (self.opened_at <= instant <= self.updated_at):
+                raise ValueError("memory lifecycle time is outside candidate chronology")
+        if any(
+            instant is not None
+            and (instant.tzinfo is None or instant.utcoffset() is None)
+            for instant in (
+                self.opened_at,
+                self.updated_at,
+                self.values.last_reinforced_at,
+                self.values.reviewed_at,
+                self.values.forgotten_at,
+                self.values.review_due_at,
+            )
+        ):
+            raise ValueError("memory candidate times must be timezone-aware")
+        return self
+
+
+class MemoryCandidateTransitionProjection(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    candidate_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    operation: Literal["open", "accept", "reject", "revise", "reinforce", "forget"]
+    values_before: MemoryCandidateValues | None
+    values_after: MemoryCandidateValues
+    change_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+    accepted_at: datetime
+    revise_kind: Literal["pending_edit", "compress", "clarify", "correct"] | None = None
+    reinforcement_reason: MemoryRetentionRationale | None = None
+    rejection_reason: Literal[
+        "duplicate",
+        "insufficient_future_utility",
+        "operator_decision",
+    ] | None = None
+    forget_reason: Literal[
+        "scheduled_decay",
+        "obsolete_review",
+        "privacy_request",
+        "source_invalidated",
+        "compressed_into",
+        "explicit_suppression",
+        "low_future_utility",
+    ] | None = None
+
+
+class MemoryRetrievalDecision(FrozenModel):
+    candidate_id: str = Field(min_length=1)
+    eligible: bool
+    source_ids: tuple[str, ...] = ()
+    stale_source_ids: tuple[str, ...] = ()
+    suppression_reasons: tuple[
+        Literal["not_active", "stale_source", "privacy_ceiling"] , ...
+    ] = ()
+    review_required: bool = False
+
+
+class MemoryCandidateProposedMutation(FrozenModel):
+    event_type: Literal[
+        "MemoryCandidateOpened",
+        "MemoryCandidateAccepted",
+        "MemoryCandidateRejected",
+        "MemoryCandidateRevised",
+        "MemoryCandidateReinforced",
+        "MemoryCandidateForgotten",
+    ]
+    payload_json: str = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def payload_is_canonical(self) -> MemoryCandidateProposedMutation:
+        decoded = json.loads(self.payload_json)
+        if not isinstance(decoded, dict):
+            raise ValueError("memory candidate mutation payload must be an object")
+        canonical = json.dumps(
+            decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        if canonical != self.payload_json:
+            raise ValueError("memory candidate mutation payload must use canonical JSON")
+        return self
+
+
+class MemoryCandidateProposalProjection(FrozenModel):
+    proposal_id: str = Field(min_length=1)
+    proposal_kind: Literal["memory_candidate_transition"] = (
+        "memory_candidate_transition"
+    )
+    proposal_encoding: Literal["typed-authority-v1"]
+    authority_contract_ref: Literal["proposal-contract:memory-candidate.1"]
+    transition_kind: Literal[
+        "open", "accept", "reject", "revise", "reinforce", "forget"
+    ]
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    expected_entity_revision: int = Field(ge=0)
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    proposed_mutation: MemoryCandidateProposedMutation
+
+    @model_validator(mode="after")
+    def transition_matches_event(self) -> MemoryCandidateProposalProjection:
+        expected = {
+            "open": "MemoryCandidateOpened",
+            "accept": "MemoryCandidateAccepted",
+            "reject": "MemoryCandidateRejected",
+            "revise": "MemoryCandidateRevised",
+            "reinforce": "MemoryCandidateReinforced",
+            "forget": "MemoryCandidateForgotten",
+        }[self.transition_kind]
+        if self.proposed_mutation.event_type != expected:
+            raise ValueError("memory candidate proposal transition does not match event")
+        return self
+
+
 class PrincipalActionEvidence(FrozenModel):
     source_event_ref: str = Field(min_length=1)
     payload_hash: str = Field(min_length=64, max_length=64)
@@ -2756,7 +3125,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.13"
+    reducer_bundle_version: str = "world-v2-reducers.14"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -2796,6 +3165,10 @@ class LedgerProjection(FrozenModel):
     experience_transitions: tuple[ExperienceTransitionProjection, ...] = ()
     experience_proposals: tuple[ExperienceProposalProjection, ...] = ()
     experience_proposal_ids: tuple[str, ...] = ()
+    memory_candidates: tuple[MemoryCandidateProjection, ...] = ()
+    memory_candidate_transitions: tuple[MemoryCandidateTransitionProjection, ...] = ()
+    memory_candidate_proposals: tuple[MemoryCandidateProposalProjection, ...] = ()
+    memory_candidate_proposal_ids: tuple[str, ...] = ()
     appraisals: tuple[AppraisalProjection, ...] = ()
     affect_baselines: tuple[AffectBaselineProjection, ...] = ()
     affect_episodes: tuple[AffectEpisodeProjection, ...] = ()
