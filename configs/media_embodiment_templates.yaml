@@ -1,4 +1,4 @@
-version: 1
+version: 2
 
 # Hard filters below protect evidence, privacy, coverage and capture feasibility.
 # Affinities are intentionally broad so one event does not map to one fixed pose.
@@ -18,6 +18,22 @@ strategies:
     holistic_cue: the body remains a natural part of the event without sensual emphasis
     framing_cue: ordinary event-led framing
     action_cue: continue the selected event action naturally
+    action_variants:
+      - action_variant_id: handheld_event_continuation
+        action_cue: continue the selected event action while the device hand remains stable
+        required_free_hands: 0
+        camera_support: handheld
+        capture_modes: [character_front_camera, character_rear_camera, mirror]
+      - action_variant_id: fixed_event_continuation
+        action_cue: continue the selected event action with both hands naturally available
+        required_free_hands: 0
+        camera_support: fixed
+        capture_modes: [timer_fixed]
+      - action_variant_id: externally_captured_event_continuation
+        action_cue: continue the selected event action while another person operates the camera
+        required_free_hands: 0
+        camera_support: external
+        capture_modes: [requested_helper, known_companion, external_sender]
     sensory_cues: []
     allowed_regions: []
     forbidden_cues: [sexualized_framing, isolated_body_part_focus]
@@ -32,6 +48,22 @@ strategies:
     holistic_cue: a believable pause while the body settles after effort
     framing_cue: keep the recovery context and breathing space visible
     action_cue: lean, sit, or brace naturally while recovering
+    action_variants:
+      - action_variant_id: handheld_supported_pause
+        action_cue: lean or sit while the device hand stays stable and the free hand rests naturally
+        required_free_hands: 1
+        camera_support: handheld
+        capture_modes: [character_front_camera, mirror]
+      - action_variant_id: fixed_two_hand_brace
+        action_cue: brace naturally with both hands while a fixed device records the recovery pause
+        required_free_hands: 2
+        camera_support: fixed
+        capture_modes: [timer_fixed]
+      - action_variant_id: companion_two_hand_brace
+        action_cue: brace naturally with both hands while the known companion takes the photograph
+        required_free_hands: 2
+        camera_support: external
+        capture_modes: [known_companion]
     sensory_cues: [skin_sheen, loose_flyaway_hair, visible_breathing_recovery]
     allowed_regions: [face, hair, neck, shoulders, arms, torso, waist, legs]
     forbidden_cues: [fitness_advertisement, pornographic_pose, isolated_body_part_focus]
@@ -46,6 +78,17 @@ strategies:
     holistic_cue: raise one or both arms only as needed to retie or lift damp or warm hair
     framing_cue: show the whole gesture rather than isolating the underarm
     action_cue: gather hair away from the neck with readable shoulders, elbows, and wrists
+    action_variants:
+      - action_variant_id: one_hand_lift
+        action_cue: the device hand remains stable while the one free hand lifts or gathers hair away from the neck; do not depict both hands in the hair
+        required_free_hands: 1
+        camera_support: handheld
+        capture_modes: [character_front_camera, mirror]
+      - action_variant_id: two_hand_retie
+        action_cue: both hands visibly retie the hair while a fixed device takes the photograph; no hand is holding a phone
+        required_free_hands: 2
+        camera_support: fixed
+        capture_modes: [timer_fixed]
     sensory_cues: [flyaway_hair, warm_skin, damp_hair_texture]
     allowed_regions: [face, hair, neck, shoulders, arms, waist]
     forbidden_cues: [underarm_fetish_closeup, impossible_shoulder_rotation, pornographic_pose]
@@ -60,6 +103,17 @@ strategies:
     holistic_cue: cool down or wipe visible moisture with an ordinary practical gesture
     framing_cue: preserve the event setting and avoid a body-product advertisement
     action_cue: use a hand, wrist, or supported towel without tangling fabric and fingers
+    action_variants:
+      - action_variant_id: one_hand_wipe
+        action_cue: the device hand remains stable while the one free hand or wrist wipes visible moisture
+        required_free_hands: 1
+        camera_support: handheld
+        capture_modes: [character_front_camera, mirror]
+      - action_variant_id: companion_towel_wipe
+        action_cue: use one hand and a clearly supported towel while the known companion operates the camera
+        required_free_hands: 1
+        camera_support: external
+        capture_modes: [known_companion]
     sensory_cues: [skin_sheen, warm_flush, practical_towel_texture]
     allowed_regions: [face, hair, neck, shoulders, arms, torso]
     forbidden_cues: [collar_pulling_exposure, fetishized_wet_skin, isolated_body_part_focus]
@@ -74,6 +128,12 @@ strategies:
     holistic_cue: adjust visibly damp hair as part of the real recent activity
     framing_cue: keep the source context legible and the hair movement anatomically natural
     action_cue: gather, blot, or move damp hair away from the face or neck
+    action_variants:
+      - action_variant_id: one_hand_damp_hair_adjustment
+        action_cue: the device hand remains stable while the one free hand gathers, blots, or moves damp hair away from the face
+        required_free_hands: 1
+        camera_support: handheld
+        capture_modes: [character_front_camera, mirror]
     sensory_cues: [separated_damp_strands, towel_or_fabric_texture, natural_skin_sheen]
     allowed_regions: [face, hair, neck, shoulders, arms]
     forbidden_cues: [shower_inference_without_evidence, fetishized_wet_skin, glamour_hair_advertisement]
@@ -88,6 +148,22 @@ strategies:
     holistic_cue: lengthen or reach as a functional continuation of the event
     framing_cue: keep the complete body line and environmental reason for the gesture visible
     action_cue: stretch, reach, or loosen the shoulders without a staged pin-up pose
+    action_variants:
+      - action_variant_id: mirror_one_arm_reach
+        action_cue: one hand holds the phone while the free arm makes a small functional reach or shoulder release
+        required_free_hands: 1
+        camera_support: handheld
+        capture_modes: [mirror]
+      - action_variant_id: fixed_two_arm_stretch
+        action_cue: both arms complete a natural stretch while a fixed device takes the photograph
+        required_free_hands: 2
+        camera_support: fixed
+        capture_modes: [timer_fixed]
+      - action_variant_id: companion_two_arm_stretch
+        action_cue: both arms complete a natural stretch while the known companion operates the camera
+        required_free_hands: 2
+        camera_support: external
+        capture_modes: [known_companion]
     sensory_cues: [natural_body_tension, fabric_movement]
     allowed_regions: [neck, shoulders, arms, torso, waist, legs]
     forbidden_cues: [underarm_fetish_closeup, pinup_pose, impossible_spine]
@@ -102,6 +178,17 @@ strategies:
     holistic_cue: preserve the final trace of movement after the activity slows
     framing_cue: show an event-aware body in space rather than a surveillance view
     action_cue: settle from a step, turn, or activity motion while acknowledging the camera
+    action_variants:
+      - action_variant_id: fixed_movement_settle
+        action_cue: settle from a step or turn toward the fixed camera with both hands naturally available
+        required_free_hands: 0
+        camera_support: fixed
+        capture_modes: [timer_fixed]
+      - action_variant_id: socially_acknowledged_movement
+        action_cue: settle from a step or turn and visibly acknowledge the helper or companion behind the camera
+        required_free_hands: 0
+        camera_support: external
+        capture_modes: [requested_helper, known_companion]
     sensory_cues: [movement_in_hair_or_fabric, post_effort_warmth]
     allowed_regions: [face, hair, neck, shoulders, arms, torso, waist, legs]
     forbidden_cues: [paparazzi_view, frozen_fashion_pose, pornographic_pose]
@@ -115,6 +202,12 @@ strategies:
     holistic_cue: knowingly adjust a real garment or covering in a physically coherent mirror moment
     framing_cue: use intimate conversational distance while keeping the reflection and coverage believable
     action_cue: adjust a sleeve, strap, belt, edge, or hem without exposing a key area
+    action_variants:
+      - action_variant_id: one_hand_mirror_adjustment
+        action_cue: one hand holds the phone while the free hand adjusts one evidenced garment edge without changing coverage
+        required_free_hands: 1
+        camera_support: handheld
+        capture_modes: [mirror]
     sensory_cues: [fabric_weight, restrained_skin_contrast, warm_private_light]
     allowed_regions: [face, hair, neck, shoulders, arms, torso, waist, legs]
     forbidden_cues: [transparent_fabric, key_area_exposure, lingerie_advertisement, impossible_mirror]
@@ -128,6 +221,12 @@ strategies:
     holistic_cue: hold a short recipient-directed pause with tangible bodily presence
     framing_cue: use close conversational framing without turning one body region into the subject
     action_cue: remain between actions with believable breath, weight, and eye contact
+    action_variants:
+      - action_variant_id: handheld_recipient_pause
+        action_cue: hold the device steadily and pause between actions with the free hand relaxed and the recipient-directed gaze legible
+        required_free_hands: 0
+        camera_support: handheld
+        capture_modes: [character_front_camera, mirror]
     sensory_cues: [warm_skin_tone, fabric_texture, breathing_presence]
     allowed_regions: [face, hair, neck, shoulders, arms, torso, waist]
     forbidden_cues: [explicit_seduction, key_area_crop, isolated_body_part_focus]
@@ -141,6 +240,17 @@ strategies:
     holistic_cue: rest with natural weight and supported limbs rather than a staged pin-up posture
     framing_cue: show enough support surface and covering to make anatomy and privacy clear
     action_cue: sit, lean, curl, or recline while maintaining plausible joint placement
+    action_variants:
+      - action_variant_id: handheld_supported_repose
+        action_cue: hold the device with one hand while the body remains supported and the free hand rests visibly
+        required_free_hands: 0
+        camera_support: handheld
+        capture_modes: [character_front_camera, mirror]
+      - action_variant_id: fixed_supported_repose
+        action_cue: rest with both hands naturally available while a fixed device takes the photograph
+        required_free_hands: 0
+        camera_support: fixed
+        capture_modes: [timer_fixed]
     sensory_cues: [soft_fabric_weight, settled_breathing, warm_private_light]
     allowed_regions: [face, hair, neck, shoulders, arms, torso, waist, legs]
     forbidden_cues: [pinup_pose, key_area_exposure, impossible_limbs, fetishized_crop]
@@ -155,6 +265,17 @@ strategies:
     holistic_cue: share a private transition while opaque clothing or covering remains securely in place
     framing_cue: make every covered key area and the physical support of the covering unambiguous
     action_cue: hold or adjust the evidenced robe, towel, sheet, oversized garment, or restrained opaque lingerie
+    action_variants:
+      - action_variant_id: one_hand_covered_transition
+        action_cue: the device hand remains stable while the free hand secures the evidenced opaque covering; every key area remains covered
+        required_free_hands: 1
+        camera_support: handheld
+        capture_modes: [character_front_camera, mirror]
+      - action_variant_id: fixed_covered_transition
+        action_cue: secure the evidenced opaque covering with one or both hands while a fixed device takes the photograph
+        required_free_hands: 2
+        camera_support: fixed
+        capture_modes: [timer_fixed]
     sensory_cues: [opaque_fabric_weight, warm_private_light, restrained_skin_contrast]
     allowed_regions: [face, hair, neck, shoulders, arms, torso, waist, legs]
     forbidden_cues: [nudity, transparent_fabric, key_area_exposure, sexual_act, fetishized_crop]

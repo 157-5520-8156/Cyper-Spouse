@@ -2,6 +2,7 @@ from companion_daemon.media_embodiment import (
     EmbodiedPresentation,
     VisiblePhysicalStateResolver,
     build_embodied_candidates,
+    embodiment_prompt_block,
 )
 
 
@@ -43,9 +44,7 @@ def test_world_visible_physical_state_takes_precedence_over_derivation() -> None
     assert [cue.cue_id for cue in state.cues] == ["perspiration"]
     assert state.cues[0].source == "world_fact"
     assert state.cues[0].intensity == "marked"
-    assert state.cues[0].evidence_refs == (
-        "/character/visible_physical_state/cues/0",
-    )
+    assert state.cues[0].evidence_refs == ("/character/visible_physical_state/cues/0",)
     assert state.cues[0].derivation_id is None
     assert state.cues[0].logical_at == "2026-07-14T20:00:00+08:00"
     assert state.cues[0].source_event_id == "event:workout"
@@ -117,6 +116,108 @@ def test_ambiguous_workout_candidates_allow_charged_but_not_veiled() -> None:
     assert restored == candidates[0].presentation
 
 
+def test_hair_retie_variants_preserve_camera_authorship_and_free_hands() -> None:
+    candidates = build_embodied_candidates(
+        snapshot=_snapshot(),
+        opportunity_id="opportunity:hair-authorship",
+        relationship_stage="ambiguous",
+        sensual_charge_ceiling="charged",
+        limit=256,
+    )
+    hair = [
+        item for item in candidates if item.presentation.body_strategy_id == "retie_or_lift_hair"
+    ]
+
+    assert hair
+    handheld = [
+        item
+        for item in hair
+        if {"character_front_camera", "mirror"} & set(item.legal_capture_modes)
+    ]
+    assert handheld
+    assert all(item.presentation.required_free_hands <= 1 for item in handheld)
+    assert all(item.presentation.action_variant_id == "one_hand_lift" for item in handheld)
+
+    two_handed = [item for item in hair if item.presentation.required_free_hands == 2]
+    assert two_handed
+    assert all(
+        not ({"character_front_camera", "mirror"} & set(item.legal_capture_modes))
+        for item in two_handed
+    )
+    assert any("timer_fixed" in item.legal_capture_modes for item in two_handed)
+
+
+def test_pre_action_variant_embodied_payload_still_round_trips() -> None:
+    current = build_embodied_candidates(
+        snapshot=_snapshot(),
+        opportunity_id="opportunity:legacy-embodiment",
+        relationship_stage="ambiguous",
+        sensual_charge_ceiling="charged",
+        limit=1,
+    )[0].presentation
+    legacy = EmbodiedPresentation.create(
+        physical_salience=current.physical_salience,
+        sensual_charge=current.sensual_charge,
+        coverage_mode=current.coverage_mode,
+        body_strategy_id=current.body_strategy_id,
+        physical_cues=current.physical_cues,
+        holistic_cue=current.holistic_cue,
+        framing_cue=current.framing_cue,
+        action_cue=current.action_cue,
+        sensory_cues=current.sensory_cues,
+        allowed_regions=current.allowed_regions,
+        forbidden_cues=current.forbidden_cues,
+        relationship_stage_basis=current.relationship_stage_basis,
+        sensual_charge_ceiling=current.sensual_charge_ceiling,
+        wardrobe_evidence_refs=current.wardrobe_evidence_refs,
+        version="embodied-presentation-v1",
+    )
+    payload = legacy.to_payload()
+    assert "action_variant_id" not in payload
+
+    restored = EmbodiedPresentation.from_payload(payload)
+
+    assert restored.version == "embodied-presentation-v1"
+    assert restored.action_variant_id == "legacy_unspecified"
+    assert restored.to_payload() == payload
+    assert "action variant" not in embodiment_prompt_block(restored)
+
+
+def test_v1_catalog_without_action_variants_is_adapted_by_camera_support(tmp_path) -> None:
+    catalog = tmp_path / "embodiment-v1.yaml"
+    catalog.write_text(
+        """version: 1
+strategies:
+  ordinary:
+    physical_salience: none
+    sensual_charges: [none]
+    coverage_modes: [fully_dressed]
+    capture_modes: [character_front_camera, timer_fixed, known_companion]
+    share_intents: [record]
+    holistic_cue: ordinary event behavior
+    framing_cue: ordinary event framing
+    action_cue: continue the event action
+    sensory_cues: []
+    allowed_regions: []
+    forbidden_cues: [sexualized_framing]
+""",
+        encoding="utf-8",
+    )
+
+    candidates = build_embodied_candidates(
+        snapshot=_snapshot(),
+        opportunity_id="opportunity:v1-catalog",
+        config_path=catalog,
+        limit=16,
+    )
+
+    assert {item.presentation.camera_support for item in candidates} == {
+        "handheld",
+        "fixed",
+        "external",
+    }
+
+
 def test_veiled_candidates_require_lover_and_explicit_private_wardrobe_evidence() -> None:
     without_evidence = build_embodied_candidates(
         snapshot=_snapshot(),
@@ -143,9 +244,7 @@ def test_veiled_candidates_require_lover_and_explicit_private_wardrobe_evidence(
     )
 
     veiled = [
-        item.presentation
-        for item in with_evidence
-        if item.presentation.sensual_charge == "veiled"
+        item.presentation for item in with_evidence if item.presentation.sensual_charge == "veiled"
     ]
     assert veiled
     assert {item.coverage_mode for item in veiled} <= {
@@ -255,6 +354,5 @@ def test_recent_contract_is_hard_filtered_and_recent_axes_softly_change_order() 
 
     assert soft_penalized[0].candidate_id != baseline[0].candidate_id
     assert all(
-        item.presentation.contract_signature != first.contract_signature
-        for item in hard_filtered
+        item.presentation.contract_signature != first.contract_signature for item in hard_filtered
     )

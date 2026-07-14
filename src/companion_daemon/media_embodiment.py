@@ -83,9 +83,7 @@ class VisiblePhysicalCue:
             evidence_refs=tuple(str(item) for item in value.get("evidence_refs", [])),
             logical_at=str(value.get("logical_at") or ""),
             source_event_id=str(value.get("source_event_id") or ""),
-            derivation_id=(
-                str(value["derivation_id"]) if value.get("derivation_id") else None
-            ),
+            derivation_id=(str(value["derivation_id"]) if value.get("derivation_id") else None),
         )
         if cue.cue_id not in VISIBLE_CUE_IDS:
             raise ValueError("invalid visible physical cue")
@@ -152,9 +150,7 @@ class VisiblePhysicalStateResolver:
                     {
                         **raw,
                         "source": "world_fact",
-                        "evidence_refs": [
-                            f"/character/visible_physical_state/cues/{index}"
-                        ],
+                        "evidence_refs": [f"/character/visible_physical_state/cues/{index}"],
                         "derivation_id": None,
                         "logical_at": logical_at,
                         "source_event_id": source_event_id,
@@ -163,9 +159,7 @@ class VisiblePhysicalStateResolver:
             )
         return tuple(cues)
 
-    def _derived_cues(
-        self, snapshot: Mapping[str, object]
-    ) -> tuple[VisiblePhysicalCue, ...]:
+    def _derived_cues(self, snapshot: Mapping[str, object]) -> tuple[VisiblePhysicalCue, ...]:
         activity = _mapping(snapshot.get("activity"))
         event = _mapping(snapshot.get("event"))
         kind = str(activity.get("kind") or "").lower()
@@ -203,6 +197,7 @@ class VisiblePhysicalStateResolver:
 
 
 EMBODIED_PRESENTATION_V1 = "embodied-presentation-v1"
+EMBODIED_PRESENTATION_V2 = "embodied-presentation-v2"
 
 
 @dataclass(frozen=True)
@@ -220,8 +215,11 @@ class EmbodiedPresentation:
     forbidden_cues: tuple[str, ...]
     relationship_stage_basis: str
     sensual_charge_ceiling: str
+    action_variant_id: str = "legacy_unspecified"
+    required_free_hands: int = 0
+    camera_support: str = "legacy_unspecified"
     wardrobe_evidence_refs: tuple[str, ...] = ()
-    version: str = EMBODIED_PRESENTATION_V1
+    version: str = EMBODIED_PRESENTATION_V2
     contract_signature: str = ""
 
     @classmethod
@@ -241,6 +239,10 @@ class EmbodiedPresentation:
         value["allowed_regions"] = list(self.allowed_regions)
         value["forbidden_cues"] = list(self.forbidden_cues)
         value["wardrobe_evidence_refs"] = list(self.wardrobe_evidence_refs)
+        if self.version == EMBODIED_PRESENTATION_V1:
+            value.pop("action_variant_id")
+            value.pop("required_free_hands")
+            value.pop("camera_support")
         return value
 
     @classmethod
@@ -253,8 +255,7 @@ class EmbodiedPresentation:
             coverage_mode=str(value.get("coverage_mode") or ""),
             body_strategy_id=str(value.get("body_strategy_id") or ""),
             physical_cues=tuple(
-                VisiblePhysicalCue.from_payload(item)
-                for item in value.get("physical_cues", [])
+                VisiblePhysicalCue.from_payload(item) for item in value.get("physical_cues", [])
             ),
             holistic_cue=str(value.get("holistic_cue") or ""),
             framing_cue=str(value.get("framing_cue") or ""),
@@ -264,6 +265,9 @@ class EmbodiedPresentation:
             forbidden_cues=tuple(str(item) for item in value.get("forbidden_cues", [])),
             relationship_stage_basis=str(value.get("relationship_stage_basis") or ""),
             sensual_charge_ceiling=str(value.get("sensual_charge_ceiling") or "none"),
+            action_variant_id=str(value.get("action_variant_id") or "legacy_unspecified"),
+            required_free_hands=int(value.get("required_free_hands") or 0),
+            camera_support=str(value.get("camera_support") or "legacy_unspecified"),
             wardrobe_evidence_refs=tuple(
                 str(item) for item in value.get("wardrobe_evidence_refs", [])
             ),
@@ -297,12 +301,10 @@ def load_embodiment_catalog(
     path: Path = DEFAULT_EMBODIMENT_CONFIG,
 ) -> dict[str, dict[str, object]]:
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    if int(raw.get("version") or 0) != 1 or not isinstance(raw.get("strategies"), dict):
+    if int(raw.get("version") or 0) not in {1, 2} or not isinstance(raw.get("strategies"), dict):
         raise ValueError("invalid embodiment catalog")
     return {
-        str(key): dict(value)
-        for key, value in raw["strategies"].items()
-        if isinstance(value, dict)
+        str(key): dict(value) for key, value in raw["strategies"].items() if isinstance(value, dict)
     }
 
 
@@ -329,7 +331,35 @@ def build_embodied_candidates(
         salience = str(raw.get("physical_salience") or "")
         charges = tuple(str(item) for item in raw.get("sensual_charges", []))
         coverage_modes = tuple(str(item) for item in raw.get("coverage_modes", []))
-        capture_modes = tuple(str(item) for item in raw.get("capture_modes", []))
+        strategy_capture_modes = tuple(str(item) for item in raw.get("capture_modes", []))
+        action_variants = raw.get("action_variants")
+        if not isinstance(action_variants, list) or not action_variants:
+            action_variants = []
+            support_modes = {
+                "handheld": {
+                    "character_front_camera",
+                    "character_rear_camera",
+                    "mirror",
+                },
+                "fixed": {"timer_fixed"},
+                "external": {
+                    "requested_helper",
+                    "known_companion",
+                    "external_sender",
+                },
+            }
+            for support, supported in support_modes.items():
+                modes = [mode for mode in strategy_capture_modes if mode in supported]
+                if modes:
+                    action_variants.append(
+                        {
+                            "action_variant_id": f"legacy_{support}",
+                            "action_cue": str(raw.get("action_cue") or ""),
+                            "required_free_hands": 0,
+                            "camera_support": support,
+                            "capture_modes": modes,
+                        }
+                    )
         share_intents = tuple(str(item) for item in raw.get("share_intents", []))
         required_cues = {str(item) for item in raw.get("required_physical_cues", [])}
         matched_cues = tuple(cue for cue in state.cues if cue.cue_id in required_cues)
@@ -342,62 +372,72 @@ def build_embodied_candidates(
             if SENSUAL_CHARGE_RANK[charge] > SENSUAL_CHARGE_RANK[sensual_charge_ceiling]:
                 continue
             for coverage_mode in coverage_modes:
-                if (
-                    coverage_mode in {"private_apparel", "strategic_cover"}
-                    and not wardrobe_refs
-                ):
+                if coverage_mode in {"private_apparel", "strategic_cover"} and not wardrobe_refs:
                     continue
                 if charge == "veiled" and (
-                    coverage_mode not in {"private_apparel", "strategic_cover"}
-                    or not wardrobe_refs
+                    coverage_mode not in {"private_apparel", "strategic_cover"} or not wardrobe_refs
                 ):
                     continue
-                candidate_id = f"{strategy_id}:{charge}:{coverage_mode}"
-                presentation = EmbodiedPresentation.create(
-                    physical_salience=salience,
-                    sensual_charge=charge,
-                    coverage_mode=coverage_mode,
-                    body_strategy_id=strategy_id,
-                    physical_cues=selected_cues,
-                    holistic_cue=str(raw.get("holistic_cue") or ""),
-                    framing_cue=str(raw.get("framing_cue") or ""),
-                    action_cue=str(raw.get("action_cue") or ""),
-                    sensory_cues=tuple(str(item) for item in raw.get("sensory_cues", [])),
-                    allowed_regions=tuple(str(item) for item in raw.get("allowed_regions", [])),
-                    forbidden_cues=tuple(str(item) for item in raw.get("forbidden_cues", [])),
-                    relationship_stage_basis=relationship_stage,
-                    sensual_charge_ceiling=sensual_charge_ceiling,
-                    wardrobe_evidence_refs=(
-                        wardrobe_refs
-                        if coverage_mode in {"private_apparel", "strategic_cover"}
-                        else ()
-                    ),
-                )
-                if presentation.contract_signature in recent:
-                    continue
-                legal_share_intents = tuple(
-                    intent
-                    for intent in share_intents
-                    if (
-                        (charge == "none" and intent != "intimate_signal")
-                        or (charge != "none" and intent == "intimate_signal")
+                for raw_variant in action_variants:
+                    if not isinstance(raw_variant, dict):
+                        continue
+                    action_variant_id = str(raw_variant.get("action_variant_id") or "")
+                    capture_modes = tuple(
+                        str(item)
+                        for item in raw_variant.get("capture_modes", strategy_capture_modes)
                     )
-                )
-                if not legal_share_intents:
-                    continue
-                candidates.append(
-                    EmbodiedCandidate(
-                        candidate_id,
-                        presentation,
-                        capture_modes,
-                        legal_share_intents,
+                    required_free_hands = int(raw_variant.get("required_free_hands") or 0)
+                    camera_support = str(raw_variant.get("camera_support") or "legacy_unspecified")
+                    candidate_id = f"{strategy_id}:{action_variant_id}:{charge}:{coverage_mode}"
+                    presentation = EmbodiedPresentation.create(
+                        physical_salience=salience,
+                        sensual_charge=charge,
+                        coverage_mode=coverage_mode,
+                        body_strategy_id=strategy_id,
+                        physical_cues=selected_cues,
+                        holistic_cue=str(raw.get("holistic_cue") or ""),
+                        framing_cue=str(raw.get("framing_cue") or ""),
+                        action_cue=str(
+                            raw_variant.get("action_cue") or raw.get("action_cue") or ""
+                        ),
+                        sensory_cues=tuple(str(item) for item in raw.get("sensory_cues", [])),
+                        allowed_regions=tuple(str(item) for item in raw.get("allowed_regions", [])),
+                        forbidden_cues=tuple(str(item) for item in raw.get("forbidden_cues", [])),
+                        relationship_stage_basis=relationship_stage,
+                        sensual_charge_ceiling=sensual_charge_ceiling,
+                        action_variant_id=action_variant_id,
+                        required_free_hands=required_free_hands,
+                        camera_support=camera_support,
+                        wardrobe_evidence_refs=(
+                            wardrobe_refs
+                            if coverage_mode in {"private_apparel", "strategic_cover"}
+                            else ()
+                        ),
                     )
-                )
+                    if presentation.contract_signature in recent:
+                        continue
+                    legal_share_intents = tuple(
+                        intent
+                        for intent in share_intents
+                        if (
+                            (charge == "none" and intent != "intimate_signal")
+                            or (charge != "none" and intent == "intimate_signal")
+                        )
+                    )
+                    if not legal_share_intents:
+                        continue
+                    candidates.append(
+                        EmbodiedCandidate(
+                            candidate_id,
+                            presentation,
+                            capture_modes,
+                            legal_share_intents,
+                        )
+                    )
 
     def weighted_key(item: EmbodiedCandidate) -> tuple[float, str]:
         soft = sum(
-            _embodied_axis_overlap(item.presentation, recent_item)
-            for recent_item in recent_three
+            _embodied_axis_overlap(item.presentation, recent_item) for recent_item in recent_three
         )
         stable = sha256(f"{opportunity_id}:{item.candidate_id}".encode()).hexdigest()
         weight = exp(-0.55 * soft)
@@ -408,12 +448,21 @@ def build_embodied_candidates(
 
 
 def embodiment_prompt_block(presentation: EmbodiedPresentation) -> str:
-    cue_text = "; ".join(
-        f"{cue.cue_id}={cue.intensity} on {','.join(cue.regions)} "
-        f"(source={cue.source}, event={cue.source_event_id}, at={cue.logical_at}, "
-        f"evidence={','.join(cue.evidence_refs)})"
-        for cue in presentation.physical_cues
-    ) or "no additional visible physical-state cue"
+    cue_text = (
+        "; ".join(
+            f"{cue.cue_id}={cue.intensity} on {','.join(cue.regions)} "
+            f"(source={cue.source}, event={cue.source_event_id}, at={cue.logical_at}, "
+            f"evidence={','.join(cue.evidence_refs)})"
+            for cue in presentation.physical_cues
+        )
+        or "no additional visible physical-state cue"
+    )
+    action_contract = (
+        f"- action variant: {presentation.action_variant_id}; requires "
+        f"{presentation.required_free_hands} free hand(s); camera support={presentation.camera_support}\n"
+        if presentation.version == EMBODIED_PRESENTATION_V2
+        else ""
+    )
     return (
         "Frozen embodied presentation:\n"
         f"- dimensions: physical_salience={presentation.physical_salience}; "
@@ -422,6 +471,7 @@ def embodiment_prompt_block(presentation: EmbodiedPresentation) -> str:
         f"- whole-body behavior: {presentation.holistic_cue}\n"
         f"- framing: {presentation.framing_cue}\n"
         f"- action: {presentation.action_cue}\n"
+        f"{action_contract}"
         f"- evidenced physical cues: {cue_text}\n"
         f"- sensory treatment: {'; '.join(presentation.sensory_cues) or 'ordinary'}\n"
         f"- regions may appear naturally: {', '.join(presentation.allowed_regions) or 'none emphasized'}\n"
@@ -430,8 +480,41 @@ def embodiment_prompt_block(presentation: EmbodiedPresentation) -> str:
     )
 
 
+def embodied_capture_feasibility_error(
+    presentation: EmbodiedPresentation,
+    *,
+    capture_mode: str,
+    hand_occupancy: str,
+) -> str | None:
+    """Cross-check body action, device authorship and the subject hand contract."""
+    if presentation.version == EMBODIED_PRESENTATION_V1:
+        return None
+    expected_support = {
+        "character_front_camera": "handheld",
+        "character_rear_camera": "handheld",
+        "mirror": "handheld",
+        "timer_fixed": "fixed",
+        "requested_helper": "external",
+        "known_companion": "external",
+        "external_sender": "external",
+    }.get(capture_mode)
+    if expected_support and presentation.camera_support != expected_support:
+        return "embodied_camera_support_conflict"
+    free_hands = {
+        "one_hand_operates_phone_other_presents_evidence": 1,
+        "one_hand_operates_phone_other_remains_natural": 1,
+        "one_hand_holds_phone_other_performs_gesture": 1,
+        "both_hands_available": 2,
+    }.get(hand_occupancy)
+    if free_hands is None:
+        return "embodied_hand_capacity_unknown"
+    if presentation.required_free_hands > free_hands:
+        return "embodied_action_hand_conflict"
+    return None
+
+
 def _validate_embodied_presentation(presentation: EmbodiedPresentation) -> None:
-    if presentation.version != EMBODIED_PRESENTATION_V1:
+    if presentation.version not in {EMBODIED_PRESENTATION_V1, EMBODIED_PRESENTATION_V2}:
         raise ValueError("unsupported embodied presentation version")
     if presentation.physical_salience not in PHYSICAL_SALIENCE_LEVELS:
         raise ValueError("invalid physical salience")
@@ -471,6 +554,13 @@ def _validate_embodied_presentation(presentation: EmbodiedPresentation) -> None:
         raise ValueError("incomplete embodied presentation")
     if any(region not in VISIBLE_BODY_REGIONS for region in presentation.allowed_regions):
         raise ValueError("invalid embodied presentation region")
+    if presentation.version == EMBODIED_PRESENTATION_V2:
+        if not presentation.action_variant_id:
+            raise ValueError("missing embodied action variant")
+        if presentation.required_free_hands not in {0, 1, 2}:
+            raise ValueError("invalid embodied free-hand requirement")
+        if presentation.camera_support not in {"handheld", "fixed", "external"}:
+            raise ValueError("invalid embodied camera support")
 
 
 def _relationship_allows_charge(stage: str, charge: str) -> bool:
@@ -542,18 +632,28 @@ def _embodied_signature(presentation: EmbodiedPresentation) -> str:
         presentation.sensual_charge_ceiling,
         presentation.wardrobe_evidence_refs,
     )
+    if presentation.version == EMBODIED_PRESENTATION_V2:
+        values = (
+            *values,
+            presentation.action_variant_id,
+            presentation.required_free_hands,
+            presentation.camera_support,
+        )
     return _contract_signature(values)
 
 
 def _embodied_axis_overlap(presentation: EmbodiedPresentation, recent: str) -> int:
+    axes = (
+        presentation.physical_salience,
+        presentation.sensual_charge,
+        presentation.coverage_mode,
+        presentation.body_strategy_id,
+    )
+    if presentation.version == EMBODIED_PRESENTATION_V2:
+        axes += (presentation.action_variant_id,)
     return sum(
         axis in recent
-        for axis in (
-            presentation.physical_salience,
-            presentation.sensual_charge,
-            presentation.coverage_mode,
-            presentation.body_strategy_id,
-        )
+        for axis in axes
     )
 
 

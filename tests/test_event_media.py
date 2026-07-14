@@ -112,16 +112,20 @@ def _proposal(**overrides: object) -> dict[str, object]:
             "existing_artifact": "保持原始媒体已有的相机视角",
         }[str(value["capture_mode"])]
     if "subject_variant_id" not in overrides:
-        value["subject_variant_id"] = "body_detail_showcase" if value["character_visibility"] == "body_detail" else {
-            "character_front_camera": "aware_three_quarter",
-            "character_rear_camera": "aware_three_quarter",
-            "mirror": "mirror_composed",
-            "timer_fixed": "timer_environment_pose",
-            "requested_helper": "helper_checkin_pose",
-            "known_companion": "companion_reaction",
-            "external_sender": "external_candid_glance",
-            "existing_artifact": "aware_three_quarter",
-        }[str(value["capture_mode"])]
+        value["subject_variant_id"] = (
+            "body_detail_showcase"
+            if value["character_visibility"] == "body_detail"
+            else {
+                "character_front_camera": "aware_three_quarter",
+                "character_rear_camera": "aware_three_quarter",
+                "mirror": "mirror_composed",
+                "timer_fixed": "timer_environment_pose",
+                "requested_helper": "helper_checkin_pose",
+                "known_companion": "companion_reaction",
+                "external_sender": "external_candid_glance",
+                "existing_artifact": "aware_three_quarter",
+            }[str(value["capture_mode"])]
+        )
     if "interaction_bid_id" not in overrides:
         variant = str(value.get("subject_variant_id") or "")
         value["interaction_bid_id"] = (
@@ -173,12 +177,8 @@ class FakeModel:
                 if capture in item["legal_capture_modes"]
                 and visibility == item["character_visibility"]
                 and intent in item["legal_share_intents"]
-                and privacy_rank[item["minimum_privacy"]]
-                <= privacy_rank[str(payload["privacy"])]
-                and bid
-                in item["subject_presentation"]["display_strategy"][
-                    "communicative_goals"
-                ]
+                and privacy_rank[item["minimum_privacy"]] <= privacy_rank[str(payload["privacy"])]
+                and bid in item["subject_presentation"]["display_strategy"]["communicative_goals"]
             ]
             if not legal:
                 legal = [
@@ -194,19 +194,13 @@ class FakeModel:
                 (
                     item
                     for item in legal
-                    if str(item["presentation_candidate_id"])
-                    .split("~", 1)[0]
-                    .startswith(preferred)
+                    if str(item["presentation_candidate_id"]).split("~", 1)[0].startswith(preferred)
                 ),
                 legal[0] if legal else None,
             )
             if selected:
-                payload["presentation_candidate_id"] = selected[
-                    "presentation_candidate_id"
-                ]
-                goals = selected["subject_presentation"]["display_strategy"][
-                    "communicative_goals"
-                ]
+                payload["presentation_candidate_id"] = selected["presentation_candidate_id"]
+                goals = selected["subject_presentation"]["display_strategy"]["communicative_goals"]
                 if payload.get("interaction_bid_id") not in goals:
                     payload["interaction_bid_id"] = goals[0]
         return json.dumps(payload, ensure_ascii=False)
@@ -220,9 +214,7 @@ class ChargeSelectingModel(FakeModel):
     async def complete(self, messages, *, temperature=0.8):
         payload = dict(self.payload)
         user = str(messages[-1]["content"])
-        encoded = user.split("legal_character_presentation_candidates=", 1)[1].split(
-            "\n", 1
-        )[0]
+        encoded = user.split("legal_character_presentation_candidates=", 1)[1].split("\n", 1)[0]
         candidates = json.loads(encoded)
         selected = next(
             item
@@ -492,7 +484,7 @@ async def test_planner_exposes_all_ordinary_bids_but_requires_audience_for_close
         **{
             **opportunity.__dict__,
             "audience_context": AudienceContext(
-                    recipient_ref="user:geoff", relationship_stage="ambiguous"
+                recipient_ref="user:geoff", relationship_stage="ambiguous"
             ),
         }
     )
@@ -552,6 +544,7 @@ async def test_final_plan_privacy_limits_subject_display_strategy() -> None:
     with pytest.raises(ValueError, match="interaction_bid_privacy_conflict"):
         MediaPlan.from_payload(tampered)
 
+
 @pytest.mark.asyncio
 async def test_generated_character_plan_requires_legal_complete_candidate() -> None:
     missing = _proposal()
@@ -597,9 +590,9 @@ async def test_non_selfie_capture_derives_no_selfie_arm_constraint() -> None:
 async def test_missing_subject_catalog_fails_closed_before_model_call(tmp_path: Path) -> None:
     model = FakeModel(_proposal())
 
-    result = await MediaPlanner(
-        model, subject_config_path=tmp_path / "missing-subjects.yaml"
-    ).plan(_opportunity())
+    result = await MediaPlanner(model, subject_config_path=tmp_path / "missing-subjects.yaml").plan(
+        _opportunity()
+    )
 
     assert isinstance(result, NotRenderable)
     assert result.reason == "presentation_catalog_unavailable"
@@ -630,9 +623,7 @@ async def test_v1_plan_replays_without_new_subject_interpretation() -> None:
     payload["subject_presentation"] = None
     payload["interaction_bid"] = None
     payload["embodied_presentation"] = None
-    payload["diversity_fingerprint"] = "|".join(
-        current.plan.diversity_fingerprint.split("|")[:8]
-    )
+    payload["diversity_fingerprint"] = "|".join(current.plan.diversity_fingerprint.split("|")[:8])
 
     restored = MediaPlan.from_payload(payload)
 
@@ -773,9 +764,7 @@ async def test_planner_accepts_remaining_character_media_rows(overrides: dict[st
             privacy="intimate" if intimate else "personal",
             sensual_charge_ceiling="subtle" if intimate else "none",
             audience_context=(
-                AudienceContext(
-                    recipient_ref="user:geoff", relationship_stage="ambiguous"
-                )
+                AudienceContext(recipient_ref="user:geoff", relationship_stage="ambiguous")
                 if intimate
                 else None
             ),
@@ -1055,6 +1044,9 @@ async def test_v4_plan_freezes_one_complete_character_presentation_candidate() -
         "fully_dressed",
         "functional_bodywear",
     }
+    assert result.plan.diversity_fingerprint.endswith(
+        result.plan.embodied_presentation.action_variant_id
+    )
     assert MediaPlan.from_payload(result.plan.to_payload()) == result.plan
 
 
@@ -1063,9 +1055,7 @@ async def test_v4_charged_workout_freezes_evidenced_body_state_and_prompt() -> N
     snapshot = _snapshot(
         activity={"kind": "workout", "intensity": "high", "description": "训练结束"}
     )
-    audience = AudienceContext(
-        recipient_ref="user:geoff", relationship_stage="ambiguous"
-    )
+    audience = AudienceContext(recipient_ref="user:geoff", relationship_stage="ambiguous")
     proposal = _proposal(
         content_domain="activity_process",
         share_intent="intimate_signal",
@@ -1099,6 +1089,47 @@ async def test_v4_charged_workout_freezes_evidenced_body_state_and_prompt() -> N
     assert "Frozen embodied presentation" in prompt
     assert "sensual_charge=charged" in prompt
     assert "source=derived" in prompt
+    assert "Complete character-photo contract" in prompt
+    assert "camera_authorship=" in prompt
+    assert "hand_occupancy=" in prompt
+    assert "interaction_bid=invite_desire" in prompt
+
+
+@pytest.mark.asyncio
+async def test_renderer_repairs_impossible_camera_hand_action_without_replanning(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(
+        activity={"kind": "workout", "intensity": "high", "description": "训练结束"}
+    )
+    planned = await MediaPlanner(FakeModel(_proposal())).plan(
+        _opportunity(snapshot=snapshot, automatic=True)
+    )
+    assert isinstance(planned, PlannedMedia)
+    first = MediaInspection(
+        **{
+            **_inspection(True).__dict__,
+            "capture_authorship_matches": False,
+            "hand_action_contract_matches": False,
+        }
+    )
+    generator = FakeGenerator()
+
+    result = await MediaRenderer(
+        generator=generator,
+        inspector=FakeInspector([first, _inspection(True)]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+
+    assert isinstance(result, RenderedMedia)
+    assert result.attempts == 2
+    assert "capture_authorship_mismatch" in generator.prompts[1]
+    assert planned.plan.embodied_presentation is not None
+    assert (
+        planned.plan.embodied_presentation.action_variant_id in generator.prompts[0]
+        and planned.plan.embodied_presentation.action_variant_id in generator.prompts[1]
+    )
 
 
 @pytest.mark.asyncio
@@ -1283,7 +1314,36 @@ def _inspection(
         coverage_mode_matches=True,
         non_explicit_boundary_ok=True,
         body_framing_non_fetishizing=True,
+        capture_authorship_matches=True,
+        hand_action_contract_matches=True,
+        social_bid_broadly_legible=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_complete_candidates_cross_filter_body_action_against_camera_hand_contract() -> None:
+    snapshot = _snapshot(
+        activity={"kind": "workout", "intensity": "high", "description": "训练结束"}
+    )
+    model = FakeModel(_proposal())
+
+    result = await MediaPlanner(model).plan(_opportunity(snapshot=snapshot))
+
+    assert isinstance(result, PlannedMedia)
+    marker = "legal_character_presentation_candidates="
+    encoded = model.messages[-1]["content"].split(marker, 1)[1].split("\n", 1)[0]
+    candidates = json.loads(encoded)
+    front_camera = [
+        item for item in candidates if "character_front_camera" in item["legal_capture_modes"]
+    ]
+    assert front_camera
+    assert all(item["embodied_presentation"]["required_free_hands"] <= 1 for item in front_camera)
+    assert all(
+        item["capture_physics_contracts"]["character_front_camera"]["camera_authorship"]
+        == "character_holds_capture_device"
+        for item in front_camera
+    )
+    assert all(item["subject_presentation"]["display_strategy"] for item in candidates)
 
 
 @pytest.mark.asyncio
@@ -1617,9 +1677,7 @@ async def test_legacy_v2_plan_keeps_structural_quality_gate_after_v3_upgrade(
     payload["version"] = "event-media-plan-v2"
     payload["interaction_bid"] = None
     payload["embodied_presentation"] = None
-    payload["diversity_fingerprint"] = "|".join(
-        current.plan.diversity_fingerprint.split("|")[:8]
-    )
+    payload["diversity_fingerprint"] = "|".join(current.plan.diversity_fingerprint.split("|")[:8])
     subject = payload["subject_presentation"]
     assert isinstance(subject, dict)
     subject.pop("version")
@@ -1652,8 +1710,10 @@ async def test_legacy_v2_plan_keeps_structural_quality_gate_after_v3_upgrade(
     )
 
     result = await MediaRenderer(
-        generator=FakeGenerator(), inspector=FakeInspector([incomplete, incomplete]),
-        output_dir=tmp_path, visual_identity_path=None,
+        generator=FakeGenerator(),
+        inspector=FakeInspector([incomplete, incomplete]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
     ).render(restored)
 
     assert not isinstance(result, RenderedMedia)
