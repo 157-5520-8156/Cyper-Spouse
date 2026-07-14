@@ -63,6 +63,8 @@ def _opportunity(
     privacy: str = "personal",
     snapshot=None,
     automatic: bool = False,
+    sensual_charge_ceiling: str = "none",
+    audience_context: AudienceContext | None = None,
 ) -> MediaOpportunity:
     return MediaOpportunity(
         opportunity_id="opportunity:42",
@@ -70,6 +72,8 @@ def _opportunity(
         privacy_ceiling=privacy,
         event_snapshot=snapshot or _snapshot(),
         delivery_mode="automatic" if automatic else "preview",
+        sensual_charge_ceiling=sensual_charge_ceiling,
+        audience_context=audience_context,
     )
 
 
@@ -144,6 +148,98 @@ class FakeModel:
         self.calls = 0
         self.messages: list[dict[str, str]] = []
 
+    async def complete(self, messages, *, temperature=0.8):
+        self.calls += 1
+        self.messages = messages
+        payload = dict(self.payload) if isinstance(self.payload, dict) else self.payload
+        if (
+            isinstance(payload, dict)
+            and payload.get("character_visibility") in {"identifiable", "body_detail"}
+            and "presentation_candidate_id" not in payload
+        ):
+            marker = "legal_character_presentation_candidates="
+            user = str(messages[-1]["content"])
+            encoded = user.split(marker, 1)[1].split("\n", 1)[0]
+            candidates = json.loads(encoded)
+            capture = payload.get("capture_mode")
+            visibility = payload.get("character_visibility")
+            intent = payload.get("share_intent")
+            preferred = str(payload.get("subject_variant_id") or "")
+            bid = payload.get("interaction_bid_id")
+            privacy_rank = {"ordinary": 0, "personal": 1, "intimate": 2}
+            legal = [
+                item
+                for item in candidates
+                if capture in item["legal_capture_modes"]
+                and visibility == item["character_visibility"]
+                and intent in item["legal_share_intents"]
+                and privacy_rank[item["minimum_privacy"]]
+                <= privacy_rank[str(payload["privacy"])]
+                and bid
+                in item["subject_presentation"]["display_strategy"][
+                    "communicative_goals"
+                ]
+            ]
+            if not legal:
+                legal = [
+                    item
+                    for item in candidates
+                    if capture in item["legal_capture_modes"]
+                    and visibility == item["character_visibility"]
+                    and intent in item["legal_share_intents"]
+                    and privacy_rank[item["minimum_privacy"]]
+                    <= privacy_rank[str(payload["privacy"])]
+                ]
+            selected = next(
+                (
+                    item
+                    for item in legal
+                    if str(item["presentation_candidate_id"])
+                    .split("~", 1)[0]
+                    .startswith(preferred)
+                ),
+                legal[0] if legal else None,
+            )
+            if selected:
+                payload["presentation_candidate_id"] = selected[
+                    "presentation_candidate_id"
+                ]
+                goals = selected["subject_presentation"]["display_strategy"][
+                    "communicative_goals"
+                ]
+                if payload.get("interaction_bid_id") not in goals:
+                    payload["interaction_bid_id"] = goals[0]
+        return json.dumps(payload, ensure_ascii=False)
+
+
+class ChargeSelectingModel(FakeModel):
+    def __init__(self, payload: dict[str, object], charge: str):
+        super().__init__(payload)
+        self.charge = charge
+
+    async def complete(self, messages, *, temperature=0.8):
+        payload = dict(self.payload)
+        user = str(messages[-1]["content"])
+        encoded = user.split("legal_character_presentation_candidates=", 1)[1].split(
+            "\n", 1
+        )[0]
+        candidates = json.loads(encoded)
+        selected = next(
+            item
+            for item in candidates
+            if item["embodied_presentation"]["sensual_charge"] == self.charge
+            and payload["capture_mode"] in item["legal_capture_modes"]
+            and payload["share_intent"] in item["legal_share_intents"]
+            and payload["interaction_bid_id"]
+            in item["subject_presentation"]["display_strategy"]["communicative_goals"]
+        )
+        payload["presentation_candidate_id"] = selected["presentation_candidate_id"]
+        self.calls += 1
+        self.messages = messages
+        return json.dumps(payload, ensure_ascii=False)
+
+
+class RawFakeModel(FakeModel):
     async def complete(self, messages, *, temperature=0.8):
         self.calls += 1
         self.messages = messages
@@ -303,15 +399,16 @@ async def test_new_character_plan_freezes_subject_presentation_in_same_call() ->
     result = await MediaPlanner(model).plan(_opportunity())
 
     assert isinstance(result, PlannedMedia)
-    assert result.plan.version == "event-media-plan-v3"
+    assert result.plan.version == "event-media-plan-v4"
     assert result.plan.interaction_bid is not None
-    assert result.plan.interaction_bid.communicative_goal == "seek_validation"
     assert result.plan.interaction_bid.bid_id == "media-bid:opportunity:42"
     assert result.plan.subject_presentation is not None
-    assert result.plan.subject_presentation.variant_id == (
-        "screen_check_reaction"
+    assert result.plan.subject_presentation.display_strategy is not None
+    assert (
+        result.plan.interaction_bid.communicative_goal
+        in result.plan.subject_presentation.display_strategy.communicative_goals
     )
-    assert "legal_subject_presentation_candidates" in model.messages[1]["content"]
+    assert "legal_character_presentation_candidates" in model.messages[1]["content"]
     restored = MediaPlan.from_payload(result.plan.to_payload())
     assert restored == result.plan
     prompt = compile_media_prompt(restored, Path("configs/visual_identity.yaml"))
@@ -383,19 +480,19 @@ async def test_planner_exposes_all_ordinary_bids_but_requires_audience_for_close
             content_domain="appearance_style",
             share_intent="intimate_signal",
             privacy="intimate",
-            intimate_intensity="soft",
+            capture_mode="mirror",
             interaction_bid_id="invite_closeness",
             subject_variant_id="playful_level_pose",
             primary_evidence_ref="/character/appearance",
             sharing_motive="传递克制且非露骨的亲密信号",
         )
     )
-    opportunity = _opportunity(privacy="intimate")
+    opportunity = _opportunity(privacy="intimate", sensual_charge_ceiling="subtle")
     opportunity = MediaOpportunity(
         **{
             **opportunity.__dict__,
             "audience_context": AudienceContext(
-                recipient_ref="user:geoff", relationship_stage="close_friend"
+                    recipient_ref="user:geoff", relationship_stage="ambiguous"
             ),
         }
     )
@@ -409,7 +506,7 @@ async def test_planner_exposes_all_ordinary_bids_but_requires_audience_for_close
 @pytest.mark.asyncio
 async def test_planner_rejects_interaction_bid_outside_frozen_privacy() -> None:
     result = await MediaPlanner(
-        FakeModel(_proposal(interaction_bid_id="invite_closeness"))
+        RawFakeModel(_proposal(privacy="ordinary", interaction_bid_id="invite_closeness"))
     ).plan(_opportunity(privacy="ordinary"))
 
     assert isinstance(result, NotRenderable)
@@ -419,28 +516,32 @@ async def test_planner_rejects_interaction_bid_outside_frozen_privacy() -> None:
 @pytest.mark.asyncio
 async def test_planner_rejects_semantically_mismatched_bid_and_subject_strategy() -> None:
     result = await MediaPlanner(
-        FakeModel(
+        RawFakeModel(
             _proposal(
                 interaction_bid_id="seek_care",
-                subject_variant_id="aware_three_quarter",
+                presentation_candidate_id="not-a-legal-complete-candidate",
             )
         )
     ).plan(_opportunity())
 
     assert isinstance(result, NotRenderable)
-    assert result.reason == "subject_interaction_bid_conflict"
+    assert result.reason == "illegal_presentation_candidate"
 
 
 @pytest.mark.asyncio
 async def test_final_plan_privacy_limits_subject_display_strategy() -> None:
-    audience = AudienceContext(recipient_ref="user:geoff", relationship_stage="close_friend")
-    opportunity = MediaOpportunity(**{**_opportunity().__dict__, "audience_context": audience})
+    opportunity = _opportunity()
     planned = await MediaPlanner(
         FakeModel(
             _proposal(
-                share_intent="humor",
-                interaction_bid_id="invite_playful_exchange",
-                subject_variant_id="playful_level_pose",
+                content_domain="body_health",
+                visual_form="body_detail",
+                share_intent="care_update",
+                capture_mode="character_rear_camera",
+                character_visibility="body_detail",
+                primary_evidence_ref="/character/body_health/description",
+                interaction_bid_id="seek_care",
+                subject_variant_id="body_detail_showcase",
             )
         )
     ).plan(opportunity)
@@ -448,33 +549,22 @@ async def test_final_plan_privacy_limits_subject_display_strategy() -> None:
 
     tampered = planned.plan.to_payload()
     tampered["privacy"] = "ordinary"
-    with pytest.raises(ValueError, match="subject_display_privacy_conflict"):
+    with pytest.raises(ValueError, match="interaction_bid_privacy_conflict"):
         MediaPlan.from_payload(tampered)
 
-    ordinary_proposal = _proposal(
-        share_intent="humor",
-        privacy="ordinary",
-        interaction_bid_id="invite_playful_exchange",
-        subject_variant_id="playful_level_pose",
-    )
-    rejected = await MediaPlanner(FakeModel(ordinary_proposal)).plan(opportunity)
-    assert isinstance(rejected, NotRenderable)
-    assert rejected.reason == "illegal_subject_variant"
-
-
 @pytest.mark.asyncio
-async def test_generated_character_plan_requires_legal_subject_variant() -> None:
+async def test_generated_character_plan_requires_legal_complete_candidate() -> None:
     missing = _proposal()
     missing.pop("subject_variant_id")
-    missing_result = await MediaPlanner(FakeModel(missing)).plan(_opportunity())
+    missing_result = await MediaPlanner(RawFakeModel(missing)).plan(_opportunity())
     illegal_result = await MediaPlanner(
-        FakeModel(_proposal(subject_variant_id="mirror_composed"))
+        RawFakeModel(_proposal(presentation_candidate_id="not-legal"))
     ).plan(_opportunity())
 
     assert isinstance(missing_result, NotRenderable)
-    assert missing_result.reason == "missing_subject_variant"
+    assert missing_result.reason == "missing_presentation_candidate"
     assert isinstance(illegal_result, NotRenderable)
-    assert illegal_result.reason == "illegal_subject_variant"
+    assert illegal_result.reason == "illegal_presentation_candidate"
 
 
 @pytest.mark.asyncio
@@ -512,7 +602,7 @@ async def test_missing_subject_catalog_fails_closed_before_model_call(tmp_path: 
     ).plan(_opportunity())
 
     assert isinstance(result, NotRenderable)
-    assert result.reason == "subject_catalog_unavailable"
+    assert result.reason == "presentation_catalog_unavailable"
     assert model.calls == 0
 
 
@@ -539,6 +629,10 @@ async def test_v1_plan_replays_without_new_subject_interpretation() -> None:
     payload["version"] = "event-media-plan-v1"
     payload["subject_presentation"] = None
     payload["interaction_bid"] = None
+    payload["embodied_presentation"] = None
+    payload["diversity_fingerprint"] = "|".join(
+        current.plan.diversity_fingerprint.split("|")[:8]
+    )
 
     restored = MediaPlan.from_payload(payload)
 
@@ -656,8 +750,9 @@ async def test_planner_accepts_remaining_life_share_rows(overrides: dict[str, ob
             "visual_form": "portrait_context",
             "share_intent": "intimate_signal",
             "privacy": "intimate",
+            "capture_mode": "mirror",
             "tone": "tender",
-            "intimate_intensity": "soft",
+            "interaction_bid_id": "invite_closeness",
             "sharing_motive": "传递克制且非露骨的亲密信号",
             "primary_evidence_ref": "/character/appearance",
         },
@@ -671,8 +766,20 @@ async def test_planner_accepts_remaining_life_share_rows(overrides: dict[str, ob
     ],
 )
 async def test_planner_accepts_remaining_character_media_rows(overrides: dict[str, object]) -> None:
+    intimate = overrides.get("share_intent") == "intimate_signal"
     result = await MediaPlanner(FakeModel(_proposal(**overrides))).plan(
-        _opportunity(family="character_media", privacy="intimate")
+        _opportunity(
+            family="character_media",
+            privacy="intimate" if intimate else "personal",
+            sensual_charge_ceiling="subtle" if intimate else "none",
+            audience_context=(
+                AudienceContext(
+                    recipient_ref="user:geoff", relationship_stage="ambiguous"
+                )
+                if intimate
+                else None
+            ),
+        )
     )
     assert isinstance(result, PlannedMedia)
 
@@ -933,6 +1040,98 @@ async def test_frozen_plan_round_trip_needs_no_model_call() -> None:
 
 
 @pytest.mark.asyncio
+async def test_v4_plan_freezes_one_complete_character_presentation_candidate() -> None:
+    proposal = _proposal()
+
+    result = await MediaPlanner(FakeModel(proposal)).plan(_opportunity())
+
+    assert isinstance(result, PlannedMedia)
+    assert result.plan.version == "event-media-plan-v4"
+    assert result.plan.intimate_intensity is None
+    assert result.plan.embodied_presentation is not None
+    assert result.plan.embodied_presentation.physical_salience == "none"
+    assert result.plan.embodied_presentation.sensual_charge == "none"
+    assert result.plan.embodied_presentation.coverage_mode in {
+        "fully_dressed",
+        "functional_bodywear",
+    }
+    assert MediaPlan.from_payload(result.plan.to_payload()) == result.plan
+
+
+@pytest.mark.asyncio
+async def test_v4_charged_workout_freezes_evidenced_body_state_and_prompt() -> None:
+    snapshot = _snapshot(
+        activity={"kind": "workout", "intensity": "high", "description": "训练结束"}
+    )
+    audience = AudienceContext(
+        recipient_ref="user:geoff", relationship_stage="ambiguous"
+    )
+    proposal = _proposal(
+        content_domain="activity_process",
+        share_intent="intimate_signal",
+        privacy="intimate",
+        tone="playful",
+        interaction_bid_id="invite_desire",
+        primary_evidence_ref="/activity/description",
+        supporting_evidence_refs=["/activity/kind", "/activity/intensity"],
+        sharing_motive="传递克制且非露骨的亲密信号",
+    )
+    result = await MediaPlanner(ChargeSelectingModel(proposal, "charged")).plan(
+        _opportunity(
+            privacy="intimate",
+            snapshot=snapshot,
+            sensual_charge_ceiling="charged",
+            audience_context=audience,
+        )
+    )
+
+    assert isinstance(result, PlannedMedia)
+    body = result.plan.embodied_presentation
+    assert body is not None
+    assert body.physical_salience in {"contextual", "foregrounded"}
+    assert body.sensual_charge == "charged"
+    assert {cue.cue_id for cue in body.physical_cues} & {
+        "perspiration",
+        "flush",
+        "recovering_breath",
+    }
+    prompt = compile_media_prompt(result.plan, None)
+    assert "Frozen embodied presentation" in prompt
+    assert "sensual_charge=charged" in prompt
+    assert "source=derived" in prompt
+
+
+@pytest.mark.asyncio
+async def test_v4_rejects_legacy_intimate_intensity_field() -> None:
+    proposal = _proposal(intimate_intensity="bold")
+    result = await MediaPlanner(FakeModel(proposal)).plan(_opportunity())
+
+    assert isinstance(result, NotRenderable)
+    assert result.reason == "legacy_intimate_intensity_in_v4"
+
+
+@pytest.mark.asyncio
+async def test_sensual_ceiling_requires_intimate_privacy_and_eligible_relationship() -> None:
+    privacy_conflict = await MediaPlanner(FakeModel(_proposal())).plan(
+        _opportunity(sensual_charge_ceiling="charged")
+    )
+    relationship_conflict = await MediaPlanner(FakeModel(_proposal())).plan(
+        _opportunity(
+            privacy="intimate",
+            sensual_charge_ceiling="charged",
+            audience_context=AudienceContext(
+                recipient_ref="user:geoff", relationship_stage="close_friend"
+            ),
+        )
+    )
+
+    assert isinstance(privacy_conflict, NotRenderable)
+    assert privacy_conflict.reason == "sensual_charge_ceiling_requires_intimate_privacy"
+    assert isinstance(relationship_conflict, NotRenderable)
+    assert relationship_conflict.reason == "sensual_charge_ceiling_relationship_conflict"
+
+
+@pytest.mark.asyncio
 async def test_tampered_replay_cannot_bypass_route_or_privacy_invariants() -> None:
     result = await MediaPlanner(FakeModel(_proposal())).plan(_opportunity())
     assert isinstance(result, PlannedMedia)
@@ -1073,7 +1272,65 @@ def _inspection(
         deviations=() if passed else (reason,),
         inspector_model="fake",
         rule_version="media-inspection-v1",
+        observed_subject_presentation={"gaze_target": "camera"},
+        garment_topology_ok=True,
+        hand_sleeve_occlusion_ok=True,
+        evidence_attachment_ok=True,
+        display_strategy_broadly_matches=True,
+        expression_artifact_free=True,
+        physical_salience_matches=True,
+        sensual_charge_broadly_matches=True,
+        coverage_mode_matches=True,
+        non_explicit_boundary_ok=True,
+        body_framing_non_fetishizing=True,
     )
+
+
+@pytest.mark.asyncio
+async def test_renderer_repairs_charged_image_that_dilutes_to_ordinary_portrait(
+    tmp_path: Path,
+) -> None:
+    snapshot = _snapshot(
+        activity={"kind": "workout", "intensity": "high", "description": "训练结束"}
+    )
+    audience = AudienceContext(recipient_ref="user:geoff", relationship_stage="ambiguous")
+    proposal = _proposal(
+        content_domain="activity_process",
+        share_intent="intimate_signal",
+        privacy="intimate",
+        interaction_bid_id="invite_desire",
+        primary_evidence_ref="/activity/description",
+        supporting_evidence_refs=["/activity/kind", "/activity/intensity"],
+        sharing_motive="传递克制且非露骨的亲密信号",
+    )
+    planned = await MediaPlanner(ChargeSelectingModel(proposal, "charged")).plan(
+        _opportunity(
+            privacy="intimate",
+            snapshot=snapshot,
+            sensual_charge_ceiling="charged",
+            audience_context=audience,
+            automatic=True,
+        )
+    )
+    assert isinstance(planned, PlannedMedia)
+    diluted = _inspection(True)
+    diluted = MediaInspection(
+        **{
+            **diluted.__dict__,
+            "sensual_charge_broadly_matches": False,
+        }
+    )
+    generator = FakeGenerator()
+    result = await MediaRenderer(
+        generator=generator,
+        inspector=FakeInspector([diluted, _inspection(True)]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+
+    assert isinstance(result, RenderedMedia)
+    assert result.attempts == 2
+    assert "sensual_charge_mismatch" in generator.prompts[1]
 
 
 @pytest.mark.asyncio
@@ -1359,6 +1616,10 @@ async def test_legacy_v2_plan_keeps_structural_quality_gate_after_v3_upgrade(
     payload = current.plan.to_payload()
     payload["version"] = "event-media-plan-v2"
     payload["interaction_bid"] = None
+    payload["embodied_presentation"] = None
+    payload["diversity_fingerprint"] = "|".join(
+        current.plan.diversity_fingerprint.split("|")[:8]
+    )
     subject = payload["subject_presentation"]
     assert isinstance(subject, dict)
     subject.pop("version")

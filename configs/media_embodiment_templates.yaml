@@ -1,0 +1,160 @@
+version: 1
+
+# Hard filters below protect evidence, privacy, coverage and capture feasibility.
+# Affinities are intentionally broad so one event does not map to one fixed pose.
+reference_profiles:
+  none: everyday_selfie
+  subtle: relationship_private
+  charged: relationship_private_bold
+  veiled: relationship_private_bold
+
+strategies:
+  neutral_presence:
+    physical_salience: none
+    sensual_charges: [none]
+    coverage_modes: [fully_dressed, functional_bodywear]
+    capture_modes: [character_front_camera, character_rear_camera, mirror, timer_fixed, requested_helper, known_companion, external_sender]
+    share_intents: [atmosphere, record, show_and_tell, check_in, seek_feedback, progress_update, complain, care_update, humor, memory_keep]
+    holistic_cue: the body remains a natural part of the event without sensual emphasis
+    framing_cue: ordinary event-led framing
+    action_cue: continue the selected event action naturally
+    sensory_cues: []
+    allowed_regions: []
+    forbidden_cues: [sexualized_framing, isolated_body_part_focus]
+
+  recovery_pause:
+    physical_salience: foregrounded
+    sensual_charges: [none, charged]
+    coverage_modes: [fully_dressed, functional_bodywear]
+    capture_modes: [character_front_camera, mirror, timer_fixed, known_companion]
+    share_intents: [record, complain, care_update, intimate_signal]
+    required_physical_cues: [perspiration, flush, recovering_breath, muscle_tension, posture_fatigue]
+    holistic_cue: a believable pause while the body settles after effort
+    framing_cue: keep the recovery context and breathing space visible
+    action_cue: lean, sit, or brace naturally while recovering
+    sensory_cues: [skin_sheen, loose_flyaway_hair, visible_breathing_recovery]
+    allowed_regions: [face, hair, neck, shoulders, arms, torso, waist, legs]
+    forbidden_cues: [fitness_advertisement, pornographic_pose, isolated_body_part_focus]
+
+  retie_or_lift_hair:
+    physical_salience: foregrounded
+    sensual_charges: [none, charged]
+    coverage_modes: [fully_dressed, functional_bodywear, private_apparel]
+    capture_modes: [character_front_camera, mirror, timer_fixed]
+    share_intents: [record, complain, humor, intimate_signal]
+    required_physical_cues: [perspiration, flush, damp_hair]
+    holistic_cue: raise one or both arms only as needed to retie or lift damp or warm hair
+    framing_cue: show the whole gesture rather than isolating the underarm
+    action_cue: gather hair away from the neck with readable shoulders, elbows, and wrists
+    sensory_cues: [flyaway_hair, warm_skin, damp_hair_texture]
+    allowed_regions: [face, hair, neck, shoulders, arms, waist]
+    forbidden_cues: [underarm_fetish_closeup, impossible_shoulder_rotation, pornographic_pose]
+
+  wipe_or_cool_down:
+    physical_salience: foregrounded
+    sensual_charges: [none, charged]
+    coverage_modes: [fully_dressed, functional_bodywear]
+    capture_modes: [character_front_camera, mirror, known_companion]
+    share_intents: [record, complain, care_update, intimate_signal]
+    required_physical_cues: [perspiration, flush, wet_skin]
+    holistic_cue: cool down or wipe visible moisture with an ordinary practical gesture
+    framing_cue: preserve the event setting and avoid a body-product advertisement
+    action_cue: use a hand, wrist, or supported towel without tangling fabric and fingers
+    sensory_cues: [skin_sheen, warm_flush, practical_towel_texture]
+    allowed_regions: [face, hair, neck, shoulders, arms, torso]
+    forbidden_cues: [collar_pulling_exposure, fetishized_wet_skin, isolated_body_part_focus]
+
+  damp_hair_adjustment:
+    physical_salience: foregrounded
+    sensual_charges: [none, charged]
+    coverage_modes: [fully_dressed, functional_bodywear, private_apparel]
+    capture_modes: [character_front_camera, mirror]
+    share_intents: [record, show_and_tell, complain, intimate_signal]
+    required_physical_cues: [damp_hair, wet_skin, rain_damp_fabric]
+    holistic_cue: adjust visibly damp hair as part of the real recent activity
+    framing_cue: keep the source context legible and the hair movement anatomically natural
+    action_cue: gather, blot, or move damp hair away from the face or neck
+    sensory_cues: [separated_damp_strands, towel_or_fabric_texture, natural_skin_sheen]
+    allowed_regions: [face, hair, neck, shoulders, arms]
+    forbidden_cues: [shower_inference_without_evidence, fetishized_wet_skin, glamour_hair_advertisement]
+
+  stretch_or_reach:
+    physical_salience: foregrounded
+    sensual_charges: [none, charged]
+    coverage_modes: [fully_dressed, functional_bodywear, private_apparel]
+    capture_modes: [mirror, timer_fixed, known_companion]
+    share_intents: [record, care_update, humor, intimate_signal]
+    required_physical_cues: [muscle_tension, posture_fatigue, sleepy_face]
+    holistic_cue: lengthen or reach as a functional continuation of the event
+    framing_cue: keep the complete body line and environmental reason for the gesture visible
+    action_cue: stretch, reach, or loosen the shoulders without a staged pin-up pose
+    sensory_cues: [natural_body_tension, fabric_movement]
+    allowed_regions: [neck, shoulders, arms, torso, waist, legs]
+    forbidden_cues: [underarm_fetish_closeup, pinup_pose, impossible_spine]
+
+  movement_afterglow:
+    physical_salience: contextual
+    sensual_charges: [none, charged]
+    coverage_modes: [fully_dressed, functional_bodywear]
+    capture_modes: [timer_fixed, requested_helper, known_companion]
+    share_intents: [record, check_in, memory_keep, intimate_signal]
+    required_physical_cues: [perspiration, flush, muscle_tension, recovering_breath]
+    holistic_cue: preserve the final trace of movement after the activity slows
+    framing_cue: show an event-aware body in space rather than a surveillance view
+    action_cue: settle from a step, turn, or activity motion while acknowledging the camera
+    sensory_cues: [movement_in_hair_or_fabric, post_effort_warmth]
+    allowed_regions: [face, hair, neck, shoulders, arms, torso, waist, legs]
+    forbidden_cues: [paparazzi_view, frozen_fashion_pose, pornographic_pose]
+
+  mirror_adjustment:
+    physical_salience: contextual
+    sensual_charges: [subtle, charged, veiled]
+    coverage_modes: [fully_dressed, functional_bodywear, private_apparel, strategic_cover]
+    capture_modes: [mirror]
+    share_intents: [intimate_signal]
+    holistic_cue: knowingly adjust a real garment or covering in a physically coherent mirror moment
+    framing_cue: use intimate conversational distance while keeping the reflection and coverage believable
+    action_cue: adjust a sleeve, strap, belt, edge, or hem without exposing a key area
+    sensory_cues: [fabric_weight, restrained_skin_contrast, warm_private_light]
+    allowed_regions: [face, hair, neck, shoulders, arms, torso, waist, legs]
+    forbidden_cues: [transparent_fabric, key_area_exposure, lingerie_advertisement, impossible_mirror]
+
+  close_private_pause:
+    physical_salience: contextual
+    sensual_charges: [subtle, charged]
+    coverage_modes: [fully_dressed, functional_bodywear, private_apparel]
+    capture_modes: [character_front_camera, mirror]
+    share_intents: [intimate_signal]
+    holistic_cue: hold a short recipient-directed pause with tangible bodily presence
+    framing_cue: use close conversational framing without turning one body region into the subject
+    action_cue: remain between actions with believable breath, weight, and eye contact
+    sensory_cues: [warm_skin_tone, fabric_texture, breathing_presence]
+    allowed_regions: [face, hair, neck, shoulders, arms, torso, waist]
+    forbidden_cues: [explicit_seduction, key_area_crop, isolated_body_part_focus]
+
+  resting_repose:
+    physical_salience: contextual
+    sensual_charges: [none, subtle, charged, veiled]
+    coverage_modes: [fully_dressed, private_apparel, strategic_cover]
+    capture_modes: [character_front_camera, mirror, timer_fixed]
+    share_intents: [record, care_update, intimate_signal]
+    holistic_cue: rest with natural weight and supported limbs rather than a staged pin-up posture
+    framing_cue: show enough support surface and covering to make anatomy and privacy clear
+    action_cue: sit, lean, curl, or recline while maintaining plausible joint placement
+    sensory_cues: [soft_fabric_weight, settled_breathing, warm_private_light]
+    allowed_regions: [face, hair, neck, shoulders, arms, torso, waist, legs]
+    forbidden_cues: [pinup_pose, key_area_exposure, impossible_limbs, fetishized_crop]
+
+  covered_transition:
+    physical_salience: foregrounded
+    sensual_charges: [veiled]
+    coverage_modes: [private_apparel, strategic_cover]
+    capture_modes: [character_front_camera, mirror, timer_fixed]
+    share_intents: [intimate_signal]
+    requires_world_wardrobe_evidence: true
+    holistic_cue: share a private transition while opaque clothing or covering remains securely in place
+    framing_cue: make every covered key area and the physical support of the covering unambiguous
+    action_cue: hold or adjust the evidenced robe, towel, sheet, oversized garment, or restrained opaque lingerie
+    sensory_cues: [opaque_fabric_weight, warm_private_light, restrained_skin_contrast]
+    allowed_regions: [face, hair, neck, shoulders, arms, torso, waist, legs]
+    forbidden_cues: [nudity, transparent_fabric, key_area_exposure, sexual_act, fetishized_crop]

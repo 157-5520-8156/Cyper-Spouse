@@ -165,7 +165,7 @@ display_strategies:
     temporal_beat: caught_between_tasks_or_just_after_effort
     forbidden_cues: [commercial_smile, invented_illness, glamour_pose]
   composed_attraction:
-    communicative_goals: [invite_closeness, invite_appreciation]
+    communicative_goals: [invite_closeness, invite_desire, invite_appreciation]
     tone_affinities: [tender, calm]
     intentionality: knowingly_performed
     intensity: restrained
@@ -181,7 +181,7 @@ display_strategies:
     requires_relationship: true
     exclude_when_severe_affect: true
   playful_challenge:
-    communicative_goals: [invite_closeness, invite_playful_exchange]
+    communicative_goals: [invite_closeness, invite_desire, invite_playful_exchange]
     tone_affinities: [playful, amused]
     intentionality: knowingly_performed
     intensity: restrained

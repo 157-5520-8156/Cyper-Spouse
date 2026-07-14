@@ -42,6 +42,11 @@ interaction_bids:
     response_pressure: low
     share_intent_affinities: [intimate_signal, memory_keep]
     minimum_privacy: intimate
+  invite_desire:
+    hoped_response: low_pressure_attraction_or_affection
+    response_pressure: low
+    share_intent_affinities: [intimate_signal]
+    minimum_privacy: intimate
   revisit_memory:
     hoped_response: reminisce_or_add_memory
     response_pressure: low

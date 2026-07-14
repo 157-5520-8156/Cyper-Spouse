@@ -22,6 +22,14 @@ from companion_daemon.budget import BudgetGate, image_render_estimate
 from companion_daemon.image_generation import GeneratedImage, ImageGenerator, visual_reference_paths
 from companion_daemon.llm import ChatModel, model_call_scope
 from companion_daemon.media_domain import PRIVACY_LEVELS, PRIVACY_RANK as _PRIVACY_RANK
+from companion_daemon.media_embodiment import (
+    DEFAULT_EMBODIMENT_CONFIG,
+    SENSUAL_CHARGE_LEVELS,
+    SENSUAL_CHARGE_RANK,
+    EmbodiedPresentation,
+    build_embodied_candidates,
+    embodiment_prompt_block,
+)
 from companion_daemon.media_interaction import (
     DEFAULT_INTERACTION_CONFIG,
     MediaInteractionBid,
@@ -41,10 +49,16 @@ from companion_daemon.visual_identity import load_visual_identity
 
 PLAN_VERSION_V1 = "event-media-plan-v1"
 PLAN_VERSION_V2 = "event-media-plan-v2"
-PLAN_VERSION = "event-media-plan-v3"
-SUPPORTED_PLAN_VERSIONS = {PLAN_VERSION_V1, PLAN_VERSION_V2, PLAN_VERSION}
-QUALITY_PLAN_VERSIONS = {PLAN_VERSION_V2, PLAN_VERSION}
-INSPECTION_VERSION = "media-inspection-v4"
+PLAN_VERSION_V3 = "event-media-plan-v3"
+PLAN_VERSION = "event-media-plan-v4"
+SUPPORTED_PLAN_VERSIONS = {
+    PLAN_VERSION_V1,
+    PLAN_VERSION_V2,
+    PLAN_VERSION_V3,
+    PLAN_VERSION,
+}
+QUALITY_PLAN_VERSIONS = {PLAN_VERSION_V2, PLAN_VERSION_V3, PLAN_VERSION}
+INSPECTION_VERSION = "media-inspection-v5"
 
 FAMILIES = {"life_share", "character_media"}
 CONTENT_DOMAINS = {
@@ -190,8 +204,11 @@ _CHARACTER_MATRIX: dict[str, tuple[frozenset[str], frozenset[str]]] = {
         frozenset({"show_and_tell", "seek_feedback", "memory_keep"}),
     ),
     "activity_process": (
-        frozenset({"portrait_closeup", "portrait_context", "social_frame"}),
-        frozenset({"record", "show_and_tell", "complain", "humor", "care_update", "memory_keep"}),
+        frozenset({"portrait_closeup", "portrait_context", "full_body", "social_frame"}),
+        frozenset({
+            "record", "show_and_tell", "complain", "humor", "care_update",
+            "memory_keep", "intimate_signal",
+        }),
     ),
     "outcome_progress": (
         frozenset({"portrait_context", "full_body"}),
@@ -360,6 +377,7 @@ class MediaOpportunity:
     delivery_mode: str = "preview"
     expression_requirements: tuple[str, ...] = ()
     audience_context: "AudienceContext | None" = None
+    sensual_charge_ceiling: str = "none"
 
 
 @dataclass(frozen=True)
@@ -407,6 +425,7 @@ class MediaPlan:
     existing_artifact_path: str | None = None
     subject_presentation: SubjectPresentationPlan | None = None
     interaction_bid: MediaInteractionBid | None = None
+    embodied_presentation: EmbodiedPresentation | None = None
 
     def to_payload(self) -> dict[str, object]:
         payload = asdict(self)
@@ -417,6 +436,9 @@ class MediaPlan:
         )
         payload["interaction_bid"] = (
             self.interaction_bid.to_payload() if self.interaction_bid else None
+        )
+        payload["embodied_presentation"] = (
+            self.embodied_presentation.to_payload() if self.embodied_presentation else None
         )
         return payload
 
@@ -477,6 +499,11 @@ class MediaPlan:
                     if payload.get("interaction_bid") is not None
                     else None
                 ),
+                embodied_presentation=(
+                    EmbodiedPresentation.from_payload(payload["embodied_presentation"])
+                    if payload.get("embodied_presentation") is not None
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("invalid media plan payload") from exc
@@ -520,6 +547,13 @@ class MediaInspection:
     expression_artifact_free: bool | None = None
     salient_expression_cues: tuple[str, ...] = ()
     forbidden_expression_cues: tuple[str, ...] = ()
+    physical_salience_matches: bool | None = None
+    sensual_charge_broadly_matches: bool | None = None
+    coverage_mode_matches: bool | None = None
+    observed_physical_cues: tuple[str, ...] = ()
+    unsupported_physical_cues: tuple[str, ...] = ()
+    non_explicit_boundary_ok: bool | None = None
+    body_framing_non_fetishizing: bool | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -528,6 +562,8 @@ class MediaInspection:
             "deviations": list(self.deviations),
             "salient_expression_cues": list(self.salient_expression_cues),
             "forbidden_expression_cues": list(self.forbidden_expression_cues),
+            "observed_physical_cues": list(self.observed_physical_cues),
+            "unsupported_physical_cues": list(self.unsupported_physical_cues),
         }
 
 
@@ -574,11 +610,13 @@ class MediaPlanner:
         enabled: bool | None = None,
         subject_config_path: Path = DEFAULT_SUBJECT_CONFIG,
         interaction_config_path: Path = DEFAULT_INTERACTION_CONFIG,
+        embodiment_config_path: Path = DEFAULT_EMBODIMENT_CONFIG,
     ):
         self.model = model
         self.enabled = _env_flag("COMPANION_EVENT_MEDIA_ENABLED") if enabled is None else enabled
         self.subject_config_path = subject_config_path
         self.interaction_config_path = interaction_config_path
+        self.embodiment_config_path = embodiment_config_path
 
     async def plan(
         self,
@@ -592,15 +630,20 @@ class MediaPlanner:
             return NotRenderable(opportunity.opportunity_id, preflight)
         recent = tuple(_history_fingerprint(item) for item in recent_media[-12:])
         recent_subjects = tuple(_history_subject_signature(item) for item in recent_media[-12:])
+        recent_embodiments = tuple(
+            _history_embodiment_signature(item) for item in recent_media[-12:]
+        )
         try:
-            subject_candidates = _planner_subject_candidates(
+            presentation_candidates = _planner_character_candidates(
                 opportunity,
                 recent_subjects=recent_subjects,
-                config_path=self.subject_config_path,
+                recent_embodiments=recent_embodiments,
+                subject_config_path=self.subject_config_path,
+                embodiment_config_path=self.embodiment_config_path,
             )
         except (OSError, ValueError, TypeError) as exc:
             return NotRenderable(
-                opportunity.opportunity_id, "subject_catalog_unavailable", str(exc)[:240]
+                opportunity.opportunity_id, "presentation_catalog_unavailable", str(exc)[:240]
             )
         try:
             interaction_bids = _planner_interaction_bids(
@@ -616,7 +659,7 @@ class MediaPlanner:
             ):
                 raw = await self.model.complete(
                     _planning_messages(
-                        opportunity, recent, subject_candidates, interaction_bids
+                        opportunity, recent, presentation_candidates, interaction_bids
                     ),
                     temperature=0.65,
                 )
@@ -630,8 +673,10 @@ class MediaPlanner:
             proposal,
             recent,
             recent_subjects=recent_subjects,
+            recent_embodiments=recent_embodiments,
             subject_config_path=self.subject_config_path,
             interaction_config_path=self.interaction_config_path,
+            embodiment_config_path=self.embodiment_config_path,
         )
 
 
@@ -711,9 +756,12 @@ class MediaRenderer:
                 subject_required=plan.subject_presentation is not None,
                 quality_required=plan.version in QUALITY_PLAN_VERSIONS,
                 social_required=(
-                    plan.version == PLAN_VERSION
+                    plan.version in {PLAN_VERSION_V3, PLAN_VERSION}
                     and plan.subject_presentation is not None
                     and plan.subject_presentation.display_strategy is not None
+                ),
+                embodied_required=(
+                    plan.version == PLAN_VERSION and plan.embodied_presentation is not None
                 ),
             )
             last_inspection = inspection
@@ -764,9 +812,12 @@ class MediaRenderer:
             subject_required=plan.subject_presentation is not None,
             quality_required=plan.version in QUALITY_PLAN_VERSIONS,
             social_required=(
-                plan.version == PLAN_VERSION
+                plan.version in {PLAN_VERSION_V3, PLAN_VERSION}
                 and plan.subject_presentation is not None
                 and plan.subject_presentation.display_strategy is not None
+            ),
+            embodied_required=(
+                plan.version == PLAN_VERSION and plan.embodied_presentation is not None
             ),
         )
         if not inspection.passed:
@@ -791,20 +842,39 @@ class MediaRenderer:
             and self.visual_identity_path.is_file()
             and self.subject_config_path.is_file()
         ):
-            profile = (
-                "relationship_private" if plan.privacy == "intimate" else "everyday_selfie"
-            )
+            profile = "everyday_selfie"
+            relationship_tier = None
+            if plan.version == PLAN_VERSION and plan.embodied_presentation:
+                profile = {
+                    "none": "everyday_selfie",
+                    "subtle": "relationship_private",
+                    "charged": "relationship_private_bold",
+                    "veiled": "relationship_private_bold",
+                }[plan.embodied_presentation.sensual_charge]
+            elif plan.privacy == "intimate":
+                profile = "relationship_private"
+                relationship_tier = plan.intimate_intensity
             return select_identity_references(
                 identity_path=self.visual_identity_path,
                 presentation=plan.subject_presentation,
                 subject_config_path=self.subject_config_path,
                 profile=profile,
-                relationship_tier=(plan.intimate_intensity if plan.privacy == "intimate" else None),
+                relationship_tier=relationship_tier,
             )
+        fallback_profile = (
+            {
+                "none": "everyday_selfie",
+                "subtle": "relationship_private",
+                "charged": "relationship_private_bold",
+                "veiled": "relationship_private_bold",
+            }[plan.embodied_presentation.sensual_charge]
+            if plan.version == PLAN_VERSION and plan.embodied_presentation
+            else "relationship_private" if plan.privacy == "intimate" else "everyday_selfie"
+        )
         return visual_reference_paths(
             self.visual_identity_path,
-            profile="relationship_private" if plan.privacy == "intimate" else "everyday_selfie",
-            relationship_tier=plan.intimate_intensity,
+            profile=fallback_profile,
+            relationship_tier=(None if plan.version == PLAN_VERSION else plan.intimate_intensity),
             scene_hint=plan.diversity_fingerprint,
         )
 
@@ -920,6 +990,21 @@ class OpenAIMediaInspector:
             forbidden_expression_cues=tuple(
                 str(item) for item in payload.get("forbidden_expression_cues", [])[:12]
             ),
+            physical_salience_matches=_optional_bool(payload, "physical_salience_matches"),
+            sensual_charge_broadly_matches=_optional_bool(
+                payload, "sensual_charge_broadly_matches"
+            ),
+            coverage_mode_matches=_optional_bool(payload, "coverage_mode_matches"),
+            observed_physical_cues=tuple(
+                str(item) for item in payload.get("observed_physical_cues", [])[:12]
+            ),
+            unsupported_physical_cues=tuple(
+                str(item) for item in payload.get("unsupported_physical_cues", [])[:12]
+            ),
+            non_explicit_boundary_ok=_optional_bool(payload, "non_explicit_boundary_ok"),
+            body_framing_non_fetishizing=_optional_bool(
+                payload, "body_framing_non_fetishizing"
+            ),
         )
 
 
@@ -1030,7 +1115,11 @@ def compile_media_prompt(
     ):
         profile = "relationship_private" if plan.privacy == "intimate" else "everyday_selfie"
         identity = "\n" + load_visual_identity(str(visual_identity_path)).prompt_block(
-            relationship_tier=plan.intimate_intensity if profile == "relationship_private" else None
+            relationship_tier=(
+                plan.intimate_intensity
+                if plan.version != PLAN_VERSION and profile == "relationship_private"
+                else None
+            )
         )
     people = {
         "none": "No other person is visible.",
@@ -1061,6 +1150,11 @@ def compile_media_prompt(
         if plan.interaction_bid
         else ""
     )
+    embodiment = (
+        "\n" + embodiment_prompt_block(plan.embodied_presentation)
+        if plan.embodied_presentation
+        else ""
+    )
     return (
         "Create one believable fictional personal-media photograph. No text or watermark.\n"
         f"Frozen plan={plan.plan_id}; event={plan.event_id}; family={plan.family}.\n"
@@ -1075,6 +1169,7 @@ def compile_media_prompt(
         f"{identity}"
         f"{interaction}"
         f"{subject}"
+        f"{embodiment}"
     )
 
 
@@ -1084,8 +1179,10 @@ def _freeze_proposal(
     recent: tuple[str, ...],
     *,
     recent_subjects: tuple[str, ...] = (),
+    recent_embodiments: tuple[str, ...] = (),
     subject_config_path: Path = DEFAULT_SUBJECT_CONFIG,
     interaction_config_path: Path = DEFAULT_INTERACTION_CONFIG,
+    embodiment_config_path: Path = DEFAULT_EMBODIMENT_CONFIG,
 ) -> PlanningResult:
     fields = {
         "content_domain": CONTENT_DOMAINS,
@@ -1142,9 +1239,8 @@ def _freeze_proposal(
         return NotRenderable(opportunity.opportunity_id, "invalid_model_output", "constraints")
     if len(constraints) + len(opportunity.expression_requirements) > 12:
         return NotRenderable(opportunity.opportunity_id, "too_many_constraints")
-    intensity = proposal.get("intimate_intensity")
-    if intensity is not None and intensity not in INTIMATE_INTENSITIES:
-        return NotRenderable(opportunity.opportunity_id, "invalid_intimate_intensity")
+    if proposal.get("intimate_intensity") is not None:
+        return NotRenderable(opportunity.opportunity_id, "legacy_intimate_intensity_in_v4")
 
     bid_id = proposal.get("interaction_bid_id")
     if not isinstance(bid_id, str) or not bid_id:
@@ -1174,46 +1270,83 @@ def _freeze_proposal(
     direction_error = _validate_direction_catalog(proposal, values)
     if direction_error:
         return NotRenderable(opportunity.opportunity_id, direction_error)
-    fingerprint = "|".join(
-        (
-            opportunity.family,
-            values["content_domain"],
-            values["visual_form"],
-            values["share_intent"],
-            values["capture_mode"],
-            values["character_visibility"],
-            values["polish"],
-            values["tone"],
-        )
-    )
-    if fingerprint in recent[-12:]:
-        return NotRenderable(opportunity.opportunity_id, "duplicate_recent_fingerprint")
-
     existing_path = _selected_existing_path(opportunity.event_snapshot, evidence)
     subject_presentation: SubjectPresentationPlan | None = None
+    embodied_presentation: EmbodiedPresentation | None = None
     if (
         opportunity.family == "character_media"
         and values["route"] == "generate"
     ):
-        variant_id = proposal.get("subject_variant_id")
-        if not isinstance(variant_id, str) or not variant_id:
-            return NotRenderable(opportunity.opportunity_id, "missing_subject_variant")
-        legal_candidates = build_subject_candidates(
-            snapshot=opportunity.event_snapshot,
-            opportunity_id=opportunity.opportunity_id,
-            capture_mode=values["capture_mode"],
-            character_visibility=values["character_visibility"],
-            recent_subject_signatures=recent_subjects,
-            **_subject_context_kwargs(opportunity, privacy=values["privacy"]),
-            config_path=subject_config_path,
+        candidate_id = proposal.get("presentation_candidate_id")
+        if not isinstance(candidate_id, str) or not candidate_id:
+            return NotRenderable(opportunity.opportunity_id, "missing_presentation_candidate")
+        legal_candidates = _planner_character_candidates(
+            opportunity,
+            recent_subjects=recent_subjects,
+            recent_embodiments=recent_embodiments,
+            subject_config_path=subject_config_path,
+            embodiment_config_path=embodiment_config_path,
         )
-        selected = next((item for item in legal_candidates if item.variant_id == variant_id), None)
+        selected = next(
+            (item for item in legal_candidates if item["presentation_candidate_id"] == candidate_id),
+            None,
+        )
         if selected is None:
-            return NotRenderable(opportunity.opportunity_id, "illegal_subject_variant")
-        subject_presentation = selected.presentation
+            return NotRenderable(opportunity.opportunity_id, "illegal_presentation_candidate")
+        modes = selected.get("legal_capture_modes", [])
+        intents = selected.get("legal_share_intents", [])
+        if values["capture_mode"] not in modes:
+            return NotRenderable(opportunity.opportunity_id, "presentation_capture_conflict")
+        if values["share_intent"] not in intents:
+            return NotRenderable(opportunity.opportunity_id, "presentation_intent_conflict")
+        if selected.get("character_visibility") != values["character_visibility"]:
+            return NotRenderable(opportunity.opportunity_id, "presentation_visibility_conflict")
+        subject_presentation = SubjectPresentationPlan.from_payload(
+            selected["subject_presentation"]
+        )
+        embodied_presentation = EmbodiedPresentation.from_payload(
+            selected["embodied_presentation"]
+        )
+        physical_evidence_refs = {
+            pointer
+            for cue in embodied_presentation.physical_cues
+            for pointer in cue.evidence_refs
+        }
+        if any(pointer not in evidence for pointer in physical_evidence_refs):
+            return NotRenderable(
+                opportunity.opportunity_id, "unselected_physical_state_evidence"
+            )
+        if any(
+            pointer not in evidence
+            for pointer in embodied_presentation.wardrobe_evidence_refs
+        ):
+            return NotRenderable(opportunity.opportunity_id, "unselected_wardrobe_evidence")
         strategy = subject_presentation.display_strategy
         if strategy and interaction_bid.communicative_goal not in strategy.communicative_goals:
             return NotRenderable(opportunity.opportunity_id, "subject_interaction_bid_conflict")
+        bid_error = _embodiment_bid_error(embodied_presentation, interaction_bid)
+        if bid_error:
+            return NotRenderable(opportunity.opportunity_id, bid_error)
+    fingerprint_parts = (
+        opportunity.family,
+        values["content_domain"],
+        values["visual_form"],
+        values["share_intent"],
+        values["capture_mode"],
+        values["character_visibility"],
+        values["polish"],
+        values["tone"],
+    )
+    if embodied_presentation:
+        fingerprint_parts += (
+            embodied_presentation.physical_salience,
+            embodied_presentation.sensual_charge,
+            embodied_presentation.coverage_mode,
+            embodied_presentation.body_strategy_id,
+        )
+    fingerprint = "|".join(fingerprint_parts)
+    if fingerprint in recent[-12:]:
+        return NotRenderable(opportunity.opportunity_id, "duplicate_recent_fingerprint")
     event = _mapping(opportunity.event_snapshot.get("event"))
     plan = MediaPlan(
         version=PLAN_VERSION,
@@ -1259,10 +1392,11 @@ def _freeze_proposal(
             f"{values['share_intent']}：{_compact_value(evidence[primary])}；"
             f"{str(proposal['action']).strip().replace('{primary}', _compact_value(evidence[primary]))}"
         )[:600],
-        intimate_intensity=str(intensity) if intensity else None,
+        intimate_intensity=None,
         existing_artifact_path=existing_path if values["route"] == "reuse_existing" else None,
         subject_presentation=subject_presentation,
         interaction_bid=interaction_bid,
+        embodied_presentation=embodied_presentation,
     )
     frozen_error = _validate_frozen_plan(plan)
     if frozen_error:
@@ -1279,6 +1413,25 @@ def _validate_opportunity(opportunity: MediaOpportunity) -> str | None:
         return "invalid_family"
     if opportunity.privacy_ceiling not in PRIVACY_LEVELS:
         return "invalid_privacy_ceiling"
+    if opportunity.sensual_charge_ceiling not in SENSUAL_CHARGE_LEVELS:
+        return "invalid_sensual_charge_ceiling"
+    if (
+        opportunity.sensual_charge_ceiling != "none"
+        and opportunity.privacy_ceiling != "intimate"
+    ):
+        return "sensual_charge_ceiling_requires_intimate_privacy"
+    stage = (
+        opportunity.audience_context.relationship_stage
+        if opportunity.audience_context
+        else ""
+    )
+    if opportunity.sensual_charge_ceiling in {"subtle", "charged"} and stage not in {
+        "ambiguous",
+        "lover",
+    }:
+        return "sensual_charge_ceiling_relationship_conflict"
+    if opportunity.sensual_charge_ceiling == "veiled" and stage != "lover":
+        return "sensual_charge_ceiling_relationship_conflict"
     if opportunity.delivery_mode not in DELIVERY_MODES:
         return "invalid_delivery_mode"
     if any(
@@ -1290,6 +1443,29 @@ def _validate_opportunity(opportunity: MediaOpportunity) -> str | None:
         return "missing_committed_event"
     if str(event.get("status")) not in {"committed", "settled", "completed"}:
         return "event_not_committed"
+    return None
+
+
+def _embodiment_bid_error(
+    embodiment: EmbodiedPresentation,
+    bid: MediaInteractionBid,
+) -> str | None:
+    charge = embodiment.sensual_charge
+    goal = bid.communicative_goal
+    if charge == "none" and goal in {"invite_closeness", "invite_desire"}:
+        return "embodiment_interaction_bid_conflict"
+    if charge == "subtle" and goal not in {
+        "invite_closeness",
+        "invite_appreciation",
+    }:
+        return "embodiment_interaction_bid_conflict"
+    if charge in {"charged", "veiled"} and goal not in {
+        "invite_desire",
+        "invite_closeness",
+        "invite_playful_exchange",
+        "invite_appreciation",
+    }:
+        return "embodiment_interaction_bid_conflict"
     return None
 
 
@@ -1421,18 +1597,24 @@ def _validate_frozen_plan(plan: MediaPlan) -> str | None:
     pointers = (plan.primary_evidence_ref, *plan.supporting_evidence_refs)
     if len(pointers) != len(set(pointers)) or set(plan.evidence_values) != set(pointers):
         return "invalid_evidence"
-    expected = "|".join(
-        (
-            plan.family,
-            plan.content_domain,
-            plan.visual_form,
-            plan.share_intent,
-            plan.capture_mode,
-            plan.character_visibility,
-            plan.polish,
-            plan.tone,
-        )
+    expected_parts = (
+        plan.family,
+        plan.content_domain,
+        plan.visual_form,
+        plan.share_intent,
+        plan.capture_mode,
+        plan.character_visibility,
+        plan.polish,
+        plan.tone,
     )
+    if plan.version == PLAN_VERSION and plan.embodied_presentation:
+        expected_parts += (
+            plan.embodied_presentation.physical_salience,
+            plan.embodied_presentation.sensual_charge,
+            plan.embodied_presentation.coverage_mode,
+            plan.embodied_presentation.body_strategy_id,
+        )
+    expected = "|".join(expected_parts)
     if plan.diversity_fingerprint != expected:
         return "invalid_fingerprint"
     if plan.family == "life_share" and plan.character_visibility not in {"none", "trace_only"}:
@@ -1499,7 +1681,12 @@ def _validate_frozen_plan(plan: MediaPlan) -> str | None:
         item.startswith("/existing_media/") and item.endswith("/path") for item in evidence_refs
     ):
         return "unselected_existing_artifact"
-    if plan.intimate_intensity and (
+    if plan.version == PLAN_VERSION:
+        if plan.intimate_intensity is not None:
+            return "legacy_intimate_intensity_in_v4"
+    elif plan.embodied_presentation is not None:
+        return "legacy_embodied_presentation_conflict"
+    elif plan.intimate_intensity and (
         plan.share_intent != "intimate_signal"
         or plan.intimate_intensity not in INTIMATE_INTENSITIES
     ):
@@ -1516,7 +1703,7 @@ def _validate_frozen_plan(plan: MediaPlan) -> str | None:
             return "invalid_interaction_bid"
         if plan.interaction_bid.bid_id != f"media-bid:{plan.opportunity_id}":
             return "invalid_interaction_bid_id"
-        if plan.interaction_bid.communicative_goal == "invite_closeness" and plan.privacy != "intimate":
+        if plan.interaction_bid.communicative_goal in {"invite_closeness", "invite_desire"} and plan.privacy != "intimate":
             return "interaction_bid_privacy_conflict"
         if _PRIVACY_RANK[plan.interaction_bid.minimum_privacy] > _PRIVACY_RANK[plan.privacy]:
             return "interaction_bid_privacy_conflict"
@@ -1532,8 +1719,10 @@ def _validate_frozen_plan(plan: MediaPlan) -> str | None:
             and plan.subject_presentation is None
         ):
             return "missing_subject_presentation"
-    elif plan.family == "life_share" and plan.subject_presentation is not None:
-        return "life_share_subject_presentation_conflict"
+    elif plan.family == "life_share" and (
+        plan.subject_presentation is not None or plan.embodied_presentation is not None
+    ):
+        return "life_share_presentation_conflict"
     elif (
         plan.family == "character_media"
         and plan.route == "generate"
@@ -1546,14 +1735,14 @@ def _validate_frozen_plan(plan: MediaPlan) -> str | None:
         except ValueError:
             return "invalid_subject_presentation"
         if (
-            plan.version == PLAN_VERSION
+            plan.version in {PLAN_VERSION_V3, PLAN_VERSION}
             and plan.route == "generate"
             and plan.subject_presentation.version != "subject-presentation-v2"
         ):
-            return "legacy_subject_presentation_in_v3"
+            return "legacy_subject_presentation_in_modern_plan"
         strategy = plan.subject_presentation.display_strategy
         if (
-            plan.version == PLAN_VERSION
+            plan.version in {PLAN_VERSION_V3, PLAN_VERSION}
             and strategy is not None
             and plan.interaction_bid is not None
             and plan.interaction_bid.communicative_goal not in strategy.communicative_goals
@@ -1571,13 +1760,47 @@ def _validate_frozen_plan(plan: MediaPlan) -> str | None:
         )
         if feasibility_error:
             return feasibility_error
+    if plan.version == PLAN_VERSION:
+        if (
+            plan.family == "character_media"
+            and plan.route == "generate"
+            and plan.embodied_presentation is None
+        ):
+            return "missing_embodied_presentation"
+        if plan.embodied_presentation is not None:
+            try:
+                EmbodiedPresentation.from_payload(plan.embodied_presentation.to_payload())
+            except ValueError:
+                return "invalid_embodied_presentation"
+            embodiment = plan.embodied_presentation
+            physical_evidence_refs = {
+                pointer
+                for cue in embodiment.physical_cues
+                for pointer in cue.evidence_refs
+            }
+            if any(pointer not in plan.evidence_values for pointer in physical_evidence_refs):
+                return "unselected_physical_state_evidence"
+            if any(
+                pointer not in plan.evidence_values
+                for pointer in embodiment.wardrobe_evidence_refs
+            ):
+                return "unselected_wardrobe_evidence"
+            if embodiment.sensual_charge == "none":
+                if plan.share_intent == "intimate_signal" or plan.privacy == "intimate":
+                    return "sensual_charge_intent_conflict"
+            elif plan.share_intent != "intimate_signal" or plan.privacy != "intimate":
+                return "sensual_charge_requires_intimate_signal"
+            if plan.interaction_bid:
+                bid_error = _embodiment_bid_error(embodiment, plan.interaction_bid)
+                if bid_error:
+                    return bid_error
     return None
 
 
 def _planning_messages(
     opportunity: MediaOpportunity,
     recent: tuple[str, ...],
-    subject_candidates: tuple[dict[str, object], ...] = (),
+    presentation_candidates: tuple[dict[str, object], ...] = (),
     interaction_bids: tuple[dict[str, object], ...] = (),
 ) -> list[dict[str, str]]:
     recent_three = recent[-3:]
@@ -1595,9 +1818,10 @@ def _planning_messages(
                 "Supporting evidence is optional. Prefer controlled variety, but facts and capture-source "
                 "legality always win. A character photo may be posed, atmospheric, funny, polished or raw; "
                 "avoid both lifeless standing and paparazzi-like framing unless evidence specifically supports it. "
-                "For generated character media, choose exactly one supplied subject_variant_id. The variant is a "
-                "coherent frozen performance: never rewrite or independently combine its appearance, gaze, pose, "
-                "expression, gesture, or photo awareness."
+                "For generated character media, choose exactly one supplied presentation_candidate_id. Each "
+                "candidate is one coherent frozen subject-and-body performance: never rewrite or independently "
+                "combine its appearance, gaze, pose, expression, gesture, bodily state, wardrobe coverage, "
+                "sensual charge, or photo awareness."
             ),
         },
         {
@@ -1605,12 +1829,13 @@ def _planning_messages(
             "content": (
                 f"opportunity_id={opportunity.opportunity_id}\nfamily={opportunity.family}\n"
                 f"privacy_ceiling={opportunity.privacy_ceiling}\n"
+                f"sensual_charge_ceiling={opportunity.sensual_charge_ceiling}\n"
                 f"delivery_mode={opportunity.delivery_mode}\n"
                 f"audience_context={_stable_json(asdict(opportunity.audience_context) if opportunity.audience_context else {})}\n"
                 f"event_snapshot={_stable_json(opportunity.event_snapshot)}\n"
                 f"hard_banned_fingerprints_last_12={_stable_json(recent)}\n"
                 f"soft_penalty_last_3={_stable_json(recent_three)}\n"
-                f"legal_subject_presentation_candidates={_stable_json(subject_candidates)}\n"
+                f"legal_character_presentation_candidates={_stable_json(presentation_candidates)}\n"
                 f"legal_interaction_bid_candidates={_stable_json(interaction_bids)}\n"
                 "Enums:\n"
                 f"content_domain={sorted(CONTENT_DOMAINS)}\nvisual_form={sorted(VISUAL_FORMS)}\n"
@@ -1624,9 +1849,9 @@ def _planning_messages(
                 "Return fields: content_domain, visual_form, share_intent, capture_mode, "
                 "character_visibility, other_people_visibility, polish, tone, privacy, "
                 "primary_evidence_ref, supporting_evidence_refs, composition, action, "
-                "camera_direction, sharing_motive, constraints, route, and optional intimate_intensity."
+                "camera_direction, sharing_motive, constraints, and route. Never return intimate_intensity."
                 " Return exactly one interaction_bid_id from the supplied candidates. Also return "
-                "subject_variant_id for generated character_media; omit it otherwise. Interaction bids "
+                "presentation_candidate_id for generated character_media; omit it otherwise. Interaction bids "
                 "are invitations, never claims that the recipient will respond."
             ),
         },
@@ -1646,11 +1871,20 @@ def _interaction_bid_values(
             raise ValueError(f"invalid interaction bid privacy: {bid_id}")
         if _PRIVACY_RANK[minimum_privacy] > _PRIVACY_RANK[opportunity.privacy_ceiling]:
             continue
-        if bid_id == "invite_closeness" and (
-            opportunity.audience_context is None
-            or not opportunity.audience_context.relationship_stage
-        ):
-            continue
+        if bid_id in {"invite_closeness", "invite_desire"}:
+            stage = (
+                opportunity.audience_context.relationship_stage
+                if opportunity.audience_context
+                else ""
+            )
+            if stage not in {"ambiguous", "lover"}:
+                continue
+            minimum_charge = "charged" if bid_id == "invite_desire" else "subtle"
+            if (
+                SENSUAL_CHARGE_RANK[opportunity.sensual_charge_ceiling]
+                < SENSUAL_CHARGE_RANK[minimum_charge]
+            ):
+                continue
         pressure = str(raw.get("response_pressure") or "")
         hoped_response = str(raw.get("hoped_response") or "")
         if pressure not in {"none", "low", "medium"} or not hoped_response:
@@ -1704,13 +1938,24 @@ def _inspection_prompt(plan: MediaPlan) -> str:
         if plan.subject_presentation and plan.subject_presentation.display_strategy
         else ""
     )
+    embodiment_fields = (
+        " Return physical_salience_matches, sensual_charge_broadly_matches, coverage_mode_matches, "
+        "non_explicit_boundary_ok, and body_framing_non_fetishizing as booleans; also return "
+        "observed_physical_cues and unsupported_physical_cues as string arrays. Reject missing planned "
+        "bodily salience, ordinary-portrait dilution of charged/veiled intent, unsupported sweat/wet hair/"
+        "wardrobe, more exposure than planned, transparent coverage, key-area visibility, sexual acts, "
+        "fetishized isolated body-part framing, or impossible straps/sleeves/towels/sheets/mirror anatomy. "
+        f"Planned embodied presentation: {_stable_json(plan.embodied_presentation.to_payload())}."
+        if plan.embodied_presentation
+        else ""
+    )
     return (
         "Inspect this fictional personal-media image. Return JSON only with passed (boolean), reason "
         "(string), observed_summary (one factual Chinese sentence), observed_facts (string array), "
         "and deviations (string array). Reject malformed face/hands/body, unwanted text/watermark, "
         "identity mismatch when a reference is supplied, privacy escalation, or a visible contradiction "
         "of capture source, character visibility, people visibility, composition, action, or selected "
-        f"evidence.{subject_fields}{quality_fields}{social_fields} Frozen plan: "
+        f"evidence.{subject_fields}{quality_fields}{social_fields}{embodiment_fields} Frozen plan: "
         f"{_stable_json(plan.to_payload())[:5000]}"
     )
 
@@ -1721,7 +1966,8 @@ def _repair_prompt(prompt: str, inspection: MediaInspection) -> str:
         f"Visible deviations: {'; '.join(inspection.deviations) or inspection.reason}. "
         "Repair only those visible defects. Keep the same event evidence, classification, subject, "
         "capture authorship, composition intent, privacy, scene, interaction bid, and the same social "
-        "performance; do not select a new photo concept or expression strategy."
+        "performance and embodied presentation; do not select a new photo concept, expression strategy, "
+        "sensual-charge level, clothing fact, or body strategy."
     )
 
 
@@ -1732,6 +1978,7 @@ def _enforce_inspection_contract(
     subject_required: bool = False,
     quality_required: bool = False,
     social_required: bool = False,
+    embodied_required: bool = False,
 ) -> MediaInspection:
     quality_defects = tuple(
         name
@@ -1763,6 +2010,26 @@ def _enforce_inspection_contract(
             reason=social_defects[0],
             deviations=(*inspection.deviations, *social_defects),
         )
+    embodiment_defects = tuple(
+        name
+        for name, value in (
+            ("physical_salience_mismatch", inspection.physical_salience_matches),
+            ("sensual_charge_mismatch", inspection.sensual_charge_broadly_matches),
+            ("coverage_mode_mismatch", inspection.coverage_mode_matches),
+            ("explicit_boundary_violation", inspection.non_explicit_boundary_ok),
+            ("fetishizing_body_framing", inspection.body_framing_non_fetishizing),
+        )
+        if value is False
+    )
+    if inspection.unsupported_physical_cues:
+        embodiment_defects += ("unsupported_physical_cue",)
+    if inspection.passed and embodiment_defects:
+        return replace(
+            inspection,
+            passed=False,
+            reason=embodiment_defects[0],
+            deviations=(*inspection.deviations, *embodiment_defects),
+        )
     if inspection.passed and inspection.reference_pose_copy:
         return replace(
             inspection,
@@ -1792,6 +2059,17 @@ def _enforce_inspection_contract(
         )
     ):
         missing = "inspection_social_performance_fields_missing"
+    elif automatic and embodied_required and any(
+        value is None
+        for value in (
+            inspection.physical_salience_matches,
+            inspection.sensual_charge_broadly_matches,
+            inspection.coverage_mode_matches,
+            inspection.non_explicit_boundary_ok,
+            inspection.body_framing_non_fetishizing,
+        )
+    ):
+        missing = "inspection_embodiment_fields_missing"
     if inspection.passed and missing:
         return replace(
             inspection,
@@ -1819,6 +2097,207 @@ def _history_subject_signature(item: str | MediaPlan | dict[str, object]) -> str
     return str(subject.get("subject_signature") or "") if isinstance(subject, dict) else ""
 
 
+def _history_embodiment_signature(item: str | MediaPlan | dict[str, object]) -> str:
+    if isinstance(item, str):
+        return ""
+    if isinstance(item, MediaPlan):
+        if not item.embodied_presentation:
+            return ""
+        body = item.embodied_presentation
+        return "|".join(
+            (
+                body.contract_signature,
+                body.physical_salience,
+                body.sensual_charge,
+                body.coverage_mode,
+                body.body_strategy_id,
+            )
+        )
+    embodiment = item.get("embodied_presentation")
+    if not isinstance(embodiment, dict):
+        return ""
+    return "|".join(
+        str(embodiment.get(key) or "")
+        for key in (
+            "contract_signature",
+            "physical_salience",
+            "sensual_charge",
+            "coverage_mode",
+            "body_strategy_id",
+        )
+    )
+
+
+def _planner_character_candidates(
+    opportunity: MediaOpportunity,
+    *,
+    recent_subjects: tuple[str, ...],
+    recent_embodiments: tuple[str, ...],
+    subject_config_path: Path,
+    embodiment_config_path: Path,
+) -> tuple[dict[str, object], ...]:
+    """Compose complete legal subject/body candidates before the LLM chooses one."""
+    if opportunity.family != "character_media":
+        return ()
+    subjects = _planner_subject_candidates(
+        opportunity,
+        recent_subjects=recent_subjects,
+        config_path=subject_config_path,
+    )
+    relationship_stage = (
+        opportunity.audience_context.relationship_stage
+        if opportunity.audience_context
+        else ""
+    )
+    embodiments = build_embodied_candidates(
+        snapshot=opportunity.event_snapshot,
+        opportunity_id=opportunity.opportunity_id,
+        relationship_stage=relationship_stage,
+        sensual_charge_ceiling=opportunity.sensual_charge_ceiling,
+        recent_signatures=recent_embodiments,
+        config_path=embodiment_config_path,
+        limit=256,
+    )
+    combined: list[dict[str, object]] = []
+    for subject in subjects:
+        subject_modes = {
+            str(item) for item in subject.get("legal_capture_modes", [])
+        }
+        for body in embodiments:
+            legal_modes = sorted(subject_modes & set(body.legal_capture_modes))
+            if not legal_modes:
+                continue
+            subject_payload = {
+                "variant_id": subject["subject_variant_id"],
+                "appearance": subject["appearance"],
+                "performance": subject["performance"],
+                "subject_signature": subject["subject_signature"],
+                "version": "subject-presentation-v2",
+                "display_strategy": subject["display_strategy"],
+            }
+            subject_contract_id = sha256(
+                _stable_json(subject_payload).encode("utf-8")
+            ).hexdigest()[:12]
+            combined.append(
+                {
+                    "presentation_candidate_id": (
+                        f"{subject['subject_variant_id']}~"
+                        f"{subject_contract_id}@@{body.candidate_id}"
+                    ),
+                    "subject_presentation": subject_payload,
+                    "embodied_presentation": body.presentation.to_payload(),
+                    "character_visibility": subject["character_visibility"],
+                    "minimum_privacy": subject["display_strategy"]["minimum_privacy"],
+                    "legal_capture_modes": legal_modes,
+                    "legal_share_intents": list(body.legal_share_intents),
+                }
+            )
+
+    def stable_key(item: dict[str, object]) -> tuple[str, str]:
+        candidate_id = str(item["presentation_candidate_id"])
+        return (
+            sha256(f"{opportunity.opportunity_id}:{candidate_id}".encode()).hexdigest(),
+            candidate_id,
+        )
+
+    # A pure random top-eight can accidentally erase a capture source or body-detail
+    # option. Greedily cover the legal capture/visibility surface, with stable seeded
+    # tie-breaking, then spend remaining slots on variety.
+    universe = {
+        (mode, str(item["character_visibility"]), intent, str(item["minimum_privacy"]))
+        for item in combined
+        for mode in item["legal_capture_modes"]
+        for intent in item["legal_share_intents"]
+    }
+    uncovered = set(universe)
+    remaining = sorted(combined, key=stable_key)
+    selected: list[dict[str, object]] = []
+    available_charges = sorted(
+        {
+            str(item["embodied_presentation"]["sensual_charge"])
+            for item in remaining
+        },
+        key=SENSUAL_CHARGE_RANK.__getitem__,
+    )
+    for charge in available_charges:
+        charge_candidates = [
+            item
+            for item in remaining
+            if item["embodied_presentation"]["sensual_charge"] == charge
+        ]
+        if not charge_candidates or len(selected) >= 8:
+            continue
+        preferred_goal = "invite_desire" if charge in {"charged", "veiled"} else None
+        if preferred_goal:
+            compatible = [
+                item
+                for item in charge_candidates
+                if preferred_goal
+                in item["subject_presentation"]["display_strategy"][
+                    "communicative_goals"
+                ]
+            ]
+            if compatible:
+                charge_candidates = compatible
+        charge_modes: set[str] = set()
+        quota = 1 if charge == "none" else 2
+        for _ in range(quota):
+            available = [item for item in charge_candidates if item in remaining]
+            if not available or len(selected) >= 8:
+                break
+            choice = min(
+                available,
+                key=lambda item: (
+                    -sum(mode not in charge_modes for mode in item["legal_capture_modes"]),
+                    stable_key(item),
+                ),
+            )
+            selected.append(choice)
+            remaining.remove(choice)
+            charge_modes.update(str(mode) for mode in choice["legal_capture_modes"])
+            uncovered -= {
+                (
+                    mode,
+                    str(choice["character_visibility"]),
+                    intent,
+                    str(choice["minimum_privacy"]),
+                )
+                for mode in choice["legal_capture_modes"]
+                for intent in choice["legal_share_intents"]
+            }
+    while remaining and len(selected) < 8:
+        best = min(
+            remaining,
+            key=lambda item: (
+                -sum(
+                    (
+                        mode,
+                        str(item["character_visibility"]),
+                        intent,
+                        str(item["minimum_privacy"]),
+                    ) in uncovered
+                    for mode in item["legal_capture_modes"]
+                    for intent in item["legal_share_intents"]
+                ),
+                stable_key(item),
+            ),
+        )
+        selected.append(best)
+        remaining.remove(best)
+        uncovered -= {
+            (mode, str(best["character_visibility"]), intent, str(best["minimum_privacy"]))
+            for mode in best["legal_capture_modes"]
+            for intent in best["legal_share_intents"]
+        }
+        if not uncovered:
+            break
+    for item in remaining:
+        if len(selected) >= 8:
+            break
+        selected.append(item)
+    return tuple(selected)
+
+
 def _planner_subject_candidates(
     opportunity: MediaOpportunity,
     *,
@@ -1839,7 +2318,9 @@ def _planner_subject_candidates(
                 **_subject_context_kwargs(opportunity),
                 config_path=config_path,
             ):
-                key = (candidate.variant_id, visibility)
+                # The diversity signature intentionally omits hand/occlusion bookkeeping,
+                # but capture legality cannot. Merge only byte-identical presentations.
+                key = (_stable_json(candidate.presentation.to_payload()), visibility)
                 if key not in combined:
                     payload = candidate.planner_payload()
                     payload["character_visibility"] = visibility
