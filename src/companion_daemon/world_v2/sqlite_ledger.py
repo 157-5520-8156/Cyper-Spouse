@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime
 import hashlib
-import json
 from pathlib import Path
 import sqlite3
 from threading import RLock
@@ -11,7 +9,7 @@ from threading import RLock
 from .errors import ConcurrencyConflict, IdempotencyConflict, LedgerIntegrityError
 from .ledger import canonical_event_json, commit_request_hash, derived_commit_id
 from .reducers import ReducerState, RevisionClass, event_definition, make_projection, reduce_event
-from .schemas import Action, CommitResult, LedgerProjection, WorldEvent
+from .schemas import CommitResult, LedgerProjection, WorldEvent
 
 
 class SQLiteWorldLedger:
@@ -95,50 +93,16 @@ class SQLiteWorldLedger:
 
     @staticmethod
     def _encode_state(state: ReducerState) -> str:
-        return json.dumps(
-            {
-                "observation_refs": list(state.observation_refs),
-                "logical_time": state.logical_time.isoformat() if state.logical_time else None,
-                "actions": [action.model_dump(mode="json") for action in state.actions],
-            },
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        return state.model_dump_json()
 
     @staticmethod
     def _decode_state(value: str) -> ReducerState:
         try:
-            raw = json.loads(value)
-            if not isinstance(raw, dict):
-                raise LedgerIntegrityError("head state is not a JSON object")
-            refs = raw.get("observation_refs")
-            logical_time = raw.get("logical_time")
-            actions = raw.get("actions", [])
-            if not isinstance(refs, list) or not all(
-                isinstance(item, str) for item in refs
-            ):
-                raise LedgerIntegrityError("head observation_refs are invalid")
-            if logical_time is not None and not isinstance(logical_time, str):
-                raise LedgerIntegrityError("head logical_time is invalid")
-            if not isinstance(actions, list):
-                raise LedgerIntegrityError("head actions are invalid")
-            decoded_actions = tuple(
-                Action.model_validate_json(
-                    json.dumps(item, ensure_ascii=False, separators=(",", ":"))
-                )
-                for item in actions
-            )
-            decoded_time = datetime.fromisoformat(logical_time) if logical_time else None
+            return ReducerState.model_validate_json(value)
         except LedgerIntegrityError:
             raise
         except Exception as exc:
             raise LedgerIntegrityError("head state is invalid") from exc
-        return ReducerState(
-            observation_refs=tuple(refs),
-            logical_time=decoded_time,
-            actions=decoded_actions,
-        )
 
     def _ensure_head(self) -> None:
         initial = make_projection(

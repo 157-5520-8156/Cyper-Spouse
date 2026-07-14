@@ -5,7 +5,16 @@ from datetime import UTC, datetime
 import pytest
 from pydantic import ValidationError
 
-from companion_daemon.world_v2 import Action, ActionIntent, AcceptanceErrorCode, ReplayMode
+from companion_daemon.world_v2 import (
+    Action,
+    ActionIntent,
+    AcceptanceErrorCode,
+    BudgetAccount,
+    ClaimLease,
+    ExecutionReceipt,
+    ReplayMode,
+    TriggerProcess,
+)
 from companion_daemon.world_v2.schemas import WorldEvent
 
 
@@ -141,4 +150,50 @@ def test_world_contracts_reject_timezone_naive_datetimes() -> None:
                 "state": "authorized",
                 "recovery_policy": "effect_once",
             }
+        )
+
+
+def test_execution_receipt_cannot_represent_a_contradictory_terminal_state() -> None:
+    with pytest.raises(ValidationError, match="ack receipt"):
+        ExecutionReceipt(
+            receipt_id="receipt-invalid",
+            result_id="result-invalid",
+            action_id="action-1",
+            provider="provider:test",
+            provider_ref="provider-ref-1",
+            source_event_id="provider-ref-1",
+            receipt_kind="ack",
+            observed_state="delivered",
+            is_terminal=False,
+            cost_actual=0,
+            received_at=NOW,
+            raw_payload_hash="sha256:invalid",
+        )
+
+
+def test_budget_and_trigger_authority_models_reject_inconsistent_state() -> None:
+    with pytest.raises(ValidationError, match="overrun"):
+        BudgetAccount(
+            account_id="budget-invalid",
+            category="chat",
+            window_id="window-invalid",
+            limit=10,
+            spent=0,
+            overrun=9,
+        )
+
+    lease = ClaimLease(
+        owner_id="owner-2",
+        attempt_id="attempt-2",
+        acquired_at=NOW,
+        expires_at=NOW.replace(hour=13),
+    )
+    with pytest.raises(ValidationError, match="latest attempt"):
+        TriggerProcess(
+            trigger_id="trigger-invalid",
+            trigger_ref="result-invalid",
+            process_kind="settlement",
+            state="claimed",
+            claim_lease=lease,
+            attempt_ids=("attempt-1",),
         )

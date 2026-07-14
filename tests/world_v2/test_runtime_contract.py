@@ -12,7 +12,7 @@ from companion_daemon.world_v2 import (
     ProjectionRequest,
     WorldRuntime,
 )
-from companion_daemon.world_v2.errors import IdempotencyConflict, UnknownAction
+from companion_daemon.world_v2.errors import IdempotencyConflict
 
 
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
@@ -131,7 +131,7 @@ async def test_clock_advance_is_effect_once_and_rejects_time_reversal() -> None:
 
 
 @pytest.mark.asyncio
-async def test_settle_rejects_result_for_unknown_action() -> None:
+async def test_settle_defers_unknown_action_result_for_reconciliation() -> None:
     runtime = WorldRuntime.in_memory(world_id="world-v2-test")
     result = ExternalObservation(
         schema_version="world-v2.1",
@@ -155,8 +155,8 @@ async def test_settle_rejects_result_for_unknown_action() -> None:
         raw_payload_hash="sha256:receipt-1",
     )
 
-    with pytest.raises(UnknownAction):
-        await runtime.settle(result)
+    outcome = await runtime.settle(result)
+    assert outcome.status == "deferred"
 
 
 def test_runtime_rejects_a_ledger_bound_to_another_world() -> None:

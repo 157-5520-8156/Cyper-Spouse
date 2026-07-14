@@ -2,9 +2,8 @@ from __future__ import annotations
 
 import asyncio
 
-from .action_lifecycle import settlement_event_type
-from .errors import ActionIdentityMismatch, UnknownAction
 from .ledger import LedgerPort, WorldLedger
+from .settlement import SettlementPlanner
 from .schemas import (
     ClockObservation,
     ExternalObservation,
@@ -30,6 +29,7 @@ class WorldRuntime:
             raise ValueError("ledger belongs to another world")
         self._world_id = world_id
         self._ledger = ledger or WorldLedger.in_memory(world_id=world_id)
+        self._settlement = SettlementPlanner(world_id=world_id)
         self._lock = asyncio.Lock()
 
     @classmethod
@@ -41,18 +41,27 @@ class WorldRuntime:
             return await asyncio.to_thread(self._ledger.project)
         return self._ledger.project()
 
-    async def _commit(self, events: list[WorldEvent], *, world_revision: int, deliberation_revision: int):
+    async def _commit(
+        self,
+        events: list[WorldEvent],
+        *,
+        world_revision: int,
+        deliberation_revision: int,
+        commit_id: str | None = None,
+    ):
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(
                 self._ledger.commit,
                 events,
                 expected_world_revision=world_revision,
                 expected_deliberation_revision=deliberation_revision,
+                commit_id=commit_id,
             )
         return self._ledger.commit(
             events,
             expected_world_revision=world_revision,
             expected_deliberation_revision=deliberation_revision,
+            commit_id=commit_id,
         )
 
     async def ingest(self, observation: Observation) -> RuntimeOutcome:
@@ -135,40 +144,26 @@ class WorldRuntime:
         trigger_id = f"trigger:settlement:{result.source}:{result.source_event_id}"
         async with self._lock:
             before = await self._project_for_write()
-            action = next(
-                (
-                    candidate
-                    for candidate in before.actions
-                    if candidate.action_id == result.action_id
-                ),
-                None,
+            recording_events = self._settlement.recording_events(
+                result, trigger_id=trigger_id
             )
-            if action is None:
-                raise UnknownAction(f"action {result.action_id!r} does not exist")
-            if action.idempotency_key != result.idempotency_key:
-                raise ActionIdentityMismatch(
-                    f"result idempotency key does not match action {action.action_id!r}"
-                )
-            event = WorldEvent.from_payload(
-                schema_version=result.schema_version,
-                event_id=f"event:{trigger_id}",
-                world_id=self._world_id,
-                event_type=settlement_event_type(result.status),
-                logical_time=result.logical_time,
-                created_at=result.created_at,
-                actor=f"provider:{result.source}",
-                source=result.source,
-                trace_id=result.trace_id,
-                causation_id=result.causation_id,
-                correlation_id=result.correlation_id,
-                idempotency_key=(
-                    f"external-observation:{result.source}:{result.source_event_id}"
-                ),
-                payload=result.model_dump(mode="json"),
+            await self._commit(
+                list(recording_events),
+                world_revision=before.world_revision,
+                deliberation_revision=before.deliberation_revision,
+                commit_id=f"commit:{trigger_id}:inbox",
+            )
+            after_inbox = await self._project_for_write()
+            plan = self._settlement.plan(
+                result,
+                trigger_id=trigger_id,
+                projection=after_inbox,
             )
             committed = await self._commit(
-                [event], world_revision=before.world_revision,
-                deliberation_revision=before.deliberation_revision,
+                list(plan.events),
+                world_revision=after_inbox.world_revision,
+                deliberation_revision=after_inbox.deliberation_revision,
+                commit_id=f"commit:{trigger_id}:settlement",
             )
         return RuntimeOutcome(
             outcome_id=f"outcome:{trigger_id}",
@@ -176,8 +171,9 @@ class WorldRuntime:
             observation_ref=result.result_id,
             committed_world_revision=committed.world_revision,
             ledger_sequence=committed.ledger_sequence,
-            status="action_executed",
-            projection_hint=f"action:{result.action_id}:{result.status}",
+            status=plan.runtime_status,
+            deferred_refs=(plan.deferred_ref,) if plan.deferred_ref else (),
+            projection_hint=plan.projection_hint,
         )
 
     def project(self, viewer: ProjectionRequest) -> WorldProjection:

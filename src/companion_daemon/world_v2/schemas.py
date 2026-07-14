@@ -245,6 +245,139 @@ class Action(FrozenModel):
     recovery_policy: str = Field(min_length=1)
 
 
+class ClaimLease(FrozenModel):
+    owner_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
+    acquired_at: datetime
+    expires_at: datetime
+
+    @model_validator(mode="after")
+    def expires_after_acquisition(self) -> ClaimLease:
+        if self.expires_at <= self.acquired_at:
+            raise ValueError("claim lease must expire after acquisition")
+        return self
+
+
+class TriggerProcess(FrozenModel):
+    schema_version: SchemaVersion = "world-v2.1"
+    trigger_id: str = Field(min_length=1)
+    trigger_ref: str = Field(min_length=1)
+    process_kind: Literal["observation", "clock", "settlement", "recovery"]
+    state: Literal["claimed", "terminal"]
+    claim_lease: ClaimLease
+    attempt_ids: tuple[str, ...] = Field(min_length=1)
+    runtime_outcome_ref: str | None = None
+
+    @model_validator(mode="after")
+    def active_attempt_matches_lease(self) -> TriggerProcess:
+        if len(set(self.attempt_ids)) != len(self.attempt_ids):
+            raise ValueError("trigger attempt_ids must be unique")
+        if self.attempt_ids[-1] != self.claim_lease.attempt_id:
+            raise ValueError("active claim lease must reference the latest attempt")
+        return self
+
+
+class BudgetReservation(FrozenModel):
+    schema_version: SchemaVersion = "world-v2.1"
+    reservation_id: str = Field(min_length=1)
+    account_id: str = Field(min_length=1)
+    action_id: str = Field(min_length=1)
+    category: Literal[
+        "chat", "repair", "audit", "proactive", "vision", "audio", "image", "tool"
+    ]
+    amount_limit: int = Field(ge=0)
+    state: Literal["reserved", "settled", "released"] = "reserved"
+    settled_cost: int = Field(default=0, ge=0)
+
+
+class BudgetAccount(FrozenModel):
+    schema_version: SchemaVersion = "world-v2.1"
+    account_id: str = Field(min_length=1)
+    category: Literal[
+        "chat", "repair", "audit", "proactive", "vision", "audio", "image", "tool"
+    ]
+    window_id: str = Field(min_length=1)
+    limit: int = Field(ge=0)
+    reserved: int = Field(default=0, ge=0)
+    spent: int = Field(default=0, ge=0)
+    overrun: int = Field(default=0, ge=0)
+
+    @model_validator(mode="after")
+    def totals_are_consistent(self) -> BudgetAccount:
+        if self.overrun != max(0, self.spent - self.limit):
+            raise ValueError("budget account overrun does not match spent and limit")
+        return self
+
+
+class ExecutionReceipt(FrozenModel):
+    schema_version: SchemaVersion = "world-v2.1"
+    receipt_id: str = Field(min_length=1)
+    result_id: str = Field(min_length=1)
+    action_id: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    provider_ref: str = Field(min_length=1)
+    source_event_id: str = Field(min_length=1)
+    receipt_kind: Literal["ack", "terminal"]
+    observed_state: Literal[
+        "provider_accepted", "delivered", "failed", "cancelled", "expired", "unknown"
+    ]
+    is_terminal: bool
+    artifact_refs: tuple[str, ...] = ()
+    cost_actual: int = Field(ge=0)
+    error_class: str | None = None
+    received_at: datetime
+    raw_payload_hash: str = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def receipt_kind_matches_observed_state(self) -> ExecutionReceipt:
+        if self.receipt_kind == "ack" and (
+            self.observed_state != "provider_accepted" or self.is_terminal
+        ):
+            raise ValueError("ack receipt must be non-terminal provider_accepted")
+        if self.receipt_kind == "terminal" and (
+            self.observed_state == "provider_accepted" or not self.is_terminal
+        ):
+            raise ValueError("terminal receipt must carry a terminal observed state")
+        return self
+
+
+class BudgetSettlement(FrozenModel):
+    schema_version: SchemaVersion = "world-v2.1"
+    settlement_id: str = Field(min_length=1)
+    reservation_id: str = Field(min_length=1)
+    action_id: str = Field(min_length=1)
+    result_id: str = Field(min_length=1)
+    state: Literal["settled", "released"]
+    settlement_kind: Literal["terminal", "reconciliation_adjustment"] = "terminal"
+    previous_cost: int = Field(default=0, ge=0)
+    cost_actual: int = Field(ge=0)
+    cost_delta: int
+
+    @model_validator(mode="after")
+    def delta_matches_cost_transition(self) -> BudgetSettlement:
+        if self.cost_delta != self.cost_actual - self.previous_cost:
+            raise ValueError("cost_delta must equal cost_actual minus previous_cost")
+        return self
+
+
+class ActionReconciliation(FrozenModel):
+    schema_version: SchemaVersion = "world-v2.1"
+    reconciliation_id: str = Field(min_length=1)
+    result_id: str = Field(min_length=1)
+    action_id: str = Field(min_length=1)
+    reason: Literal[
+        "unknown_action",
+        "identity_mismatch",
+        "terminal_conflict",
+        "invalid_transition",
+    ]
+    observed_state: ActionState
+    existing_state: ActionState | None = None
+    provider: str = Field(min_length=1)
+    provider_ref: str = Field(min_length=1)
+    raw_payload_hash: str = Field(min_length=1)
+
+
 class WorldProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
     world_id: str
@@ -326,4 +459,12 @@ class LedgerProjection(FrozenModel):
     logical_time: datetime | None = None
     observation_refs: tuple[str, ...] = ()
     actions: tuple[Action, ...] = ()
+    budget_accounts: tuple[BudgetAccount, ...] = ()
+    budget_reservations: tuple[BudgetReservation, ...] = ()
+    trigger_processes: tuple[TriggerProcess, ...] = ()
+    pending_external_observations: tuple[ExternalObservation, ...] = ()
+    execution_receipts: tuple[ExecutionReceipt, ...] = ()
+    budget_settlements: tuple[BudgetSettlement, ...] = ()
+    reconciliations: tuple[ActionReconciliation, ...] = ()
+    completed_trigger_ids: tuple[str, ...] = ()
     semantic_hash: str

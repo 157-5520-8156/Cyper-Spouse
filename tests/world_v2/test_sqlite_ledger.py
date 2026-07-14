@@ -6,7 +6,13 @@ import sqlite3
 import pytest
 
 from companion_daemon.world_v2.errors import ConcurrencyConflict, LedgerIntegrityError
-from companion_daemon.world_v2.schemas import Action, WorldEvent
+from companion_daemon.world_v2.schemas import (
+    Action,
+    BudgetAccount,
+    BudgetReservation,
+    BudgetSettlement,
+    WorldEvent,
+)
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
 
@@ -153,10 +159,53 @@ def test_sqlite_head_preserves_authorized_actions_across_restart(tmp_path) -> No
         idempotency_key="action-authorized:action-1",
         payload={"action": action.model_dump(mode="json")},
     )
+    reservation = BudgetReservation(
+        reservation_id="budget-1",
+        account_id="budget-account-chat",
+        action_id="action-1",
+        category="chat",
+        amount_limit=10_000,
+    )
+    account = BudgetAccount(
+        account_id="budget-account-chat",
+        category="chat",
+        window_id="test-window",
+        limit=1_000_000,
+    )
+    configured = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event-budget-account-configured",
+        world_id="world-sqlite-test",
+        event_type="BudgetAccountConfigured",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="system:acceptance",
+        source="acceptance",
+        trace_id="trace-action-1",
+        causation_id="acceptance-1",
+        correlation_id="conversation-1",
+        idempotency_key="budget-account:chat:test-window",
+        payload={"account": account.model_dump(mode="json")},
+    )
+    reserved = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event-budget-reserved-1",
+        world_id="world-sqlite-test",
+        event_type="BudgetReserved",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="system:acceptance",
+        source="acceptance",
+        trace_id="trace-action-1",
+        causation_id="acceptance-1",
+        correlation_id="conversation-1",
+        idempotency_key="budget-reserved:budget-1",
+        payload={"reservation": reservation.model_dump(mode="json")},
+    )
 
     ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     ledger.commit(
-        [authorized],
+        [configured, reserved, authorized],
         commit_id="commit-action-1",
         expected_world_revision=0,
         expected_deliberation_revision=0,
@@ -166,4 +215,87 @@ def test_sqlite_head_preserves_authorized_actions_across_restart(tmp_path) -> No
     reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     assert reopened.project().actions == (action,)
     assert reopened.rebuild() == reopened.project()
+    reopened.close()
+
+
+def test_budget_overrun_with_other_reservations_survives_restart(tmp_path) -> None:
+    path = tmp_path / "world-v2-budget-overrun.sqlite3"
+
+    def domain_event(event_id: str, event_type: str, payload: dict[str, object]):
+        return WorldEvent.from_payload(
+            schema_version="world-v2.1",
+            event_id=event_id,
+            world_id="world-sqlite-test",
+            event_type=event_type,
+            logical_time=NOW,
+            created_at=NOW,
+            actor="system:test",
+            source="test",
+            trace_id="trace-budget-overrun",
+            causation_id="acceptance-budget-overrun",
+            correlation_id="conversation-budget-overrun",
+            idempotency_key=event_id,
+            payload=payload,
+        )
+
+    account = BudgetAccount(
+        account_id="account-chat",
+        category="chat",
+        window_id="window-1",
+        limit=100,
+    )
+    first = BudgetReservation(
+        reservation_id="reservation-1",
+        account_id=account.account_id,
+        action_id="action-1",
+        category="chat",
+        amount_limit=60,
+    )
+    second = BudgetReservation(
+        reservation_id="reservation-2",
+        account_id=account.account_id,
+        action_id="action-2",
+        category="chat",
+        amount_limit=40,
+    )
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [
+            domain_event("event-account", "BudgetAccountConfigured", {
+                "account": account.model_dump(mode="json")
+            }),
+            domain_event("event-reservation-1", "BudgetReserved", {
+                "reservation": first.model_dump(mode="json")
+            }),
+            domain_event("event-reservation-2", "BudgetReserved", {
+                "reservation": second.model_dump(mode="json")
+            }),
+        ],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    settlement = BudgetSettlement(
+        settlement_id="settlement-1",
+        reservation_id=first.reservation_id,
+        action_id=first.action_id,
+        result_id="result-1",
+        state="settled",
+        cost_actual=120,
+        cost_delta=120,
+    )
+    ledger.commit(
+        [domain_event("event-settlement", "BudgetSettled", {
+            "settlement": settlement.model_dump(mode="json")
+        })],
+        expected_world_revision=3,
+        expected_deliberation_revision=0,
+    )
+    ledger.close()
+
+    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    projection = reopened.project()
+    assert projection.budget_accounts[0].spent == 120
+    assert projection.budget_accounts[0].reserved == 40
+    assert projection.budget_accounts[0].overrun == 20
+    assert reopened.rebuild() == projection
     reopened.close()
