@@ -15,6 +15,8 @@
 4. `AttentionAuthority`：角色当前注意状态；
 5. `SituationCompiler`：把以上 authority 与既有 Clock、Plan/Activity、NPC/Occurrence、Commitment 编译成只读处境。
 
+合并前还必须先安装 `actor-authority-policy.2` artifact/catalog/digest；这不是可延期的便利项。policy.1 只承担legacy replay，不能授权四个v2治理operation。
+
 前四个是独立写 authority，各有自己的 before/after、CAS、history 和补偿；其中人为/模型选择的 mutation 走 typed proposal family，Clock mechanical mutation 明确不属于 typed family。第五个没有写事件、没有 reducer、没有独立 reducer bundle，只暴露一个纯函数式 Interface：
 
 ```text
@@ -39,7 +41,7 @@ SituationCompiler.compile(request: SituationCompileRequest) -> SituationProjecti
 - 不在任一 reducer 中级联修改 Affect、Relationship、Memory、CharacterCore、Action 或其他三个 `.16` projection；
 - 不在 `.16` 接 QQ；平台 Adapter 最后迁移。
 
-受控随机仍属于 Deliberation：如果角色在多个目标或活动间随机选择，必须先有 `RandomDrawRecorded`，proposal 绑定 draw、候选集 hash、catalog/sampler version。四个 reducer 和 SituationCompiler 都不抽样。
+`.16` 不宣称已经拥有受控随机 authority。`selection_mode=random_draw` 在本 bundle 中一律 fail closed；现有或临时增加的薄 `RandomDrawProjection`、caller 传入的 draw 字段、普通 EvidenceRef 都不能把它变成受支持能力。`selection_mode=direct` 是完整可用路径，不得因为 RandomAuthority 尚未落地而阻塞 Goal open/revise 或其他合法直接选择。完整受控随机留给独立 `RandomAuthority` Module，并须通过 4.2 的后续验收合同后才能由新 bundle 显式启用。
 
 ## 3. Module、Interface 与 seam
 
@@ -49,6 +51,8 @@ SituationCompiler.compile(request: SituationCompileRequest) -> SituationProjecti
 | `LocationAuthority` | typed proposal codec + `reduce_location(...)` | single-head、cause binding、scene classification、privacy floor、CAS、补偿 | in-process | exact before/after 与 source authority |
 | `ResourceAuthority` | typed proposal codec + `reduce_resource(...)` | 定点运算、band policy、Clock interval、CAS、补偿 | in-process | delta conservation 与 deterministic band |
 | `AttentionAuthority` | typed proposal codec + `reduce_attention(...)` | mode/focus 约束、expiry、Clock authority、CAS、补偿 | in-process | lifecycle、time 与 exact latest |
+| `ClockAuthorityIndex` | `resolve_latest_clock(pinned_state)` | `ClockAdvanced` transition projection/history、latest selection、exact hash/policy verification | in-process read-only | live/reopen/rebuild解析相同latest Clock |
+| `DeliberativeBasisResolver` | `resolve(binding, pinned_state)` | typed parser dispatch、capability、canonical source hashes、privacy floor | in-process read-only | same binding/state → same resolved basis |
 | `SituationCompiler` | `compile(request)` | source matrix、分类、隐私、排序、截断、hash、cache validation | in-process | 相同 pinned input 必须 byte-equivalent |
 | `SQLiteWorldLedger` | 现有 open/commit/project/rebuild | `.15→.16` verified migration | local-substitutable | 非空 SQLite reopen/rebuild/tamper |
 
@@ -63,12 +67,14 @@ AuthorizedMutationEnvelope
   change_id
   transition_id
   expected_entity_revision
-  evidence_refs[]
+  cause_authority              # discriminator；deliberative时为typed basis
   policy_refs[]
   acceptance_id
   proposal_id
   evaluated_world_revision
   accepted_change_hash
+  selection_mode
+  random_draw_authority?
 ```
 
 共同不变量：
@@ -87,7 +93,7 @@ AuthorizedMutationEnvelope
 - reducer 只改变自己的 head/history，并消费自己的 pending proposal；
 - failed commit 对 head、history、proposal、acceptance、committed refs 全部原子回滚。
 
-Clock mechanical lane 不制造 `ProposalRecorded/AcceptanceRecorded`，其事件也不得注册进 typed proposal family 的 `mutation_event_types`。它使用 domain-specific typed authority，仍必须绑定 exact `ClockAdvanced` event ID、world revision、payload hash、from/to logical time、policy version/digest 和目标 before image。其 idempotency key 固定为：
+Clock mechanical lane 不制造 `ProposalRecorded/AcceptanceRecorded`，其事件也不得注册进 typed proposal family 的 `mutation_event_types`。它使用 domain-specific typed authority，仍必须绑定 exact `ClockTransitionProjection`、policy 和目标 before image。domain resolver 禁止扫描 caller cause 或把 cause 自报的 event ref/revision/hash/from/to 当成事实；唯一可信来源是 4.3 的 committed Clock projection/history。Goal expiry要求resolved Clock的`logical_time_to >= due_window.ends_at`；允许用 latest Clock补结算先前漏掉的due，但不能引用更早Clock。Resource recovery与Attention due同样只认该resolver结果。其idempotency key固定为：
 
 ```text
 sha256(world_id + event_type + operation + target_identity + before_revision + clock_event_ref + policy_digest)
@@ -106,17 +112,25 @@ sha256(world_id + event_type + operation + target_identity + before_revision + c
 | Resource | `v2_resource_transition` | `proposal-contract:v2-resource.1` | `V2ResourceStateInitialized`、`V2ResourceStateAdjusted`、`V2ResourceTransitionCompensated` |
 | Attention | `v2_attention_transition` | `proposal-contract:v2-attention.1` | `V2AttentionChanged`、`V2AttentionTransitionCompensated` |
 
-四个 family 均以 `ProposalRecorded` 为 record event，并分别拥有 concrete `*ProposalProjection`、canonical `*ProposedMutation`、codec 与 proposal store。selector `(ProposalRecorded, proposal_kind)`、contract ref、mutation event owner 必须全局唯一。`V2GoalExpired`、`V2ResourceClockAdjusted` 和 `TriggerProcessOpened(process_kind=v2_attention_expiry_due)` 由 mechanical payload map 与普通 event catalog 注册，不经过 proposal registry。
+四个 family 均以 `ProposalRecorded` 为 record event，并分别拥有 concrete `*ProposalProjection`、canonical `*ProposedMutation`、codec 与 proposal store。每个 ProposalProjection 的 `transition_kind` 是该域 operation 的 closed `Literal`，validator 使用完整映射验证 `transition_kind ↔ proposed_mutation.event_type`，不能接受任意字符串或只检查event属于domain。`payload_json` 解码后必须是JSON object，且重新按UTF-8、sort keys、无多余空白编码后与原文byte-equivalent；array/scalar、duplicate/unknown shape或非canonical object全部拒绝。selector `(ProposalRecorded, proposal_kind)`、contract ref、mutation event owner必须全局唯一。`V2GoalExpired`、`V2ResourceClockAdjusted`和`TriggerProcessOpened(process_kind=v2_attention_expiry_due)`由mechanical payload map与普通event catalog注册，不经过proposal registry。
 
-### 4.2 可选受控随机 binding
+### 4.2 selection mode 冻结与后续 RandomAuthority 合同
 
-任何由受控随机选出的 proposal 都在 domain mutation 中携带以下可选字段，字段进入 canonical mutation hash：
+每个可由模型或随机选择产生的 mutation 都显式声明选择边界：
 
 ```text
-RandomDrawBinding
+selection_mode = direct | random_draw
+```
+
+`.16` 的 installed policy 只支持 `direct`。`direct` 表示没有随机抽样，禁止携带 draw authority；它可用于所有本来合法的 lane，尤其不得要求 Goal direct 先等待随机模块。`random_draw` 是保留的 wire literal，但本 bundle 的 proposal codec、dry-run 和 domain reducer 必须无条件以 `random_authority_not_installed` 拒绝；即使 payload 携带看似完整的以下结构也不能接受：
+
+```text
+RandomDrawAuthority
+  decision_evidence_ref          # exact committed_world_event EvidenceRef
   draw_event_ref
   draw_world_revision
   draw_payload_hash
+  draw_id
   attempt_id
   candidate_set_hash
   selected_candidate_ref
@@ -125,11 +139,76 @@ RandomDrawBinding
   supersedes_draw_ref?
 ```
 
-Reducer 必须 exact resolve 已提交 `RandomDrawRecorded`，验证候选集、选中项、attempt、catalog/sampler 与 supersede lineage。没有发生随机选择时该字段必须为空；存在随机选择却缺 binding 时 proposal 拒绝。CAS retry 复用同一 draw，world revision 改变导致候选集变化时必须显式 supersede，不能通过拒绝 proposal 刷结果。
+上述 `RandomDrawAuthority` 在 `.16` 只是保留 schema，不是可用 authority。薄 `RandomDrawProjection` 只记录“某处声称抽过”，缺少独立 entropy、预算、采样、supersession、消费与 replay 语义，禁止被 resolver 当成支持证据。`direct` 携带任何 draw authority 也拒绝。
 
-### 4.3 统一时间 pin
+后续 bundle 要启用 `random_draw`，必须先交付独立、可替换、可单测的深 Module：
 
-所有 after image 的 `updated_at`、transition 的 `accepted_at` 必须等于 domain event 的 Logical Time。首次建立的 `opened_at/since` 必须等于建立事件时间；terminal `closed_at` 必须等于 terminal event 时间。普通 transition 不得回写 `opened_at/since`，不得让任何生命周期时间晚于 `updated_at`。Clock mechanical after image 使用所绑定 Clock 的 `logical_time_to`，且 domain event Logical Time 必须与它相等。
+```text
+RandomAuthority.record(request: RandomDrawRequest) -> RandomDrawProjection
+RandomAuthority.supersede(request: RandomDrawSupersedeRequest) -> RandomDrawProjection
+RandomAuthority.resolve(binding: RandomDrawAuthority) -> ResolvedRandomDecision
+
+RandomDrawRequest
+  world_id, actor_ref
+  trigger_ref                   # exact committed trigger/cause
+  decision_kind, decision_slot  # 同一触发中的稳定选择槽
+  evaluated_world_revision
+  entropy_authority {
+    nonce_event_ref, nonce_world_revision, nonce_payload_hash
+    entropy_commitment, nonce
+  }
+  candidates[] {candidate_ref, weight_bp}
+  frequency_budget_authority {
+    budget_ref, budget_revision, budget_event_ref, budget_payload_hash
+    window_ref, limit, consumed_before
+  }
+  catalog_version
+  sampler_version, sampler_digest
+```
+
+其验收合同不可删减：
+
+1. `(world_id, actor_ref, trigger_ref, decision_kind, decision_slot)` 是稳定 decision identity；retry 不得换 slot 刷结果。
+2. entropy/nonce 必须在 proposal 评估 revision 之前由 Ledger 提交并 exact resolve；不能读 wall clock、进程 RNG 或调用方临时随机数。
+3. 候选集按 `candidate_ref` canonical sort，引用与正整数权重全部进入 hash；selected candidate 必须由纯 deterministic weighted sampler 从 committed nonce 复算。
+4. frequency budget 是已提交 authority；record 前验证窗口、limit 与 `consumed_before`，超预算 fail closed，不能只靠 prompt 提醒。
+5. `RandomDrawRecorded` 与 `RandomDrawSuperseded` 都有 typed payload、event catalog、pure reducer、head/history、Ledger projection、SQLite roundtrip、semantic hash 与 rebuild。supersede 必须绑定旧 draw 的 exact event/revision/hash，并保持 lineage；历史不可删除。
+6. consuming domain mutation 必须把 active draw 与唯一 `consumer_transition_id` 原子登记进持久化 `consumed_random_draw_ids`；同一 draw 的第二次消费、消费 superseded draw、换 candidate 消费、跨 actor/slot 消费全部拒绝。CAS retry只可重放同一 consumer identity。
+7. 只有该 Module 的版本、events、reducer、Ledger 与上述攻击测试全部进入一个后续 bundle 后，domain resolver 才能从“无条件拒绝”切到“exact authority 接受”；单独添加 projection/schema 不算完成。
+
+### 4.3 ClockTransitionProjection 与 latest resolver
+
+`.16` 为既有 `ClockAdvanced` reducer 增加共享、可重建的 authority projection；不新增 Clock event，也不改变旧 event envelope：
+
+```text
+ClockTransitionProjection
+  clock_event_ref               # 实际应用的ClockAdvanced event ID
+  computed_world_revision       # reducer/ledger应用位置计算；绝不读payload自报值
+  payload_hash                  # canonical ClockAdvanced payload hash
+  logical_time_from
+  logical_time_to
+  installed_policy_version
+  installed_policy_digest
+```
+
+`ClockAdvanced` reducer 在验证原有 from/to 与 installed Clock policy 后，将上述完整 projection append 到 immutable `clock_transition_history`。event ref来自真实 envelope/event identity；world revision来自 Ledger commit/reducer cursor；payload hash由canonical payload计算；policy version/digest来自event所引用且被registry exact验证的已安装artifact，而不是replay时“当前最新版”policy。任何同名payload字段都不能覆盖这些computed fields。history按`computed_world_revision`严格递增，event ref/revision唯一，from必须等于应用前ReducerState logical time，to必须等于应用后logical time。
+
+```text
+resolve_latest_clock(pinned_state):
+  candidates = clock_transition_history
+  latest = max(candidates, key=computed_world_revision)
+  require latest.logical_time_to == pinned_state.logical_time
+  require latest policy version/digest仍可由installed artifact exact验证
+  return latest
+```
+
+domain `ClockCauseAuthority` 仍可携带projection字段作为mutation hash/binding，但resolver必须逐项等于上述latest projection；它不能借自报字段创建authority。缺history、history latest与current logical time不一致、wrong policy/hash/ref/revision/from/to都fail closed。若多个Clock transition到达同一logical time，选择computed world revision最大者；不按event ID、payload顺序或wall clock选择。
+
+`ReducerState` 新增 `clock_transition_history`，`LedgerProjection`、`make_projection`、`semantic_payload(.16)`、SQLite `_state_from_projection` 和rebuild必须完整接线。`.15` legacy semantic payload/hash明确排除此字段，验证旧库时不得倒算或改变旧hash；迁入`.16`时由目标reducer replay immutable `ClockAdvanced` events重建history，再以`.16` semantic规则持久化。旧 event envelope 的 `logical_time` 字段继续保持现有含义，不能改成`logical_time_from/to`、computed world revision或projection timestamp。
+
+### 4.4 统一时间 pin
+
+所有 after image 的 `updated_at`、transition 的 `accepted_at` 必须等于 domain event 的 Logical Time，并满足 `after.updated_at >= before.updated_at`；同一 head 的 Logical Time 不得倒退。首次建立的 `opened_at/since` 必须等于建立事件时间；terminal `closed_at` 必须等于 terminal event 时间。普通 transition 不得回写 `opened_at/since`，不得让任何生命周期时间晚于 `updated_at`。Clock mechanical after image 使用所绑定 Clock 的 `logical_time_to`，且 domain event Logical Time 必须与它相等。
 
 ## 5. 投影合同
 
@@ -146,13 +225,13 @@ GoalProjection
     importance_bp              # 0..10000
     progress_bp                # 0..10000
     due_window? {starts_at, ends_at}
-    blocker_refs[]             # canonical unique sorted refs
+    blockers[]                 # canonical unique sorted typed GoalBlocker
     privacy_class
-    completion_contract_ref?
-    completion_contract_digest?
+    completion_contract?        # typed CompletionContract
     status                     # active|paused|blocked|completed|abandoned|expired
-    terminal_reason_ref?
+    terminal_reason?           # typed GoalTerminalReason；禁止dead/free ref
     supersedes_goal_id?
+    supersedes_goal_authority?  # exact prior terminal Goal binding
   }
   origin {change_id, transition_id, policy_refs, accepted_event_ref}
   opened_at
@@ -165,12 +244,96 @@ GoalTransitionProjection
   semantic_fingerprint_after
   change_id, policy_refs, accepted_event_ref, accepted_at
   cause_authority?
+  completion_evidence?          # only V2GoalCompleted；与cause独立
+  removed_blocker_fingerprints[]? # Unblock或blocked→Complete exact diff
+  canonical_evidence_refs[]     # 只由typed bindings派生，caller不可填写
   revise_kind?
-  random_draw_binding?
+  selection_mode
+  random_draw_authority?
   compensates_transition_id?
 ```
 
-`outcome_ref` 是想实现的结果引用，不是已发生 Fact。它与 actor/goal identity 在 Open 后不可变；目标含义变化时创建新 Goal 并用 `supersedes_goal_id` 串联。`importance_bp`、`due_window`、completion contract 可通过显式 `revise_kind=reprioritize|reschedule|recontract` 修改并保留 before/after；没有 completion contract 的 Goal 不可 Complete，只能 Abandon/Expire。terminal Goal 永不 reopen。
+Completion 使用冻结的 typed contract，而不是任意 ref/digest：
+
+```text
+CompletionContract
+  contract_id
+  contract_version
+  completion_kind              # settled_occurrence_outcome|active_fact_predicate
+  outcome_ref
+  expected_actor_ref
+  allowed_event_types[]
+  settlement_schema_ref?       # required for settled_occurrence_outcome
+  required_fact_predicate?
+  required_fact_value_hash?
+  evidence_cutoff_world_revision
+  privacy_class
+  contract_schema_ref          # closed registry中的exact schema
+  policy_version
+  policy_digest
+  contract_digest              # 上述字段canonical hash
+
+GoalCompletionEvidence =
+  WorldOccurrenceCompletionEvidence
+  | CommittedFactStateCompletionEvidence
+
+WorldOccurrenceCompletionEvidence
+  evidence_kind=settled_occurrence_outcome
+  occurrence_id, occurrence_entity_revision
+  settlement_event_ref, world_revision, payload_hash
+  resolved_actor_ref, settled_outcome_ref, settlement_schema_ref
+  privacy_class
+
+CommittedFactStateCompletionEvidence
+  evidence_kind=active_fact_predicate
+  fact_id, fact_entity_revision
+  fact_event_ref, world_revision, payload_hash
+  resolved_actor_ref, resolved_outcome_ref
+  resolved_fact_predicate, resolved_fact_value_hash
+  privacy_class
+
+GoalRationale
+  rationale_class              # effort_attribution|milestone_interpretation|priority_reassessment|constraint_response|value_alignment|uncertainty_management|self_direction
+  text                         # trim→NFC后1..512 Unicode code points；拒绝全部Unicode General_Category=Cc control
+  privacy_class
+
+GoalProgressAssessment
+  contribution_class           # direct_contribution|indirect_support|milestone_reached|reappraisal
+  rationale: GoalRationale     # 主观解释，不是客观证据
+  basis                        # exact committed settled event | Fact | Experience typed basis
+  delta_bp                     # strictly > 0
+
+GoalLifecycleReason
+  reason_kind                  # operation-specific closed catalog
+  rationale: GoalRationale
+  basis                        # committed typed basis或internal intention
+  privacy_class
+
+GoalTerminalReason = AbandonedTerminalReason | CompletedTerminalReason | ExpiredTerminalReason
+  AbandonedTerminalReason {terminal_kind=abandoned, reason: GoalLifecycleReason}
+  CompletedTerminalReason {terminal_kind=completed, contract_id, contract_digest, completion_evidence_ref, privacy_class}
+  ExpiredTerminalReason {terminal_kind=expired, due_window, clock_projection_ref, policy_digest, privacy_class}
+
+GoalBlocker
+  blocker_id
+  blocker_class                # external_dependency|resource_constraint|uncertainty|priority_conflict|relationship_constraint|environmental_constraint
+  rationale: GoalRationale
+  basis: DeliberativeBasisBinding
+  blocker_fingerprint          # blocker全部typed canonical material的hash
+  privacy_class
+
+GoalBlockerResolution
+  blocker_id, removed_blocker_fingerprint
+  resolution_class             # externally_resolved|no_longer_relevant|accepted_tradeoff|superseded_assessment
+  rationale: GoalRationale
+  basis: DeliberativeBasisBinding
+```
+
+Open 时 `evidence_cutoff_world_revision` 等于proposal的`evaluated_world_revision`；recontract时重置为该revision，因此contract不能用早已存在的证据“事后完成”Goal。CompletionContract只能来自`goal-completion-contract-registry.1`：`completion_kind ↔ contract_schema_ref ↔ evidence union member`一一对应，contract digest覆盖closed kind/schema、outcome/actor约束、cutoff、privacy与policy全部canonical字段；unknown schema/kind、映射不一致或digest不匹配fail closed。`V2GoalCompleted` payload 在 `cause_authority` 之外必须另有且只有一个 typed `GoalCompletionEvidence` union member，deliberative recognition与operator补结算都必填。首发resolver只支持两个closed pure parser：WorldOccurrence只读current settled projection的`settled_outcome_ref`；Fact只读current active Fact的subject/predicate/value。每个parser exact绑定current entity revision、accepted event/world revision/payload hash、actor与kind-specific outcome，且证据必须晚于cutoff并逐项满足contract；unknown kind、非current、非settled/active、缺字段或只能靠自由payload解释的source全部fail closed。Activity、Plan、Action与Receipt目前缺少足够的terminal origin/outcome authority，明确unsupported；不得用`goal_ref/intent_ref`拼ID、只看status/event type或组合宽松receipt冒充CompletionEvidence，待对应authority另行硬化并版本化union后才能扩展。operator lane的ActorAuthority只负责重新授权该mutation，不能替代、制造或放宽CompletionEvidence；没有客观union evidence时operator也不能Complete。completed Goal privacy取before Goal、contract、evidence与deliberative basis的最严格meet。
+
+为使WorldOccurrence parser纯解析，`.16` 给`WorldOccurrenceProjection`新增`settled_outcome_ref?`：仅settled current projection可非空，由settlement reducer从其typed event material确定性冻结。该字段进入`.16` projection/semantic/SQLite/rebuild，`.15` legacy semantic/hash明确排除；`.15→.16`用immutable occurrence settlement events replay重建，不能由prompt、Goal或当前模型补写。
+
+`outcome_ref` 是想实现的结果引用，不是已发生 Fact。它与 actor/goal identity 在 Open 后不可变；目标含义变化时创建新 Goal并用 `supersedes_goal_id` 串联。若填写该字段，必须同时携带 `supersedes_goal_authority={goal_id, actor_ref, entity_revision, target_head_semantic_hash, accepted_event_ref, accepted_world_revision, accepted_payload_hash, privacy_class}`，resolver 必须 exact 命中一个已经存在的当前 Goal head，且该 Goal 与新 Goal 同 actor、不是新 Goal 自身、状态为 `completed|abandoned|expired`。codec必须从该exact head/event binding派生`GoalSupersessionEvidenceRef`并加入mutation的`canonical_evidence_refs`；caller不能漏掉、替换或另填ref。缺失目标、跨 actor、自指、非 terminal、stale head/revision/event/hash 一律拒绝；因此 supersession 不能被用作修改活跃目标或制造环。新Goal privacy不得弱于target/basis/rationale的最严格floor。`importance_bp`、`due_window`、CompletionContract 可通过显式 `revise_kind=reprioritize|reschedule|recontract` 修改并保留 before/after；没有 CompletionContract 的Goal不可Complete，只能Abandon/Expire。terminal Goal永不reopen。
 
 状态机：
 
@@ -178,18 +341,23 @@ GoalTransitionProjection
 |---|---|---|---|
 | 无 | open | active | rev `0→1`；初始 progress 可为 0..10000；记录初始 contract/due |
 | active/paused/blocked | revise | 原状态 | 只改 revise kind 允许的字段；outcome/identity/progress 不变 |
-| active/paused/blocked | progress | 原状态 | 只接受 settled external/domain progress；非负 delta；before + delta = after；after ≤ 10000 |
-| active | pause | paused | reason ref；不改 progress |
-| paused | resume | active | 明确 resume evidence |
-| active | block | blocked | 新 blocker 非空；blocker set 有实际变化 |
-| blocked | unblock | blocked/active | exact non-empty removal diff；仍有 blocker 则保持 blocked，为空才 active |
-| blocked | block | blocked | 只允许增加/替换有 authority 的 blocker refs |
-| active/paused/blocked | complete | completed | exact completion contract + settled evidence；closed_at=logical time |
-| active/paused/blocked | abandon | abandoned | deliberative/operator reason；closed_at=logical time |
+| active/paused/blocked | progress | 原状态 | deliberative主观评估；exact settled/Fact/Experience basis；delta > 0；before + delta = after ≤ 10000 |
+| active | pause | paused | typed pause reason；不改 progress |
+| paused | resume | active | typed resume reason |
+| active | block | blocked | deliberative typed GoalBlocker additions非空；集合有实际变化 |
+| blocked | unblock | blocked/active | deliberative typed GoalBlockerResolution exact移除；仍有 blocker 则blocked，为空才active |
+| blocked | block | blocked | 只允许增加/替换有typed basis与privacy floor的GoalBlocker |
+| active/paused | complete | completed | deliberative recognition/operator补结算 + strict contract/evidence；closed_at=logical time |
+| blocked | complete | completed | 同上，且after.blockers必须显式为空；transition记录完整removed fingerprints |
+| active/paused/blocked | abandon | abandoned | deliberative typed abandon reason；closed_at=logical time |
 | active/paused/blocked | expire | expired | exact Clock authority 到达 due end；closed_at=clock logical time |
 | latest non-open transition | compensate | 显式 restored head | exact latest transition；生成新 revision，不删除历史 |
 
-达到 `progress_bp=10000` 仍保持原状态，直到独立 `V2GoalCompleted`。`recontract` 不可用来把尚未满足的 completion 事后改写为已经满足：新 contract 的 evidence cutoff 必须晚于 revision 前的最新 completion evidence，或由 deployment ActorAuthority 明确纠错；否则创建 superseding Goal。
+Progress 是角色对“这些经历对我的目标推进了多少”的主观内在评估，不是 Runtime 对 settlement 的机械派生。settled event、Fact 或 Experience 只提供 exact typed basis；Deliberation 选择 `contribution_class`、rationale 与正 delta，reducer只验证basis authority/capability、`before + delta = after`、范围、时间与privacy floor，不硬编码“某 event/outcome 必然让某 Goal 加多少”。评估为 no-change 时不产生 `V2GoalProgressed` 或空 mutation，可在审议 trace 中记录no-change decision。operator不得日常替角色加progress，只能通过exact compensation纠错。达到 `progress_bp=10000` 仍保持原状态，直到独立 `V2GoalCompleted`；Complete 才要求严格客观 CompletionContract。
+
+pause/resume/abandon 不接受自由 reason 字符串。typed catalog 首版分别为：pause=`priority_shift|resource_constraint|uncertainty|relationship_consideration|context_changed`；resume=`priority_restored|constraint_resolved|renewed_intent|context_changed`；abandon=`no_longer_desired|superseded|infeasible|values_changed|context_changed`。三者与Progress/Block/Unblock均为deliberative-only；operator纠错只能走exact compensation，不能伪装一次新的角色选择。terminal head保存structured `GoalTerminalReason`：abandon复用exact `GoalLifecycleReason`，complete/expire分别绑定contract evidence或Clock projection，不保存悬空/free reason ref。分类用于审计、检索和模型发挥，不映射固定动作或话术。`recontract` 必须生成新 contract ID/digest并把 evidence cutoff pin 到recontract前的当前world revision；Operator治理修正也不能降低cutoff或复用更早证据，需修正历史时走exact compensation或创建superseding Goal。
+
+Block/Unblock同样是角色对处境的解释，不是settlement reducer的机械副作用。Goal head只保存typed `GoalBlocker`集合，不保存裸refs；每个blocker的class、内嵌rationale、typed basis、`blocker_fingerprint`与privacy都进入mutation hash。`V2GoalUnblocked`逐项携带exact `GoalBlockerResolution`，其`removed_blocker_fingerprint`、basis与rationale必须匹配/解释被移除current blocker；partial diff后其余blocker保持byte-equivalent。resolution class与basis是closed matrix：`externally_resolved`必须有exact `CommittedEvidenceBasis`，不能靠内心宣称外部障碍已解决；`no_longer_relevant|accepted_tradeoff|superseded_assessment`允许`InternalIntentionBasis`，明确表示角色主观放下、接受或改判，而非篡改外部事实。两者只允许Deliberation；operator纠错只能走exact compensation。settled event若相关，只能先作为`CommittedEvidenceBasis`供Deliberation评估，Runtime不得自动Block/Unblock。reducer验证typed authority、class×basis、集合diff、identity/fingerprint、privacy与状态机，不硬编码某settlement必然构成或解除哪类blocker。blocked Goal被Complete时不是隐式遗留blockers：Complete transition必须列出所有removed blocker fingerprints，after集合显式清空。
 
 ### 5.2 Location
 
@@ -231,6 +399,7 @@ ResourceProjection
     derived_band               # policy-derived
     band_policy_version
     band_policy_digest
+    privacy_class
   }
   origin
   updated_at
@@ -264,6 +433,7 @@ AttentionProjection
     interruptibility_bp        # 0..10000
     since
     expires_at?
+    privacy_class
   }
   origin
   updated_at
@@ -284,28 +454,28 @@ AttentionTransitionProjection
 
 | Lane | 谁可产生候选 | 是否 Proposal/Acceptance | 可引用 authority | 禁止事项 |
 |---|---|---|---|---|
-| `deliberative` | 主 Deliberation | 是 | committed Fact/Experience/Plan/Occurrence/Action receipt、active Goal 等 | 用户一句话直接成世界状态；自证 completion |
+| `deliberative` | 主 Deliberation | 是 | typed external basis，或有严格能力边界的 spontaneous internal basis | 用户一句话直接成世界事实；internal basis 自证 location/progress/completion |
 | `operator` | 明确 operator command Adapter | 是 | active deployment `ActorAuthorityProjection` + domain required operation；OperatorObservation 仅审计 | 借 operator observation 伪造授权；借 operator lane 接普通用户消息 |
 | `settlement` | Runtime 对已提交 settled domain/external result 的确定性 adapter | 是；settlement 先 commit，下一 world revision 才记录 proposal | exact committed settled event/receipt | prospective/future evidence；provider accepted 冒充 settled；从 pending Action 改状态 |
-| `clock_runtime` | `advance()` / recovery | 否；domain-specific mechanical contract | exact latest applicable `ClockAdvanced` | wall clock、LLM、随机、查询时隐式变化 |
+| `clock_runtime` | `advance()` / recovery | 否；domain-specific mechanical contract | exact latest `ClockAdvanced`（按6.3前定义） | wall clock、LLM、随机、查询时隐式变化 |
 | `compensation` | operator 或 domain correction Deliberation | 是 | exact latest transition + correction evidence | 回滚历史、补偿非 latest、跨 identity 补偿 |
 
 ### 6.2 Event catalog
 
 | Domain | Event | Operation | Lane | 必需 authority | Reducer 只写 |
 |---|---|---|---|---|---|
-| Goal | `V2GoalOpened` | open | deliberative/operator | outcome source、policy、可选 due/contract | goal head/history |
-| Goal | `V2GoalRevised` | revise | deliberative/operator | revise kind + exact before/after | goal head/history |
-| Goal | `V2GoalProgressed` | progress | settlement | prior-revision exact settled cause + before/delta/after | goal head/history |
-| Goal | `V2GoalPaused` | pause | deliberative/operator | reason evidence | goal head/history |
-| Goal | `V2GoalResumed` | resume | deliberative/operator | resume evidence | goal head/history |
-| Goal | `V2GoalBlocked` | block | deliberative/settlement | blocker additions/replacements 均可解析 | goal head/history |
-| Goal | `V2GoalUnblocked` | unblock | deliberative/settlement | exact non-empty resolved blocker diff | goal head/history |
-| Goal | `V2GoalCompleted` | complete | settlement/operator | frozen completion contract + prior-revision settled evidence | goal head/history |
-| Goal | `V2GoalAbandoned` | abandon | deliberative/operator | reason evidence | goal head/history |
+| Goal | `V2GoalOpened` | open | deliberative/operator initialization/import | outcome source、policy、可选 due/contract | goal head/history |
+| Goal | `V2GoalRevised` | revise | deliberative/operator governance correction | revise kind + exact before/after | goal head/history |
+| Goal | `V2GoalProgressed` | progress | deliberative | exact settled/Fact/Experience typed basis + contribution class/rationale + before/positive delta/after | goal head/history |
+| Goal | `V2GoalPaused` | pause | deliberative only | typed pause reason + basis | goal head/history |
+| Goal | `V2GoalResumed` | resume | deliberative only | typed resume reason + basis | goal head/history |
+| Goal | `V2GoalBlocked` | block | deliberative only | typed GoalBlocker additions/replacements + basis | goal head/history |
+| Goal | `V2GoalUnblocked` | unblock | deliberative only | exact non-empty GoalBlockerResolution diff + basis | goal head/history |
+| Goal | `V2GoalCompleted` | complete | deliberative recognition/operator evidence-backed补结算 | typed frozen CompletionContract + 独立typed GoalCompletionEvidence；operator authority只reauth | goal head/history |
+| Goal | `V2GoalAbandoned` | abandon | deliberative only | typed abandon reason + basis | goal head/history |
 | Goal | `V2GoalExpired` | expire | clock_runtime | exact Clock + frozen due end + policy digest + exact expired after | goal head/history |
 | Goal | `V2GoalTransitionCompensated` | compensate | compensation | exact latest non-open transition | goal head/history |
-| Location | `V2LocationChanged` | establish/change | operator/deliberative/settlement | exact cause union + from/to；establish 仅 operator | location head/history |
+| Location | `V2LocationChanged` | establish/change | operator/settled movement | exact ActorAuthority或prior-revision settled movement + from/to；establish仅operator | location head/history |
 | Location | `V2LocationChangeCompensated` | compensate | compensation | exact latest transition | location head/history |
 | Resource | `V2ResourceStateInitialized` | initialize | operator | active ActorAuthority + band policy | resource head/history |
 | Resource | `V2ResourceStateAdjusted` | adjust/reclassify | deliberative/operator/settlement | exact cause + before/delta/after + pinned band policy | resource head/history |
@@ -317,6 +487,8 @@ AttentionTransitionProjection
 
 Situation 没有任何 catalog event。
 
+Goal lane是closed matrix且没有settlement写lane：operator只可用于Open初始化/导入、Revised治理修正、携带strict independent CompletionEvidence的Complete补结算，以及operator-origin transition的compensation reauthorization。Complete正常路径是Deliberation对客观证据的recognition。Progress/Block/Unblock/Pause/Resume/Abandon全部deliberative-only；其历史错误由exact compensation修正，不能直接借operator lane或settlement adapter提交相同operation。
+
 ### 6.3 Cause authority union
 
 共享字符串 `cause_ref` 不足以授权变化。每个 payload 使用 discriminator union：
@@ -324,7 +496,31 @@ Situation 没有任何 catalog event。
 ```text
 DeliberativeCauseAuthority
   kind=accepted_deliberation
-  evidence_refs[]
+  basis: DeliberativeBasisBinding
+
+DeliberativeBasisBinding = CommittedEvidenceBasis | InternalIntentionBasis
+
+CommittedEvidenceBasis
+  basis_kind=committed_evidence
+  sources[] {
+    source_kind                 # closed typed parser kind
+    event_ref, world_revision, payload_hash
+    source_entity_ref?, source_entity_revision?
+  }
+
+InternalIntentionBasis
+  basis_kind=internal_intention
+  actor_ref
+  trigger_ref                   # deliberation turn/active trigger identity
+  decision_slot
+  evaluated_world_revision
+  logical_time
+  intention_kind               # goal_choice|goal_governance|attention_choice|resource_self_regulation
+  intention_class              # self_direction|priority_reassessment|constraint_response|value_alignment|uncertainty_management
+  rationale: GoalRationale     # 内嵌；禁止外部ref/blob
+  intention_material_hash      # 上述typed canonical material的派生hash
+  policy_version, policy_digest
+  privacy_class=private
 
 DomainOperatorAuthorityBinding
   kind=deployment_actor_authority
@@ -341,21 +537,31 @@ SettledEventCauseAuthority
 
 ClockCauseAuthority
   kind=clock
-  clock_event_ref, clock_world_revision, clock_payload_hash
+  clock_event_ref, clock_world_revision, clock_payload_hash  # 必须逐项等于resolved projection
   logical_time_from, logical_time_to
   policy_version, policy_digest
 
 CompensationCauseAuthority
   kind=compensation
   target_transition_id, target_entity_revision
+  target_event_ref, target_world_revision, target_payload_hash
+  expected_target_lane?         # 仅审计/比较；不授权
   correction_evidence_refs[]
 ```
 
-每个 operator mutation 都必须解析当前 active `ActorAuthorityProjection`：principal kind 为 deployment operator、required operation 存在、authority 未过期、values/policy digest 和 committed event 完全匹配。四域 required operation 分别冻结为 `v2_goal_governance|v2_location_governance|v2_resource_governance|v2_attention_governance`。`OperatorObservationRecorded` 只能作为 `audit_observation_ref`，单独存在永远不能授权 mutation。补偿若撤销 operator-lane transition，也必须携带当前有效的同域 ActorAuthority；过期/撤销的旧授权不能借 compensation 复活。
+每个 operator mutation 都必须解析当前 active `ActorAuthorityProjection`：principal kind 为 deployment operator、required operation 存在、authority 未过期、values/policy digest 和 committed event 完全匹配。四域 required operation 分别冻结为 `v2_goal_governance|v2_location_governance|v2_resource_governance|v2_attention_governance`。ActorAuthority policy 采用版本化 operation catalog：现有 `actor-authority-policy.1` 的 digest 与 legacy operation 集合原样保留，只用于历史 replay；新增 `actor-authority-policy.2`，其 digest 必须覆盖含上述四个 v2 operation 的完整 canonical catalog。resolver 先按 policy version/digest 选 catalog，再验证 projection 的 allowed operations 是该 catalog 的合法 subset；四个 `.16` domain 只接受 `.2`。禁止给 `.1` authority 套新 schema/字段后声称拥有 v2 operation，policy/digest不匹配或operation不在对应版本catalog均fail closed。`OperatorObservationRecorded` 只能作为 `audit_observation_ref`，单独存在永远不能授权 mutation。
 
-domain reducer 还要限制允许的 kind 和 event type。例如图片 inspection result 不能成为 Location change；`ExecutionReceiptRecorded` 只有 terminal settled receipt 才能成为 Goal completion 或 Resource adjustment evidence。Deliberative evidence 可以支持角色“选择改变目标/注意”，但不能把用户或模型的一句话升级成 Location、settled progress 或 completion 事实。
+Compensation target 不只绑定 transition ID：必须 exact resolve latest transition 的accepted event ref/world revision/payload hash。effective lane只能从该exact target transition及既有compensation lineage重新推导，caller无权声明；若保留`expected_target_lane`，它只用于与推导结果比较，不参与授权。撤销operator transition必须携带当前有效同域ActorAuthority；撤销settlement/deliberative transition必须携带可验证的correction evidence；撤销mechanical transition必须同时绑定原latest Clock authority与新的纠错authority。过期/撤销的旧授权不能借compensation复活。
 
-## 7. Settlement 两阶段与跨 projection 原子批次
+`DeliberativeBasisResolver` 是共享纯 Interface：它按 `source_kind` 选择唯一 typed parser，exact resolve 已提交 event/projection、actor、revision、payload hash 与适用能力，并返回 `ResolvedDeliberativeBasis{capabilities, privacy_floor, canonical_source_hashes}`；不得接收自由 EvidenceRef 列表，也不得用 ref 前缀猜类型。多个 external source 的 `privacy_floor` 取最严格 meet；internal intention 的 floor 取`private`与内嵌rationale privacy的最严格值。domain after image 的 `privacy_class` 不得弱于该 floor，普通 revise/change/compensation也不能借机降级；Goal还必须meet其全部basis、GoalRationale、superseded target与completion evidence的最严格privacy。Goal、Location、Resource、Attention 都持久化该 privacy class，Situation viewer 继续做二次 meet。无隐私字段或无法解析 privacy 的来源 fail closed。
+
+Internal intention 是“角色此刻自己想这样选择”的 authority，不是外部事实证明。它确保 spontaneous Goal direct 不需要伪造用户消息或等待外部 evidence，也确保 RandomAuthority 尚未完成不会阻塞 direct。其能力矩阵只允许 Goal open/revise/pause/resume/abandon、Attention change，以及有 pinned self-regulation policy 的 Resource deliberative adjustment；Goal progress 还必须引用 exact settled/Fact/Experience basis，internal intention 单独不足；Location establish/change、Goal completion、伪造 blocker 已解决或任何 external outcome始终禁止。`actor_ref` 必须等于被改实体 actor，trigger/decision slot/policy/hash 全部进入 proposal 与 accepted mutation hash。
+
+Acceptance只表示“该主观选择获准成为相应domain mutation”，不会把`GoalRationale`或`InternalIntentionBasis`升级成客观证据。二者不得被Fact/Experience reducer采信，不得进入CompletionEvidence union，也不得作为未来CompletionContract的settlement source；需要记忆主观动机时只能按独立、明确支持的subjective source type处理。所有rationale text统一执行trim→NFC，再按normalized Unicode code points验证1..512长度；包含任何Unicode General_Category=`Cc` control的文本拒绝，normalized text与privacy进入canonical hash。禁止rationale ref、任意JSON blob或未限长自由字段。Situation internal projection可保留结构化class，viewer默认不输出原始text，只有明确viewer/privacy grant才可披露。
+
+domain reducer 还要限制允许的 basis kind、capability 和 event type。例如图片 inspection result 不能成为 Location change；terminal `ExecutionReceiptRecorded` 首发只能作为合法Resource adjustment authority或Deliberation basis，不能成为Goal CompletionEvidence。Activity/Action/Receipt completion留待对应terminal origin/outcome authority硬化后的future union版本；禁止拼ID/status。用户或模型的一句话可以成为角色 deliberation 的输入，但不能被升级成 Location、机械progress 或 completion 事实。
+
+## 7. Settlement 两阶段与逐域提交
 
 Settlement authority 固定采用两阶段，不引入 prospective binding：
 
@@ -363,27 +569,37 @@ Settlement authority 固定采用两阶段，不引入 prospective binding：
 world revision N:
   ActivityCompleted / WorldOccurrenceSettled / terminal receipt committed
 
-deliberation revision(s), evaluated_world_revision=N:
+evaluated_world_revision=N:
   ProposalRecorded(V2ResourceStateAdjusted, cause = exact committed settlement)
-  ProposalRecorded(V2GoalProgressed, cause = exact committed settlement)
-  ProposalRecorded(V2AttentionChanged, cause = exact committed settlement)
-
-world revision N+1 atomic commit:
+world revision N+1:
   AcceptanceRecorded(resource) → V2ResourceStateAdjusted
-  AcceptanceRecorded(goal)     → V2GoalProgressed
-  AcceptanceRecorded(attention)→ V2AttentionChanged
+
+evaluated_world_revision=N+1:
+  Deliberation evaluates the committed settlement / Fact / Experience
+  → either no-change trace, or ProposalRecorded(
+      V2GoalProgressed,
+      basis = exact committed source,
+      contribution_class + rationale + positive delta)
+world revision N+2:
+  only when proposed: AcceptanceRecorded(goal) → V2GoalProgressed
+
+evaluated_world_revision=N+2:
+  ProposalRecorded(V2AttentionChanged, cause = same exact settlement)
+world revision N+3:
+  AcceptanceRecorded(attention) → V2AttentionChanged
 ```
 
 规则：
 
 1. Settlement 必须先成为 `CommittedWorldEventRef`；proposal 不得引用未来 event ID，也不得因“计划同批提交”跳过 source resolver；
-2. 每个 domain change 有独立 mutation hash、proposal、acceptance 和 CAS；
-3. 需要共同生效的 downstream changes 放进一个普通 Ledger commit，按现有 batch invariant 排成相邻 acceptance/mutation pairs；不引入新的 UoW manifest schema；
-4. 任一 before image、source authority、Acceptance 或 hash 失败则 downstream commit 整体失败；已经在 revision N 提交的 settlement 不回滚；
-5. 未列出的 projection 保持 byte-equivalent；
-6. Settlement 已发生但某些 downstream proposal 未被接受是合法状态：相应 projection 保持不变，不能伪称已调整；
-7. retry 复用 proposal、draw（若有）和 event identity；world revision 已变化则旧 proposal stale，重新 deliberation；
-8. 如果三个 downstream changes 不要求共同生效，也可分别 commit，但 trace 必须明确哪些已经结算，禁止 reducer 自动补齐。
+2. 每个 domain change 有独立 mutation hash、proposal、acceptance 和 CAS；每个 `AcceptanceRecorded → mutation` pair单独提交；
+3. 一个pair成功会推进world revision，下一域proposal必须在该最新revision重新评估，不能复用N上的旧proposal；
+4. 任一before image、source authority、Acceptance或hash失败只回滚当前pair；先前已经提交的settlement和其他domain pair保持有效；
+5. 部分更新是合法且必须可表示的状态：例如Resource已调整而Goal/Attention未调整。Situation只展示已提交heads，不推断或自动补齐缺失域；
+6. 未列出的projection保持byte-equivalent；
+7. Goal域不存在settlement写lane：adapter不得生成Goal progress/block/unblock/complete等mutation，只暴露committed source；Deliberation可选择no-change、主观更新或recognize strict CompletionEvidence，operator只可证据完备地补结算；
+8. retry只复用仍pin当前revision的direct proposal；revision变化后旧proposal必须stale并重新deliberation；
+9. trace逐域记录成功、拒绝、跳过与待重审，不使用“跨域原子成功”措辞，也不引入UoW manifest。
 
 ## 8. SituationCompiler 的确定性边界
 
@@ -465,7 +681,7 @@ reason = no_authority | not_applicable | privacy_ceiling | budget_truncated
 | location scene visibility | Location head | 原值；不是披露许可 | unavailable | 精确 location disclosure 另按 privacy meet |
 | activities | active lifecycle-valid Plan/Activity heads | stable sort `(importance desc, id asc)` | 空列表 | 每项 privacy filter |
 | participants | Plan/Occurrence/NPC exact refs | 去重稳定排序 | 不从对话猜测 | participant 最严格 privacy |
-| goals | non-terminal Goal heads | stable sort `(importance desc, due relation, id)` | 空列表 | 每 Goal privacy filter |
+| goals | non-terminal Goal heads | stable sort `(importance desc, due relation, id)`；默认只投影status/class，不投影GoalRationale/InternalIntention text | 空列表 | 每 Goal privacy filter；原文需explicit viewer grant |
 | goal due relation | Goal frozen due window + logical time | `none|future|open|overdue` | due 缺失为 none | 继承 Goal privacy |
 | resources | actor Resource heads | 消费 committed band；验证 head pinned policy 可识别，绝不按当前 policy 重算 | 每个缺 kind显式 unavailable；未知 source policy fail closed | 默认 internal；viewer 需明确 policy |
 | resource pressure | available resource values + policy | catalog 聚合，不触发行为 | 无资源为 unavailable | 继承最严格 resource visibility |
@@ -525,11 +741,18 @@ SituationProjection
 | GS16-AUTH-006 | expected revision 正确但 current semantic head 不同 | CAS 拒绝 |
 | GS16-AUTH-007 | event ID 不等于 accepted_event_ref | 拒绝 |
 | GS16-AUTH-008 | duplicate proposal/transition/change/event ID | 拒绝或严格幂等；不得二次变化 |
-| GS16-AUTH-009 | failed multi-domain UoW 只落一半 | 整批回滚 |
+| GS16-AUTH-009 | 前一domain pair成功、后一pair失败 | 前一pair保留、当前pair原子回滚；Situation显示合法部分更新 |
 | GS16-AUTH-010 | 只有 OperatorObservation、无 active domain ActorAuthority | operator mutation 拒绝 |
 | GS16-AUTH-011 | ActorAuthority operation/expiry/principal/values digest 不匹配 | 拒绝 |
-| GS16-AUTH-012 | 随机选择缺 draw binding、候选集被篡改或 retry 重抽 | 拒绝；CAS retry 复用 exact draw |
-| GS16-AUTH-013 | after.updated_at/opened_at/since/closed_at 不等 event/Clock time | 拒绝 |
+| GS16-AUTH-020 | policy.1 authority伪装包含v2 operation、policy version/digest/catalog subset不匹配 | `.16` domain拒绝；policy.1历史仍可按legacy catalog replay |
+| GS16-AUTH-021 | Clock cause自报latest ref/revision/hash/from/to，或绕过projection/history | 拒绝；只信`resolve_latest_clock(pinned_state)`结果 |
+| GS16-AUTH-022 | Clock history latest revision不是最大、to不等current logical time、policy artifact不匹配 | consistency/resolver fail closed |
+| GS16-AUTH-012 | `.16` 中提交任意 `selection_mode=random_draw`，包括携带完整/薄 RandomDrawProjection | 一律 `random_authority_not_installed`；零状态变化 |
+| GS16-AUTH-016 | direct 携带任何 RandomDrawAuthority；Goal direct 不带 draw | 前者拒绝；后者按正常 typed basis/authority 验证，不被 RandomAuthority 缺失阻塞 |
+| GS16-AUTH-018 | deliberative basis 是自由 EvidenceRef、错 typed parser/actor/revision/hash/capability | ProposalRecorded 拒绝且零残留 |
+| GS16-AUTH-019 | after privacy 弱于最严格 basis privacy；internal intention 声称 public | 拒绝；internal intention floor 固定 private |
+| GS16-AUTH-017 | proposal transition_kind/event映射错误、payload JSON非object或非canonical | ProposalRecorded拒绝且零残留 |
+| GS16-AUTH-013 | after.updated_at/opened_at/since/closed_at 不等 event/Clock time，或updated_at早于before | 拒绝 |
 | GS16-AUTH-014 | mechanical event 被注册为 typed mutation 或携带 Acceptance | registry/contract test 失败 |
 | GS16-AUTH-015 | legacy `GoalProgressed/Resumed/Abandoned/Compensated` payload 进入 v2 | unknown event/contract 拒绝；只接受冻结的 `V2*` 名称 |
 
@@ -537,19 +760,30 @@ SituationProjection
 
 | ID | 攻击 | 预期 |
 |---|---|---|
-| GS16-GOAL-001 | progress delta 为负、溢出或 before+delta≠after | 拒绝；禁止 clamp |
+| GS16-GOAL-001 | progress delta ≤0、溢出或 before+delta≠after | 拒绝；禁止 clamp/空mutation |
 | GS16-GOAL-002 | progress 到 10000 自动 completed | head 仍非 terminal |
-| GS16-GOAL-003 | completion contract 在 Complete 时被替换 | 拒绝 |
+| GS16-GOAL-003 | CompletionContract unknown kind/schema、registry mapping/digest/privacy错误、evidence早于cutoff或parser值不匹配 | 拒绝 |
 | GS16-GOAL-004 | pending Action/provider accepted 当 completion evidence | 拒绝 |
 | GS16-GOAL-005 | settled evidence hash/revision/event type 不匹配 | 拒绝 |
 | GS16-GOAL-006 | terminal goal pause/resume/progress/reopen | 拒绝 |
-| GS16-GOAL-007 | Expired 使用 wall clock、非 latest applicable Clock 或未到 due | 拒绝 |
-| GS16-GOAL-008 | compensation 指向非 latest、其他 goal 或 open transition | 拒绝 |
+| GS16-GOAL-007 | Expired 使用 wall clock、非resolver latest Clock projection、cause自报Clock或未到due | 拒绝 |
+| GS16-GOAL-008 | compensation 指向非latest/其他goal/错event binding，或caller用target lane字段升权 | 拒绝；effective lane从exact target/lineage重导 |
 | GS16-GOAL-009 | blocker ref 不存在、跨 world 或 aliases 另一 authority | 拒绝 |
 | GS16-GOAL-010 | Goal event 改 Affect/Memory/Attention | zero-cascade diff 失败 |
 | GS16-GOAL-011 | 多 blocker 只解除一个却被强制 active | 保持 blocked；exact diff 保留其余 blocker |
-| GS16-GOAL-012 | paused/blocked goal 收到 prior-revision settled progress | 可 progress 且状态不隐式变化 |
+| GS16-GOAL-012 | Runtime见到settlement自动增长progress；或Deliberation无exact settled/Fact/Experience basis | 拒绝；source只供主观评估，no-change不产生event |
 | GS16-GOAL-013 | revise 偷改 outcome/identity/progress 或事后伪造 completion contract | 拒绝 |
+| GS16-GOAL-014 | supersedes_goal缺失、跨actor、自指、非terminal或stale exact binding | 拒绝；只有同actor既存terminal Goal可被supersede |
+| GS16-GOAL-015 | spontaneous internal basis + direct 打开合法 Goal | 接受；不要求外部evidence或RandomAuthority |
+| GS16-GOAL-016 | reducer按event/outcome类型硬编码progress delta或contribution | property test失败；只验typed basis、正delta算术、隐私与时间 |
+| GS16-GOAL-017 | pause/resume/abandon自由reason字符串或错operation分类 | schema/reducer拒绝；只接受对应typed reason catalog |
+| GS16-GOAL-018 | Complete把evidence塞进cause、deliberative/operator无独立union evidence、错union/parser | 拒绝；两lane均strict，operator只reauth |
+| GS16-GOAL-019 | Activity/Plan/Action/Receipt用ID/ref/status/event type拼CompletionEvidence | unsupported/fail closed；首发只装settled occurrence与active Fact parser |
+| GS16-GOAL-020 | accepted rationale/internal intention被Fact、Experience或Completion resolver采信 | 拒绝；Acceptance不升级主观material |
+| GS16-GOAL-021 | rationale非canonical trim/NFC、空/超长、任意Unicode Cc、自由ref/blob或viewer默认泄露原文 | schema/projection测试失败 |
+| GS16-GOAL-022 | 裸blocker、wrong removed fingerprint/basis/rationale、settlement自动Block/Unblock、operator直接选择 | 拒绝；typed blocker + deliberative-only，纠错走exact compensation |
+| GS16-GOAL-023 | settlement adapter提交任意Goal mutation | 拒绝；Goal无settlement写lane，source只供Deliberation |
+| GS16-GOAL-024 | blocked Goal Complete后仍保留blocker或removed fingerprints不完整 | 拒绝；after blockers显式为空 |
 
 ### 9.3 Location
 
@@ -617,6 +851,7 @@ SituationProjection
 | GS16-SQL-005 | 从更旧 bundle 连续迁移到 `.16` | 每段先按旧规则验证，最终 rebuild 一致 |
 | GS16-SQL-006 | 旧裸 Goal/location/needs 被自动升级 typed authority | 必须为空/unavailable；测试失败 |
 | GS16-SQL-007 | replay 期间调用 model/random/network/wall clock | 零调用 |
+| GS16-SQL-008 | `.15` legacy hash错误包含Clock history，或`.16` reopen丢失/改写Clock history | 前者按legacy exact hash拒绝漂移；后者roundtrip/rebuild测试失败 |
 
 ## 10. `.15→.16` 迁移清单
 
@@ -629,23 +864,24 @@ goals, goal_transitions, goal_proposals, goal_proposal_ids
 locations, location_transitions, location_proposals, location_proposal_ids
 resources, resource_transitions, resource_proposals, resource_proposal_ids
 attentions, attention_transitions, attention_proposals, attention_proposal_ids
+clock_transition_history
 ```
 
 不新增 `situations` 或 `situation_transitions`。Situation 是 Snapshot 编译产物。
 
-`.16` semantic payload 包含四组 head/history；pending proposal 和 proposal ID 沿用既有决策：若它们当前不属于 semantic payload，则保持一致，不为 `.16` 单独改变 hash 语义。所有 live consistency validator 检查：唯一 identity、连续 revision、before/after 连续、head 等于 latest transition、proposal durable index 完整。
+`.16` semantic payload 包含四组 head/history、`clock_transition_history`与WorldOccurrence的`settled_outcome_ref`；pending proposal 和 proposal ID 沿用既有决策：若它们当前不属于 semantic payload，则保持一致，不为 `.16` 单独改变 hash 语义。`.15` legacy semantic branch明确不含Clock history与`settled_outcome_ref`。所有 live consistency validator 检查：唯一 identity、连续 revision、before/after 连续、head 等于 latest transition、proposal durable index完整，以及Clock history revision/event唯一递增、latest.to等于current logical time、Occurrence只有settled current head可带outcome。
 
 ### 10.2 Verified migration 顺序
 
 1. 读取 `.15` head cursor、bundle、state JSON、semantic hash、state hash；
 2. 用保留的 `.15` semantic payload 分支验证旧 semantic hash，并用现有 persisted state hash 验证 head state/cursor；
 3. 不声称调用不存在的 `.15` reducer runner；仓库当前只安装目标 reducer artifact。若未来引入 archived bundle runner，必须另立 ADR/bundle，不在 `.16` 临时扩 scope；
-4. 用 `.16` 目标 reducer 从 immutable events replay 到相同 cursor；旧未注册事件按既有 catalog/legacy handling fail closed，不倒造 `.16` events；
-5. 目标 `.16` state 的四组新字段全部空；不解析旧 prompt、`SituationStateProjection`、legacy Goal/needs/location/attention 字符串；
-6. 比较目标 replay 的既有 `.15` authority slices 与已验证 head，确保 `.16` 零级联地只增加空新字段；
+4. 用 `.16` 目标 reducer 从 immutable events replay 到相同 cursor；reducer从既有`ClockAdvanced` events重建`clock_transition_history`，并从typed occurrence settlement events重建`settled_outcome_ref`；不改event envelope logical_time语义，旧未注册事件按既有 catalog/legacy handling fail closed，不倒造 `.16` events；
+5. 目标 `.16` state 的四组domain新字段全部空，Clock history按旧Clock events重建；不解析旧 prompt、`SituationStateProjection`、legacy Goal/needs/location/attention 字符串；
+6. 比较目标 replay 的既有 `.15` authority slices 与已验证 head，确保domain新字段为空，新增的Clock history与Occurrence outcome都可由旧typed events逐项复算；
 7. 在一个 SQLite transaction 写 state JSON、semantic hash、bundle version、state hash；
 8. close/reopen，再 direct rebuild，三者 projection/hash/cursor 一致；
-9. migration 测试只断言旧字段没有被升格及新 slice unavailable；不新增未定义的持久化 migration report。原始 legacy 内容仍只存在于其原始事件/旧存储归档；
+9. migration 测试断言旧domain字段没有被升格、新domain slice unavailable，并验证Clock history与旧`ClockAdvanced` log逐项一致；不新增未定义的持久化 migration report。原始 legacy 内容仍只存在于其原始事件/旧存储归档；
 10. 更新 supported migration set，保留 `.15` legacy semantic payload/hash 分支。
 
 对于新世界，Goal/Location/Resource/Attention 都可为空并由 Situation 显式输出 unavailable。需要初始化 Location/Resource/Attention 时，必须由 active deployment ActorAuthority 通过相应 operator proposal；不能靠 Pydantic defaults、`WorldStarted` 或隐式 seed lane 制造状态。Goal 可由普通 deliberative proposal 打开。
@@ -657,10 +893,10 @@ attentions, attention_transitions, attention_proposals, attention_proposal_ids
 - `WorldRuntime` 暴露四个 domain proposal command，不暴露“set situation”；
 - Deliberation 只能返回 typed proposal candidates；Adapter 不自行接受；
 - Operator command 必须解析 active domain ActorAuthority；可另写 exact observation 作审计，再提 operator-lane proposal，但 observation 不授权；
-- activity/occurrence/action settlement 先 commit；下一 world revision 的 adapter 才能用其 `CommittedWorldEventRef` 构造 proposal；
+- activity/occurrence/action settlement 先 commit；Resource/Attention settlement adapter可在下一revision构造其合法proposal，但Goal progress必须由Deliberation主观评估该typed source，Runtime不得自动增长；
 - `advance()` 在 `ClockAdvanced` 后确定性枚举 due Goal、Resource interval 与 Attention expiry：Goal/Resource 写 exact mechanical after，Attention 只打开唯一 due trigger；
 - recovery 使用同一 idempotency material，不生成新结果；
-- RandomDraw 只在候选选择发生时产生，并被 proposal 引用。
+- `.16` producer 只生成 `selection_mode=direct`；不得生成、伪造或接受 RandomDraw。后续 RandomAuthority 通过独立 bundle 验收后才能启用。
 
 ### 11.2 Consumers
 
@@ -678,7 +914,7 @@ attentions, attention_transitions, attention_proposals, attention_proposal_ids
 
 至少提供四条可读 fixture：
 
-1. `ActivityCompleted committed → 下一 revision proposals → V2ResourceStateAdjusted + V2GoalProgressed + V2AttentionChanged → Situation recompiled → Capsule consumed`；
+1. `ActivityCompleted committed → latest revision V2Resource pair → Deliberation对Goal作no-change或带contribution/rationale的positive-progress pair → new latest revision V2Attention pair → 每步 Situation recompiled`，并含后一pair失败而前面部分更新保留的分支；
 2. `ClockAdvanced → V2GoalExpired/V2ResourceClockAdjusted + attention expiry due trigger → Deliberation 可选 V2AttentionChanged/no-change → Situation recompiled`；
 3. `private Location/Goal → internal Situation available → viewer Situation redacted`；
 4. `blocked Goal + depleted resource → Advisory 提出多种解释 → Deliberation 可选择不同 stance`，证明没有固定情绪/话术映射。
@@ -710,8 +946,19 @@ attentions, attention_transitions, attention_proposals, attention_proposal_ids
 - 四个独立 authority Module 均有 CAS/history/compensation；其非 mechanical mutation 有独立 proposal/acceptance family，Clock event 明确不属于 typed family；
 - 四个 proposal selector/contract/mutation owner 与全部 `V2*` event names 按 4.1 冻结，legacy 同名 producer 无法进入 v2 catalog；
 - operator lane 必须 exact resolve active deployment ActorAuthority 与 domain operation；OperatorObservation 单独存在不能授权；
-- settlement 使用“先 commit、下一 revision proposal”两阶段，没有 future/prospective source shortcut；
-- 随机 proposal 的 RandomDrawBinding 与 mutation hash、候选集、retry/supersede lineage 完整闭环；
+- ActorAuthority policy.1/digest/legacy catalog保持可回放；`.16`只接受digest绑定四个v2治理operation catalog的policy.2，并验证allowed-operations subset；
+- ClockAdvanced reducer冻结computed event ref/world revision/payload hash/from/to/installed policy到immutable history；domain只信latest resolver，Clock history进入`.16` semantic/SQLite/rebuild而不进入`.15` legacy hash，旧event envelope logical_time语义不变；
+- settlement使用“先commit、下一revision proposal”两阶段；每域pair按最新revision串行提交，部分更新合法，没有future/prospective source shortcut或跨域原子承诺；
+- Goal CompletionContract为typed frozen contract，cutoff后的exact evidence才能完成；
+- `.16` 对所有 `selection_mode=random_draw` 无条件 fail closed，薄 RandomDrawProjection 不算支持；`direct` 是可用路径且 Goal direct 不因 RandomAuthority 缺失受阻；
+- deliberative mutation 只接受 typed `DeliberativeBasisBinding`，resolver exact 解析 capability 与最严格 privacy floor；spontaneous internal basis 可授权受限的 Goal/Attention/Resource 自主选择，但不能伪造 Location、机械progress/completion；Goal progress还须exact settled/Fact/Experience basis并由Deliberation主观给出正delta；
+- `supersedes_goal_id` 只可 exact 指向同 actor、非 self、既存且 terminal 的 Goal；
+- Goal progress只由Deliberation基于exact settled/Fact/Experience作正delta主观评估，no-change零Goal event，Runtime不自动增长；Complete仍使用strict contract；pause/resume/abandon使用typed reason catalog；
+- Complete evidence与cause分离；deliberative recognition/operator补结算均strict且operator只reauth，Goal无settlement写lane；首发只支持settled occurrence outcome与active Fact predicate；
+- CompletionContract closed registry冻结kind/schema/digest/privacy，Goal privacy meet contract/evidence/basis/rationale/target；unknown或不匹配fail closed；
+- GoalRationale/InternalIntention使用closed class + trim→NFC bounded text，拒绝全部Unicode Cc并带privacy；Acceptance不升级为Fact/Experience/Completion证据，viewer默认隐藏原文；
+- Goal blocker是带fingerprint的typed集合，Resolution逐项绑定removed fingerprint/basis/rationale；Block/Unblock与Progress/Pause/Resume/Abandon均deliberative-only，blocked Complete显式清空blockers，operator纠错走exact compensation；
+- 每域proposal的transition_kind为closed Literal并与event type完整映射，canonical payload JSON必须解码为object；
 - after/opened/since/closed 时间全部 pin event/Clock Logical Time；
 - Clock expiry/recovery 有 exact authority、确定性 idempotency 与 recovery；
 - 每个 domain event 通过 zero-cascade projection diff；
@@ -720,6 +967,7 @@ attentions, attention_transitions, attention_proposals, attention_proposal_ids
 - missing 与 redacted 显式区分；viewer 不泄露 private Goal/Location/Resource/Attention；
 - live compile、cache compile、reopen compile、rebuild compile byte-equivalent；internal semantic hash 不因 viewer/budget 改变，viewer projection hash 精确绑定 scope/budget；
 - `.15→.16` 非空 SQLite migration、连续跨版本、tamper 和中断恢复通过；
+- WorldOccurrence `settled_outcome_ref`只由typed settlement冻结，`.15` semantic排除、`.16` semantic/SQLite/replay纳入；
 - legacy Goal/needs/location/attention 没有被自动升格；
 - ContextCapsule 有 source-bound 消费 trace，但没有固定处境→情绪/话术规则；
 - 旧 `context_assembler`/life runtime 写旁路已删除或有可验证隔离；
@@ -734,11 +982,13 @@ attentions, attention_transitions, attention_proposals, attention_proposal_ids
 - Goal、Location、Resource、Attention 是四个 authority Module，不共享 reducer；
 - Situation 是只读编译结果，不是第五个 authority；
 - Clock lane 是 typed mechanical authority，不注册 typed proposal mutation、不伪装 Acceptance；Attention 到期只打开 due trigger，不替角色选择 after；
+- latest Clock按`clock_transition_history`最大computed world revision选择并要求to等于current logical time，不信cause自报；
 - Location/Attention 每 actor 单 head，Resource 每 `(actor, kind)` 单 head，Goal 每 ID 单 head；
 - Resource 首发只有三个 kind，所有数值为 `0..10000` 定点；
 - 到期只打开/执行显式 transition，不做查询时 TTL；
 - terminal Goal 不 reopen，progress `10000` 不自动 complete；
-- cross-domain change 只通过显式原子 UoW，不通过 reducer cascade；
+- `.16` 仅安装 direct selection；RandomAuthority 的 trigger/slot、prior entropy、weighted candidates、frequency budget、deterministic sampler、Recorded/Superseded Ledger reducer与防复用消费合同属于后续 bundle；
+- cross-domain change 按每域pair逐次提交，不通过reducer cascade；已提交部分不因后续域失败回滚；
 - legacy 裸状态只隔离，不升级为 typed authority；
 - Compiler 的 internal semantic identity 包含 internal policy/source revisions；viewer scope、budget 和 truncation 只进入独立 viewer projection identity；
 - 人类感来自主 Deliberation 对可靠处境的自由解释，不来自 reducer 的固定行为表。
