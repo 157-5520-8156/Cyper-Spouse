@@ -261,3 +261,92 @@ def test_live_qq_observation_cli_can_assert_evidence_status(tmp_path, capsys) ->
     passing_output = json.loads(capsys.readouterr().out)
     assert passing_output["evidence_status"] == "pass"
     assert passing_output["experience_status"] == "experience_watch"
+
+
+def test_live_qq_observation_cli_can_assert_experience_status(tmp_path, capsys) -> None:
+    one_bubble_path = tmp_path / "one-bubble.jsonl"
+    one_bubble_path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "outcome": "reply_delivered",
+                    "cadence": "hot",
+                    "elapsed_ms": 1000 + index,
+                    "first_visible_elapsed_ms": 800 + index,
+                    "message_kinds": ["reply"],
+                    "segment_count": 1,
+                    "selected_affordance_kind": "soft_repair"
+                    if index % 2 == 0
+                    else "let_it_pass",
+                }
+            )
+            for index in range(8)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        _main(
+            (
+                "--observation-jsonl",
+                str(one_bubble_path),
+                "--assert-live-evidence",
+                "--assert-experience-evidence",
+            )
+        )
+        == 1
+    )
+    one_bubble_output = json.loads(capsys.readouterr().out)
+    assert one_bubble_output["evidence_status"] == "pass"
+    assert one_bubble_output["experience_status"] == "experience_watch"
+
+    varied_path = tmp_path / "varied.jsonl"
+    affordances = (
+        "soft_repair",
+        "let_it_pass",
+        "approach",
+        "withdraw_slightly",
+        "gentle_check_in",
+        "playful_deflect",
+        "share_small_self_detail",
+        "delayed_afterthought",
+    )
+    varied_path.write_text(
+        "\n".join(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "outcome": "reply_delivered",
+                    "cadence": "hot",
+                    "elapsed_ms": 1200 + index,
+                    "first_visible_elapsed_ms": 900 + index,
+                    "message_kinds": ["reply", "afterthought"]
+                    if index == 0
+                    else ["reply"],
+                    "segment_count": 2 if index in {0, 1} else 1,
+                    "multi_segment": index in {0, 1},
+                    "selected_affordance_kind": affordances[index],
+                }
+            )
+            for index in range(8)
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    assert (
+        _main(
+            (
+                "--observation-jsonl",
+                str(varied_path),
+                "--assert-live-evidence",
+                "--assert-experience-evidence",
+            )
+        )
+        == 0
+    )
+    varied_output = json.loads(capsys.readouterr().out)
+    assert varied_output["evidence_status"] == "pass"
+    assert varied_output["experience_status"] == "pass"

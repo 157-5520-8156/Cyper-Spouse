@@ -723,7 +723,8 @@ Implementation 的内部 Seam，顶层调用者不需要知道它们。
   热启动样本不足、缺 first-visible 计时或 hot P95 超过目标都会在报告中显式标出，不能把空
   JSONL 当作真实平台通过。需要把它作为验证门时，追加 `--assert-live-evidence`，证据不足或
   latency watch 会非零退出；experience status 会额外标出固定 affordance、过高单气泡率或缺少
-  多段/afterthought 证据，供人工复核“一问一答”是否回潮；
+  多段/afterthought 证据，供人工复核“一问一答”是否回潮；若要把体验模式也作为自动门禁，
+  可追加 `--assert-experience-evidence`；
 - 任何迁移阶段都不能只看测试通过而忽略 baseline 变差。
 
 已记录的实测证据（不纳入仓库，以避免把运行数据或环境细节提交）：
