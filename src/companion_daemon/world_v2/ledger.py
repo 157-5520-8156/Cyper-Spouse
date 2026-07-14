@@ -18,7 +18,13 @@ from .reducers import (
     reduce_event,
     require_reducer_bundle,
 )
-from .schemas import CommitResult, LedgerProjection, ProjectionCursor, WorldEvent
+from .schemas import (
+    CommitResult,
+    CommittedWorldEventRef,
+    LedgerProjection,
+    ProjectionCursor,
+    WorldEvent,
+)
 
 
 class LedgerPort(Protocol):
@@ -44,6 +50,14 @@ class LedgerPort(Protocol):
     def project_at(self, cursor: ProjectionCursor) -> LedgerProjection: ...
 
     def lookup_event_commit(self, event_id: str) -> tuple[WorldEvent, CommitResult] | None: ...
+
+    def resolve_committed_event_refs(
+        self, event_ids: Sequence[str], *, at_world_revision: int
+    ) -> dict[str, CommittedWorldEventRef]: ...
+
+    def resolve_initial_world_event_ref(
+        self, *, at_world_revision: int
+    ) -> CommittedWorldEventRef: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -255,6 +269,36 @@ class WorldLedger:
                 return stored.event, commit.result
         raise RuntimeError(f"event {event_id!r} has no owning commit")
 
+    def resolve_committed_event_refs(
+        self, event_ids: Sequence[str], *, at_world_revision: int
+    ) -> dict[str, CommittedWorldEventRef]:
+        """Resolve a bounded source set through the in-memory event-id index."""
+
+        identities = tuple(sorted(set(event_ids)))
+        if len(identities) != len(event_ids):
+            raise ValueError("committed event source identities must be unique")
+        resolved: dict[str, CommittedWorldEventRef] = {}
+        for event_id in identities:
+            stored = self._by_event_id.get(event_id)
+            if stored is None:
+                raise ValueError(f"committed event {event_id!r} is unavailable")
+            if stored.world_revision > at_world_revision:
+                raise ValueError("committed event source is newer than the pinned projection")
+            if event_definition(stored.event.event_type).revision_class is not RevisionClass.WORLD:
+                raise ValueError("Situation source is not a committed world event")
+            resolved[event_id] = _committed_ref(stored)
+        return resolved
+
+    def resolve_initial_world_event_ref(
+        self, *, at_world_revision: int
+    ) -> CommittedWorldEventRef:
+        if not self._events:
+            raise ValueError("world has no initial event authority")
+        stored = self._events[0]
+        if stored.event.event_type != "WorldStarted" or stored.world_revision > at_world_revision:
+            raise ValueError("world has no pinned WorldStarted authority")
+        return _committed_ref(stored)
+
     def rebuild(self, *, reducer_bundle_version: str = REDUCER_BUNDLE_VERSION) -> LedgerProjection:
         require_reducer_bundle(reducer_bundle_version)
         state = ReducerState()
@@ -275,3 +319,19 @@ class WorldLedger:
             state=state,
             reducer_bundle_version=reducer_bundle_version,
         )
+
+
+def _committed_ref(stored: _StoredEvent) -> CommittedWorldEventRef:
+    event = stored.event
+    return CommittedWorldEventRef(
+        event_id=event.event_id,
+        event_type=event.event_type,
+        world_revision=stored.world_revision,
+        payload_hash=event.payload_hash,
+        logical_time=event.logical_time,
+        continuation_refs=(
+            (str(event.payload()["appraisal_trigger_ref"]),)
+            if event.event_type == "WorldOccurrenceSettled"
+            else ()
+        ),
+    )

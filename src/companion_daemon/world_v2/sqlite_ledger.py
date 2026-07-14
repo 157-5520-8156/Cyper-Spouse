@@ -21,7 +21,13 @@ from .reducers import (
     reduce_event,
     require_reducer_bundle,
 )
-from .schemas import CommitResult, LedgerProjection, ProjectionCursor, WorldEvent
+from .schemas import (
+    CommitResult,
+    CommittedWorldEventRef,
+    LedgerProjection,
+    ProjectionCursor,
+    WorldEvent,
+)
 from .upcasting import CURRENT_SCHEMA_VERSION, require_target_schema, upcast_event
 
 
@@ -881,6 +887,91 @@ class SQLiteWorldLedger:
             if event is None:
                 raise LedgerIntegrityError("event is absent from its owning commit")
             return event, result
+
+    def resolve_committed_event_refs(
+        self, event_ids: Sequence[str], *, at_world_revision: int
+    ) -> dict[str, CommittedWorldEventRef]:
+        """Resolve only requested sources through the unique event-id index."""
+
+        identities = tuple(sorted(set(event_ids)))
+        if len(identities) != len(event_ids):
+            raise ValueError("committed event source identities must be unique")
+        if not identities:
+            return {}
+        placeholders = ",".join("?" for _ in identities)
+        with self._thread_lock:
+            rows = tuple(
+                self._connection.execute(
+                    f"""SELECT event_id, world_revision, event_json, event_hash
+                        FROM world_v2_events
+                        WHERE world_id = ? AND event_id IN ({placeholders})""",
+                    (self._world_id, *identities),
+                )
+            )
+            if len(rows) != len(identities):
+                raise ValueError("one or more committed Situation sources are unavailable")
+            resolved = {
+                str(row["event_id"]): self._committed_ref_from_row(
+                    row, at_world_revision=at_world_revision
+                )
+                for row in rows
+            }
+            if set(resolved) != set(identities):
+                raise LedgerIntegrityError("event source query returned the wrong identities")
+            return resolved
+
+    def resolve_initial_world_event_ref(
+        self, *, at_world_revision: int
+    ) -> CommittedWorldEventRef:
+        with self._thread_lock:
+            row = self._connection.execute(
+                """SELECT event_id, world_revision, event_json, event_hash
+                   FROM world_v2_events
+                   WHERE world_id = ?
+                   ORDER BY ledger_sequence ASC LIMIT 1""",
+                (self._world_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError("world has no initial event authority")
+            resolved = self._committed_ref_from_row(
+                row, at_world_revision=at_world_revision
+            )
+            if resolved.event_type != "WorldStarted":
+                raise ValueError("world has no pinned WorldStarted authority")
+            return resolved
+
+    def _committed_ref_from_row(
+        self, row: sqlite3.Row, *, at_world_revision: int
+    ) -> CommittedWorldEventRef:
+        event_json = row["event_json"]
+        if not isinstance(event_json, str) or not hmac.compare_digest(
+            hashlib.sha256(event_json.encode()).hexdigest(), str(row["event_hash"])
+        ):
+            raise LedgerIntegrityError("event source envelope hash mismatch")
+        event = WorldEvent.model_validate_json(event_json)
+        validate_event_identity(event)
+        world_revision = int(row["world_revision"])
+        if (
+            event.world_id != self._world_id
+            or event.event_id != row["event_id"]
+        ):
+            raise LedgerIntegrityError("event source row does not match its authority")
+        if world_revision > at_world_revision:
+            raise ValueError("committed event source is newer than the pinned projection")
+        if event_definition(event.event_type).revision_class is not RevisionClass.WORLD:
+            raise ValueError("Situation source is not a committed world event")
+        return CommittedWorldEventRef(
+            event_id=event.event_id,
+            event_type=event.event_type,
+            world_revision=world_revision,
+            payload_hash=event.payload_hash,
+            logical_time=event.logical_time,
+            continuation_refs=(
+                (str(event.payload()["appraisal_trigger_ref"]),)
+                if event.event_type == "WorldOccurrenceSettled"
+                else ()
+            ),
+        )
 
     def _verified_commit_locked(
         self, commit_id: str
