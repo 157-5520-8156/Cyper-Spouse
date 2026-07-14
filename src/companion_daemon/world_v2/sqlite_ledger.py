@@ -310,6 +310,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.11",
                 "world-v2-reducers.12",
                 "world-v2-reducers.13",
+                "world-v2-reducers.14",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -489,6 +490,7 @@ class SQLiteWorldLedger:
             "world-v2-reducers.11",
             "world-v2-reducers.12",
             "world-v2-reducers.13",
+            "world-v2-reducers.14",
             REDUCER_BUNDLE_VERSION,
         }:
             payload.pop("commitments", None)
@@ -543,6 +545,10 @@ class SQLiteWorldLedger:
             memory_candidate_transitions=projection.memory_candidate_transitions,
             memory_candidate_proposals=projection.memory_candidate_proposals,
             memory_candidate_proposal_ids=projection.memory_candidate_proposal_ids,
+            character_core=projection.character_core,
+            character_core_transitions=projection.character_core_transitions,
+            character_core_proposals=projection.character_core_proposals,
+            character_core_proposal_ids=projection.character_core_proposal_ids,
             appraisals=projection.appraisals,
             affect_baselines=projection.affect_baselines,
             affect_episodes=projection.affect_episodes,

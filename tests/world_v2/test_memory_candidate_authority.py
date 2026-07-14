@@ -1663,7 +1663,7 @@ def test_sqlite_migrates_nonempty_v13_head_to_v14_and_rebuilds(tmp_path) -> None
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
     projected = migrated.project()
-    assert projected.reducer_bundle_version == "world-v2-reducers.14"
+    assert projected.reducer_bundle_version == "world-v2-reducers.15"
     assert projected.facts == before.facts
     assert projected.memory_candidates == ()
     assert migrated.rebuild() == projected

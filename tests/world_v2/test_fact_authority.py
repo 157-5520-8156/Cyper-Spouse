@@ -829,7 +829,7 @@ def test_sqlite_fact_roundtrip_rebuild_tamper_and_v11_migration(tmp_path) -> Non
             ),
         )
     migrated = SQLiteWorldLedger(path=legacy_path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.14"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.15"
     assert migrated.project().facts == ()
     migrated_message = migrated.project().message_observations[0]
     assert (migrated_message.actor, migrated_message.channel, migrated_message.payload_ref) == (

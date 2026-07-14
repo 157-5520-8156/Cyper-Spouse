@@ -54,6 +54,8 @@ from .commitment_events import (
     CommitmentClockTransitionPayload,
 )
 from .commitment_reducers import reduce_commitment, reduce_commitment_clock
+from .character_core_events import CHARACTER_CORE_PAYLOAD_MODELS, CharacterCoreChangedPayload
+from .character_core_reducers import CHARACTER_CORE_POLICY_REFS, reduce_character_core
 from .fact_events import FACT_PAYLOAD_MODELS, FactAuthorizedMutationPayload, FactChangedPayload
 from .fact_reducers import reduce_fact
 from .experience_events import (
@@ -141,6 +143,9 @@ from .schemas import (
     BudgetReservation,
     BudgetSettlement,
     ClaimLease,
+    CharacterCoreProjection,
+    CharacterCoreProposalProjection,
+    CharacterCoreTransitionProjection,
     CommittedWorldEventRef,
     CommitmentProjection,
     CommitmentProposalProjection,
@@ -185,7 +190,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.14"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.15"
 INSTALLED_APPRAISAL_POLICY_REFS = ("policy:appraisal-v1",)
 INSTALLED_APPRAISAL_MATRIX_VERSION = "appraisal-matrix.1"
 INSTALLED_SOURCE_CLUSTERING_VERSION = "source-clustering.1"
@@ -210,7 +215,7 @@ def _experience_semantic_dump(
     dumped = experience.model_dump(mode="json")
     if (
         reducer_bundle_version
-        not in {"world-v2-reducers.13", REDUCER_BUNDLE_VERSION}
+        not in {"world-v2-reducers.13", "world-v2-reducers.14", REDUCER_BUNDLE_VERSION}
         and isinstance(experience, LegacyExperienceProjection)
     ):
         dumped.pop("authority_contract_version", None)
@@ -289,6 +294,10 @@ class ReducerState(FrozenModel):
     memory_candidate_transitions: tuple[MemoryCandidateTransitionProjection, ...] = ()
     memory_candidate_proposals: tuple[MemoryCandidateProposalProjection, ...] = ()
     memory_candidate_proposal_ids: tuple[str, ...] = ()
+    character_core: CharacterCoreProjection | None = None
+    character_core_transitions: tuple[CharacterCoreTransitionProjection, ...] = ()
+    character_core_proposals: tuple[CharacterCoreProposalProjection, ...] = ()
+    character_core_proposal_ids: tuple[str, ...] = ()
     proposal_ids: tuple[str, ...] = ()
     proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
@@ -720,6 +729,46 @@ class ReducerState(FrozenModel):
             for item in self.memory_candidate_proposals
         ):
             raise ValueError("pending memory proposal is absent from durable index")
+        core_transition_ids = tuple(
+            item.transition_id for item in self.character_core_transitions
+        )
+        if len(core_transition_ids) != len(set(core_transition_ids)):
+            raise ValueError("character core transition ids must be unique")
+        if self.character_core is None:
+            if self.character_core_transitions:
+                raise ValueError("character core transition has no projected head")
+        else:
+            lineage = self.character_core_transitions
+            if not lineage or lineage[0].operation != "initialize":
+                raise ValueError("character core lineage must begin with initialize")
+            if any(item.core_id != self.character_core.core_id for item in lineage):
+                raise ValueError("character core lineage belongs to another core")
+            if tuple(item.entity_revision for item in lineage) != tuple(
+                range(1, len(lineage) + 1)
+            ):
+                raise ValueError("character core lineage revisions must be contiguous")
+            if lineage[0].values_before is not None or any(
+                current.values_before != previous.values_after
+                for previous, current in zip(lineage, lineage[1:])
+            ):
+                raise ValueError("character core lineage values are discontinuous")
+            latest = lineage[-1]
+            if (
+                self.character_core.entity_revision != latest.entity_revision
+                or self.character_core.values != latest.values_after
+                or self.character_core.origin.transition_id != latest.transition_id
+                or self.character_core.origin.accepted_event_ref != latest.accepted_event_ref
+            ):
+                raise ValueError("character core projection does not match lineage head")
+        if len(self.character_core_proposal_ids) != len(
+            set(self.character_core_proposal_ids)
+        ):
+            raise ValueError("character core proposal ids must be unique")
+        if any(
+            item.proposal_id not in set(self.character_core_proposal_ids)
+            for item in self.character_core_proposals
+        ):
+            raise ValueError("pending character core proposal is absent from durable index")
         return self
 
     def semantic_payload(
@@ -770,6 +819,7 @@ class ReducerState(FrozenModel):
                     in {
                         "world-v2-reducers.12",
                         "world-v2-reducers.13",
+                        "world-v2-reducers.14",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else item.model_dump(
@@ -810,7 +860,11 @@ class ReducerState(FrozenModel):
                 (
                     occurrence.model_dump(mode="json")
                     if reducer_bundle_version
-                    in {"world-v2-reducers.13", REDUCER_BUNDLE_VERSION}
+                    in {
+                        "world-v2-reducers.13",
+                        "world-v2-reducers.14",
+                        REDUCER_BUNDLE_VERSION,
+                    }
                     else occurrence.model_dump(
                         mode="json",
                         exclude={
@@ -854,6 +908,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.11",
             "world-v2-reducers.12",
             "world-v2-reducers.13",
+            "world-v2-reducers.14",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["threads"] = tuple(item.model_dump(mode="json") for item in self.threads)
@@ -864,6 +919,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.11",
             "world-v2-reducers.12",
             "world-v2-reducers.13",
+            "world-v2-reducers.14",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["commitments"] = tuple(
@@ -875,6 +931,7 @@ class ReducerState(FrozenModel):
         if reducer_bundle_version in {
             "world-v2-reducers.12",
             "world-v2-reducers.13",
+            "world-v2-reducers.14",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["facts"] = tuple(item.model_dump(mode="json") for item in self.facts)
@@ -883,18 +940,28 @@ class ReducerState(FrozenModel):
             )
         if reducer_bundle_version in {
             "world-v2-reducers.13",
+            "world-v2-reducers.14",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["experience_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.experience_transitions
             )
-        if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+        if reducer_bundle_version in {"world-v2-reducers.14", REDUCER_BUNDLE_VERSION}:
             payload["memory_candidates"] = tuple(
                 item.model_dump(mode="json") for item in self.memory_candidates
             )
             payload["memory_candidate_transitions"] = tuple(
                 item.model_dump(mode="json")
                 for item in self.memory_candidate_transitions
+            )
+        if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            payload["character_core"] = (
+                self.character_core.model_dump(mode="json")
+                if self.character_core is not None
+                else None
+            )
+            payload["character_core_transitions"] = tuple(
+                item.model_dump(mode="json") for item in self.character_core_transitions
             )
         return payload
 
@@ -1146,6 +1213,36 @@ class _MemoryCandidateProposalStore:
             }
         )
 
+
+class _CharacterCoreProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        if not isinstance(event, WorldEvent) or not isinstance(
+            proposal, CharacterCoreProposalProjection
+        ):
+            raise TypeError("character core proposal adapter received incompatible values")
+        return _character_core_proposal_recorded(state, event, proposal=proposal)
+
+    def find(
+        self, state: ReducerState, proposal_id: str
+    ) -> CharacterCoreProposalProjection | None:
+        return next(
+            (item for item in state.character_core_proposals if item.proposal_id == proposal_id),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        return state.model_copy(
+            update={
+                "character_core_proposals": tuple(
+                    item
+                    for item in state.character_core_proposals
+                    if item.proposal_id != proposal_id
+                )
+            }
+        )
+
 _TYPED_PROPOSAL_STORES = {
     "proposal-contract:appraisal-legacy.1": _LegacyAppraisalProposalStore(),
     "proposal-contract:affect-legacy.1": _LegacyAffectProposalStore(),
@@ -1156,6 +1253,7 @@ _TYPED_PROPOSAL_STORES = {
     "proposal-contract:fact.1": _FactProposalStore(),
     "proposal-contract:experience.1": _ExperienceProposalStore(),
     "proposal-contract:memory-candidate.1": _MemoryCandidateProposalStore(),
+    "proposal-contract:character-core.1": _CharacterCoreProposalStore(),
 }
 
 _TYPED_PROPOSAL_REGISTRY = TypedProposalRegistry(
@@ -1685,6 +1783,70 @@ def _memory_candidate_proposal_recorded(
             ),
             "memory_candidate_proposal_ids": (
                 *state.memory_candidate_proposal_ids,
+                proposal.proposal_id,
+            ),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
+def _character_core_proposal_recorded(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    proposal: CharacterCoreProposalProjection | None = None,
+) -> ReducerState:
+    proposal = proposal or CharacterCoreProposalProjection.model_validate_json(
+        event.payload_json
+    )
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("character core proposal must evaluate current world revision")
+    if proposal.proposal_id in state.character_core_proposal_ids:
+        raise ValueError("character core proposal identity is already registered")
+    payload = CharacterCoreChangedPayload.model_validate_json(
+        proposal.proposed_mutation.payload_json
+    )
+    if (
+        payload.proposal_id != proposal.proposal_id
+        or payload.change_id != proposal.change_id
+        or payload.transition_id != proposal.transition_id
+        or payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or payload.expected_entity_revision != proposal.expected_entity_revision
+        or payload.accepted_change_hash != proposal.proposed_change_hash
+        or payload.evidence_refs != proposal.evidence_refs
+        or payload.policy_refs != proposal.policy_refs
+    ):
+        raise ValueError("persisted character core proposal body does not match index")
+    if proposal.policy_refs != CHARACTER_CORE_POLICY_REFS:
+        raise ValueError("character core proposal references uninstalled policy")
+    _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
+    reduce_character_core(
+        state.character_core,
+        state.character_core_transitions,
+        payload,
+        event_type=proposal.proposed_mutation.event_type,
+        event_id=payload.core_after.origin.accepted_event_ref,
+        logical_time=_require_life_time(state, event),
+        actor_authorities=state.actor_authorities,
+        facts=state.facts,
+        fact_history=state.fact_transitions,
+        experiences=state.experiences,
+        experience_history=state.experience_transitions,
+        world_occurrences=state.world_occurrences,
+        committed_events=state.committed_world_event_refs,
+    )
+    return state.model_copy(
+        update={
+            "character_core_proposals": (*state.character_core_proposals, proposal),
+            "character_core_proposal_ids": (
+                *state.character_core_proposal_ids,
                 proposal.proposal_id,
             ),
             "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
@@ -2833,6 +2995,86 @@ def _memory_candidate_changed(state: ReducerState, event: WorldEvent) -> Reducer
     )
 
 
+def _character_core_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = CharacterCoreChangedPayload.model_validate_json(event.payload_json)
+    proposal = _require_authorized_character_core(state, payload)
+    _validate_evidence_authority(state, payload.evidence_refs, require_all=True)
+    core, history = reduce_character_core(
+        state.character_core,
+        state.character_core_transitions,
+        payload,
+        event_type=event.event_type,
+        event_id=event.event_id,
+        logical_time=logical_time,
+        actor_authorities=state.actor_authorities,
+        facts=state.facts,
+        fact_history=state.fact_transitions,
+        experiences=state.experiences,
+        experience_history=state.experience_transitions,
+        world_occurrences=state.world_occurrences,
+        committed_events=state.committed_world_event_refs,
+    )
+    return state.model_copy(
+        update={
+            "character_core": core,
+            "character_core_transitions": history,
+            "character_core_proposals": tuple(
+                item for item in state.character_core_proposals if item != proposal
+            ),
+        }
+    )
+
+
+def _require_authorized_character_core(
+    state: ReducerState,
+    payload: CharacterCoreChangedPayload,
+) -> CharacterCoreProposalProjection:
+    proposal = next(
+        (
+            item
+            for item in state.character_core_proposals
+            if item.proposal_id == payload.proposal_id
+        ),
+        None,
+    )
+    decision = next(
+        (
+            item
+            for item in state.acceptance_decisions
+            if item.proposal_id == payload.proposal_id
+        ),
+        None,
+    )
+    if proposal is None:
+        raise ValueError("character core transition requires persisted typed proposal")
+    if (
+        decision is None
+        or decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+        or not state.acceptance_decisions
+        or state.acceptance_decisions[-1] != decision
+        or not state.committed_world_event_refs
+        or state.committed_world_event_refs[-1].event_type != "AcceptanceRecorded"
+    ):
+        raise ValueError("character core transition requires adjacent accepted authority")
+    if (
+        proposal.transition_kind != payload.operation
+        or proposal.change_id != payload.change_id
+        or proposal.transition_id != payload.transition_id
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.expected_entity_revision != payload.expected_entity_revision
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or proposal.evidence_refs != payload.evidence_refs
+        or json.loads(proposal.proposed_mutation.payload_json)
+        != payload.model_dump(mode="json")
+    ):
+        raise ValueError("accepted character core transition does not match proposal")
+    return proposal
+
+
 def _require_authorized_memory_candidate(
     state: ReducerState,
     payload: MemoryCandidateAuthorizedMutationPayload,
@@ -3948,6 +4190,10 @@ _EVENTS = {
             EventDefinition(event_type, RevisionClass.WORLD, _memory_candidate_changed)
             for event_type in MEMORY_CANDIDATE_PAYLOAD_MODELS
         ),
+        *(
+            EventDefinition(event_type, RevisionClass.WORLD, _character_core_changed)
+            for event_type in CHARACTER_CORE_PAYLOAD_MODELS
+        ),
     )
 }
 
@@ -4074,6 +4320,10 @@ def make_projection(
         memory_candidate_transitions=state.memory_candidate_transitions,
         memory_candidate_proposals=state.memory_candidate_proposals,
         memory_candidate_proposal_ids=state.memory_candidate_proposal_ids,
+        character_core=state.character_core,
+        character_core_transitions=state.character_core_transitions,
+        character_core_proposals=state.character_core_proposals,
+        character_core_proposal_ids=state.character_core_proposal_ids,
         appraisals=state.appraisals,
         affect_baselines=state.affect_baselines,
         affect_episodes=state.affect_episodes,

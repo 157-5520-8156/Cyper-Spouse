@@ -580,7 +580,7 @@ def test_sqlite_commitment_roundtrip_and_rebuild(tmp_path) -> None:
             (legacy_hash, "world-v2-reducers.11", WORLD),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.14"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.15"
     assert migrated.project().commitments == expected.commitments
     assert migrated.rebuild() == migrated.project()
     migrated.close()

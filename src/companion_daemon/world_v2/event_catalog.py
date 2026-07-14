@@ -21,6 +21,7 @@ from .affect_events import AFFECT_PAYLOAD_MODELS
 from .actor_authority_events import ACTOR_AUTHORITY_PAYLOAD_MODELS
 from .authorization_events import AUTHORIZATION_PAYLOAD_MODELS
 from .commitment_events import COMMITMENT_PAYLOAD_MODELS
+from .character_core_events import CHARACTER_CORE_PAYLOAD_MODELS
 from .fact_events import FACT_PAYLOAD_MODELS
 from .experience_events import (
     EXPERIENCE_PAYLOAD_MODELS,
@@ -60,7 +61,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.14"
+    reducer_bundle: str = "world-v2-reducers.15"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -249,6 +250,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **FACT_PAYLOAD_MODELS,
         **EXPERIENCE_PAYLOAD_MODELS,
         **MEMORY_CANDIDATE_PAYLOAD_MODELS,
+        **CHARACTER_CORE_PAYLOAD_MODELS,
         "LegacyExperienceCommitted": LegacyExperienceCommittedPayload,
         **THREAD_MECHANICAL_PAYLOAD_MODELS,
         **ACTOR_AUTHORITY_PAYLOAD_MODELS,
@@ -334,6 +336,10 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         **{
             event_type: "world_id+candidate_id+expected_entity_revision+transition_id"
             for event_type in MEMORY_CANDIDATE_PAYLOAD_MODELS
+        },
+        **{
+            event_type: "world_id+core_id+expected_entity_revision+transition_id"
+            for event_type in CHARACTER_CORE_PAYLOAD_MODELS
         },
         "ActorAuthorityBootstrapped": "world_id+authority_id+transition_id",
         "ActorAuthorityRotated": "world_id+authority_id+expected_entity_revision+transition_id",
@@ -893,6 +899,40 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     ),
                 )
                 for event_type, payload_model in MEMORY_CANDIDATE_PAYLOAD_MODELS.items()
+            ),
+            *(
+                _contract(
+                    event_type,
+                    "proposal_acceptance",
+                    "world",
+                    payload_model.__name__,
+                    allowed_predecessors=("AcceptanceRecorded",),
+                    evidence_types=(
+                        "committed_fact",
+                        "committed_experience",
+                        "committed_world_event",
+                    ),
+                    successors=(
+                        ("CharacterCoreRevised",)
+                        if event_type == "CharacterCoreInitialized"
+                        else (
+                            "CharacterCoreRevised",
+                            "CharacterCoreRevisionCompensated",
+                        )
+                        if event_type == "CharacterCoreRevised"
+                        else (
+                            "CharacterCoreRevised",
+                            "CharacterCoreRevisionCompensated",
+                        )
+                    ),
+                    compensations=(
+                        ("CharacterCoreRevisionCompensated",)
+                        if event_type
+                        in {"CharacterCoreRevised", "CharacterCoreRevisionCompensated"}
+                        else ()
+                    ),
+                )
+                for event_type, payload_model in CHARACTER_CORE_PAYLOAD_MODELS.items()
             ),
             _contract(
                 "AppraisalAccepted",

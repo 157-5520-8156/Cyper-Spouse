@@ -25,6 +25,7 @@ def test_installed_family_manifest_owns_all_current_typed_proposals() -> None:
     assert tuple(item.contract_ref for item in INSTALLED_TYPED_PROPOSAL_FAMILIES) == (
         "proposal-contract:affect-legacy.1",
         "proposal-contract:appraisal-legacy.1",
+        "proposal-contract:character-core.1",
         "proposal-contract:commitment.1",
         "proposal-contract:experience.1",
         "proposal-contract:fact.1",
@@ -44,6 +45,9 @@ def test_installed_family_manifest_owns_all_current_typed_proposals() -> None:
         "proposal-contract:commitment.1"
     )
     assert family_for_mutation("PrivateCommitmentDeadlineBroken") is None
+    assert family_for_mutation("CharacterCoreRevised").contract_ref == (
+        "proposal-contract:character-core.1"
+    )
 
 
 def test_record_routing_preserves_legacy_and_generic_boundaries() -> None:

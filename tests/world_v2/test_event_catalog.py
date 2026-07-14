@@ -20,7 +20,7 @@ def test_catalog_covers_every_reducer_event_with_stable_revision_metadata() -> N
         assert contract.producer
         assert contract.payload_contract
         assert contract.schema_version == "world-v2.1"
-        assert contract.reducer_bundle == "world-v2-reducers.14"
+        assert contract.reducer_bundle == "world-v2-reducers.15"
         assert contract.upcaster == "world-v2-upcasters.1"
         assert contract.idempotency_identity
         schema = contract.json_schema()
@@ -144,3 +144,23 @@ def test_observation_contract_freezes_source_event_identity() -> None:
     contract = event_contract("ObservationRecorded")
 
     assert contract.idempotency_identity == "source+source_event_id"
+
+
+def test_character_core_catalog_closes_revision_and_compensation_lifecycle() -> None:
+    initialized = event_contract("CharacterCoreInitialized")
+    revised = event_contract("CharacterCoreRevised")
+    compensated = event_contract("CharacterCoreRevisionCompensated")
+
+    assert initialized.allowed_predecessors == ("AcceptanceRecorded",)
+    assert initialized.successors == ("CharacterCoreRevised",)
+    assert revised.successors == (
+        "CharacterCoreRevised",
+        "CharacterCoreRevisionCompensated",
+    )
+    assert revised.compensations == ("CharacterCoreRevisionCompensated",)
+    assert compensated.successors == (
+        "CharacterCoreRevised",
+        "CharacterCoreRevisionCompensated",
+    )
+    assert compensated.compensations == ("CharacterCoreRevisionCompensated",)
+    assert "CharacterCoreRevisionCompensated" in event_contracts()

@@ -6,7 +6,7 @@ import hashlib
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
 
 
 SchemaVersion = Literal["world-v2.1"]
@@ -709,13 +709,400 @@ class DueWindow(FrozenModel):
         return self
 
 
+class CharacterCoreImmutableIdentity(FrozenModel):
+    canonical_identity_refs: tuple[str, ...] = Field(min_length=1)
+    continuity_anchor_refs: tuple[str, ...] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def refs_are_unique(self) -> CharacterCoreImmutableIdentity:
+        refs = (*self.canonical_identity_refs, *self.continuity_anchor_refs)
+        if len(refs) != len(set(refs)):
+            raise ValueError("character core identity refs must be unique")
+        return self
+
+
+class CharacterCoreOperatorGoverned(FrozenModel):
+    role_refs: tuple[str, ...] = ()
+    non_negotiable_value_refs: tuple[str, ...] = ()
+    hard_boundary_refs: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def refs_are_canonical(self) -> CharacterCoreOperatorGoverned:
+        for refs in (
+            self.role_refs,
+            self.non_negotiable_value_refs,
+            self.hard_boundary_refs,
+        ):
+            if tuple(sorted(refs)) != refs or len(refs) != len(set(refs)):
+                raise ValueError("character core operator refs must be sorted and unique")
+        return self
+
+
+CHARACTER_CORE_COORDINATE_CATALOG_VERSION = "character-core-coordinate-catalog.1"
+CHARACTER_CORE_TRAIT_AXES = (
+    "agreeableness",
+    "assertiveness",
+    "autonomy",
+    "conscientiousness",
+    "curiosity",
+    "emotional_stability",
+    "extraversion",
+    "openness",
+    "warmth",
+)
+CHARACTER_CORE_VALUE_REFS = (
+    "value:autonomy",
+    "value:care",
+    "value:growth",
+    "value:honesty",
+    "value:privacy",
+    "value:reciprocity",
+)
+CHARACTER_CORE_PREFERENCE_REFS = (
+    "preference:direct_communication",
+    "preference:independent_time",
+    "preference:playful_banter",
+    "preference:quiet_reflection",
+    "preference:shared_routines",
+)
+CHARACTER_CORE_COORDINATE_CATALOG_DIGEST = hashlib.sha256(
+    json.dumps(
+        {
+            "version": CHARACTER_CORE_COORDINATE_CATALOG_VERSION,
+            "trait_axes": CHARACTER_CORE_TRAIT_AXES,
+            "value_refs": CHARACTER_CORE_VALUE_REFS,
+            "preference_refs": CHARACTER_CORE_PREFERENCE_REFS,
+            "excluded_short_term": (
+                "mood",
+                "anxiety",
+                "anger",
+                "sadness",
+                "current_energy",
+                "relationship_stage",
+            ),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+).hexdigest()
+
+
+class CharacterCoreAxis(FrozenModel):
+    axis_code: Literal[
+        "agreeableness",
+        "assertiveness",
+        "autonomy",
+        "conscientiousness",
+        "curiosity",
+        "emotional_stability",
+        "extraversion",
+        "openness",
+        "warmth",
+    ]
+    value_bp: int = Field(ge=0, le=10_000)
+
+
+class CharacterCoreValuePriority(FrozenModel):
+    value_ref: Literal[
+        "value:autonomy",
+        "value:care",
+        "value:growth",
+        "value:honesty",
+        "value:privacy",
+        "value:reciprocity",
+    ]
+    priority_bp: int = Field(ge=0, le=10_000)
+
+
+class CharacterCoreSlowEvolving(FrozenModel):
+    coordinate_catalog_version: Literal["character-core-coordinate-catalog.1"]
+    coordinate_catalog_digest: str = Field(min_length=64, max_length=64)
+    trait_axes: tuple[CharacterCoreAxis, ...] = ()
+    value_priorities: tuple[CharacterCoreValuePriority, ...] = ()
+    preference_refs: tuple[
+        Literal[
+            "preference:direct_communication",
+            "preference:independent_time",
+            "preference:playful_banter",
+            "preference:quiet_reflection",
+            "preference:shared_routines",
+        ],
+        ...,
+    ] = ()
+    autonomy_style: Literal["dependent", "collaborative", "self_directed"]
+    attachment_tendency: Literal["guarded", "balanced", "connection_seeking"]
+    conflict_style: Literal["avoidant", "deliberative", "direct"]
+    privacy_tendency: Literal["open", "selective", "reserved"]
+
+    @model_validator(mode="after")
+    def coordinates_are_canonical(self) -> CharacterCoreSlowEvolving:
+        if self.coordinate_catalog_digest != CHARACTER_CORE_COORDINATE_CATALOG_DIGEST:
+            raise ValueError("character core coordinate catalog is not installed")
+        axes = tuple(item.axis_code for item in self.trait_axes)
+        priorities = tuple(item.value_ref for item in self.value_priorities)
+        if axes != tuple(sorted(axes)) or len(axes) != len(set(axes)):
+            raise ValueError("character trait axes must be sorted and unique")
+        if priorities != tuple(sorted(priorities)) or len(priorities) != len(set(priorities)):
+            raise ValueError("character value priorities must be sorted and unique")
+        if self.preference_refs != tuple(sorted(self.preference_refs)) or len(
+            self.preference_refs
+        ) != len(set(self.preference_refs)):
+            raise ValueError("character preferences must be sorted and unique")
+        return self
+
+
+CharacterCoreEvidenceSourceKind = Literal["fact", "experience"]
+CharacterCoreEvidencePolarity = Literal["supporting", "contradicting"]
+
+
+class CharacterCoreEvidenceBinding(FrozenModel):
+    source_kind: CharacterCoreEvidenceSourceKind
+    source_id: str = Field(min_length=1)
+    source_entity_revision: int = Field(ge=1)
+    authority_event_ref: str = Field(min_length=1)
+    authority_world_revision: int = Field(ge=1)
+    authority_payload_hash: str = Field(min_length=64, max_length=64)
+    source_values_hash: str = Field(min_length=64, max_length=64)
+    polarity: CharacterCoreEvidencePolarity
+    scene_ref: str = Field(min_length=1)
+    trigger_kind: str = Field(min_length=1)
+    observed_from: datetime
+    observed_to: datetime
+
+    @field_validator("observed_from", "observed_to")
+    @classmethod
+    def observation_times_are_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("character evidence observation time must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def window_is_ordered(self) -> CharacterCoreEvidenceBinding:
+        if self.observed_to < self.observed_from:
+            raise ValueError("character evidence source window is reversed")
+        return self
+
+
+def character_core_evidence_authority_id(binding: CharacterCoreEvidenceBinding) -> str:
+    material = {
+        "source_kind": binding.source_kind,
+        "source_id": binding.source_id,
+        "source_entity_revision": binding.source_entity_revision,
+        "authority_event_ref": binding.authority_event_ref,
+        "authority_world_revision": binding.authority_world_revision,
+        "authority_payload_hash": binding.authority_payload_hash,
+        "source_values_hash": binding.source_values_hash,
+    }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+class CharacterCoreEvidenceWindow(FrozenModel):
+    opens_at: datetime
+    closes_at: datetime
+    source_bindings: tuple[CharacterCoreEvidenceBinding, ...] = Field(min_length=1)
+    distinct_scene_refs: tuple[str, ...] = Field(min_length=1)
+    distinct_trigger_kinds: tuple[str, ...] = Field(min_length=1)
+    supporting_count: int = Field(ge=0)
+    contradicting_count: int = Field(ge=0)
+    privacy_floor: PrivacyClass
+    policy_version: str = Field(min_length=1)
+    evidence_digest: str = Field(min_length=64, max_length=64)
+
+    @field_validator("opens_at", "closes_at")
+    @classmethod
+    def window_times_are_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("character evidence window time must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def summary_is_derived(self) -> CharacterCoreEvidenceWindow:
+        if self.closes_at < self.opens_at:
+            raise ValueError("character evidence window is reversed")
+        authority_ids = tuple(
+            character_core_evidence_authority_id(item) for item in self.source_bindings
+        )
+        if len(authority_ids) != len(set(authority_ids)):
+            raise ValueError("character evidence authority cannot be reused in one window")
+        if self.opens_at != min(item.observed_from for item in self.source_bindings) or (
+            self.closes_at != max(item.observed_to for item in self.source_bindings)
+        ):
+            raise ValueError("character evidence window bounds are not source-derived")
+        scenes = tuple(sorted({item.scene_ref for item in self.source_bindings}))
+        triggers = tuple(sorted({item.trigger_kind for item in self.source_bindings}))
+        if self.distinct_scene_refs != scenes or self.distinct_trigger_kinds != triggers:
+            raise ValueError("character evidence diversity summary is not source-derived")
+        if self.supporting_count != sum(
+            item.polarity == "supporting" for item in self.source_bindings
+        ) or self.contradicting_count != sum(
+            item.polarity == "contradicting" for item in self.source_bindings
+        ):
+            raise ValueError("character evidence polarity counts are not source-derived")
+        material = {
+            "policy_version": self.policy_version,
+            "source_bindings": [item.model_dump(mode="json") for item in self.source_bindings],
+        }
+        expected = hashlib.sha256(
+            json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        if self.evidence_digest != expected:
+            raise ValueError("character evidence digest does not match exact sources")
+        return self
+
+
+class CharacterCoreValues(FrozenModel):
+    immutable_identity: CharacterCoreImmutableIdentity
+    operator_governed: CharacterCoreOperatorGoverned
+    slow_evolving: CharacterCoreSlowEvolving
+    privacy_class: PrivacyClass
+
+
+class CharacterCoreOrigin(FrozenModel):
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+
+
+def character_core_semantic_fingerprint(
+    *, core_id: str, actor_ref: str, values: CharacterCoreValues, policy_refs: tuple[str, ...]
+) -> str:
+    material = {
+        "core_id": core_id,
+        "actor_ref": actor_ref,
+        "values": values.model_dump(mode="json"),
+        "policy_refs": sorted(policy_refs),
+    }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 class CharacterCoreProjection(FrozenModel):
-    core_revision: int = Field(default=0, ge=0)
-    identity_refs: tuple[str, ...] = ()
-    traits: tuple[str, ...] = ()
-    values: tuple[str, ...] = ()
-    preferences: tuple[str, ...] = ()
-    boundaries: tuple[str, ...] = ()
+    core_id: str = Field(min_length=1)
+    actor_ref: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    semantic_fingerprint: str = Field(min_length=64, max_length=64)
+    values: CharacterCoreValues
+    origin: CharacterCoreOrigin
+    created_at: datetime
+    updated_at: datetime
+
+    @field_validator("created_at", "updated_at")
+    @classmethod
+    def chronology_times_are_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("character core chronology must be timezone-aware")
+        return value
+
+    @model_validator(mode="after")
+    def fingerprint_is_exact(self) -> CharacterCoreProjection:
+        if self.updated_at < self.created_at:
+            raise ValueError("character core update precedes initialization")
+        if self.semantic_fingerprint != character_core_semantic_fingerprint(
+            core_id=self.core_id,
+            actor_ref=self.actor_ref,
+            values=self.values,
+            policy_refs=self.origin.policy_refs,
+        ):
+            raise ValueError("character core semantic fingerprint is invalid")
+        return self
+
+
+class CharacterCoreOperatorAuthorityBinding(FrozenModel):
+    authority_id: str = Field(min_length=1)
+    authority_revision: int = Field(ge=1)
+    principal_ref: str = Field(min_length=1)
+    authority_event_ref: str = Field(min_length=1)
+    authority_world_revision: int = Field(ge=1)
+    authority_payload_hash: str = Field(min_length=64, max_length=64)
+    authority_values_hash: str = Field(min_length=64, max_length=64)
+    authority_policy_digest: str = Field(min_length=64, max_length=64)
+    authorization_contract: Literal["deployment-actor-authority:character-core.1"]
+
+
+CharacterCoreFieldClass = Literal[
+    "immutable_identity", "operator_governed", "privacy_class", "slow_evolving"
+]
+CharacterCoreAuthorityLane = Literal[
+    "operator_initialize", "operator_revision", "longitudinal_evolution", "compensation"
+]
+
+
+class CharacterCoreTransitionProjection(FrozenModel):
+    transition_id: str = Field(min_length=1)
+    core_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    operation: Literal["initialize", "revise", "compensate"]
+    authority_lane: CharacterCoreAuthorityLane
+    changed_field_classes: tuple[CharacterCoreFieldClass, ...] = Field(min_length=1)
+    values_before: CharacterCoreValues | None
+    values_after: CharacterCoreValues
+    evidence_window: CharacterCoreEvidenceWindow | None = None
+    operator_authority: CharacterCoreOperatorAuthorityBinding | None = None
+    change_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    policy_version: str = Field(min_length=1)
+    policy_digest: str = Field(min_length=64, max_length=64)
+    accepted_event_ref: str = Field(min_length=1)
+    accepted_at: datetime
+    compensates_transition_id: str | None = None
+
+    @field_validator("accepted_at")
+    @classmethod
+    def accepted_time_is_aware(cls, value: datetime) -> datetime:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("character core transition time must be timezone-aware")
+        return value
+
+
+class CharacterCoreProposedMutation(FrozenModel):
+    event_type: Literal[
+        "CharacterCoreInitialized",
+        "CharacterCoreRevised",
+        "CharacterCoreRevisionCompensated",
+    ]
+    payload_json: str = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def payload_is_canonical(self) -> CharacterCoreProposedMutation:
+        decoded = json.loads(self.payload_json)
+        if not isinstance(decoded, dict):
+            raise ValueError("character core mutation payload must be an object")
+        if self.payload_json != json.dumps(
+            decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ):
+            raise ValueError("character core mutation payload must be canonical")
+        return self
+
+
+class CharacterCoreProposalProjection(FrozenModel):
+    proposal_id: str = Field(min_length=1)
+    proposal_kind: Literal["character_core_revision"] = "character_core_revision"
+    proposal_encoding: Literal["typed-authority-v1"]
+    authority_contract_ref: Literal["proposal-contract:character-core.1"]
+    transition_kind: Literal["initialize", "revise", "compensate"]
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    expected_entity_revision: int = Field(ge=0)
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    proposed_mutation: CharacterCoreProposedMutation
+
+    @model_validator(mode="after")
+    def transition_matches_event(self) -> CharacterCoreProposalProjection:
+        expected = {
+            "initialize": "CharacterCoreInitialized",
+            "revise": "CharacterCoreRevised",
+            "compensate": "CharacterCoreRevisionCompensated",
+        }[self.transition_kind]
+        if self.proposed_mutation.event_type != expected:
+            raise ValueError("character core proposal transition does not match event")
+        return self
 
 
 FactCardinality = Literal["single", "set"]
@@ -2835,6 +3222,7 @@ class ActorAuthorityValues(FrozenModel):
             "consent_grant",
             "privacy_policy",
             "actor_authority_rotation",
+            "character_core_governance",
         ],
         ...,
     ] = Field(min_length=1)
@@ -3125,7 +3513,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.14"
+    reducer_bundle_version: str = "world-v2-reducers.15"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -3169,6 +3557,10 @@ class LedgerProjection(FrozenModel):
     memory_candidate_transitions: tuple[MemoryCandidateTransitionProjection, ...] = ()
     memory_candidate_proposals: tuple[MemoryCandidateProposalProjection, ...] = ()
     memory_candidate_proposal_ids: tuple[str, ...] = ()
+    character_core: CharacterCoreProjection | None = None
+    character_core_transitions: tuple[CharacterCoreTransitionProjection, ...] = ()
+    character_core_proposals: tuple[CharacterCoreProposalProjection, ...] = ()
+    character_core_proposal_ids: tuple[str, ...] = ()
     appraisals: tuple[AppraisalProjection, ...] = ()
     affect_baselines: tuple[AffectBaselineProjection, ...] = ()
     affect_episodes: tuple[AffectEpisodeProjection, ...] = ()
