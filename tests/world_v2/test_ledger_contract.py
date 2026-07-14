@@ -6,6 +6,7 @@ import pytest
 
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.errors import IdempotencyConflict
+from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.schemas import WorldEvent
 
 
@@ -13,6 +14,11 @@ NOW = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
 
 
 def event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldEvent:
+    identity = domain_idempotency_key(
+        event_type=event_type,
+        world_id="world-v2-ledger-test",
+        payload=payload,
+    )
     return WorldEvent.from_payload(
         schema_version="world-v2.1",
         event_id=event_id,
@@ -25,7 +31,7 @@ def event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldEv
         trace_id="trace-ledger-1",
         causation_id="cause-ledger-1",
         correlation_id="correlation-ledger-1",
-        idempotency_key=event_id,
+        idempotency_key=identity or event_id,
         payload=payload,
     )
 
@@ -95,28 +101,63 @@ def test_revision_streams_do_not_make_each_other_stale_and_retry_joins() -> None
 
 def test_acceptance_record_advances_the_world_revision() -> None:
     ledger = WorldLedger.in_memory(world_id="world-v2-ledger-test")
+    ledger.commit(
+        [
+            event(
+                "event-proposal-1",
+                "ProposalRecorded",
+                {"proposal_id": "proposal-1", "evaluated_world_revision": 0},
+            )
+        ],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
 
     committed = ledger.commit(
         [
             event(
                 "event-acceptance-1",
                 "AcceptanceRecorded",
-                {"acceptance_id": "acceptance-1", "status": "accepted"},
+                {
+                    "acceptance_id": "acceptance-1",
+                    "status": "rejected",
+                    "proposal_id": "proposal-1",
+                    "evaluated_world_revision": 0,
+                },
             )
         ],
         expected_world_revision=0,
-        expected_deliberation_revision=999,
+        expected_deliberation_revision=1,
     )
 
     assert committed.world_revision == 1
-    assert committed.deliberation_revision == 0
+    assert committed.deliberation_revision == 1
+
+
+def test_current_commits_cannot_forge_migration_only_acceptance_audits() -> None:
+    ledger = WorldLedger.in_memory(world_id="world-v2-ledger-test")
+
+    with pytest.raises(ValueError, match="migration-only"):
+        ledger.commit(
+            [
+                event(
+                    "event-legacy-acceptance",
+                    "LegacyAcceptanceAuditRecorded",
+                    {"status": "rejected", "acceptance_id": "legacy:acceptance"},
+                )
+            ],
+            expected_world_revision=0,
+            expected_deliberation_revision=0,
+        )
+
+    assert ledger.project().world_revision == 0
 
 
 def test_multi_event_unit_of_work_retry_joins_the_original_result() -> None:
     ledger = WorldLedger.in_memory(world_id="world-v2-ledger-test")
     events = [
         event("event-observation-1", "ObservationRecorded", {"observation_id": "obs-1"}),
-        event("event-acceptance-1", "AcceptanceRecorded", {"status": "accepted"}),
+        event("event-observation-2", "ObservationRecorded", {"observation_id": "obs-2"}),
     ]
 
     first = ledger.commit(
@@ -133,7 +174,7 @@ def test_multi_event_unit_of_work_retry_joins_the_original_result() -> None:
     )
 
     assert retried == first
-    assert first.event_ids == ("event-observation-1", "event-acceptance-1")
+    assert first.event_ids == ("event-observation-1", "event-observation-2")
     assert ledger.project().world_revision == 2
 
 

@@ -51,6 +51,18 @@ class ActivityPlannedPayload(DomainMutationPayload):
         return self
 
 
+class ActivityTransitionPayload(DomainMutationPayload):
+    plan_id: str = Field(min_length=1)
+    transitioned_at: datetime
+    reason_ref: str = Field(min_length=1)
+
+
+class WorldOccurrenceTerminalPayload(DomainMutationPayload):
+    occurrence_id: str = Field(min_length=1)
+    effective_at: datetime
+    reason_ref: str = Field(min_length=1)
+
+
 class WorldOccurrenceCommittedPayload(DomainMutationPayload):
     occurrence: WorldOccurrenceProjection
 
@@ -199,10 +211,17 @@ class ExperienceCommittedPayload(DomainMutationPayload):
 LIFE_PAYLOAD_MODELS = {
     "NpcRegistered": NpcRegisteredPayload,
     "ActivityPlanned": ActivityPlannedPayload,
+    "ActivityStarted": ActivityTransitionPayload,
+    "ActivityPaused": ActivityTransitionPayload,
+    "ActivityResumed": ActivityTransitionPayload,
+    "ActivityCompleted": ActivityTransitionPayload,
+    "ActivityAbandoned": ActivityTransitionPayload,
     "WorldOccurrenceCommitted": WorldOccurrenceCommittedPayload,
     "WorldOccurrenceActivated": WorldOccurrenceActivatedPayload,
     "OutcomeObservationRecorded": OutcomeObservationRecordedPayload,
     "OutcomeProposalRecorded": OutcomeProposalRecordedPayload,
     "WorldOccurrenceSettled": WorldOccurrenceSettledPayload,
     "ExperienceCommitted": ExperienceCommittedPayload,
+    "WorldOccurrenceCancelled": WorldOccurrenceTerminalPayload,
+    "WorldOccurrenceExpired": WorldOccurrenceTerminalPayload,
 }

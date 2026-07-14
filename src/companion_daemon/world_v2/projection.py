@@ -49,6 +49,7 @@ class ProjectionLimits:
     world_occurrences: int = 128
     outcome_observations: int = 128
     experiences: int = 128
+    appraisals: int = 128
 
     def __post_init__(self) -> None:
         if any(
@@ -64,6 +65,7 @@ class ProjectionLimits:
                 self.world_occurrences,
                 self.outcome_observations,
                 self.experiences,
+                self.appraisals,
             )
         ):
             raise ValueError("projection limits must be positive")
@@ -346,6 +348,10 @@ class InternalProjectionReader:
             -self._limits.outcome_observations :
         ]
         experiences = projection.experiences[-self._limits.experiences :]
+        active_appraisals = tuple(
+            item for item in projection.appraisals if item.status == "active"
+        )
+        appraisals = active_appraisals[-self._limits.appraisals :]
         slice_windows = (
             self._window(
                 "pending_actions",
@@ -398,6 +404,12 @@ class InternalProjectionReader:
                 total=len(projection.experiences),
                 returned=len(experiences),
             ),
+            self._window(
+                "appraisals",
+                total=len(active_appraisals),
+                returned=len(appraisals),
+                ordering_policy="active-first-then-ledger-recency-v1",
+            ),
             *(self._unavailable_window(name) for name in self._UNAVAILABLE_SLICES),
         )
         updated_at = projection.logical_time or datetime(1970, 1, 1, tzinfo=UTC)
@@ -429,6 +441,7 @@ class InternalProjectionReader:
             world_occurrences=occurrences,
             outcome_observations=outcome_observations,
             experiences=experiences,
+            appraisals=appraisals,
             reducer_versions=(
                 VersionRef(name="schema", version=projection.schema_version),
                 VersionRef(

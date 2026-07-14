@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 
 from .ledger import LedgerPort, WorldLedger
+from .event_identity import domain_idempotency_key
 from .projection import ProjectionAuthority, ProjectionCompiler
 from .settlement import SettlementPlanner
 from .schemas import (
@@ -96,7 +97,12 @@ class WorldRuntime:
             trace_id=observation.trace_id,
             causation_id=observation.causation_id,
             correlation_id=observation.correlation_id,
-            idempotency_key=f"observation:{observation.source}:{observation.source_event_id}",
+            idempotency_key=domain_idempotency_key(
+                event_type="ObservationRecorded",
+                world_id=self._world_id,
+                payload=observation.model_dump(mode="json"),
+            )
+            or f"observation:{observation.source}:{observation.source_event_id}",
             payload=observation.model_dump(mode="json"),
         )
         async with self._lock:

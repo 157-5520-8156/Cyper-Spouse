@@ -27,6 +27,8 @@ def domain_idempotency_key(
 
 
 def validate_event_identity(event: WorldEvent) -> None:
+    if event.event_type == "LegacyAcceptanceAuditRecorded":
+        raise ValueError("legacy acceptance audit events are migration-only")
     expected = domain_idempotency_key(
         event_type=event.event_type,
         world_id=event.world_id,
@@ -43,8 +45,25 @@ def _life_identity_components(
 ) -> tuple[object, ...] | None:
     if event_type == "NpcRegistered":
         return world_id, _nested(payload, "npc", "npc_id")
+    if (
+        event_type == "ObservationRecorded"
+        and payload.get("observation_kind") == "message"
+        and isinstance(payload.get("source"), str)
+        and isinstance(payload.get("source_event_id"), str)
+    ):
+        return payload.get("source"), payload.get("source_event_id")
+    if event_type == "OperatorObservationRecorded":
+        return world_id, payload.get("observation_id")
     if event_type == "ActivityPlanned":
         return _nested(payload, "plan", "plan_id"), payload.get("transition_id")
+    if event_type in {
+        "ActivityStarted",
+        "ActivityPaused",
+        "ActivityResumed",
+        "ActivityCompleted",
+        "ActivityAbandoned",
+    }:
+        return payload.get("plan_id"), payload.get("transition_id")
     if event_type == "WorldOccurrenceCommitted":
         return (
             _nested(payload, "occurrence", "occurrence_id"),
@@ -56,6 +75,14 @@ def _life_identity_components(
         return world_id, _nested(payload, "observation", "observation_id")
     if event_type == "OutcomeProposalRecorded":
         return world_id, payload.get("outcome_proposal_id")
+    if event_type == "ProposalRecorded" and payload.get("proposal_kind") == "appraisal_transition":
+        return world_id, payload.get("proposal_id"), payload.get("change_id")
+    if (
+        event_type == "AcceptanceRecorded"
+        and payload.get("proposal_id") is not None
+        and payload.get("evaluated_world_revision") is not None
+    ):
+        return world_id, payload.get("proposal_id"), payload.get("evaluated_world_revision")
     if event_type == "WorldOccurrenceSettled":
         return (
             payload.get("occurrence_id"),
@@ -64,11 +91,20 @@ def _life_identity_components(
         )
     if event_type == "ExperienceCommitted":
         return world_id, _nested(payload, "experience", "experience_id")
+    if event_type in {"WorldOccurrenceCancelled", "WorldOccurrenceExpired"}:
+        return payload.get("occurrence_id"), payload.get("transition_id")
+    if event_type == "AppraisalAccepted":
+        return world_id, _nested(payload, "appraisal", "appraisal_id"), payload.get("transition_id")
+    if event_type in {"AppraisalContradicted", "AppraisalExpired", "AppraisalSuperseded"}:
+        return payload.get("appraisal_id"), payload.get("transition_id")
     if event_type == "TriggerProcessOpened":
         return world_id, _nested(payload, "process", "trigger_id"), "opened"
     if event_type in {"TriggerProcessClaimed", "TriggerProcessReclaimed"}:
         process = payload.get("process")
-        if isinstance(process, dict) and process.get("process_kind") == "npc_world_appraisal":
+        if isinstance(process, dict) and process.get("process_kind") in {
+            "npc_world_appraisal",
+            "interaction_appraisal",
+        }:
             attempts = process.get("attempt_ids")
             attempt_id = attempts[-1] if isinstance(attempts, list) and attempts else None
             return world_id, process.get("trigger_id"), attempt_id, event_type

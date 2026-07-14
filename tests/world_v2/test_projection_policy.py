@@ -801,7 +801,7 @@ def test_projection_hash_binds_reducer_bundle_and_projection_values_are_deeply_f
     )
 
     assert first.projection_hash != changed_bundle.projection_hash
-    assert first.reducer_bundle_version == "world-v2-reducers.3"
+    assert first.reducer_bundle_version == "world-v2-reducers.5"
     assert changed_bundle.reducer_bundle_version == "world-v2-reducers.test-next"
     try:
         first.view.action_state_counts[0].count = 99
@@ -835,7 +835,7 @@ def test_internal_snapshot_is_revision_pinned_and_preserves_private_authority() 
         (version.name, version.version) for version in snapshot.reducer_versions
     ) == (
         ("schema", "world-v2.1"),
-        ("reducer_bundle", "world-v2-reducers.3"),
+        ("reducer_bundle", "world-v2-reducers.5"),
     )
     assert snapshot.system_health.status == "degraded"
     affect_window = next(

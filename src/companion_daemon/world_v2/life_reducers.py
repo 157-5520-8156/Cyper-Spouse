@@ -6,6 +6,7 @@ from datetime import datetime
 
 from .life_events import (
     ActivityPlannedPayload,
+    ActivityTransitionPayload,
     ExperienceCommittedPayload,
     NpcRegisteredPayload,
     OutcomeObservationRecordedPayload,
@@ -13,6 +14,7 @@ from .life_events import (
     WorldOccurrenceActivatedPayload,
     WorldOccurrenceCommittedPayload,
     WorldOccurrenceSettledPayload,
+    WorldOccurrenceTerminalPayload,
 )
 from .schemas import (
     ExperienceProjection,
@@ -77,6 +79,48 @@ def plan_activity(
         if predecessor is None or predecessor.status != "abandoned":
             raise ValueError("replacement plan requires an abandoned predecessor")
     return (*plans, payload.plan)
+
+
+def transition_activity(
+    plans: tuple[PlanStateProjection, ...],
+    payload: ActivityTransitionPayload,
+    *,
+    target_status: str,
+    allowed_statuses: frozenset[str],
+    logical_time: datetime,
+) -> tuple[PlanStateProjection, ...]:
+    index = next(
+        (index for index, plan in enumerate(plans) if plan.plan_id == payload.plan_id),
+        None,
+    )
+    if index is None:
+        raise ValueError("activity transition references an unknown plan")
+    plan = plans[index]
+    _expect_revision(plan.entity_revision, payload.expected_entity_revision)
+    if plan.status not in allowed_statuses:
+        raise ValueError(f"cannot transition {plan.status!r} activity to {target_status!r}")
+    if payload.transitioned_at > logical_time:
+        raise ValueError("activity transition is ahead of logical time")
+    if payload.transitioned_at.tzinfo is None or payload.transitioned_at.utcoffset() is None:
+        raise ValueError("activity transition time must be timezone-aware")
+    if (
+        plan.last_transitioned_at is not None
+        and payload.transitioned_at < plan.last_transitioned_at
+    ):
+        raise ValueError("activity transition time cannot move backwards")
+    updated = plan.model_copy(
+        update={
+            "entity_revision": plan.entity_revision + 1,
+            "status": target_status,
+            "last_transitioned_at": payload.transitioned_at,
+            "terminal_reason_ref": (
+                payload.reason_ref
+                if target_status in {"completed", "abandoned"}
+                else None
+            ),
+        }
+    )
+    return (*plans[:index], updated, *plans[index + 1 :])
 
 
 def commit_occurrence(
@@ -280,6 +324,31 @@ def settle_occurrence(
             "result_payload_ref": payload.result_payload_ref,
             "result_payload_hash": payload.result_payload_hash,
             "settled_at": payload.settled_at,
+        }
+    )
+    return _replace(occurrences, index, updated)
+
+
+def terminate_occurrence(
+    occurrences: tuple[WorldOccurrenceProjection, ...],
+    payload: WorldOccurrenceTerminalPayload,
+    *,
+    target_status: str,
+    logical_time: datetime,
+) -> tuple[WorldOccurrenceProjection, ...]:
+    index, occurrence = _occurrence(occurrences, payload.occurrence_id)
+    _expect_revision(occurrence.entity_revision, payload.expected_entity_revision)
+    if occurrence.status != "committed":
+        raise ValueError("only an unactivated occurrence can cancel or expire")
+    if payload.effective_at > logical_time:
+        raise ValueError("occurrence terminal transition is ahead of logical time")
+    if target_status == "expired" and payload.effective_at < occurrence.time_window.closes_at:
+        raise ValueError("occurrence cannot expire before its committed window closes")
+    updated = occurrence.model_copy(
+        update={
+            "entity_revision": occurrence.entity_revision + 1,
+            "status": target_status,
+            "terminal_reason_ref": payload.reason_ref,
         }
     )
     return _replace(occurrences, index, updated)

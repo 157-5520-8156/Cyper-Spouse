@@ -68,6 +68,7 @@ class FrozenModel(BaseModel):
 
 class Observation(FrozenModel):
     schema_version: SchemaVersion
+    observation_kind: Literal["message"] = "message"
     observation_id: str = Field(min_length=1)
     world_id: str = Field(min_length=1)
     logical_time: datetime
@@ -354,8 +355,10 @@ class TriggerProcess(FrozenModel):
     trigger_id: str = Field(min_length=1)
     trigger_ref: str = Field(min_length=1)
     process_kind: Literal[
-        "observation", "clock", "settlement", "recovery", "npc_world_appraisal"
+        "observation", "clock", "settlement", "recovery", "npc_world_appraisal",
+        "interaction_appraisal",
     ]
+    source_evidence_ref: str | None = None
     state: Literal["open", "claimed", "terminal"]
     claim_lease: ClaimLease | None = None
     attempt_ids: tuple[str, ...] = ()
@@ -363,6 +366,11 @@ class TriggerProcess(FrozenModel):
 
     @model_validator(mode="after")
     def active_attempt_matches_lease(self) -> TriggerProcess:
+        if (
+            self.process_kind not in {"npc_world_appraisal", "interaction_appraisal"}
+            and self.source_evidence_ref is not None
+        ):
+            raise ValueError("only appraisal triggers may carry source evidence")
         if self.state == "open":
             if self.claim_lease is not None or self.attempt_ids:
                 raise ValueError("open trigger cannot already own an attempt lease")
@@ -617,6 +625,7 @@ class EvidenceRef(FrozenModel):
         "observed_message",
         "active_plan",
         "operator_observation",
+        "clock_observation",
     ]
     claim_purpose: Literal[
         "current_fact",
@@ -644,6 +653,50 @@ class CommittedWorldEventRef(FrozenModel):
     world_revision: int = Field(ge=1)
     payload_hash: str = Field(min_length=64, max_length=64)
     logical_time: datetime
+    continuation_refs: tuple[str, ...] = ()
+
+
+class OperatorObservationRef(FrozenModel):
+    observation_id: str = Field(min_length=1)
+    observation_hash: str = Field(min_length=64, max_length=64)
+
+
+class MessageObservationRef(FrozenModel):
+    observation_id: str = Field(min_length=1)
+    source: str = Field(min_length=1)
+    source_event_id: str = Field(min_length=1)
+    content_payload_hash: str = Field(min_length=1)
+    event_payload_hash: str = Field(min_length=64, max_length=64)
+    world_revision: int = Field(ge=1)
+
+
+class AcceptanceDecisionRef(FrozenModel):
+    proposal_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    acceptance_id: str | None = None
+    status: Literal["accepted", "rejected", "stale"]
+    accepted_change_id: str | None = None
+    accepted_change_hash: str | None = Field(default=None, min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def accepted_decision_has_a_complete_change(self) -> AcceptanceDecisionRef:
+        if self.status == "accepted" and (
+            self.acceptance_id is None
+            or self.accepted_change_id is None
+            or self.accepted_change_hash is None
+        ):
+            raise ValueError("accepted decision requires complete change authority")
+        if self.status != "accepted" and (
+            self.accepted_change_id is not None
+            or self.accepted_change_hash is not None
+        ):
+            raise ValueError("non-accepted decision cannot carry accepted change authority")
+        return self
+
+
+class ProposalRevisionRef(FrozenModel):
+    proposal_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
 
 
 class DueWindow(FrozenModel):
@@ -737,6 +790,8 @@ class PlanStateProjection(FrozenModel):
     participant_refs: tuple[str, ...] = ()
     location_ref: str | None = None
     supersedes_plan_id: str | None = None
+    last_transitioned_at: datetime | None = None
+    terminal_reason_ref: str | None = None
     privacy_class: PrivacyClass = "private"
 
 
@@ -804,6 +859,166 @@ class WorldOccurrenceProjection(FrozenModel):
     result_payload_ref: str | None = None
     result_payload_hash: str | None = None
     settled_at: datetime | None = None
+    terminal_reason_ref: str | None = None
+
+
+class AppraisalHypothesis(FrozenModel):
+    hypothesis_id: str = Field(min_length=1)
+    meaning: Literal[
+        "ordinary", "care", "support", "shared_joy", "goal_progress",
+        "uncertainty", "misunderstanding", "disappointment", "dismissal",
+        "boundary_violation", "dehumanization", "coercion", "control_pressure",
+        "betrayal", "loss", "user_withdrawing", "user_confused", "repair_attempt",
+        "reliability_confirmed", "reliability_broken", "restorative_solitude",
+        "creative_satisfaction", "social_warmth", "goal_strain", "npc_conflict",
+        "family_connection",
+    ]
+    attribution: Literal[
+        "user", "companion", "npc", "situation", "third_party", "unknown"
+    ]
+    controllability: Literal["controllable", "partly_controllable", "uncontrollable"]
+    severity: Literal["low", "moderate", "high", "acute"]
+    weight_bp: int = Field(ge=1, le=10_000)
+
+
+class AppraisalOrigin(FrozenModel):
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    matrix_catalog_version: str = Field(min_length=1)
+    clustering_policy_version: str = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+
+
+class AppraisalProjection(FrozenModel):
+    appraisal_id: str = Field(min_length=1)
+    entity_revision: int = Field(ge=1)
+    subject_ref: str = Field(min_length=1)
+    source_cluster_ref: str = Field(min_length=1)
+    origin: AppraisalOrigin
+    hypotheses: tuple[AppraisalHypothesis, ...] = Field(min_length=1)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    confidence_bp: int = Field(ge=1, le=10_000)
+    accepted_at: datetime
+    expires_at: datetime
+    status: Literal["active", "contradicted", "expired", "superseded"] = "active"
+    closed_at: datetime | None = None
+    contradiction_refs: tuple[EvidenceRef, ...] = ()
+    supersedes_appraisal_id: str | None = None
+    superseded_by_appraisal_id: str | None = None
+
+    @model_validator(mode="after")
+    def normalized_and_lifecycle_consistent(self) -> AppraisalProjection:
+        for name, value in (
+            ("accepted_at", self.accepted_at),
+            ("expires_at", self.expires_at),
+        ):
+            if value.tzinfo is None or value.utcoffset() is None:
+                raise ValueError(f"{name} must be timezone-aware")
+        if self.expires_at <= self.accepted_at:
+            raise ValueError("appraisal expiry must follow acceptance")
+        if sum(item.weight_bp for item in self.hypotheses) != 10_000:
+            raise ValueError("appraisal hypothesis weights must total 10,000 bp")
+        if len({item.hypothesis_id for item in self.hypotheses}) != len(self.hypotheses):
+            raise ValueError("appraisal hypothesis IDs must be unique")
+        semantic_keys = {
+            (item.meaning, item.attribution, item.controllability, item.severity)
+            for item in self.hypotheses
+        }
+        if len(semantic_keys) != len(self.hypotheses):
+            raise ValueError("duplicate appraisal hypotheses are not alternatives")
+        if self.status == "active" and (
+            self.closed_at is not None
+            or self.contradiction_refs
+            or self.superseded_by_appraisal_id is not None
+        ):
+            raise ValueError("active appraisal cannot contain terminal state")
+        if self.status != "active" and self.closed_at is None:
+            raise ValueError("terminal appraisal requires closed_at")
+        if self.closed_at is not None:
+            if self.closed_at.tzinfo is None or self.closed_at.utcoffset() is None:
+                raise ValueError("closed_at must be timezone-aware")
+            if self.closed_at < self.accepted_at:
+                raise ValueError("appraisal cannot close before acceptance")
+        if self.status == "contradicted" and not self.contradiction_refs:
+            raise ValueError("contradicted appraisal requires contradiction evidence")
+        if self.status != "contradicted" and self.contradiction_refs:
+            raise ValueError("only contradicted appraisal carries contradiction evidence")
+        if self.status == "superseded" and not self.superseded_by_appraisal_id:
+            raise ValueError("superseded appraisal requires its successor")
+        if self.status != "superseded" and self.superseded_by_appraisal_id:
+            raise ValueError("only superseded appraisal carries successor link")
+        return self
+
+
+class AppraisalMeaningRef(FrozenModel):
+    appraisal_id: str = Field(min_length=1)
+    accepted_entity_revision: Literal[1] = 1
+    hypothesis_id: str = Field(min_length=1)
+    source_cluster_ref: str = Field(min_length=1)
+    accepted_change_id: str = Field(min_length=1)
+    accepted_transition_id: str = Field(min_length=1)
+
+
+class AppraisalProposalProjection(FrozenModel):
+    """Persisted deliberation audit for one proposed appraisal transition."""
+
+    proposal_id: str = Field(min_length=1)
+    proposal_kind: Literal["appraisal_transition"] = "appraisal_transition"
+    transition_kind: Literal["accept", "contradict", "supersede"]
+    change_id: str = Field(min_length=1)
+    trigger_id: str = Field(min_length=1)
+    trigger_ref: str = Field(min_length=1)
+    source_evidence_ref: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    expected_entity_revision: int = Field(ge=0)
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    proposed_mutation: AppraisalProposedMutation
+
+    @model_validator(mode="after")
+    def source_is_part_of_the_proposal_evidence(self) -> AppraisalProposalProjection:
+        if self.source_evidence_ref not in {ref.ref_id for ref in self.evidence_refs}:
+            raise ValueError("appraisal proposal must include its trigger source evidence")
+        if len(self.policy_refs) != len(set(self.policy_refs)):
+            raise ValueError("appraisal proposal policy refs must be unique")
+        expected_event_type = {
+            "accept": "AppraisalAccepted",
+            "contradict": "AppraisalContradicted",
+            "supersede": "AppraisalSuperseded",
+        }[self.transition_kind]
+        if self.proposed_mutation.event_type != expected_event_type:
+            raise ValueError("proposed mutation type does not match transition kind")
+        return self
+
+
+class AppraisalProposedMutation(FrozenModel):
+    event_type: Literal[
+        "AppraisalAccepted", "AppraisalContradicted", "AppraisalSuperseded"
+    ]
+    payload_json: str = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def payload_is_a_canonical_object(self) -> AppraisalProposedMutation:
+        try:
+            payload = json.loads(self.payload_json)
+        except json.JSONDecodeError as exc:
+            raise ValueError("proposed mutation payload is not JSON") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("proposed mutation payload must be an object")
+        canonical = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        if canonical != self.payload_json:
+            raise ValueError("proposed mutation payload must use canonical JSON")
+        return self
+
+
+AppraisalProposalProjection.model_rebuild()
 
 
 class CommitmentStateProjection(FrozenModel):
@@ -848,7 +1063,7 @@ class AffectEpisodeProjection(FrozenModel):
     episode_id: str = Field(min_length=1)
     components: tuple[AffectComponentProjection, ...] = Field(min_length=1)
     source_refs: tuple[str, ...] = Field(min_length=1)
-    appraisal_refs: tuple[str, ...] = ()
+    appraisal_refs: tuple[AppraisalMeaningRef, ...] = ()
     opened_at: datetime
     updated_at: datetime
     status: Literal["active", "resolved", "superseded"]
@@ -991,6 +1206,7 @@ class InternalWorldSnapshot(FrozenModel):
     character_core: CharacterCoreProjection | None = None
     facts: tuple[FactProjection, ...] = ()
     experiences: tuple[ExperienceProjection, ...] = ()
+    appraisals: tuple[AppraisalProjection, ...] = ()
     npcs: tuple[NpcProjection, ...] = ()
     world_occurrences: tuple[WorldOccurrenceProjection, ...] = ()
     outcome_observations: tuple[OutcomeObservationProjection, ...] = ()
@@ -1082,13 +1298,15 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.3"
+    reducer_bundle_version: str = "world-v2-reducers.5"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
     ledger_sequence: int = Field(ge=0)
     logical_time: datetime | None = None
     observation_refs: tuple[str, ...] = ()
+    message_observations: tuple[MessageObservationRef, ...] = ()
+    operator_observations: tuple[OperatorObservationRef, ...] = ()
     committed_world_event_refs: tuple[CommittedWorldEventRef, ...] = ()
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
@@ -1105,6 +1323,12 @@ class LedgerProjection(FrozenModel):
     world_occurrences: tuple[WorldOccurrenceProjection, ...] = ()
     outcome_observations: tuple[OutcomeObservationProjection, ...] = ()
     experiences: tuple[ExperienceProjection, ...] = ()
+    appraisals: tuple[AppraisalProjection, ...] = ()
+    appraisal_proposals: tuple[AppraisalProposalProjection, ...] = ()
+    appraisal_proposal_ids: tuple[str, ...] = ()
+    proposal_ids: tuple[str, ...] = ()
+    proposal_revisions: tuple[ProposalRevisionRef, ...] = ()
+    acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
     outcome_proposals: tuple[OutcomeProposalProjection, ...] = ()
     semantic_hash: str
 

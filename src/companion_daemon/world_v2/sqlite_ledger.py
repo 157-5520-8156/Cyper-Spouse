@@ -25,6 +25,61 @@ from .schemas import CommitResult, LedgerProjection, ProjectionCursor, WorldEven
 from .upcasting import CURRENT_SCHEMA_VERSION, require_target_schema, upcast_event
 
 
+def _upcast_legacy_appraisal_trigger(
+    raw_event: dict[str, object],
+    *,
+    settlement_sources: dict[str, str],
+    trigger_sources: dict[str, str],
+) -> dict[str, object]:
+    """Add provenance introduced after the v3 LIFE bundle to replay bytes."""
+
+    event_type = raw_event.get("event_type")
+    payload_json = raw_event.get("payload_json")
+    if not isinstance(payload_json, str):
+        return raw_event
+    payload = json.loads(payload_json)
+    if not isinstance(payload, dict):
+        return raw_event
+    if event_type == "WorldOccurrenceSettled":
+        trigger_ref = payload.get("appraisal_trigger_ref")
+        event_id = raw_event.get("event_id")
+        if isinstance(trigger_ref, str) and isinstance(event_id, str):
+            settlement_sources[trigger_ref] = event_id
+        return raw_event
+    if event_type not in {
+        "TriggerProcessOpened",
+        "TriggerProcessClaimed",
+        "TriggerProcessReclaimed",
+    }:
+        return raw_event
+    process = payload.get("process")
+    if not isinstance(process, dict) or process.get("process_kind") != "npc_world_appraisal":
+        return raw_event
+    trigger_id = process.get("trigger_id")
+    trigger_ref = process.get("trigger_ref")
+    if not isinstance(trigger_id, str) or not isinstance(trigger_ref, str):
+        return raw_event
+    source = process.get("source_evidence_ref")
+    if not isinstance(source, str):
+        source = trigger_sources.get(trigger_id) or settlement_sources.get(trigger_ref)
+        if source is None:
+            return raw_event
+        process = {**process, "source_evidence_ref": source}
+        payload = {**payload, "process": process}
+    trigger_sources[trigger_id] = source
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return {
+        **raw_event,
+        "payload_json": encoded,
+        "payload_hash": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+    }
+
+
 class SQLiteWorldLedger:
     """Independent crash-consistent persistence adapter for a single World v2 world."""
 
@@ -211,8 +266,12 @@ class SQLiteWorldLedger:
                 connection.commit()
                 return
             if installed not in {
+                # .4 was an uncommitted development bundle.  It never had a
+                # durable event protocol, so treating it as migratable would
+                # silently reinterpret old projection-only appraisal hashes.
                 "world-v2-reducers.1",
                 "world-v2-reducers.2",
+                "world-v2-reducers.3",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -291,15 +350,32 @@ class SQLiteWorldLedger:
         )
         if reducer_bundle_version == "world-v2-reducers.1":
             payload.pop("pending_actions", None)
-        for key in (
-            "npcs",
-            "plans",
-            "world_occurrences",
-            "outcome_observations",
-            "experiences",
-            "committed_world_event_refs",
-        ):
-            payload.pop(key, None)
+        if reducer_bundle_version in {
+            "world-v2-reducers.1",
+            "world-v2-reducers.2",
+            "world-v2-reducers.3",
+        }:
+            payload.pop("message_observations", None)
+            payload.pop("operator_observations", None)
+        if reducer_bundle_version in {"world-v2-reducers.1", "world-v2-reducers.2"}:
+            for key in (
+                "npcs",
+                "plans",
+                "world_occurrences",
+                "outcome_observations",
+                "experiences",
+                "committed_world_event_refs",
+            ):
+                payload.pop(key, None)
+        if reducer_bundle_version == "world-v2-reducers.3":
+            for ref in payload.get("committed_world_event_refs", ()):
+                ref.pop("continuation_refs", None)
+        if reducer_bundle_version in {
+            "world-v2-reducers.1",
+            "world-v2-reducers.2",
+            "world-v2-reducers.3",
+        }:
+            payload.pop("appraisals", None)
         encoded = json.dumps(
             payload,
             ensure_ascii=False,
@@ -312,6 +388,8 @@ class SQLiteWorldLedger:
     def _state_from_projection(projection: LedgerProjection) -> ReducerState:
         return ReducerState(
             observation_refs=projection.observation_refs,
+            message_observations=projection.message_observations,
+            operator_observations=projection.operator_observations,
             committed_world_event_refs=projection.committed_world_event_refs,
             logical_time=projection.logical_time,
             actions=projection.actions,
@@ -329,6 +407,12 @@ class SQLiteWorldLedger:
             world_occurrences=projection.world_occurrences,
             outcome_observations=projection.outcome_observations,
             experiences=projection.experiences,
+            appraisals=projection.appraisals,
+            appraisal_proposals=projection.appraisal_proposals,
+            appraisal_proposal_ids=projection.appraisal_proposal_ids,
+            proposal_ids=projection.proposal_ids,
+            proposal_revisions=projection.proposal_revisions,
+            acceptance_decisions=projection.acceptance_decisions,
             outcome_proposals=projection.outcome_proposals,
         )
 
@@ -627,6 +711,8 @@ class SQLiteWorldLedger:
         world_revision = 0
         deliberation_revision = 0
         ledger_sequence = 0
+        legacy_trigger_sources: dict[str, str] = {}
+        legacy_settlement_sources: dict[str, str] = {}
         rows = self._connection.execute(
             """SELECT * FROM world_v2_events WHERE world_id = ?
                ORDER BY ledger_sequence""",
@@ -648,9 +734,30 @@ class SQLiteWorldLedger:
                 raw_event = json.loads(event_json)
                 if not isinstance(raw_event, dict):
                     raise ValueError("event envelope must be an object")
+                raw_event = _upcast_legacy_appraisal_trigger(
+                    raw_event,
+                    settlement_sources=legacy_settlement_sources,
+                    trigger_sources=legacy_trigger_sources,
+                )
                 event = upcast_event(
                     raw_event, target_schema_version=target_schema_version
                 )
+                if event.event_type == "AcceptanceRecorded":
+                    try:
+                        # Old bundles allowed arbitrary audit extensions on an
+                        # Acceptance.  Keep it authoritative only when the
+                        # already-replayed proposal state proves every current
+                        # reducer precondition; otherwise preserve it as a
+                        # revision-bearing, migration-only audit fact.
+                        reduce_event(state, event)
+                    except Exception:
+                        event = upcast_event(
+                            {
+                                **raw_event,
+                                "event_type": "LegacyAcceptanceAuditRecorded",
+                            },
+                            target_schema_version=target_schema_version,
+                        )
             except Exception as exc:
                 raise LedgerIntegrityError("persisted event is invalid") from exc
             ledger_sequence += 1

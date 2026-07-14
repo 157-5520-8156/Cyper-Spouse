@@ -16,6 +16,7 @@ from typing import Any, Literal, Mapping
 from pydantic import BaseModel, ConfigDict, Field, create_model
 
 from .errors import UnknownEventType
+from .appraisal_events import APPRAISAL_PAYLOAD_MODELS
 from .life_events import LIFE_PAYLOAD_MODELS
 from .schemas import (
     Action,
@@ -47,7 +48,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.3"
+    reducer_bundle: str = "world-v2-reducers.5"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -132,6 +133,10 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
             Observation,
             required=frozenset({"observation_id"}),
         ),
+        "OperatorObservationRecorded": _payload_model(
+            "OperatorObservationRecordedPayload",
+            {"observation_id": _ID, "observation_hash": _ID},
+        ),
         "ClockAdvanced": _optional_model_projection(
             "ClockAdvancedPayload",
             ClockObservation,
@@ -166,7 +171,18 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
             "ProposalRecordedPayload", {"proposal_id": _ID}, allow_audit_extensions=True
         ),
         "AcceptanceRecorded": _payload_model(
-            "AcceptanceRecordedPayload", {"status": _ID}, allow_audit_extensions=True
+            "AcceptanceRecordedPayload",
+            {
+                "status": _ID,
+                "proposal_id": _ID,
+                "evaluated_world_revision": (int, Field(ge=0)),
+            },
+            allow_audit_extensions=True,
+        ),
+        "LegacyAcceptanceAuditRecorded": _payload_model(
+            "LegacyAcceptanceAuditRecordedPayload",
+            {"status": _ID},
+            allow_audit_extensions=True,
         ),
         "BudgetAccountConfigured": _payload_model(
             "BudgetAccountConfiguredPayload", {"account": (BudgetAccount, ...)}
@@ -211,6 +227,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
             "ActionReconciliationPayload", {"reconciliation": (ActionReconciliation, ...)}
         ),
         **LIFE_PAYLOAD_MODELS,
+        **APPRAISAL_PAYLOAD_MODELS,
     }
 )
 
@@ -218,6 +235,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
     {
         "WorldStarted": "world_id+seed_version",
         "ObservationRecorded": "source+source_event_id",
+        "OperatorObservationRecorded": "world_id+observation_id",
         "ClockAdvanced": "world_id+tick_id",
         "ExternalObservationRecorded": "source+source_event_id",
         "ExternalObservationProcessed": "source+source_event_id+processed",
@@ -227,6 +245,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "TriggerProcessCompleted": "world_id+trigger_id+attempt_id+completed",
         "ProposalRecorded": "world_id+trigger_id+proposal_id",
         "AcceptanceRecorded": "world_id+proposal_id+evaluated_world_revision",
+        "LegacyAcceptanceAuditRecorded": "migration-only:original-event-id",
         "BudgetAccountConfigured": "account_id+window_id",
         "BudgetReserved": "reservation_id",
         "BudgetSettled": "reservation_id+result_id+terminal",
@@ -247,12 +266,23 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ActionReconciliationRequired": "result_id+reason+observed_state",
         "NpcRegistered": "world_id+npc_id",
         "ActivityPlanned": "plan_id+transition_id",
+        "ActivityStarted": "plan_id+transition_id",
+        "ActivityPaused": "plan_id+transition_id",
+        "ActivityResumed": "plan_id+transition_id",
+        "ActivityCompleted": "plan_id+transition_id",
+        "ActivityAbandoned": "plan_id+transition_id",
         "WorldOccurrenceCommitted": "occurrence_id+transition_id",
         "WorldOccurrenceActivated": "occurrence_id+transition_id",
         "OutcomeObservationRecorded": "world_id+outcome_observation_id",
         "OutcomeProposalRecorded": "world_id+outcome_proposal_id",
         "WorldOccurrenceSettled": "occurrence_id+result_id+expected_entity_revision",
         "ExperienceCommitted": "world_id+experience_id",
+        "WorldOccurrenceCancelled": "occurrence_id+transition_id",
+        "WorldOccurrenceExpired": "occurrence_id+transition_id",
+        "AppraisalAccepted": "world_id+appraisal_id+transition_id",
+        "AppraisalContradicted": "appraisal_id+transition_id",
+        "AppraisalExpired": "appraisal_id+transition_id",
+        "AppraisalSuperseded": "appraisal_id+transition_id",
     }
 )
 
@@ -293,6 +323,19 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "ObservationRecordedPayload",
                 evidence_types=("observed_message",),
                 successors=("TriggerProcessClaimed",),
+            ),
+            _contract(
+                "LegacyAcceptanceAuditRecorded",
+                "bundle_migration",
+                "world",
+                "LegacyAcceptanceAuditRecordedPayload",
+            ),
+            _contract(
+                "OperatorObservationRecorded",
+                "operator_ingress",
+                "deliberation",
+                "OperatorObservationRecordedPayload",
+                evidence_types=("operator_observation",),
             ),
             _contract(
                 "ClockAdvanced",
@@ -584,7 +627,25 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "world",
                 "ActivityPlannedPayload",
                 evidence_types=("observed_message", "active_plan"),
-                successors=("WorldOccurrenceCommitted",),
+                successors=("ActivityStarted", "ActivityAbandoned", "WorldOccurrenceCommitted"),
+            ),
+            *(
+                _contract(
+                    event_type,
+                    "proposal_acceptance",
+                    "world",
+                    "ActivityTransitionPayload",
+                    allowed_predecessors=predecessors,
+                    evidence_types=("active_plan", "committed_world_event"),
+                    successors=successors,
+                )
+                for event_type, predecessors, successors in (
+                    ("ActivityStarted", ("ActivityPlanned", "ActivityResumed"), ("ActivityPaused", "ActivityCompleted", "ActivityAbandoned")),
+                    ("ActivityPaused", ("ActivityStarted", "ActivityResumed"), ("ActivityResumed", "ActivityAbandoned")),
+                    ("ActivityResumed", ("ActivityPaused",), ("ActivityPaused", "ActivityCompleted", "ActivityAbandoned")),
+                    ("ActivityCompleted", ("ActivityStarted", "ActivityResumed"), ()),
+                    ("ActivityAbandoned", ("ActivityPlanned", "ActivityStarted", "ActivityPaused", "ActivityResumed"), ("ActivityPlanned",)),
+                )
             ),
             _contract(
                 "WorldOccurrenceCommitted",
@@ -592,7 +653,23 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "world",
                 "WorldOccurrenceCommittedPayload",
                 evidence_types=("active_plan", "committed_world_event"),
-                successors=("WorldOccurrenceActivated",),
+                successors=("WorldOccurrenceActivated", "WorldOccurrenceCancelled", "WorldOccurrenceExpired"),
+            ),
+            _contract(
+                "WorldOccurrenceCancelled",
+                "proposal_acceptance",
+                "world",
+                "WorldOccurrenceTerminalPayload",
+                allowed_predecessors=("WorldOccurrenceCommitted",),
+                evidence_types=("committed_world_event", "operator_observation"),
+            ),
+            _contract(
+                "WorldOccurrenceExpired",
+                "world_runtime",
+                "world",
+                "WorldOccurrenceTerminalPayload",
+                allowed_predecessors=("WorldOccurrenceCommitted",),
+                evidence_types=("committed_world_event", "operator_observation"),
             ),
             _contract(
                 "WorldOccurrenceActivated",
@@ -645,6 +722,44 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "ExperienceCommittedPayload",
                 allowed_predecessors=("WorldOccurrenceSettled",),
                 evidence_types=("settled_world_event", "settled_external_result"),
+            ),
+            _contract(
+                "AppraisalAccepted",
+                "proposal_acceptance",
+                "world",
+                "AppraisalAcceptedPayload",
+                allowed_predecessors=("AcceptanceRecorded", "TriggerProcessClaimed"),
+                evidence_types=("settled_world_event", "observed_message"),
+                successors=(
+                    "AppraisalContradicted",
+                    "AppraisalExpired",
+                    "AppraisalSuperseded",
+                    "AffectEpisodeOpened",
+                ),
+            ),
+            _contract(
+                "AppraisalContradicted",
+                "proposal_acceptance",
+                "world",
+                "AppraisalContradictedPayload",
+                allowed_predecessors=("AppraisalAccepted",),
+                evidence_types=("observed_message", "committed_world_event"),
+            ),
+            _contract(
+                "AppraisalExpired",
+                "world_runtime",
+                "world",
+                "AppraisalExpiredPayload",
+                allowed_predecessors=("AppraisalAccepted",),
+                evidence_types=("clock_observation",),
+            ),
+            _contract(
+                "AppraisalSuperseded",
+                "proposal_acceptance",
+                "world",
+                "AppraisalSupersededPayload",
+                allowed_predecessors=("AppraisalAccepted", "AppraisalContradicted"),
+                evidence_types=("observed_message", "committed_world_event"),
             ),
         )
     }

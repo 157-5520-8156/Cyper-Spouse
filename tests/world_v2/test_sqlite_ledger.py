@@ -8,6 +8,7 @@ import sqlite3
 import pytest
 
 from companion_daemon.world_v2.errors import ConcurrencyConflict, LedgerIntegrityError
+from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.schemas import (
     Action,
     BudgetAccount,
@@ -157,7 +158,7 @@ def test_sqlite_rebuild_selects_only_installed_replay_artifacts(tmp_path) -> Non
 
     assert ledger.rebuild(
         target_schema_version="world-v2.1",
-        reducer_bundle_version="world-v2-reducers.3",
+        reducer_bundle_version="world-v2-reducers.5",
     ) == ledger.project()
     with pytest.raises(ValueError, match="not installed"):
         ledger.rebuild(reducer_bundle_version="world-v1-reducers.9")
@@ -197,6 +198,9 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             "outcome_observations",
             "experiences",
             "committed_world_event_refs",
+                "appraisals",
+                "message_observations",
+                "operator_observations",
         ):
             legacy_payload.pop(key)
         legacy_hash = hashlib.sha256(
@@ -230,7 +234,7 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             "SELECT reducer_bundle_version, state_json FROM world_v2_heads"
         ).fetchone()
         assert migrated is not None
-        assert migrated[0] == "world-v2-reducers.3"
+        assert migrated[0] == "world-v2-reducers.5"
         assert "pending_actions" in json.loads(migrated[1])
 
 
@@ -264,6 +268,9 @@ def test_sqlite_atomically_migrates_verified_v2_head_to_life_bundle(tmp_path) ->
             "outcome_observations",
             "experiences",
             "committed_world_event_refs",
+            "appraisals",
+            "message_observations",
+            "operator_observations",
         ):
             legacy_payload.pop(key)
         legacy_hash = hashlib.sha256(
@@ -284,6 +291,236 @@ def test_sqlite_atomically_migrates_verified_v2_head_to_life_bundle(tmp_path) ->
     reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     assert reopened.project() == expected
     assert reopened.rebuild() == expected
+    reopened.close()
+
+
+def test_sqlite_atomically_migrates_verified_v3_head_to_appraisal_bundle(tmp_path) -> None:
+    path = tmp_path / "world-v2-v3-head.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.commit(
+        [event("event-v3-migration", "obs-v3-migration")],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    expected = ledger.project()
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        state_json = connection.execute(
+            "SELECT state_json FROM world_v2_heads WHERE world_id = ?",
+            ("world-sqlite-test",),
+        ).fetchone()[0]
+        state = ReducerState.model_validate_json(state_json)
+        payload = state.semantic_payload(
+            world_id="world-sqlite-test",
+            world_revision=1,
+            reducer_bundle_version="world-v2-reducers.3",
+        )
+        payload.pop("appraisals")
+        payload.pop("message_observations")
+        payload.pop("operator_observations")
+        for ref in payload["committed_world_event_refs"]:
+            ref.pop("continuation_refs", None)
+        legacy_hash = hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        connection.execute(
+            """UPDATE world_v2_heads
+               SET semantic_hash = ?, reducer_bundle_version = ?
+               WHERE world_id = ?""",
+            (legacy_hash, "world-v2-reducers.3", "world-sqlite-test"),
+        )
+
+    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    assert reopened.project() == expected
+    assert reopened.rebuild() == expected
+    reopened.close()
+
+
+def test_sqlite_rejects_unreleased_v4_bundle_instead_of_reinterpreting_it(
+    tmp_path,
+) -> None:
+    path = tmp_path / "world-v2-unreleased-v4.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    ledger.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE world_v2_heads SET reducer_bundle_version = ?",
+            ("world-v2-reducers.4",),
+        )
+
+    with pytest.raises(LedgerIntegrityError, match="no migration path"):
+        SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+
+
+@pytest.mark.parametrize(
+    ("case", "legacy_payload"),
+    [
+        ("minimal", {"status": "rejected", "acceptance_id": "legacy:acceptance"}),
+        (
+            "partial",
+            {
+                "status": "rejected",
+                "acceptance_id": "legacy:acceptance",
+                "proposal_id": "legacy:proposal",
+            },
+        ),
+        (
+            "unknown-proposal",
+            {
+                "status": "rejected",
+                "acceptance_id": "legacy:acceptance",
+                "proposal_id": "legacy:unknown",
+                "evaluated_world_revision": 0,
+            },
+        ),
+    ],
+)
+def test_sqlite_isolates_legacy_v3_unbound_acceptance_audit(
+    tmp_path, case: str, legacy_payload: dict[str, object]
+) -> None:
+    path = tmp_path / f"world-v2-v3-legacy-acceptance-{case}.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+
+    def audit_event(
+        event_id: str, event_type: str, payload: dict[str, object]
+    ) -> WorldEvent:
+        identity = domain_idempotency_key(
+            event_type=event_type,
+            world_id="world-sqlite-test",
+            payload=payload,
+        )
+        return WorldEvent.from_payload(
+            schema_version="world-v2.1",
+            event_id=event_id,
+            world_id="world-sqlite-test",
+            event_type=event_type,
+            logical_time=NOW,
+            created_at=NOW,
+            actor="system:test",
+            source="test",
+            trace_id="trace:legacy-acceptance",
+            causation_id=f"cause:{event_id}",
+            correlation_id="correlation:legacy-acceptance",
+            idempotency_key=identity or f"identity:{event_id}",
+            payload=payload,
+        )
+
+    ledger.commit(
+        [
+            audit_event(
+                "legacy-proposal",
+                "ProposalRecorded",
+                {"proposal_id": "legacy:proposal", "evaluated_world_revision": 0},
+            )
+        ],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    ledger.commit(
+        [
+            audit_event(
+                "legacy-acceptance",
+                "AcceptanceRecorded",
+                {
+                    "status": "rejected",
+                    "acceptance_id": "legacy:acceptance",
+                    "proposal_id": "legacy:proposal",
+                    "evaluated_world_revision": 0,
+                },
+            )
+        ],
+        expected_world_revision=0,
+        expected_deliberation_revision=1,
+    )
+    ledger.close()
+
+    with sqlite3.connect(path) as connection:
+        raw_event = json.loads(
+            connection.execute(
+                "SELECT event_json FROM world_v2_events WHERE event_id = ?",
+                ("legacy-acceptance",),
+            ).fetchone()[0]
+        )
+        raw_event["payload_json"] = json.dumps(
+            legacy_payload, sort_keys=True, separators=(",", ":")
+        )
+        raw_event["payload_hash"] = hashlib.sha256(
+            raw_event["payload_json"].encode("utf-8")
+        ).hexdigest()
+        encoded_event = json.dumps(
+            raw_event,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        connection.execute(
+            "UPDATE world_v2_events SET event_json = ?, event_hash = ? WHERE event_id = ?",
+            (
+                encoded_event,
+                hashlib.sha256(encoded_event.encode("utf-8")).hexdigest(),
+                "legacy-acceptance",
+            ),
+        )
+        raw_state = json.loads(
+            connection.execute(
+                "SELECT state_json FROM world_v2_heads WHERE world_id = ?",
+                ("world-sqlite-test",),
+            ).fetchone()[0]
+        )
+        for key in ("proposal_ids", "proposal_revisions", "acceptance_decisions"):
+            raw_state.pop(key, None)
+        acceptance_ref = next(
+            item
+            for item in raw_state["committed_world_event_refs"]
+            if item["event_id"] == "legacy-acceptance"
+        )
+        acceptance_ref["payload_hash"] = raw_event["payload_hash"]
+        acceptance_ref.pop("continuation_refs", None)
+        legacy_state = ReducerState.model_validate_json(
+            json.dumps(raw_state, separators=(",", ":"))
+        )
+        semantic = legacy_state.semantic_payload(
+            world_id="world-sqlite-test",
+            world_revision=1,
+            reducer_bundle_version="world-v2-reducers.3",
+        )
+        semantic.pop("appraisals")
+        semantic.pop("message_observations")
+        semantic.pop("operator_observations")
+        for ref in semantic["committed_world_event_refs"]:
+            ref.pop("continuation_refs", None)
+        legacy_hash = hashlib.sha256(
+            json.dumps(
+                semantic,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        connection.execute(
+            """UPDATE world_v2_heads
+               SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?
+               WHERE world_id = ?""",
+            (
+                json.dumps(raw_state, separators=(",", ":")),
+                legacy_hash,
+                "world-v2-reducers.3",
+                "world-sqlite-test",
+            ),
+        )
+
+    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
+    assert reopened.project().acceptance_decisions == ()
+    assert reopened.project().committed_world_event_refs[-1].event_type == (
+        "LegacyAcceptanceAuditRecorded"
+    )
+    assert reopened.rebuild() == reopened.project()
     reopened.close()
 
 
