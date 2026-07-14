@@ -46,6 +46,15 @@ class TurnFrame:
     capability: dict[str, object]
     dependency_tokens: tuple[str, ...]
 
+    def _prompt_capability(self) -> dict[str, object]:
+        capability = dict(self.capability)
+        # ``current_text`` exists only as an internal seam for pre-generation
+        # affect readers.  The user's current message is already supplied by
+        # the normal input path; exporting it here would duplicate tokens and
+        # give the dialogue model a second, less-provenanced copy to attend to.
+        capability.pop("current_text", None)
+        return capability
+
     def prompt_payload(self) -> dict[str, object]:
         """Return only bounded, provenance-carrying data suitable for one prompt."""
         return {
@@ -64,7 +73,7 @@ class TurnFrame:
             "experiences": list(self.experiences),
             "open_threads": list(self.open_threads),
             "open_actions": list(self.open_actions),
-            "capability": self.capability,
+            "capability": self._prompt_capability(),
         }
 
     def prompt_delta(self) -> dict[str, object]:
@@ -81,7 +90,7 @@ class TurnFrame:
             "dependency_tokens": list(self.dependency_tokens),
             "open_threads": list(self.open_threads),
             "open_actions": list(self.open_actions),
-            "capability": self.capability,
+            "capability": self._prompt_capability(),
             # These are explicitly fallible inner records, not user facts.
             "private_impressions": list(self.private_impressions),
             "private_commitments": list(self.private_commitments),
@@ -139,7 +148,7 @@ class TurnFrameCompiler:
                 snapshot, user_id=user_id, query=message.text
             )[: self.MAX_THREADS]
         )
-        capability = self._capability(snapshot)
+        capability = self._capability(snapshot, message=message)
         dependencies = tuple(
             token
             for token in (
@@ -286,6 +295,30 @@ class TurnFrameCompiler:
                         for item in frame.private_commitments
                         if str(item.get("commitment_id") or "")
                     ),
+                )
+            )
+        last_affordance = self._mapping(frame.capability.get("last_expression_affordance"))
+        selected = self._mapping(last_affordance.get("selected"))
+        selected_kind = str(selected.get("kind") or "")
+        if selected_kind:
+            advisories.append(
+                InnerAdvisory(
+                    kind="rhythm",
+                    tendency=(
+                        f"上一轮表达选择是 {selected_kind}；保持语气连续，"
+                        "不要在没有新证据时突然热情、突然追问或突然清零。"
+                    ),
+                    intensity=60,
+                    confidence=0.8,
+                    source_event_ids=tuple(
+                        item
+                        for item in (
+                            str(last_affordance.get("action_id") or ""),
+                            str(last_affordance.get("input_message_id") or ""),
+                        )
+                        if item
+                    )
+                    or (f"world_revision:{frame.revision}",),
                 )
             )
         if frame.open_actions:
@@ -573,12 +606,20 @@ class TurnFrameCompiler:
             "status": str(active.get("status") or "idle"),
         }
 
-    def _capability(self, snapshot: dict[str, object]) -> dict[str, object]:
+    def _capability(
+        self, snapshot: dict[str, object], *, message: IncomingMessage | None = None
+    ) -> dict[str, object]:
         return {
             "can_send_text": True,
             "has_open_actions": bool(self._actions(snapshot)),
             "controlled_transgression_enabled": bool(
                 snapshot.get("controlled_transgressions") is not None
+            ),
+            "current_text": str(message.text if message is not None else ""),
+            "last_expression_affordance": dict(
+                snapshot.get("last_expression_affordance")
+                if isinstance(snapshot.get("last_expression_affordance"), dict)
+                else {}
             ),
         }
 
