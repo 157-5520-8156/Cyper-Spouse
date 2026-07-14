@@ -126,7 +126,7 @@ class _UnsignedActorAuthorityMutation(FrozenModel):
     expected_entity_revision: int = Field(ge=0)
     values_before: ActorAuthorityValues | None = None
     values_after: ActorAuthorityValues
-    policy_version: Literal["actor-authority-policy.1"]
+    policy_version: Literal["actor-authority-policy.1", "actor-authority-policy.2"]
     policy_digest: str = Field(min_length=64, max_length=64)
     changed_at: datetime
     compensates_transition_id: str | None = None
@@ -141,7 +141,7 @@ class ActorAuthorityMutationPayload(FrozenModel):
     expected_entity_revision: int = Field(ge=0)
     values_before: ActorAuthorityValues | None = None
     values_after: ActorAuthorityValues
-    policy_version: Literal["actor-authority-policy.1"]
+    policy_version: Literal["actor-authority-policy.1", "actor-authority-policy.2"]
     policy_digest: str = Field(min_length=64, max_length=64)
     changed_at: datetime
     compensates_transition_id: str | None = None

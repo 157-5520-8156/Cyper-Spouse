@@ -7,6 +7,11 @@ import sqlite3
 
 import pytest
 
+from legacy_migration_support import (
+    legacy_state_json,
+    strip_v16_state_fields,
+)
+
 from companion_daemon.world_v2.errors import ConcurrencyConflict, LedgerIntegrityError
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.schemas import (
@@ -228,7 +233,7 @@ def test_sqlite_rebuild_selects_only_installed_replay_artifacts(tmp_path) -> Non
     assert (
         ledger.rebuild(
             target_schema_version="world-v2.1",
-            reducer_bundle_version="world-v2-reducers.15",
+            reducer_bundle_version="world-v2-reducers.16",
         )
         == ledger.project()
     )
@@ -304,6 +309,7 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             ).encode("utf-8")
         ).hexdigest()
         legacy_state = current_state.model_dump(mode="json")
+        strip_v16_state_fields(legacy_state)
         legacy_state.pop("pending_actions")
         connection.execute(
             "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?",
@@ -324,7 +330,7 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             "SELECT reducer_bundle_version, state_json FROM world_v2_heads"
         ).fetchone()
         assert migrated is not None
-        assert migrated[0] == "world-v2-reducers.15"
+        assert migrated[0] == "world-v2-reducers.16"
         assert "pending_actions" in json.loads(migrated[1])
 
 
@@ -391,9 +397,14 @@ def test_sqlite_atomically_migrates_verified_v2_head_to_life_bundle(tmp_path) ->
         ).hexdigest()
         connection.execute(
             """UPDATE world_v2_heads
-               SET semantic_hash = ?, reducer_bundle_version = ?
+               SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?
                WHERE world_id = ?""",
-            (legacy_hash, "world-v2-reducers.2", "world-sqlite-test"),
+            (
+                legacy_state_json(head[0]),
+                legacy_hash,
+                "world-v2-reducers.2",
+                "world-sqlite-test",
+            ),
         )
 
     reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
@@ -455,9 +466,14 @@ def test_sqlite_atomically_migrates_verified_v3_head_to_appraisal_bundle(tmp_pat
         ).hexdigest()
         connection.execute(
             """UPDATE world_v2_heads
-               SET semantic_hash = ?, reducer_bundle_version = ?
+               SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?
                WHERE world_id = ?""",
-            (legacy_hash, "world-v2-reducers.3", "world-sqlite-test"),
+            (
+                legacy_state_json(state_json),
+                legacy_hash,
+                "world-v2-reducers.3",
+                "world-sqlite-test",
+            ),
         )
 
     reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
@@ -534,6 +550,7 @@ def test_sqlite_migrates_v5_head_without_affect_projection_fields(tmp_path) -> N
         raw_state.pop("affect_episodes", None)
         raw_state.pop("affect_proposals", None)
         raw_state.pop("affect_proposal_ids", None)
+        strip_v16_state_fields(raw_state)
         connection.execute(
             """UPDATE world_v2_heads
                SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?
@@ -667,6 +684,7 @@ def test_sqlite_isolates_legacy_v3_unbound_acceptance_audit(
         )
         for key in ("proposal_ids", "proposal_revisions", "acceptance_decisions"):
             raw_state.pop(key, None)
+        strip_v16_state_fields(raw_state)
         acceptance_ref = next(
             item
             for item in raw_state["committed_world_event_refs"]

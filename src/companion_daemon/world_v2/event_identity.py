@@ -160,6 +160,15 @@ def _life_identity_components(
             payload.get("expected_entity_revision"),
             payload.get("transition_id"),
         )
+    if event_type == "V2GoalExpired":
+        return (
+            world_id,
+            payload.get("operation"),
+            _nested(payload, "goal_after", "goal_id"),
+            payload.get("expected_entity_revision"),
+            _nested(payload, "cause_authority", "clock_event_ref"),
+            payload.get("policy_digest"),
+        )
     if event_type == "TriggerProcessOpened":
         return world_id, _nested(payload, "process", "trigger_id"), "opened"
     if event_type in {"TriggerProcessClaimed", "TriggerProcessReclaimed"}:

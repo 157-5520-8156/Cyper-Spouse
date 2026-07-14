@@ -8,6 +8,8 @@ import sqlite3
 from nacl.signing import SigningKey
 import pytest
 
+from legacy_migration_support import legacy_state_json
+
 from companion_daemon.world_v2.actor_authority_events import (
     ROOT_KEYSET_DIGEST,
     actor_authority_mutation_hash,
@@ -1260,12 +1262,12 @@ def test_sqlite_roundtrip_and_verified_v8_to_v9_migration(monkeypatch, tmp_path)
             ).encode("utf-8")
         ).hexdigest()
         connection.execute(
-            "UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ? "
+            "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ? "
             "WHERE world_id = ?",
-            (legacy_hash, "world-v2-reducers.8", WORLD),
+            (legacy_state_json(raw_state), legacy_hash, "world-v2-reducers.8", WORLD),
         )
     migrated = SQLiteWorldLedger(path=migration_path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.15"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.16"
     assert migrated.project() == old_expected
     assert migrated.rebuild() == old_expected
     migrated.close()
@@ -1276,9 +1278,12 @@ def test_sqlite_rejects_tampered_v8_authorization_migration_head(tmp_path) -> No
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
     ledger.close()
     with sqlite3.connect(path) as connection:
+        raw_state = connection.execute(
+            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
+        ).fetchone()[0]
         connection.execute(
-            "UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ?",
-            ("0" * 64, "world-v2-reducers.8"),
+            "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ?",
+            (legacy_state_json(raw_state), "0" * 64, "world-v2-reducers.8"),
         )
     with pytest.raises(LedgerIntegrityError, match="legacy head semantic hash is invalid"):
         SQLiteWorldLedger(path=path, world_id=WORLD)

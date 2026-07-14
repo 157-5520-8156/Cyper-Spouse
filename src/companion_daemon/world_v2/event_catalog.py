@@ -23,6 +23,10 @@ from .authorization_events import AUTHORIZATION_PAYLOAD_MODELS
 from .commitment_events import COMMITMENT_PAYLOAD_MODELS
 from .character_core_events import CHARACTER_CORE_PAYLOAD_MODELS
 from .fact_events import FACT_PAYLOAD_MODELS
+from .goal_authority_events import (
+    V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
+    V2_GOAL_PAYLOAD_MODELS,
+)
 from .experience_events import (
     EXPERIENCE_PAYLOAD_MODELS,
     LegacyExperienceCommittedPayload,
@@ -61,7 +65,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.15"
+    reducer_bundle: str = "world-v2-reducers.16"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -251,6 +255,8 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **EXPERIENCE_PAYLOAD_MODELS,
         **MEMORY_CANDIDATE_PAYLOAD_MODELS,
         **CHARACTER_CORE_PAYLOAD_MODELS,
+        **V2_GOAL_PAYLOAD_MODELS,
+        **V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
         "LegacyExperienceCommitted": LegacyExperienceCommittedPayload,
         **THREAD_MECHANICAL_PAYLOAD_MODELS,
         **ACTOR_AUTHORITY_PAYLOAD_MODELS,
@@ -341,6 +347,14 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
             event_type: "world_id+core_id+expected_entity_revision+transition_id"
             for event_type in CHARACTER_CORE_PAYLOAD_MODELS
         },
+        **{
+            event_type: "world_id+goal_id+expected_entity_revision+transition_id"
+            for event_type in V2_GOAL_PAYLOAD_MODELS
+        },
+        "V2GoalExpired": (
+            "world_id+operation+goal_id+expected_entity_revision+"
+            "clock_event_ref+policy_digest"
+        ),
         "ActorAuthorityBootstrapped": "world_id+authority_id+transition_id",
         "ActorAuthorityRotated": "world_id+authority_id+expected_entity_revision+transition_id",
         "ActorAuthorityRevoked": "world_id+authority_id+expected_entity_revision+transition_id",
@@ -933,6 +947,32 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     ),
                 )
                 for event_type, payload_model in CHARACTER_CORE_PAYLOAD_MODELS.items()
+            ),
+            *(
+                _contract(
+                    event_type,
+                    "proposal_acceptance",
+                    "world",
+                    payload_model.__name__,
+                    allowed_predecessors=("AcceptanceRecorded",),
+                    evidence_types=(
+                        "committed_fact",
+                        "committed_experience",
+                        "committed_world_event",
+                        "settled_world_event",
+                    ),
+                    compensations=("V2GoalTransitionCompensated",),
+                )
+                for event_type, payload_model in V2_GOAL_PAYLOAD_MODELS.items()
+            ),
+            _contract(
+                "V2GoalExpired",
+                "world_runtime",
+                "world",
+                "V2GoalExpiredPayload",
+                allowed_predecessors=("ClockAdvanced", "V2GoalExpired"),
+                evidence_types=("clock_observation",),
+                compensations=("V2GoalTransitionCompensated",),
             ),
             _contract(
                 "AppraisalAccepted",

@@ -7,6 +7,8 @@ import sqlite3
 
 import pytest
 
+from legacy_migration_support import legacy_state_json
+
 from companion_daemon.world_v2.commitment_events import (
     CommitmentChangedPayload,
     CommitmentClockTransitionPayload,
@@ -575,12 +577,17 @@ def test_sqlite_commitment_roundtrip_and_rebuild(tmp_path) -> None:
             separators=(",", ":"),
         ).encode()).hexdigest()
         connection.execute(
-            "UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ? "
+            "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ? "
             "WHERE world_id = ?",
-            (legacy_hash, "world-v2-reducers.11", WORLD),
+            (
+                legacy_state_json(state_json),
+                legacy_hash,
+                "world-v2-reducers.11",
+                WORLD,
+            ),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.15"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.16"
     assert migrated.project().commitments == expected.commitments
     assert migrated.rebuild() == migrated.project()
     migrated.close()

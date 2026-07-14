@@ -8,6 +8,8 @@ import sqlite3
 
 import pytest
 
+from legacy_migration_support import strip_v16_state_fields
+
 from companion_daemon.world_v2.batch_invariants import appraisal_trigger_identity
 from companion_daemon.world_v2.appraisal_events import appraisal_mutation_hash
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
@@ -1040,6 +1042,7 @@ def test_sqlite_migrates_a_real_v3_life_trigger_with_derived_provenance(
             "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
         ).fetchone()[0]
         raw_state = json.loads(state_json)
+        strip_v16_state_fields(raw_state)
         raw_state.pop("message_observations", None)
         raw_state.pop("operator_observations", None)
         for process in raw_state["trigger_processes"]:
@@ -1047,7 +1050,8 @@ def test_sqlite_migrates_a_real_v3_life_trigger_with_derived_provenance(
         for ref in raw_state["committed_world_event_refs"]:
             ref.pop("continuation_refs", None)
         legacy_state = ReducerState.model_validate_json(
-            json.dumps(raw_state, separators=(",", ":"))
+            json.dumps(raw_state, separators=(",", ":")),
+            context={"source_reducer_bundle": "world-v2-reducers.3"},
         )
         legacy_payload = legacy_state.semantic_payload(
             world_id=WORLD_ID,

@@ -25,6 +25,17 @@ from .schemas import CommitResult, LedgerProjection, ProjectionCursor, WorldEven
 from .upcasting import CURRENT_SCHEMA_VERSION, require_target_schema, upcast_event
 
 
+_V16_ONLY_STATE_KEYS = frozenset(
+    {
+        "clock_transition_history",
+        "goals",
+        "goal_transitions",
+        "goal_proposals",
+        "goal_proposal_ids",
+    }
+)
+
+
 def _upcast_legacy_appraisal_trigger(
     raw_event: dict[str, object],
     *,
@@ -311,6 +322,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.12",
                 "world-v2-reducers.13",
                 "world-v2-reducers.14",
+                "world-v2-reducers.15",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -368,6 +380,20 @@ class SQLiteWorldLedger:
             if not isinstance(raw_state, dict):
                 raise ValueError("legacy state is not an object")
             raw_state = dict(raw_state)
+            injected_v16_keys = tuple(sorted(_V16_ONLY_STATE_KEYS.intersection(raw_state)))
+            if injected_v16_keys:
+                raise ValueError(
+                    f"legacy head cannot claim v16 authority fields {injected_v16_keys!r}"
+                )
+            occurrences = raw_state.get("world_occurrences", [])
+            if isinstance(occurrences, list) and any(
+                isinstance(occurrence, dict)
+                and "settled_outcome_ref" in occurrence
+                for occurrence in occurrences
+            ):
+                raise ValueError(
+                    "legacy world occurrence cannot claim a v16 settled outcome"
+                )
             experiences = raw_state.get("experiences", [])
             if isinstance(experiences, list):
                 raw_state["experiences"] = [
@@ -389,7 +415,8 @@ class SQLiteWorldLedger:
                 if isinstance(action, dict) and action.get("state") not in terminal
             ]
             state = ReducerState.model_validate_json(
-                json.dumps(raw_state, ensure_ascii=False, separators=(",", ":"))
+                json.dumps(raw_state, ensure_ascii=False, separators=(",", ":")),
+                context={"source_reducer_bundle": reducer_bundle_version},
             )
         except Exception as exc:
             raise LedgerIntegrityError("legacy head state is invalid") from exc
@@ -491,6 +518,7 @@ class SQLiteWorldLedger:
             "world-v2-reducers.12",
             "world-v2-reducers.13",
             "world-v2-reducers.14",
+            "world-v2-reducers.15",
             REDUCER_BUNDLE_VERSION,
         }:
             payload.pop("commitments", None)
@@ -522,6 +550,11 @@ class SQLiteWorldLedger:
             message_observations=projection.message_observations,
             operator_observations=projection.operator_observations,
             committed_world_event_refs=projection.committed_world_event_refs,
+            clock_transition_history=projection.clock_transition_history,
+            goals=projection.goals,
+            goal_transitions=projection.goal_transitions,
+            goal_proposals=projection.goal_proposals,
+            goal_proposal_ids=projection.goal_proposal_ids,
             logical_time=projection.logical_time,
             actions=projection.actions,
             pending_actions=projection.pending_actions,

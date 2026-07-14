@@ -7,6 +7,8 @@ import sqlite3
 
 import pytest
 
+from legacy_migration_support import strip_v16_state_fields
+
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.experience_events import (
     ExperienceCommittedPayload,
@@ -523,6 +525,7 @@ def test_experience_rejects_cross_confused_occurrence_settlement() -> None:
             closes_at=NOW + timedelta(minutes=1),
         ),
         candidate_outcome_refs=("outcome:a",),
+        settled_outcome_ref="outcome:a",
         visibility="private",
         status="settled",
         activated_at=NOW - timedelta(minutes=4),
@@ -975,6 +978,7 @@ def test_experience_cannot_weaken_plan_or_occurrence_actual_privacy(
             closes_at=NOW + timedelta(minutes=5),
         ),
         candidate_outcome_refs=("outcome:withheld",),
+        settled_outcome_ref="outcome:withheld",
         visibility="withhold",
         status="settled",
         activated_at=NOW - timedelta(minutes=3),
@@ -1121,6 +1125,7 @@ def test_sqlite_migrates_nonempty_v12_legacy_experience_without_fabricated_linea
             separators=(",", ":"),
         ).encode()).hexdigest()
         raw_state = legacy_state.model_dump(mode="json")
+        strip_v16_state_fields(raw_state)
         raw_state["experiences"][0].pop("authority_contract_version")
         raw_state["experiences"][0]["status"] = "committed"
         raw_state.pop("experience_transitions")
@@ -1178,7 +1183,7 @@ def test_sqlite_migrates_nonempty_v12_legacy_experience_without_fabricated_linea
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
     projected = migrated.project()
-    assert projected.reducer_bundle_version == "world-v2-reducers.15"
+    assert projected.reducer_bundle_version == "world-v2-reducers.16"
     assert len(projected.experiences) == 1
     assert isinstance(projected.experiences[0], LegacyExperienceProjection)
     assert projected.experiences[0].authority_contract_version == "legacy-unverified"

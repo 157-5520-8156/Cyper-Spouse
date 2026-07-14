@@ -7,6 +7,8 @@ import sqlite3
 
 import pytest
 
+from legacy_migration_support import legacy_state_json
+
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.ledger import WorldLedger
@@ -725,12 +727,12 @@ def test_sqlite_verified_v9_head_migrates_to_v11(tmp_path) -> None:
             semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode()).hexdigest()
         connection.execute(
-            "UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ? "
+            "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ? "
             "WHERE world_id = ?",
-            (legacy_hash, "world-v2-reducers.9", WORLD),
+            (legacy_state_json(state_json), legacy_hash, "world-v2-reducers.9", WORLD),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.15"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.16"
     assert migrated.project().threads == ()
     assert migrated.rebuild() == migrated.project()
     migrated.close()
@@ -770,12 +772,12 @@ def test_sqlite_verified_thread_authority_head_migrates_to_v12(
             semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")
         ).encode()).hexdigest()
         connection.execute(
-            "UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ? "
+            "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ? "
             "WHERE world_id = ?",
-            (legacy_hash, legacy_bundle, WORLD),
+            (legacy_state_json(state_json), legacy_hash, legacy_bundle, WORLD),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.15"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.16"
     assert migrated.project().threads == expected_thread
     assert migrated.project().commitments == ()
     assert migrated.rebuild() == migrated.project()

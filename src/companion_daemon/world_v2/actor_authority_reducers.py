@@ -23,6 +23,22 @@ from .schemas import (
 )
 
 
+_LEGACY_ALLOWED_OPERATIONS = (
+    "actor_authority_rotation",
+    "capability_grant",
+    "character_core_governance",
+    "consent_grant",
+    "privacy_policy",
+)
+_V2_ALLOWED_OPERATIONS = tuple(
+    sorted(
+        (*_LEGACY_ALLOWED_OPERATIONS,
+         "v2_attention_governance",
+         "v2_goal_governance",
+         "v2_location_governance",
+         "v2_resource_governance")
+    )
+)
 _POLICY = {
     "policy_version": "actor-authority-policy.1",
     "root_keyset_version": ROOT_KEYSET_VERSION,
@@ -33,6 +49,24 @@ _POLICY = {
 ACTOR_AUTHORITY_POLICY_DIGEST = hashlib.sha256(
     json.dumps(_POLICY, sort_keys=True, separators=(",", ":")).encode("utf-8")
 ).hexdigest()
+_V2_POLICY = {
+    **_POLICY,
+    "policy_version": "actor-authority-policy.2",
+    "allowed_operations": _V2_ALLOWED_OPERATIONS,
+}
+ACTOR_AUTHORITY_V2_POLICY_DIGEST = hashlib.sha256(
+    json.dumps(_V2_POLICY, sort_keys=True, separators=(",", ":")).encode("utf-8")
+).hexdigest()
+ACTOR_AUTHORITY_POLICY_REGISTRY = {
+    "actor-authority-policy.1": (
+        ACTOR_AUTHORITY_POLICY_DIGEST,
+        frozenset(_LEGACY_ALLOWED_OPERATIONS),
+    ),
+    "actor-authority-policy.2": (
+        ACTOR_AUTHORITY_V2_POLICY_DIGEST,
+        frozenset(_V2_ALLOWED_OPERATIONS),
+    ),
+}
 
 
 def reduce_actor_authority(
@@ -53,11 +87,15 @@ def reduce_actor_authority(
         raise ValueError("actor authority root proof belongs to another world")
     if event.logical_time != logical_time or payload.changed_at != logical_time:
         raise ValueError("actor authority transition must use authoritative logical time")
-    if (
-        payload.policy_version != _POLICY["policy_version"]
-        or payload.policy_digest != ACTOR_AUTHORITY_POLICY_DIGEST
-    ):
+    installed = ACTOR_AUTHORITY_POLICY_REGISTRY.get(payload.policy_version)
+    if installed is None or payload.policy_digest != installed[0]:
         raise ValueError("actor authority transition references an uninstalled policy")
+    allowed_operations = installed[1]
+    if not set(payload.values_after.allowed_operations).issubset(allowed_operations) or (
+        payload.values_before is not None
+        and not set(payload.values_before.allowed_operations).issubset(allowed_operations)
+    ):
+        raise ValueError("actor authority operations are not installed for policy version")
     _verify_root_proof(payload, event)
     nonce_key = f"{event.world_id}|{payload.root_proof.root_key_id}|{payload.root_proof.nonce}"
     if nonce_key in consumed_root_nonces:

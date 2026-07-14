@@ -56,8 +56,29 @@ from .commitment_events import (
 from .commitment_reducers import reduce_commitment, reduce_commitment_clock
 from .character_core_events import CHARACTER_CORE_PAYLOAD_MODELS, CharacterCoreChangedPayload
 from .character_core_reducers import CHARACTER_CORE_POLICY_REFS, reduce_character_core
+from .clock_authority import (
+    append_clock_transition,
+    validate_clock_history,
+)
 from .fact_events import FACT_PAYLOAD_MODELS, FactAuthorizedMutationPayload, FactChangedPayload
 from .fact_reducers import reduce_fact
+from .goal_authority_events import (
+    V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
+    V2_GOAL_PAYLOAD_MODELS,
+    V2GoalChangedPayload,
+    V2GoalExpiredPayload,
+)
+from .goal_authority_reducers import (
+    V2_GOAL_POLICY_REFS,
+    reduce_v2_goal,
+    reduce_v2_goal_expiry,
+)
+from .goal_situation_schemas import (
+    V2GoalProjection,
+    V2GoalProposalProjection,
+    V2GoalTransitionProjection,
+    validate_v2_goal_authority_state,
+)
 from .experience_events import (
     ExperienceAuthorizedMutationPayload,
     ExperienceCommittedPayload,
@@ -146,6 +167,7 @@ from .schemas import (
     CharacterCoreProjection,
     CharacterCoreProposalProjection,
     CharacterCoreTransitionProjection,
+    ClockTransitionProjection,
     CommittedWorldEventRef,
     CommitmentProjection,
     CommitmentProposalProjection,
@@ -190,7 +212,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.15"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.16"
 INSTALLED_APPRAISAL_POLICY_REFS = ("policy:appraisal-v1",)
 INSTALLED_APPRAISAL_MATRIX_VERSION = "appraisal-matrix.1"
 INSTALLED_SOURCE_CLUSTERING_VERSION = "source-clustering.1"
@@ -215,7 +237,12 @@ def _experience_semantic_dump(
     dumped = experience.model_dump(mode="json")
     if (
         reducer_bundle_version
-        not in {"world-v2-reducers.13", "world-v2-reducers.14", REDUCER_BUNDLE_VERSION}
+        not in {
+            "world-v2-reducers.13",
+            "world-v2-reducers.14",
+            "world-v2-reducers.15",
+            REDUCER_BUNDLE_VERSION,
+        }
         and isinstance(experience, LegacyExperienceProjection)
     ):
         dumped.pop("authority_contract_version", None)
@@ -245,6 +272,11 @@ class ReducerState(FrozenModel):
     message_observations: tuple[MessageObservationRef, ...] = ()
     operator_observations: tuple[OperatorObservationRef, ...] = ()
     committed_world_event_refs: tuple[CommittedWorldEventRef, ...] = ()
+    clock_transition_history: tuple[ClockTransitionProjection, ...] = ()
+    goals: tuple[V2GoalProjection, ...] = ()
+    goal_transitions: tuple[V2GoalTransitionProjection, ...] = ()
+    goal_proposals: tuple[V2GoalProposalProjection, ...] = ()
+    goal_proposal_ids: tuple[str, ...] = ()
     logical_time: datetime | None = None
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
@@ -309,6 +341,17 @@ class ReducerState(FrozenModel):
         )
         if self.pending_actions != expected:
             raise ValueError("pending_actions must equal the non-terminal action index")
+        validate_clock_history(
+            self.clock_transition_history,
+            current_logical_time=self.logical_time,
+        )
+        validate_v2_goal_authority_state(
+            self.goals,
+            self.goal_transitions,
+            self.goal_proposals,
+            self.goal_proposal_ids,
+            global_proposal_ids=self.proposal_ids,
+        )
         dimensions = tuple(item.dimension for item in self.affect_baselines)
         if len(dimensions) != len(set(dimensions)):
             raise ValueError("affect baseline dimensions must be unique")
@@ -820,6 +863,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.12",
                         "world-v2-reducers.13",
                         "world-v2-reducers.14",
+                        "world-v2-reducers.15",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else item.model_dump(
@@ -859,15 +903,20 @@ class ReducerState(FrozenModel):
             "world_occurrences": tuple(
                 (
                     occurrence.model_dump(mode="json")
+                    if reducer_bundle_version == "world-v2-reducers.16"
+                    else occurrence.model_dump(
+                        mode="json", exclude={"settled_outcome_ref"}
+                    )
                     if reducer_bundle_version
                     in {
                         "world-v2-reducers.13",
                         "world-v2-reducers.14",
-                        REDUCER_BUNDLE_VERSION,
+                        "world-v2-reducers.15",
                     }
                     else occurrence.model_dump(
                         mode="json",
                         exclude={
+                            "settled_outcome_ref",
                             "settlement_event_ref",
                             "settlement_world_revision",
                             "settlement_payload_hash",
@@ -909,6 +958,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.12",
             "world-v2-reducers.13",
             "world-v2-reducers.14",
+            "world-v2-reducers.15",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["threads"] = tuple(item.model_dump(mode="json") for item in self.threads)
@@ -920,6 +970,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.12",
             "world-v2-reducers.13",
             "world-v2-reducers.14",
+            "world-v2-reducers.15",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["commitments"] = tuple(
@@ -932,6 +983,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.12",
             "world-v2-reducers.13",
             "world-v2-reducers.14",
+            "world-v2-reducers.15",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["facts"] = tuple(item.model_dump(mode="json") for item in self.facts)
@@ -941,12 +993,17 @@ class ReducerState(FrozenModel):
         if reducer_bundle_version in {
             "world-v2-reducers.13",
             "world-v2-reducers.14",
+            "world-v2-reducers.15",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["experience_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.experience_transitions
             )
-        if reducer_bundle_version in {"world-v2-reducers.14", REDUCER_BUNDLE_VERSION}:
+        if reducer_bundle_version in {
+            "world-v2-reducers.14",
+            "world-v2-reducers.15",
+            REDUCER_BUNDLE_VERSION,
+        }:
             payload["memory_candidates"] = tuple(
                 item.model_dump(mode="json") for item in self.memory_candidates
             )
@@ -954,7 +1011,10 @@ class ReducerState(FrozenModel):
                 item.model_dump(mode="json")
                 for item in self.memory_candidate_transitions
             )
-        if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+        if reducer_bundle_version in {
+            "world-v2-reducers.15",
+            REDUCER_BUNDLE_VERSION,
+        }:
             payload["character_core"] = (
                 self.character_core.model_dump(mode="json")
                 if self.character_core is not None
@@ -962,6 +1022,15 @@ class ReducerState(FrozenModel):
             )
             payload["character_core_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.character_core_transitions
+            )
+        if reducer_bundle_version == "world-v2-reducers.16":
+            payload["clock_transition_history"] = tuple(
+                item.model_dump(mode="json")
+                for item in self.clock_transition_history
+            )
+            payload["goals"] = tuple(item.model_dump(mode="json") for item in self.goals)
+            payload["goal_transitions"] = tuple(
+                item.model_dump(mode="json") for item in self.goal_transitions
             )
         return payload
 
@@ -1243,6 +1312,36 @@ class _CharacterCoreProposalStore:
             }
         )
 
+
+class _V2GoalProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        if not isinstance(event, WorldEvent) or not isinstance(
+            proposal, V2GoalProposalProjection
+        ):
+            raise TypeError("Goal proposal adapter received incompatible values")
+        return _v2_goal_proposal_recorded(state, event, proposal=proposal)
+
+    def find(
+        self, state: ReducerState, proposal_id: str
+    ) -> V2GoalProposalProjection | None:
+        return next(
+            (item for item in state.goal_proposals if item.proposal_id == proposal_id),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        remaining = tuple(
+            item for item in state.goal_proposals if item.proposal_id != proposal_id
+        )
+        return state.model_copy(
+            update={
+                "goal_proposals": remaining,
+                "goal_proposal_ids": tuple(item.proposal_id for item in remaining),
+            }
+        )
+
 _TYPED_PROPOSAL_STORES = {
     "proposal-contract:appraisal-legacy.1": _LegacyAppraisalProposalStore(),
     "proposal-contract:affect-legacy.1": _LegacyAffectProposalStore(),
@@ -1254,6 +1353,7 @@ _TYPED_PROPOSAL_STORES = {
     "proposal-contract:experience.1": _ExperienceProposalStore(),
     "proposal-contract:memory-candidate.1": _MemoryCandidateProposalStore(),
     "proposal-contract:character-core.1": _CharacterCoreProposalStore(),
+    "proposal-contract:v2-goal.1": _V2GoalProposalStore(),
 }
 
 _TYPED_PROPOSAL_REGISTRY = TypedProposalRegistry(
@@ -1861,6 +1961,68 @@ def _character_core_proposal_recorded(
     )
 
 
+def _v2_goal_proposal_recorded(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    proposal: V2GoalProposalProjection | None = None,
+) -> ReducerState:
+    proposal = proposal or V2GoalProposalProjection.model_validate_json(
+        event.payload_json
+    )
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("Goal proposal must evaluate the current world revision")
+    if proposal.proposal_id in state.goal_proposal_ids:
+        raise ValueError("Goal proposal identity is already registered")
+    payload = V2GoalChangedPayload.model_validate_json(
+        proposal.proposed_mutation.payload_json
+    )
+    if (
+        payload.proposal_id != proposal.proposal_id
+        or payload.change_id != proposal.change_id
+        or payload.transition_id != proposal.transition_id
+        or payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or payload.expected_entity_revision != proposal.expected_entity_revision
+        or payload.accepted_change_hash != proposal.proposed_change_hash
+        or payload.evidence_refs != proposal.evidence_refs
+        or payload.policy_refs != proposal.policy_refs
+    ):
+        raise ValueError("persisted Goal proposal body does not match index")
+    if proposal.policy_refs != V2_GOAL_POLICY_REFS:
+        raise ValueError("Goal proposal references an uninstalled policy")
+    _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
+    logical_time = _require_life_time(state, event)
+    reduce_v2_goal(
+        state.goals,
+        state.goal_transitions,
+        payload,
+        event_type=proposal.proposed_mutation.event_type,
+        event_id=payload.goal_after.origin.accepted_event_ref,
+        logical_time=logical_time,
+        actor_authorities=state.actor_authorities,
+        committed_events=state.committed_world_event_refs,
+        random_draws=(),
+        world_occurrences=state.world_occurrences,
+        facts=state.facts,
+        experiences=state.experiences,
+        clock_transition_history=state.clock_transition_history,
+    )
+    return state.model_copy(
+        update={
+            "goal_proposals": (*state.goal_proposals, proposal),
+            "goal_proposal_ids": (*state.goal_proposal_ids, proposal.proposal_id),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
 def _affect_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     proposal = AffectProposalProjection.model_validate_json(event.payload_json)
     if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
@@ -2100,13 +2262,28 @@ def _clock_advanced(state: ReducerState, event: WorldEvent) -> ReducerState:
         raise ValueError("ClockAdvanced requires logical_time_to")
     origin = datetime.fromisoformat(logical_time_from)
     target = datetime.fromisoformat(logical_time_to)
+    if (
+        origin.tzinfo is None
+        or origin.utcoffset() is None
+        or target.tzinfo is None
+        or target.utcoffset() is None
+    ):
+        raise ValueError("ClockAdvanced timestamps must be timezone-aware")
     if target <= origin:
         raise ValueError("ClockAdvanced logical_time_to must follow logical_time_from")
     if state.logical_time is not None and origin != state.logical_time:
         raise ValueError("ClockAdvanced logical_time_from does not match current logical time")
     if state.logical_time is not None and target <= state.logical_time:
         raise ValueError("logical time cannot move backwards or remain unchanged")
-    return state.model_copy(update={"logical_time": target})
+    history = append_clock_transition(
+        state.clock_transition_history,
+        event=event,
+        current_logical_time=state.logical_time,
+        computed_world_revision=len(state.committed_world_event_refs) + 1,
+    )
+    return state.model_copy(
+        update={"logical_time": target, "clock_transition_history": history}
+    )
 
 
 def _operator_observation_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -3634,6 +3811,101 @@ def _fact_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
     )
 
 
+def _v2_goal_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = V2GoalChangedPayload.model_validate_json(event.payload_json)
+    proposal = _require_authorized_v2_goal(state, payload)
+    goals, transitions = reduce_v2_goal(
+        state.goals,
+        state.goal_transitions,
+        payload,
+        event_type=event.event_type,
+        event_id=event.event_id,
+        logical_time=logical_time,
+        actor_authorities=state.actor_authorities,
+        committed_events=state.committed_world_event_refs,
+        random_draws=(),
+        world_occurrences=state.world_occurrences,
+        facts=state.facts,
+        experiences=state.experiences,
+        clock_transition_history=state.clock_transition_history,
+    )
+    remaining = tuple(item for item in state.goal_proposals if item != proposal)
+    return state.model_copy(
+        update={
+            "goals": goals,
+            "goal_transitions": transitions,
+            "goal_proposals": remaining,
+            "goal_proposal_ids": tuple(item.proposal_id for item in remaining),
+        }
+    )
+
+
+def _v2_goal_expired(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = V2GoalExpiredPayload.model_validate_json(event.payload_json)
+    goals, transitions = reduce_v2_goal_expiry(
+        state.goals,
+        state.goal_transitions,
+        payload,
+        event_type=event.event_type,
+        event_id=event.event_id,
+        logical_time=logical_time,
+        clock_transition_history=state.clock_transition_history,
+    )
+    return state.model_copy(
+        update={"goals": goals, "goal_transitions": transitions}
+    )
+
+
+def _require_authorized_v2_goal(
+    state: ReducerState,
+    payload: V2GoalChangedPayload,
+) -> V2GoalProposalProjection:
+    proposal = next(
+        (item for item in state.goal_proposals if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    decision = next(
+        (
+            item
+            for item in state.acceptance_decisions
+            if item.proposal_id == payload.proposal_id
+        ),
+        None,
+    )
+    if proposal is None:
+        raise ValueError("Goal transition requires a persisted typed proposal")
+    if (
+        decision is None
+        or decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+    ):
+        raise ValueError("Goal transition requires its accepted decision")
+    if (
+        not state.committed_world_event_refs
+        or state.committed_world_event_refs[-1].event_type != "AcceptanceRecorded"
+        or not state.acceptance_decisions
+        or state.acceptance_decisions[-1] != decision
+    ):
+        raise ValueError("Goal transition requires adjacent AcceptanceRecorded authority")
+    if (
+        proposal.transition_kind != payload.operation
+        or proposal.change_id != payload.change_id
+        or proposal.transition_id != payload.transition_id
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.expected_entity_revision != payload.expected_entity_revision
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or proposal.evidence_refs != payload.evidence_refs
+        or json.loads(proposal.proposed_mutation.payload_json)
+        != payload.model_dump(mode="json")
+    ):
+        raise ValueError("accepted Goal transition does not match its proposal")
+    return proposal
+
+
 def _require_authorized_fact(
     state: ReducerState,
     payload: FactAuthorizedMutationPayload,
@@ -4183,6 +4455,14 @@ _EVENTS = {
         ),
         EventDefinition("PrivateCommitmentReleased", RevisionClass.WORLD, _commitment_changed),
         *(
+            EventDefinition(event_type, RevisionClass.WORLD, _v2_goal_changed)
+            for event_type in V2_GOAL_PAYLOAD_MODELS
+        ),
+        *(
+            EventDefinition(event_type, RevisionClass.WORLD, _v2_goal_expired)
+            for event_type in V2_GOAL_MECHANICAL_PAYLOAD_MODELS
+        ),
+        *(
             EventDefinition(event_type, RevisionClass.WORLD, _fact_changed)
             for event_type in FACT_PAYLOAD_MODELS
         ),
@@ -4298,6 +4578,11 @@ def make_projection(
         message_observations=state.message_observations,
         operator_observations=state.operator_observations,
         committed_world_event_refs=state.committed_world_event_refs,
+        clock_transition_history=state.clock_transition_history,
+        goals=state.goals,
+        goal_transitions=state.goal_transitions,
+        goal_proposals=state.goal_proposals,
+        goal_proposal_ids=state.goal_proposal_ids,
         actions=state.actions,
         pending_actions=state.pending_actions,
         budget_accounts=state.budget_accounts,

@@ -6,10 +6,28 @@ import hashlib
 import json
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator, model_validator
+from pydantic import (
+    Field,
+    ValidationInfo,
+    computed_field,
+    field_validator,
+    model_validator,
+)
+
+from .goal_situation_schemas import (
+    V2GoalProjection,
+    V2GoalProposalProjection,
+    V2GoalTransitionProjection,
+    validate_v2_goal_authority_state,
+)
+from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
 
 
 SchemaVersion = Literal["world-v2.1"]
+_LEGACY_WITHOUT_SETTLED_OUTCOME = frozenset(
+    f"world-v2-reducers.{version}"
+    for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+)
 RuntimeStatus = Literal[
     "observed_only",
     "action_authorized",
@@ -32,16 +50,6 @@ ActionState = Literal[
 ]
 
 
-def _contains_naive_datetime(value: Any) -> bool:
-    if isinstance(value, datetime):
-        return value.tzinfo is None or value.utcoffset() is None
-    if isinstance(value, dict):
-        return any(_contains_naive_datetime(item) for item in value.values())
-    if isinstance(value, (tuple, list, set, frozenset)):
-        return any(_contains_naive_datetime(item) for item in value)
-    return False
-
-
 class AcceptanceErrorCode(StrEnum):
     UNSUPPORTED_CLAIM = "unsupported_claim"
     STALE_REVISION = "stale_revision"
@@ -53,17 +61,6 @@ class AcceptanceErrorCode(StrEnum):
     ACTION_DUPLICATE = "action_duplicate"
     DEPENDENCY_UNSATISFIED = "dependency_unsatisfied"
     EXPIRED_INTENT = "expired_intent"
-
-
-class FrozenModel(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
-
-    @model_validator(mode="after")
-    def datetimes_are_timezone_aware(self) -> FrozenModel:
-        for name in type(self).model_fields:
-            if _contains_naive_datetime(getattr(self, name)):
-                raise ValueError(f"{name} must contain only timezone-aware datetimes")
-        return self
 
 
 class Observation(FrozenModel):
@@ -602,46 +599,6 @@ class WorldProjection(FrozenModel):
     view: ViewerProjection = Field(discriminator="view_kind")
 
 
-PrivacyClass = Literal["public", "shareable", "personal", "private", "withhold"]
-
-
-class EvidenceRef(FrozenModel):
-    ref_id: str = Field(min_length=1)
-    evidence_type: Literal[
-        "committed_fact",
-        "committed_experience",
-        "committed_world_event",
-        "settled_world_event",
-        "settled_external_result",
-        "observed_message",
-        "active_plan",
-        "operator_observation",
-        "clock_observation",
-    ]
-    claim_purpose: Literal[
-        "current_fact",
-        "past_experience",
-        "future_plan",
-        "private_hypothesis",
-        "action_authorization",
-        "conversation_continuity",
-    ]
-    source_world_revision: int | None = Field(default=None, ge=1)
-    immutable_hash: str | None = Field(default=None, min_length=64, max_length=64)
-
-    @model_validator(mode="after")
-    def committed_world_evidence_is_revision_pinned(self) -> EvidenceRef:
-        if self.evidence_type in {
-            "committed_world_event",
-            "settled_world_event",
-            "committed_fact",
-            "committed_experience",
-        }:
-            if self.source_world_revision is None or self.immutable_hash is None:
-                raise ValueError("world-event evidence requires revision and immutable hash")
-        return self
-
-
 class CommittedWorldEventRef(FrozenModel):
     event_id: str = Field(min_length=1)
     event_type: str = Field(min_length=1)
@@ -649,6 +606,22 @@ class CommittedWorldEventRef(FrozenModel):
     payload_hash: str = Field(min_length=64, max_length=64)
     logical_time: datetime
     continuation_refs: tuple[str, ...] = ()
+
+
+class ClockTransitionProjection(FrozenModel):
+    clock_event_ref: str = Field(min_length=1)
+    computed_world_revision: int = Field(ge=1)
+    payload_hash: str = Field(min_length=64, max_length=64)
+    logical_time_from: datetime
+    logical_time_to: datetime
+    installed_policy_version: str = Field(min_length=1)
+    installed_policy_digest: str = Field(min_length=64, max_length=64)
+
+    @model_validator(mode="after")
+    def interval_is_forward(self) -> ClockTransitionProjection:
+        if self.logical_time_to <= self.logical_time_from:
+            raise ValueError("clock transition interval must move forward")
+        return self
 
 
 class OperatorObservationRef(FrozenModel):
@@ -1595,6 +1568,9 @@ class WorldOccurrenceProjection(FrozenModel):
     precondition_refs: tuple[str, ...] = ()
     satisfied_precondition_refs: tuple[str, ...] = ()
     candidate_outcome_refs: tuple[str, ...] = Field(min_length=1)
+    # Exact chosen outcome is retained only after settlement.  Optional at the
+    # field level permits non-settled heads; the state validator closes shape.
+    settled_outcome_ref: str | None = Field(default=None, min_length=1)
     observation_refs: tuple[str, ...] = ()
     visibility: PrivacyClass
     status: Literal["committed", "active", "settled", "cancelled", "expired"]
@@ -1607,6 +1583,26 @@ class WorldOccurrenceProjection(FrozenModel):
     settlement_world_revision: int | None = Field(default=None, ge=1)
     settlement_payload_hash: str | None = Field(default=None, min_length=64, max_length=64)
     terminal_reason_ref: str | None = None
+
+    @model_validator(mode="after")
+    def settled_outcome_matches_lifecycle(
+        self, info: ValidationInfo
+    ) -> WorldOccurrenceProjection:
+        if self.status == "settled":
+            if self.settled_outcome_ref is None and (
+                info.context is not None
+                and info.context.get("source_reducer_bundle")
+                in _LEGACY_WITHOUT_SETTLED_OUTCOME
+            ):
+                return self
+            if (
+                self.settled_outcome_ref is None
+                or self.settled_outcome_ref not in self.candidate_outcome_refs
+            ):
+                raise ValueError("settled occurrence requires one candidate outcome")
+        elif self.settled_outcome_ref is not None:
+            raise ValueError("non-settled occurrence cannot retain a settled outcome")
+        return self
 
 
 class AppraisalHypothesis(FrozenModel):
@@ -3223,6 +3219,10 @@ class ActorAuthorityValues(FrozenModel):
             "privacy_policy",
             "actor_authority_rotation",
             "character_core_governance",
+            "v2_attention_governance",
+            "v2_goal_governance",
+            "v2_location_governance",
+            "v2_resource_governance",
         ],
         ...,
     ] = Field(min_length=1)
@@ -3513,7 +3513,7 @@ class CommitResult(FrozenModel):
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.15"
+    reducer_bundle_version: str = "world-v2-reducers.16"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -3535,6 +3535,11 @@ class LedgerProjection(FrozenModel):
     message_observations: tuple[MessageObservationRef, ...] = ()
     operator_observations: tuple[OperatorObservationRef, ...] = ()
     committed_world_event_refs: tuple[CommittedWorldEventRef, ...] = ()
+    clock_transition_history: tuple[ClockTransitionProjection, ...] = ()
+    goals: tuple[V2GoalProjection, ...] = ()
+    goal_transitions: tuple[V2GoalTransitionProjection, ...] = ()
+    goal_proposals: tuple[V2GoalProposalProjection, ...] = ()
+    goal_proposal_ids: tuple[str, ...] = ()
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
@@ -3601,4 +3606,11 @@ class LedgerProjection(FrozenModel):
         dimensions = tuple(item.dimension for item in self.affect_baselines)
         if len(dimensions) != len(set(dimensions)):
             raise ValueError("affect baseline dimensions must be unique")
+        validate_v2_goal_authority_state(
+            self.goals,
+            self.goal_transitions,
+            self.goal_proposals,
+            self.goal_proposal_ids,
+            global_proposal_ids=self.proposal_ids,
+        )
         return self

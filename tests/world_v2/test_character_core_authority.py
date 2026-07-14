@@ -6,6 +6,8 @@ import json
 import sqlite3
 
 import pytest
+
+from legacy_migration_support import strip_v16_state_fields
 from nacl.signing import SigningKey
 from pydantic import ValidationError
 
@@ -225,6 +227,7 @@ def occurrence_experience(
             opens_at=occurred_to - timedelta(hours=1), closes_at=occurred_to
         ),
         candidate_outcome_refs=(f"outcome:{index}",),
+        settled_outcome_ref=f"outcome:{index}",
         visibility="private",
         status="settled",
         result_id=f"result:{index}",
@@ -1690,6 +1693,7 @@ def test_sqlite_migrates_nonempty_v14_to_v15_replays_and_rejects_tamper(
                 ).encode()
             ).hexdigest()
             raw_state = state.model_dump(mode="json")
+            strip_v16_state_fields(raw_state)
             for field in (
                 "character_core",
                 "character_core_transitions",
@@ -1713,7 +1717,7 @@ def test_sqlite_migrates_nonempty_v14_to_v15_replays_and_rejects_tamper(
     downgrade(tamper=False)
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
     projected = migrated.project()
-    assert projected.reducer_bundle_version == "world-v2-reducers.15"
+    assert projected.reducer_bundle_version == "world-v2-reducers.16"
     assert projected.world_revision == 2
     assert projected.logical_time == NOW
     assert projected.character_core is None

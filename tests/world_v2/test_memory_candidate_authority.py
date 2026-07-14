@@ -7,6 +7,8 @@ import sqlite3
 
 import pytest
 
+from legacy_migration_support import strip_v16_state_fields
+
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.fact_events import FactChangedPayload, fact_mutation_hash
 from companion_daemon.world_v2.ledger import WorldLedger
@@ -1643,6 +1645,7 @@ def test_sqlite_migrates_nonempty_v13_head_to_v14_and_rebuilds(tmp_path) -> None
             ).encode()
         ).hexdigest()
         raw_state = state.model_dump(mode="json")
+        strip_v16_state_fields(raw_state)
         for field in (
             "memory_candidates",
             "memory_candidate_transitions",
@@ -1663,7 +1666,7 @@ def test_sqlite_migrates_nonempty_v13_head_to_v14_and_rebuilds(tmp_path) -> None
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
     projected = migrated.project()
-    assert projected.reducer_bundle_version == "world-v2-reducers.15"
+    assert projected.reducer_bundle_version == "world-v2-reducers.16"
     assert projected.facts == before.facts
     assert projected.memory_candidates == ()
     assert migrated.rebuild() == projected

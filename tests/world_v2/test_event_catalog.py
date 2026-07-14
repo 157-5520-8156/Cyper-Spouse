@@ -20,7 +20,7 @@ def test_catalog_covers_every_reducer_event_with_stable_revision_metadata() -> N
         assert contract.producer
         assert contract.payload_contract
         assert contract.schema_version == "world-v2.1"
-        assert contract.reducer_bundle == "world-v2-reducers.15"
+        assert contract.reducer_bundle == "world-v2-reducers.16"
         assert contract.upcaster == "world-v2-upcasters.1"
         assert contract.idempotency_identity
         schema = contract.json_schema()

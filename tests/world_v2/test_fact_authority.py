@@ -7,6 +7,8 @@ import sqlite3
 
 import pytest
 
+from legacy_migration_support import strip_v16_state_fields
+
 from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.fact_events import FactChangedPayload, fact_mutation_hash
@@ -807,6 +809,7 @@ def test_sqlite_fact_roundtrip_rebuild_tamper_and_v11_migration(tmp_path) -> Non
             "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
         ).fetchone()[0]
         raw_state = json.loads(state_json)
+        strip_v16_state_fields(raw_state)
         retained = raw_state["message_observations"][0]
         for field in ("actor", "channel", "payload_ref"):
             retained.pop(field)
@@ -829,7 +832,7 @@ def test_sqlite_fact_roundtrip_rebuild_tamper_and_v11_migration(tmp_path) -> Non
             ),
         )
     migrated = SQLiteWorldLedger(path=legacy_path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.15"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.16"
     assert migrated.project().facts == ()
     migrated_message = migrated.project().message_observations[0]
     assert (migrated_message.actor, migrated_message.channel, migrated_message.payload_ref) == (

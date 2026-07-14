@@ -7,6 +7,8 @@ import sqlite3
 
 import pytest
 
+from legacy_migration_support import legacy_state_json
+
 from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.ledger import WorldLedger
@@ -660,13 +662,13 @@ def test_sqlite_migrates_verified_v6_head_to_relationship_bundle(tmp_path) -> No
             semantic.pop(key)
         legacy_hash = hashlib.sha256(canonical(semantic).encode("utf-8")).hexdigest()
         connection.execute(
-            "UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ? "
+            "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ? "
             "WHERE world_id = ?",
-            (legacy_hash, "world-v2-reducers.6", WORLD),
+            (legacy_state_json(raw), legacy_hash, "world-v2-reducers.6", WORLD),
         )
 
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert reopened.project().reducer_bundle_version == "world-v2-reducers.15"
+    assert reopened.project().reducer_bundle_version == "world-v2-reducers.16"
     assert reopened.project() == expected
     reopened.close()
 

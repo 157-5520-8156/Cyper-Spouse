@@ -329,6 +329,7 @@ def settle_occurrence(
         update={
             "entity_revision": occurrence.entity_revision + 1,
             "status": "settled",
+            "settled_outcome_ref": payload.candidate_result_ref,
             "result_id": payload.result_id,
             "result_payload_ref": payload.result_payload_ref,
             "result_payload_hash": payload.result_payload_hash,

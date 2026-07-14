@@ -6,6 +6,8 @@ import sqlite3
 from nacl.signing import SigningKey
 import pytest
 
+from legacy_migration_support import legacy_state_json
+
 import companion_daemon.world_v2.actor_authority_reducers as actor_authority_reducers
 from companion_daemon.world_v2.actor_authority_events import (
     ACTOR_AUTHORITY_PAYLOAD_MODELS,
@@ -15,7 +17,10 @@ from companion_daemon.world_v2.actor_authority_events import (
     installed_root_keyset_digest,
     root_envelope_signature_message,
 )
-from companion_daemon.world_v2.actor_authority_reducers import ACTOR_AUTHORITY_POLICY_DIGEST
+from companion_daemon.world_v2.actor_authority_reducers import (
+    ACTOR_AUTHORITY_POLICY_DIGEST,
+    ACTOR_AUTHORITY_V2_POLICY_DIGEST,
+)
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.ledger import WorldLedger
@@ -37,6 +42,95 @@ def test_actor_authority_event_family_is_declared() -> None:
         "ActorAuthorityRevoked",
         "ActorAuthorityCompensated",
     }
+
+
+def test_legacy_actor_authority_policy_cannot_claim_v2_domain_operation(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("WORLD_V2_ENABLE_INSECURE_TEST_ROOT", "1")
+    after = values().model_copy(
+        update={
+            "allowed_operations": tuple(
+                sorted((*values().allowed_operations, "v2_goal_governance"))
+            )
+        }
+    )
+    payload = signed_payload(
+        operation="bootstrap",
+        transition_id="transition:legacy-v2-escalation",
+        expected_revision=0,
+        before=None,
+        after=after,
+    )
+    with pytest.raises(ValueError, match="operations are not installed"):
+        WorldLedger.in_memory(world_id=WORLD).commit(
+            [event("event:legacy-v2-escalation", "ActorAuthorityBootstrapped", payload)],
+            expected_world_revision=0,
+            expected_deliberation_revision=0,
+        )
+
+
+def test_actor_authority_policy_v2_installs_domain_operations(monkeypatch) -> None:
+    monkeypatch.setenv("WORLD_V2_ENABLE_INSECURE_TEST_ROOT", "1")
+    after = values().model_copy(
+        update={
+            "allowed_operations": tuple(
+                sorted(
+                    (
+                        *values().allowed_operations,
+                        "v2_attention_governance",
+                        "v2_goal_governance",
+                        "v2_location_governance",
+                        "v2_resource_governance",
+                    )
+                )
+            )
+        }
+    )
+    payload = signed_payload(
+        operation="bootstrap",
+        transition_id="transition:v2-domain-authority",
+        expected_revision=0,
+        before=None,
+        after=after,
+        policy_version="actor-authority-policy.2",
+        policy_digest=ACTOR_AUTHORITY_V2_POLICY_DIGEST,
+    )
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    ledger.commit(
+        [event("event:v2-domain-authority", "ActorAuthorityBootstrapped", payload)],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    authority = ledger.project().actor_authorities[0]
+    assert authority.policy_version == "actor-authority-policy.2"
+    assert authority.policy_digest == ACTOR_AUTHORITY_V2_POLICY_DIGEST
+    assert "v2_goal_governance" in authority.values.allowed_operations
+
+
+def test_actor_authority_policy_v2_rejects_wrong_digest(monkeypatch) -> None:
+    monkeypatch.setenv("WORLD_V2_ENABLE_INSECURE_TEST_ROOT", "1")
+    payload = signed_payload(
+        operation="bootstrap",
+        transition_id="transition:v2-wrong-policy-digest",
+        expected_revision=0,
+        before=None,
+        after=values(),
+        policy_version="actor-authority-policy.2",
+        policy_digest="f" * 64,
+    )
+    with pytest.raises(ValueError, match="uninstalled policy"):
+        WorldLedger.in_memory(world_id=WORLD).commit(
+            [
+                event(
+                    "event:v2-wrong-policy-digest",
+                    "ActorAuthorityBootstrapped",
+                    payload,
+                )
+            ],
+            expected_world_revision=0,
+            expected_deliberation_revision=0,
+        )
 
 
 def test_mutation_hash_canonicalizes_equivalent_utc_spellings() -> None:
@@ -155,6 +249,8 @@ def signed_payload(
     world_id: str = WORLD,
     nonce: str | None = None,
     root_key_id: str = "test-only:development-root-1",
+    policy_version: str = "actor-authority-policy.1",
+    policy_digest: str = ACTOR_AUTHORITY_POLICY_DIGEST,
 ) -> dict[str, object]:
     raw: dict[str, object] = {
         "world_id": world_id,
@@ -164,8 +260,8 @@ def signed_payload(
         "expected_entity_revision": expected_revision,
         "values_before": before.model_dump(mode="json") if before else None,
         "values_after": after.model_dump(mode="json"),
-        "policy_version": "actor-authority-policy.1",
-        "policy_digest": ACTOR_AUTHORITY_POLICY_DIGEST,
+        "policy_version": policy_version,
+        "policy_digest": policy_digest,
         "changed_at": NOW.isoformat(),
         "compensates_transition_id": compensates,
         "root_proof": {
@@ -976,13 +1072,13 @@ def test_sqlite_migrates_verified_v7_head_to_actor_authority_bundle(tmp_path) ->
             ).encode("utf-8")
         ).hexdigest()
         connection.execute(
-            "UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ? "
+            "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ? "
             "WHERE world_id = ?",
-            (legacy_hash, "world-v2-reducers.7", WORLD),
+            (legacy_state_json(raw_state), legacy_hash, "world-v2-reducers.7", WORLD),
         )
 
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert reopened.project().reducer_bundle_version == "world-v2-reducers.15"
+    assert reopened.project().reducer_bundle_version == "world-v2-reducers.16"
     assert reopened.project() == expected
     assert reopened.rebuild() == expected
     reopened.close()
@@ -1000,10 +1096,13 @@ def test_sqlite_rejects_tampered_v7_head_during_actor_bundle_migration(
     )
     ledger.close()
     with sqlite3.connect(path) as connection:
+        raw_state = connection.execute(
+            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD,)
+        ).fetchone()[0]
         connection.execute(
-            "UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ? "
+            "UPDATE world_v2_heads SET state_json = ?, semantic_hash = ?, reducer_bundle_version = ? "
             "WHERE world_id = ?",
-            ("0" * 64, "world-v2-reducers.7", WORLD),
+            (legacy_state_json(raw_state), "0" * 64, "world-v2-reducers.7", WORLD),
         )
     with pytest.raises(LedgerIntegrityError, match="legacy head semantic hash is invalid"):
         SQLiteWorldLedger(path=path, world_id=WORLD)
