@@ -238,6 +238,7 @@ class PinnedTurnCompiler:
             "channel": observation.channel,
             "payload_ref": observation.payload_ref,
             "payload_hash": observation.payload_hash,
+            "text": observation.text,
             "reply_context": observation.reply_context,
             "attachment_refs": observation.attachment_refs,
         }

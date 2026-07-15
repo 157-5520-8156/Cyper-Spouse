@@ -66,7 +66,11 @@ class _EmotionAdvice:
     adapter_id = "emotion"
     version = "test.1"
 
+    def __init__(self) -> None:
+        self.received: AdvisoryAdapterInput | None = None
+
     async def classify(self, request: AdvisoryAdapterInput) -> tuple[CandidateDistribution, ...]:
+        self.received = request
         return (
             CandidateDistribution(
                 catalog_version="world-v2-matrix-1",
@@ -108,6 +112,7 @@ def _observation() -> Observation:
         channel="test",
         payload_ref="payload:pinned-turn:1",
         payload_hash="sha256:" + "a" * 64,
+        text="我好像有点失望，你刚刚没怎么接住我。",
         received_at=NOW,
     )
 
@@ -170,7 +175,7 @@ async def test_pinned_turn_passes_source_bound_advisory_candidates_to_deliberati
         companion_actor_ref="agent:companion",
         advisory_compiler=AdvisoryCompiler(
             catalog=default_matrix_catalog(),
-            adapters=(_EmotionAdvice(),),
+            adapters=(advice := _EmotionAdvice(),),
             authority_key=b"pinned-turn-advisory-test-authority-key",
         ),
     )
@@ -183,6 +188,8 @@ async def test_pinned_turn_passes_source_bound_advisory_candidates_to_deliberati
     assert '"kind":"appraisal.negative"' in content
     assert '"value":"disappointment"' in content
     assert '"source_refs":["event:trigger:observation:test:message:pinned-turn:1"]' in content
+    assert advice.received is not None
+    assert advice.received.trigger["text"] == "我好像有点失望，你刚刚没怎么接住我。"
     projection = ledger.project()
     assert projection.world_revision == 2
     assert projection.deliberation_revision == 2

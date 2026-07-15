@@ -100,6 +100,11 @@ class Observation(FrozenModel):
     channel: str = Field(min_length=1)
     payload_ref: str = Field(min_length=1)
     payload_hash: str = Field(min_length=1)
+    # ``payload_ref`` proves where the ingress payload lives, but cannot make
+    # a local Advisory understand a user's disappointment, sarcasm or repair
+    # attempt.  This bounded, auditable copy is optional for compatibility;
+    # when supplied it is part of the immutable Observation event payload.
+    text: str | None = Field(default=None, min_length=1, max_length=12_000)
     received_at: datetime
     reply_context: dict[str, Any] | None = None
     attachment_refs: tuple[str, ...] = ()
