@@ -33,7 +33,7 @@ from companion_daemon.media_moment import MomentCapture, choose_moment_capture
 
 COMPLETE_CANDIDATE_VERSION = "complete-media-expression-candidate-v1"
 IDENTITY_SELECTION_VERSION = "identity-reference-selection-v1"
-PERCEPTUAL_SIGNATURE_VERSION = "media-perceptual-v2"
+PERCEPTUAL_SIGNATURE_VERSION = "media-perceptual-v3"
 
 
 @dataclass(frozen=True)
@@ -124,11 +124,10 @@ class CompleteMediaExpressionCandidate:
             ),
             "photographic_authenticity": (
                 self.photographic_authenticity.to_payload()
-                if self.photographic_authenticity else None
+                if self.photographic_authenticity
+                else None
             ),
-            "moment_capture": (
-                self.moment_capture.to_payload() if self.moment_capture else None
-            ),
+            "moment_capture": (self.moment_capture.to_payload() if self.moment_capture else None),
             "source_presentation_candidate_id": self.source_presentation_candidate_id,
         }
 
@@ -266,23 +265,189 @@ _BID_ADDRESS_RECIPES: tuple[tuple[tuple[str, ...], dict[str, str | None]], ...] 
     ),
 )
 
-_ADDITIONAL_BID_ADDRESS_RECIPES: tuple[
-    tuple[tuple[str, ...], dict[str, str | None]], ...
-] = (
-    (("inform_status", "coordinate_next_step"), dict(address_mode="evidence_mediated", engagement_tactic="demonstration", disclosure_mode="evidence_first", staging_degree="lightly_arranged", temporal_beat="held_for_response", visual_priority="primary_evidence", expression_charge="none", attraction_mechanism=None)),
-    (("share_presence",), dict(address_mode="direct_recipient", engagement_tactic="presence", disclosure_mode="selective_focus", staging_degree="camera_aware", temporal_beat="held_for_response", visual_priority="character", expression_charge="none", attraction_mechanism=None)),
-    (("share_discovery",), dict(address_mode="evidence_mediated", engagement_tactic="demonstration", disclosure_mode="evidence_first", staging_degree="lightly_arranged", temporal_beat="mid_action", visual_priority="primary_evidence", expression_charge="none", attraction_mechanism=None)),
-    (("share_discovery",), dict(address_mode="consultative", engagement_tactic="comparison", disclosure_mode="selective_focus", staging_degree="camera_aware", temporal_beat="reaction", visual_priority="primary_evidence", expression_charge="none", attraction_mechanism=None)),
-    (("invite_opinion",), dict(address_mode="consultative", engagement_tactic="comparison", disclosure_mode="evidence_first", staging_degree="lightly_arranged", temporal_beat="held_for_response", visual_priority="primary_evidence", expression_charge="none", attraction_mechanism=None)),
-    (("invite_appreciation",), dict(address_mode="direct_recipient", engagement_tactic="reveal", disclosure_mode="polished_display", staging_degree="deliberately_posed", temporal_beat="held_for_response", visual_priority="character", expression_charge="none", attraction_mechanism=None)),
-    (("celebrate_together",), dict(address_mode="shared_attention", engagement_tactic="celebration", disclosure_mode="open_context", staging_degree="camera_aware", temporal_beat="reaction", visual_priority="relationship", expression_charge="none", attraction_mechanism=None)),
-    (("invite_playful_exchange",), dict(address_mode="photographer_relational", engagement_tactic="contrast", disclosure_mode="partial_reveal", staging_degree="camera_aware", temporal_beat="reaction", visual_priority="character", expression_charge="none", attraction_mechanism=None)),
-    (("seek_validation",), dict(address_mode="direct_recipient", engagement_tactic="vulnerability", disclosure_mode="unguarded_access", staging_degree="camera_aware", temporal_beat="aftermath", visual_priority="character", expression_charge="none", attraction_mechanism=None)),
-    (("seek_validation",), dict(address_mode="evidence_mediated", engagement_tactic="contrast", disclosure_mode="evidence_first", staging_degree="unposed", temporal_beat="aftermath", visual_priority="primary_evidence", expression_charge="none", attraction_mechanism=None)),
-    (("seek_care",), dict(address_mode="evidence_mediated", engagement_tactic="vulnerability", disclosure_mode="evidence_first", staging_degree="unposed", temporal_beat="aftermath", visual_priority="primary_evidence", expression_charge="none", attraction_mechanism=None)),
-    (("offer_reassurance",), dict(address_mode="direct_recipient", engagement_tactic="reassurance", disclosure_mode="open_context", staging_degree="camera_aware", temporal_beat="just_after", visual_priority="character", expression_charge="none", attraction_mechanism=None)),
-    (("revisit_memory",), dict(address_mode="shared_attention", engagement_tactic="presence", disclosure_mode="open_context", staging_degree="existing_artifact", temporal_beat="retrospective", visual_priority="relationship", expression_charge="none", attraction_mechanism=None)),
-    (("invite_closeness",), dict(address_mode="photographer_relational", engagement_tactic="affection", disclosure_mode="selective_focus", staging_degree="privately_composed", temporal_beat="reaction", visual_priority="relationship", expression_charge="subtle", attraction_mechanism=None)),
+_ADDITIONAL_BID_ADDRESS_RECIPES: tuple[tuple[tuple[str, ...], dict[str, str | None]], ...] = (
+    (
+        ("inform_status", "coordinate_next_step"),
+        dict(
+            address_mode="evidence_mediated",
+            engagement_tactic="demonstration",
+            disclosure_mode="evidence_first",
+            staging_degree="lightly_arranged",
+            temporal_beat="held_for_response",
+            visual_priority="primary_evidence",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("share_presence",),
+        dict(
+            address_mode="direct_recipient",
+            engagement_tactic="presence",
+            disclosure_mode="selective_focus",
+            staging_degree="camera_aware",
+            temporal_beat="held_for_response",
+            visual_priority="character",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("share_discovery",),
+        dict(
+            address_mode="evidence_mediated",
+            engagement_tactic="demonstration",
+            disclosure_mode="evidence_first",
+            staging_degree="lightly_arranged",
+            temporal_beat="mid_action",
+            visual_priority="primary_evidence",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("share_discovery",),
+        dict(
+            address_mode="consultative",
+            engagement_tactic="comparison",
+            disclosure_mode="selective_focus",
+            staging_degree="camera_aware",
+            temporal_beat="reaction",
+            visual_priority="primary_evidence",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("invite_opinion",),
+        dict(
+            address_mode="consultative",
+            engagement_tactic="comparison",
+            disclosure_mode="evidence_first",
+            staging_degree="lightly_arranged",
+            temporal_beat="held_for_response",
+            visual_priority="primary_evidence",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("invite_appreciation",),
+        dict(
+            address_mode="direct_recipient",
+            engagement_tactic="reveal",
+            disclosure_mode="polished_display",
+            staging_degree="deliberately_posed",
+            temporal_beat="held_for_response",
+            visual_priority="character",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("celebrate_together",),
+        dict(
+            address_mode="shared_attention",
+            engagement_tactic="celebration",
+            disclosure_mode="open_context",
+            staging_degree="camera_aware",
+            temporal_beat="reaction",
+            visual_priority="relationship",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("invite_playful_exchange",),
+        dict(
+            address_mode="photographer_relational",
+            engagement_tactic="contrast",
+            disclosure_mode="partial_reveal",
+            staging_degree="camera_aware",
+            temporal_beat="reaction",
+            visual_priority="character",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("seek_validation",),
+        dict(
+            address_mode="direct_recipient",
+            engagement_tactic="vulnerability",
+            disclosure_mode="unguarded_access",
+            staging_degree="camera_aware",
+            temporal_beat="aftermath",
+            visual_priority="character",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("seek_validation",),
+        dict(
+            address_mode="evidence_mediated",
+            engagement_tactic="contrast",
+            disclosure_mode="evidence_first",
+            staging_degree="unposed",
+            temporal_beat="aftermath",
+            visual_priority="primary_evidence",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("seek_care",),
+        dict(
+            address_mode="evidence_mediated",
+            engagement_tactic="vulnerability",
+            disclosure_mode="evidence_first",
+            staging_degree="unposed",
+            temporal_beat="aftermath",
+            visual_priority="primary_evidence",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("offer_reassurance",),
+        dict(
+            address_mode="direct_recipient",
+            engagement_tactic="reassurance",
+            disclosure_mode="open_context",
+            staging_degree="camera_aware",
+            temporal_beat="just_after",
+            visual_priority="character",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("revisit_memory",),
+        dict(
+            address_mode="shared_attention",
+            engagement_tactic="presence",
+            disclosure_mode="open_context",
+            staging_degree="existing_artifact",
+            temporal_beat="retrospective",
+            visual_priority="relationship",
+            expression_charge="none",
+            attraction_mechanism=None,
+        ),
+    ),
+    (
+        ("invite_closeness",),
+        dict(
+            address_mode="photographer_relational",
+            engagement_tactic="affection",
+            disclosure_mode="selective_focus",
+            staging_degree="privately_composed",
+            temporal_beat="reaction",
+            visual_priority="relationship",
+            expression_charge="subtle",
+            attraction_mechanism=None,
+        ),
+    ),
 )
 
 _ATTRACTION_MECHANISMS = (
@@ -390,9 +555,7 @@ def build_complete_candidates(
                         engagement_tactic=address.engagement_tactic,
                         attraction_mechanism=address.attraction_mechanism,
                         capture_mode=capture_mode,
-                        face_visible=(
-                            str(presentation["character_visibility"]) == "identifiable"
-                        ),
+                        face_visible=(str(presentation["character_visibility"]) == "identifiable"),
                     )
                     upgraded_subject = upgrade_subject_presentation_v4(
                         upgraded_subject,
@@ -412,6 +575,11 @@ def build_complete_candidates(
                         family=family,
                         staging_degree=address.staging_degree,
                         visual_form=visual_form,
+                        character_visible=(
+                            presentation is not None
+                            and str(presentation["character_visibility"])
+                            in {"identifiable", "body_detail"}
+                        ),
                         event_snapshot=event_snapshot,
                     )
                     moment_capture = (
@@ -549,6 +717,7 @@ def candidate_perceptual_signature(item: CompleteMediaExpressionCandidate) -> st
     mouth = "no_face"
     authorship = "no_face"
     temporal_phase = "no_face"
+    expression_beat = "no_face"
     pose = "none"
     if item.subject_presentation:
         face = item.subject_presentation.get("facial_performance") or {}
@@ -563,6 +732,7 @@ def candidate_perceptual_signature(item: CompleteMediaExpressionCandidate) -> st
         mouth = str(micro.get("mouth_action") or face.get("mouth_behavior") or "unknown")
         authorship = str(micro.get("performance_authorship") or "legacy_authorship")
         temporal_phase = str(micro.get("temporal_phase") or "legacy_temporal")
+        expression_beat = str(micro.get("expression_beat_id") or "legacy_expression_beat")
         pose = ":".join(
             str(performance.get(key) or "")
             for key in ("head_yaw", "shoulder_orientation", "posture", "gesture")
@@ -591,11 +761,10 @@ def candidate_perceptual_signature(item: CompleteMediaExpressionCandidate) -> st
         mouth_action=mouth,
         performance_authorship=authorship,
         temporal_phase=temporal_phase,
+        expression_beat=expression_beat,
         pose=pose,
         embodied_strategy=str(embodied.get("body_strategy_id") or "none"),
-        aesthetic_intent=(
-            authenticity.aesthetic_intent if authenticity else "legacy_authenticity"
-        ),
+        aesthetic_intent=(authenticity.aesthetic_intent if authenticity else "legacy_authenticity"),
         scene_orderliness=(
             authenticity.scene_orderliness if authenticity else "legacy_orderliness"
         ),
@@ -611,12 +780,29 @@ def build_perceptual_signature(**axes: str) -> str:
     """Return one schema-versioned signature shared by candidates and history."""
 
     ordered = (
-        "engagement_tactic", "attraction_mechanism", "shot_distance", "camera_height",
-        "view_axis", "camera_face_distance", "face_radial_position",
-        "subject_occupancy", "subject_placement", "orientation",
-        "display_family", "gaze_sequence", "nose_cheek_action", "mouth_action",
-        "performance_authorship", "temporal_phase", "pose", "embodied_strategy",
-        "aesthetic_intent", "scene_orderliness", "capture_imperfection", "visual_form",
+        "engagement_tactic",
+        "attraction_mechanism",
+        "shot_distance",
+        "camera_height",
+        "view_axis",
+        "camera_face_distance",
+        "face_radial_position",
+        "subject_occupancy",
+        "subject_placement",
+        "orientation",
+        "display_family",
+        "gaze_sequence",
+        "nose_cheek_action",
+        "mouth_action",
+        "performance_authorship",
+        "temporal_phase",
+        "expression_beat",
+        "pose",
+        "embodied_strategy",
+        "aesthetic_intent",
+        "scene_orderliness",
+        "capture_imperfection",
+        "visual_form",
         "identity_references",
     )
     if set(axes) != set(ordered):

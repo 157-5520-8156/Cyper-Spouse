@@ -118,15 +118,22 @@ def test_camera_geometry_v2_freezes_face_distance_without_changing_v1_payloads()
 
     current = CameraGeometry.create(
         **{
-            **{key: value for key, value in legacy.to_payload().items() if key not in {"version", "contract_signature"}},
+            **{
+                key: value
+                for key, value in legacy.to_payload().items()
+                if key not in {"version", "contract_signature"}
+            },
             "camera_face_distance": "arm_length",
             "face_radial_position": "inner_third",
         }
     )
     assert current.version == "camera-geometry-v2"
-    assert current.compatibility_error(
-        capture_mode="character_front_camera", visual_form="portrait_closeup"
-    ) is None
+    assert (
+        current.compatibility_error(
+            capture_mode="character_front_camera", visual_form="portrait_closeup"
+        )
+        is None
+    )
     assert CameraGeometry.from_payload(current.to_payload()) == current
 
 
@@ -328,13 +335,79 @@ def test_invite_desire_has_nine_visual_mechanisms_not_two_scene_templates() -> N
     )
     assert (
         len(
-                {
-                    item.subject_presentation["facial_display_strategy"]["strategy_family"]
-                    for item in invite_desire
-                }
+            {
+                item.subject_presentation["facial_display_strategy"]["strategy_family"]
+                for item in invite_desire
+            }
         )
         >= 4
     )
+
+
+def test_character_media_freezes_rich_visible_expression_beats_not_only_face_axes() -> None:
+    """Playful recipient-facing media keeps a whole still-frame beat for the renderer."""
+    snapshot = {
+        "event": {"event_id": "event:playful", "status": "committed"},
+        "activity": {"kind": "daily", "description": "出门前收拾包，突然想逗一下收件人"},
+        "location": {"kind": "home", "name": "玄关"},
+        "character": {"emotion": "playful"},
+    }
+    subject = next(
+        item
+        for item in build_subject_candidates(
+            snapshot=snapshot,
+            opportunity_id="op:rich-beat-source",
+            capture_mode="character_front_camera",
+            character_visibility="identifiable",
+            privacy_ceiling="intimate",
+            relationship_stage="lover",
+            limit=64,
+        )
+        if item.presentation.display_strategy is not None
+    )
+    embodiment = next(
+        item
+        for item in build_embodied_candidates(
+            snapshot=snapshot,
+            opportunity_id="op:rich-beat-source",
+            relationship_stage="lover",
+            sensual_charge_ceiling="charged",
+            limit=256,
+        )
+        if item.presentation.sensual_charge == "charged"
+        and "character_front_camera" in item.legal_capture_modes
+    )
+    source = {
+        "presentation_candidate_id": "source:rich-beat",
+        "legal_capture_modes": ["character_front_camera"],
+        "legal_share_intents": ["intimate_signal"],
+        "character_visibility": "identifiable",
+        "subject_presentation": subject.presentation.to_payload(),
+        "embodied_presentation": embodiment.presentation.to_payload(),
+    }
+
+    beats = []
+    for index in range(32):
+        candidates = build_complete_candidates(
+            opportunity_id=f"op:rich-beat:{index}",
+            family="character_media",
+            expression_charge_ceiling="charged",
+            presentation_candidates=(source,),
+            event_snapshot=snapshot,
+            limit=64,
+        )
+        playful = next(
+            item
+            for item in candidates
+            if item.media_address_strategy.attraction_mechanism == "playful_tease"
+        )
+        beats.append(playful.subject_presentation["facial_micro_performance"])
+
+    assert all(item["expression_beat_id"] for item in beats)
+    assert all(item["visible_evidence"] for item in beats)
+    assert len({item["expression_beat_id"] for item in beats}) >= 3
+    assert any("nose" in " ".join(item["visible_evidence"]).lower() for item in beats)
+    assert any("head shake" in " ".join(item["visible_evidence"]).lower() for item in beats)
 
 
 def test_life_share_candidates_cover_environment_process_and_detail_geometry() -> None:
@@ -376,9 +449,7 @@ def test_interaction_bids_have_multiple_compatible_address_routes() -> None:
         {tactic for _address, tactic in discovery}
     )
     assert len(validation) >= 2
-    assert {"vulnerability", "contrast"}.issubset(
-        {tactic for _address, tactic in validation}
-    )
+    assert {"vulnerability", "contrast"}.issubset({tactic for _address, tactic in validation})
 
 
 def test_complete_candidates_freeze_authenticity_and_varied_visible_face_actions() -> None:
@@ -437,6 +508,14 @@ def test_complete_candidates_freeze_authenticity_and_varied_visible_face_actions
     assert len({item["facial_display_strategy"]["strategy_family"] for item in faces}) >= 3
     assert len({item["facial_micro_performance"]["nose_cheek_action"] for item in faces}) >= 2
     assert len({item.photographic_authenticity.aesthetic_intent for item in candidates}) >= 2
+    assert all(
+        item.photographic_authenticity.aesthetic_intent not in {"editorial", "commercial"}
+        for item in candidates
+    )
+    assert all(
+        item.photographic_authenticity.processing_level in {"light", "typical_phone"}
+        for item in candidates
+    )
 
 
 def test_character_media_candidates_freeze_lived_moment_contracts() -> None:
@@ -497,10 +576,7 @@ def test_character_media_candidates_freeze_lived_moment_contracts() -> None:
         "brief_pause",
         "responsive_reaction",
     }
-    assert all(
-        item.moment_capture.anti_static_direction
-        for item in candidates
-    )
+    assert all(item.moment_capture.anti_static_direction for item in candidates)
 
 
 def test_moment_capture_uses_stable_but_varied_wording_without_reading_world_facts() -> None:
@@ -586,9 +662,9 @@ def test_complete_candidates_use_versioned_perceptual_axes_and_varied_face_geome
 
     assert candidates
     assert {item.camera_geometry.version for item in candidates} == {"camera-geometry-v2"}
-    assert {
-        item.camera_geometry.camera_face_distance for item in candidates
-    }.issubset({"very_close", "arm_length", "supported_near"})
+    assert {item.camera_geometry.camera_face_distance for item in candidates}.issubset(
+        {"very_close", "arm_length", "supported_near"}
+    )
     assert len({item.camera_geometry.face_radial_position for item in candidates}) >= 2
     signatures = {candidate_perceptual_signature(item) for item in candidates}
     assert all(item.startswith(PERCEPTUAL_SIGNATURE_VERSION + "|") for item in signatures)
@@ -665,10 +741,12 @@ def test_life_share_authenticity_never_invents_region_or_defaults_to_commercial(
         item.photographic_authenticity.regional_grounding in {"none", "artifact_inherited"}
         for item in candidates
     )
-    assert all(item.photographic_authenticity.aesthetic_intent != "commercial" for item in candidates)
-    assert {
-        item.photographic_authenticity.catalog_version for item in candidates
-    } == {"media-authenticity-catalog-v1"}
+    assert all(
+        item.photographic_authenticity.aesthetic_intent != "commercial" for item in candidates
+    )
+    assert {item.photographic_authenticity.catalog_version for item in candidates} == {
+        "media-authenticity-catalog-v1"
+    }
 
 
 def test_authenticity_axes_vary_independently_but_only_from_grounded_scene_cues() -> None:

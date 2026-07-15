@@ -45,26 +45,58 @@ SUBJECT_PRESENTATION_V3 = "subject-presentation-v3"
 SUBJECT_PRESENTATION_V4 = "subject-presentation-v4"
 
 EXPRESSION_FAMILIES = {
-    "neutral_present", "warm", "amused", "playfully_performed", "proud",
-    "frustrated", "embarrassed", "tired", "vulnerable", "tender",
-    "desire_direct", "desire_withheld",
+    "neutral_present",
+    "warm",
+    "amused",
+    "playfully_performed",
+    "proud",
+    "frustrated",
+    "embarrassed",
+    "tired",
+    "vulnerable",
+    "tender",
+    "desire_direct",
+    "desire_withheld",
 }
 MOUTH_BEHAVIORS = {
-    "relaxed_closed", "relaxed_parted", "small_smile", "asymmetric_half_smile",
-    "suppressed_laugh", "open_laugh", "subtle_pout", "lightly_pressed",
-    "mid_speech", "not_visible",
+    "relaxed_closed",
+    "relaxed_parted",
+    "small_smile",
+    "asymmetric_half_smile",
+    "suppressed_laugh",
+    "open_laugh",
+    "subtle_pout",
+    "lightly_pressed",
+    "mid_speech",
+    "not_visible",
 }
 EYE_BEHAVIORS = {
-    "steady_lens", "soft_lens", "screen_check", "evidence_focus", "look_away",
-    "glance_back", "companion_focus", "relaxed_heavy_lidded", "not_visible",
+    "steady_lens",
+    "soft_lens",
+    "screen_check",
+    "evidence_focus",
+    "look_away",
+    "glance_back",
+    "companion_focus",
+    "relaxed_heavy_lidded",
+    "not_visible",
 }
 BROW_BEHAVIORS = {
-    "neutral", "slight_lift", "single_brow_energy", "faint_inward_draw",
-    "relaxed_lowered", "not_visible",
+    "neutral",
+    "slight_lift",
+    "single_brow_energy",
+    "faint_inward_draw",
+    "relaxed_lowered",
+    "not_visible",
 }
 GAZE_SEQUENCES = {
-    "continuous_lens", "evidence_then_lens", "lens_then_away", "away_then_back",
-    "screen_then_lens", "companion_then_camera", "no_face",
+    "continuous_lens",
+    "evidence_then_lens",
+    "lens_then_away",
+    "away_then_back",
+    "screen_then_lens",
+    "companion_then_camera",
+    "no_face",
 }
 FACIAL_ENERGIES = {"low", "contained", "lively", "breathless", "held", "recovering"}
 
@@ -85,10 +117,19 @@ class FacialPerformance:
     def from_payload(cls, value: object) -> "FacialPerformance":
         if not isinstance(value, dict):
             raise ValueError("facial performance must be an object")
-        result = cls(**{name: _required_text(value, name) for name in (
-            "expression_family", "mouth_behavior", "eye_behavior", "brow_behavior",
-            "gaze_sequence", "facial_energy",
-        )})
+        result = cls(
+            **{
+                name: _required_text(value, name)
+                for name in (
+                    "expression_family",
+                    "mouth_behavior",
+                    "eye_behavior",
+                    "brow_behavior",
+                    "gaze_sequence",
+                    "facial_energy",
+                )
+            }
+        )
         enums = (
             (result.expression_family, EXPRESSION_FAMILIES),
             (result.mouth_behavior, MOUTH_BEHAVIORS),
@@ -255,12 +296,12 @@ class SubjectPresentationPlan:
             payload["performance"].pop("expression", None)
             payload["performance"].pop("gaze_target", None)
             payload["facial_display_strategy"] = (
-                self.facial_display_strategy.to_payload()
-                if self.facial_display_strategy else None
+                self.facial_display_strategy.to_payload() if self.facial_display_strategy else None
             )
             payload["facial_micro_performance"] = (
                 self.facial_micro_performance.to_payload()
-                if self.facial_micro_performance else None
+                if self.facial_micro_performance
+                else None
             )
         return payload
 
@@ -293,7 +334,9 @@ class SubjectPresentationPlan:
             else None
         )
         performance_value = value.get("performance")
-        if version in {SUBJECT_PRESENTATION_V3, SUBJECT_PRESENTATION_V4} and isinstance(performance_value, dict):
+        if version in {SUBJECT_PRESENTATION_V3, SUBJECT_PRESENTATION_V4} and isinstance(
+            performance_value, dict
+        ):
             placeholder = (
                 "facial_micro_performance_v1"
                 if version == SUBJECT_PRESENTATION_V4
@@ -311,11 +354,13 @@ class SubjectPresentationPlan:
         )
         facial_display_strategy = (
             FacialDisplayStrategy.from_payload(value.get("facial_display_strategy"))
-            if version == SUBJECT_PRESENTATION_V4 else None
+            if version == SUBJECT_PRESENTATION_V4
+            else None
         )
         facial_micro_performance = (
             FacialMicroPerformance.from_payload(value.get("facial_micro_performance"))
-            if version == SUBJECT_PRESENTATION_V4 else None
+            if version == SUBJECT_PRESENTATION_V4
+            else None
         )
         presentation = cls(
             variant_id=_required_text(value, "variant_id"),
@@ -328,9 +373,17 @@ class SubjectPresentationPlan:
             facial_display_strategy=facial_display_strategy,
             facial_micro_performance=facial_micro_performance,
         )
-        if version not in {"subject-presentation-v1", SUBJECT_PRESENTATION_V2, SUBJECT_PRESENTATION_V3, SUBJECT_PRESENTATION_V4}:
+        if version not in {
+            "subject-presentation-v1",
+            SUBJECT_PRESENTATION_V2,
+            SUBJECT_PRESENTATION_V3,
+            SUBJECT_PRESENTATION_V4,
+        }:
             raise ValueError("unsupported subject presentation version")
-        if version in {SUBJECT_PRESENTATION_V2, SUBJECT_PRESENTATION_V3} and display_strategy is None:
+        if (
+            version in {SUBJECT_PRESENTATION_V2, SUBJECT_PRESENTATION_V3}
+            and display_strategy is None
+        ):
             raise ValueError("missing photo display strategy")
         if version == SUBJECT_PRESENTATION_V3 and facial_performance is None:
             raise ValueError("missing facial performance")
@@ -339,8 +392,11 @@ class SubjectPresentationPlan:
         ):
             raise ValueError("missing facial display contract")
         if presentation.subject_signature != _subject_signature(
-            presentation.appearance, presentation.performance, presentation.display_strategy,
-            presentation.facial_performance, presentation.facial_display_strategy,
+            presentation.appearance,
+            presentation.performance,
+            presentation.display_strategy,
+            presentation.facial_performance,
+            presentation.facial_display_strategy,
             presentation.facial_micro_performance,
         ):
             raise ValueError("invalid subject signature")
@@ -417,15 +473,68 @@ def adapt_subject_for_attraction_mechanism_v3(
     if presentation.version != SUBJECT_PRESENTATION_V3 or presentation.facial_performance is None:
         raise ValueError("attraction adaptation requires subject presentation v3")
     recipes: dict[str, FacialPerformance] = {
-        "direct_invitation": FacialPerformance("desire_direct", "relaxed_parted", "steady_lens", "neutral", "continuous_lens", "held"),
-        "playful_tease": FacialPerformance("playfully_performed", "subtle_pout", "steady_lens", "single_brow_energy", "away_then_back", "lively"),
-        "withheld_attention": FacialPerformance("desire_withheld", "relaxed_closed", "glance_back", "relaxed_lowered", "away_then_back", "held"),
-        "sensory_immediacy": FacialPerformance("desire_direct", "relaxed_parted", "soft_lens", "neutral", "lens_then_away", "breathless"),
-        "private_trust": FacialPerformance("tender", "relaxed_parted", "relaxed_heavy_lidded", "relaxed_lowered", "continuous_lens", "low"),
-        "confident_display": FacialPerformance("desire_direct", "asymmetric_half_smile", "steady_lens", "single_brow_energy", "continuous_lens", "contained"),
-        "interrupted_transition": FacialPerformance("desire_withheld", "relaxed_parted", "evidence_focus", "slight_lift", "evidence_then_lens", "recovering"),
-        "close_proximity": FacialPerformance("tender", "relaxed_parted", "soft_lens", "neutral", "continuous_lens", "held"),
-        "atmospheric_suggestion": FacialPerformance("desire_withheld", "relaxed_closed", "look_away", "relaxed_lowered", "lens_then_away", "low"),
+        "direct_invitation": FacialPerformance(
+            "desire_direct", "relaxed_parted", "steady_lens", "neutral", "continuous_lens", "held"
+        ),
+        "playful_tease": FacialPerformance(
+            "playfully_performed",
+            "subtle_pout",
+            "steady_lens",
+            "single_brow_energy",
+            "away_then_back",
+            "lively",
+        ),
+        "withheld_attention": FacialPerformance(
+            "desire_withheld",
+            "relaxed_closed",
+            "glance_back",
+            "relaxed_lowered",
+            "away_then_back",
+            "held",
+        ),
+        "sensory_immediacy": FacialPerformance(
+            "desire_direct",
+            "relaxed_parted",
+            "soft_lens",
+            "neutral",
+            "lens_then_away",
+            "breathless",
+        ),
+        "private_trust": FacialPerformance(
+            "tender",
+            "relaxed_parted",
+            "relaxed_heavy_lidded",
+            "relaxed_lowered",
+            "continuous_lens",
+            "low",
+        ),
+        "confident_display": FacialPerformance(
+            "desire_direct",
+            "asymmetric_half_smile",
+            "steady_lens",
+            "single_brow_energy",
+            "continuous_lens",
+            "contained",
+        ),
+        "interrupted_transition": FacialPerformance(
+            "desire_withheld",
+            "relaxed_parted",
+            "evidence_focus",
+            "slight_lift",
+            "evidence_then_lens",
+            "recovering",
+        ),
+        "close_proximity": FacialPerformance(
+            "tender", "relaxed_parted", "soft_lens", "neutral", "continuous_lens", "held"
+        ),
+        "atmospheric_suggestion": FacialPerformance(
+            "desire_withheld",
+            "relaxed_closed",
+            "look_away",
+            "relaxed_lowered",
+            "lens_then_away",
+            "low",
+        ),
     }
     facial = recipes.get(mechanism)
     if facial is None:
@@ -453,19 +562,85 @@ def adapt_subject_for_media_address_v3(
     if attraction_mechanism:
         return adapt_subject_for_attraction_mechanism_v3(presentation, attraction_mechanism)
     recipes = {
-        "presence": FacialPerformance("warm", "relaxed_closed", "soft_lens", "neutral", "continuous_lens", "contained"),
-        "reveal": FacialPerformance("proud", "small_smile", "evidence_focus", "slight_lift", "evidence_then_lens", "contained"),
-        "demonstration": FacialPerformance("neutral_present", "relaxed_closed", "evidence_focus", "neutral", "evidence_then_lens", "contained"),
-        "question": FacialPerformance("neutral_present", "relaxed_parted", "steady_lens", "slight_lift", "continuous_lens", "held"),
-        "comparison": FacialPerformance("neutral_present", "lightly_pressed", "evidence_focus", "slight_lift", "evidence_then_lens", "contained"),
-        "contrast": FacialPerformance("amused", "asymmetric_half_smile", "glance_back", "single_brow_energy", "away_then_back", "lively"),
-        "comic_hook": FacialPerformance("playfully_performed", "subtle_pout", "steady_lens", "slight_lift", "continuous_lens", "lively"),
-        "celebration": FacialPerformance("proud", "open_laugh", "steady_lens", "slight_lift", "continuous_lens", "lively"),
-        "vulnerability": FacialPerformance("vulnerable", "relaxed_parted", "soft_lens", "faint_inward_draw", "lens_then_away", "low"),
-        "reassurance": FacialPerformance("tender", "small_smile", "soft_lens", "neutral", "continuous_lens", "contained"),
-        "coordination": FacialPerformance("neutral_present", "mid_speech", "evidence_focus", "slight_lift", "evidence_then_lens", "contained"),
-        "affection": FacialPerformance("tender", "relaxed_parted", "soft_lens", "relaxed_lowered", "continuous_lens", "held"),
-        "nostalgia": FacialPerformance("tender", "small_smile", "look_away", "relaxed_lowered", "lens_then_away", "low"),
+        "presence": FacialPerformance(
+            "warm", "relaxed_closed", "soft_lens", "neutral", "continuous_lens", "contained"
+        ),
+        "reveal": FacialPerformance(
+            "proud",
+            "small_smile",
+            "evidence_focus",
+            "slight_lift",
+            "evidence_then_lens",
+            "contained",
+        ),
+        "demonstration": FacialPerformance(
+            "neutral_present",
+            "relaxed_closed",
+            "evidence_focus",
+            "neutral",
+            "evidence_then_lens",
+            "contained",
+        ),
+        "question": FacialPerformance(
+            "neutral_present",
+            "relaxed_parted",
+            "steady_lens",
+            "slight_lift",
+            "continuous_lens",
+            "held",
+        ),
+        "comparison": FacialPerformance(
+            "neutral_present",
+            "lightly_pressed",
+            "evidence_focus",
+            "slight_lift",
+            "evidence_then_lens",
+            "contained",
+        ),
+        "contrast": FacialPerformance(
+            "amused",
+            "asymmetric_half_smile",
+            "glance_back",
+            "single_brow_energy",
+            "away_then_back",
+            "lively",
+        ),
+        "comic_hook": FacialPerformance(
+            "playfully_performed",
+            "subtle_pout",
+            "steady_lens",
+            "slight_lift",
+            "continuous_lens",
+            "lively",
+        ),
+        "celebration": FacialPerformance(
+            "proud", "open_laugh", "steady_lens", "slight_lift", "continuous_lens", "lively"
+        ),
+        "vulnerability": FacialPerformance(
+            "vulnerable",
+            "relaxed_parted",
+            "soft_lens",
+            "faint_inward_draw",
+            "lens_then_away",
+            "low",
+        ),
+        "reassurance": FacialPerformance(
+            "tender", "small_smile", "soft_lens", "neutral", "continuous_lens", "contained"
+        ),
+        "coordination": FacialPerformance(
+            "neutral_present",
+            "mid_speech",
+            "evidence_focus",
+            "slight_lift",
+            "evidence_then_lens",
+            "contained",
+        ),
+        "affection": FacialPerformance(
+            "tender", "relaxed_parted", "soft_lens", "relaxed_lowered", "continuous_lens", "held"
+        ),
+        "nostalgia": FacialPerformance(
+            "tender", "small_smile", "look_away", "relaxed_lowered", "lens_then_away", "low"
+        ),
     }
     facial = recipes.get(engagement_tactic)
     if presentation.version != SUBJECT_PRESENTATION_V3 or facial is None:
@@ -583,7 +758,11 @@ def build_subject_candidates(
         variant_id = str(raw.get("id") or "")
         allowed_capture = {str(item) for item in raw.get("capture_modes", [])}
         allowed_visibility = {str(item) for item in raw.get("character_visibilities", [])}
-        if not variant_id or capture_mode not in allowed_capture or character_visibility not in allowed_visibility:
+        if (
+            not variant_id
+            or capture_mode not in allowed_capture
+            or character_visibility not in allowed_visibility
+        ):
             continue
         performance = SubjectPerformance.from_payload(raw.get("performance"))
         derived_occlusion = _derive_occlusion_complexity(
@@ -647,7 +826,9 @@ def build_subject_candidates(
     def weighted_key(item: SubjectCandidate) -> tuple[float, int, str]:
         signature = item.presentation.subject_signature
         axes = signature.split("|")
-        soft = sum(sum(axis in recent_item.split("|") for axis in axes) for recent_item in recent_three)
+        soft = sum(
+            sum(axis in recent_item.split("|") for axis in axes) for recent_item in recent_three
+        )
         stable = sha256(f"{opportunity_id}:{item.variant_id}".encode()).hexdigest()
         risk = {"low": 0, "medium": 2, "high": 6}.get(
             item.presentation.performance.occlusion_complexity, 1
@@ -877,14 +1058,14 @@ def _subject_signature(
     facial_micro_performance: FacialMicroPerformance | None = None,
 ) -> str:
     axes = [
-            appearance.hair_arrangement,
-            performance.head_yaw,
-            performance.head_pitch,
-            performance.head_roll,
-            performance.gaze_target,
-            performance.expression,
-            performance.shoulder_orientation,
-            performance.gesture,
+        appearance.hair_arrangement,
+        performance.head_yaw,
+        performance.head_pitch,
+        performance.head_roll,
+        performance.gaze_target,
+        performance.expression,
+        performance.shoulder_orientation,
+        performance.gesture,
     ]
     if display_strategy:
         axes.extend(
@@ -907,7 +1088,22 @@ def _subject_signature(
     if facial_display_strategy:
         axes.extend(facial_display_strategy.to_payload().values())
     if facial_micro_performance:
-        axes.extend(facial_micro_performance.to_payload().values())
+        # v1 only contained strings, and its exact historical signature must
+        # remain replay-compatible. v2 freezes a list of visible evidence, so
+        # compact the whole contract instead of flattening a non-string value.
+        if facial_micro_performance.version == "facial-micro-performance-v1":
+            axes.extend(facial_micro_performance.to_payload().values())
+        else:
+            axes.append(
+                sha256(
+                    json.dumps(
+                        facial_micro_performance.to_payload(),
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
     return "|".join(axes)
 
 
@@ -933,7 +1129,10 @@ def _facial_performance(strategy: PhotoDisplayStrategy) -> FacialPerformance:
         "composed_attraction": "relaxed_parted",
         "playful_challenge": "asymmetric_half_smile",
         "tired_unfiltered": "relaxed_parted",
-    }.get(strategy.strategy_id, "small_smile" if family in {"warm", "proud", "tender"} else "relaxed_closed")
+    }.get(
+        strategy.strategy_id,
+        "small_smile" if family in {"warm", "proud", "tender"} else "relaxed_closed",
+    )
     eye = {
         "composed_attraction": "steady_lens",
         "playful_challenge": "steady_lens",
@@ -949,9 +1148,21 @@ def _facial_performance(strategy: PhotoDisplayStrategy) -> FacialPerformance:
         expression_family=family,
         mouth_behavior=mouth,
         eye_behavior=eye,
-        brow_behavior=("single_brow_energy" if strategy.strategy_id == "playful_challenge" else "slight_lift" if family == "playfully_performed" else "neutral"),
+        brow_behavior=(
+            "single_brow_energy"
+            if strategy.strategy_id == "playful_challenge"
+            else "slight_lift"
+            if family == "playfully_performed"
+            else "neutral"
+        ),
         gaze_sequence=gaze,
-        facial_energy=("held" if family.startswith("desire") else "low" if family in {"tired", "vulnerable"} else "contained"),
+        facial_energy=(
+            "held"
+            if family.startswith("desire")
+            else "low"
+            if family in {"tired", "vulnerable"}
+            else "contained"
+        ),
     )
 
 
@@ -1013,9 +1224,7 @@ def _derive_hand_occupancy(capture_mode: str, gesture: str) -> str:
     return "both_hands_available"
 
 
-def _derive_occlusion_complexity(
-    capture_mode: str, character_visibility: str, gesture: str
-) -> str:
+def _derive_occlusion_complexity(capture_mode: str, character_visibility: str, gesture: str) -> str:
     evidence_gestures = {
         "show_primary_evidence",
         "hold_or_point_at_primary_evidence",

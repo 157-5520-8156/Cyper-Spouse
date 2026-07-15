@@ -2,7 +2,11 @@ from pathlib import Path
 
 import yaml
 
-from companion_daemon.media_facial import choose_facial_contract
+from companion_daemon.media_facial import (
+    FACIAL_MICRO_VERSION_V1,
+    FacialMicroPerformance,
+    choose_facial_contract,
+)
 from companion_daemon.media_subject import (
     PhotoDisplayStrategy,
     SubjectAppearance,
@@ -17,6 +21,7 @@ from companion_daemon.media_subject import (
 
 
 CONFIG = Path("configs/media_subject_templates.yaml")
+FACIAL_CONFIG = Path("configs/media_facial_performance_templates.yaml")
 
 
 def _snapshot(*, appearance_state=None):
@@ -55,6 +60,45 @@ def test_catalog_builds_deterministic_coherent_candidates() -> None:
     assert len({item.presentation.subject_signature for item in first}) == len(first)
 
 
+def test_pre_beat_v1_facial_catalog_uses_bounded_compatibility_matrix(tmp_path: Path) -> None:
+    """An installed v1 affinity catalog must not become a planning outage."""
+    legacy_catalog = yaml.safe_load(FACIAL_CONFIG.read_text(encoding="utf-8"))
+    legacy_catalog.pop("expression_beats")
+    legacy_catalog.pop("micro_recipes")
+    custom_path = tmp_path / "legacy-facial-catalog.yaml"
+    custom_path.write_text(yaml.safe_dump(legacy_catalog), encoding="utf-8")
+
+    strategy, micro = choose_facial_contract(
+        stable_seed="legacy-facial-catalog",
+        engagement_tactic="affection",
+        attraction_mechanism=None,
+        catalog_path=custom_path,
+    )
+
+    assert strategy.strategy_family in {"tender_private", "warm_connection", "desire_withheld"}
+    assert micro.recipe_id.startswith("legacy:")
+    assert micro.expression_beat_id.endswith("coherent_visible_beat")
+
+
+def test_default_style_uses_complete_recipe_ids_from_catalog(tmp_path: Path) -> None:
+    """The runtime selects catalog-owned complete performances, not Python defaults."""
+    catalog = yaml.safe_load(FACIAL_CONFIG.read_text(encoding="utf-8"))
+    for recipes in catalog["micro_recipes"].values():
+        for recipe in recipes:
+            recipe["id"] = f"catalog-owned:{recipe['id']}"
+    custom_path = tmp_path / "catalog-owned-recipes.yaml"
+    custom_path.write_text(yaml.safe_dump(catalog), encoding="utf-8")
+
+    _, micro = choose_facial_contract(
+        stable_seed="catalog-owned-recipes",
+        engagement_tactic="affection",
+        attraction_mechanism=None,
+        catalog_path=custom_path,
+    )
+
+    assert micro.recipe_id.startswith("catalog-owned:")
+
+
 def test_character_candidates_include_coherent_social_performance_recipes() -> None:
     candidates = build_subject_candidates(
         snapshot=_snapshot(),
@@ -66,7 +110,9 @@ def test_character_candidates_include_coherent_social_performance_recipes() -> N
     )
 
     pretend = next(
-        item for item in candidates if item.presentation.display_strategy
+        item
+        for item in candidates
+        if item.presentation.display_strategy
         and item.presentation.display_strategy.strategy_id == "pretend_innocent"
     )
     strategy = pretend.presentation.display_strategy
@@ -97,8 +143,15 @@ def test_social_performance_prompt_leads_with_holistic_behavior() -> None:
     )
     appearance = SubjectAppearance("media_local", "natural_down", "home_cooking", "natural")
     performance = SubjectPerformance(
-        "near_front", "level", "none", "lens", "pretend_innocent",
-        "slightly_turned", "compact_casual", "show_primary_evidence", "aware_light_pose",
+        "near_front",
+        "level",
+        "none",
+        "lens",
+        "pretend_innocent",
+        "slightly_turned",
+        "compact_casual",
+        "show_primary_evidence",
+        "aware_light_pose",
     )
     presentation = SubjectPresentationPlan.create_v2(
         variant_id="test__pretend_innocent",
@@ -139,14 +192,32 @@ def test_subject_v3_keeps_expression_out_of_pose_performance() -> None:
 
 def test_facial_matrix_exposes_broad_social_and_visible_action_variety() -> None:
     tactics = (
-        "presence", "reveal", "demonstration", "question", "comparison", "contrast",
-        "comic_hook", "celebration", "vulnerability", "reassurance", "coordination",
-        "affection", "nostalgia", "attraction",
+        "presence",
+        "reveal",
+        "demonstration",
+        "question",
+        "comparison",
+        "contrast",
+        "comic_hook",
+        "celebration",
+        "vulnerability",
+        "reassurance",
+        "coordination",
+        "affection",
+        "nostalgia",
+        "attraction",
     )
     mechanisms = (
-        None, "direct_invitation", "playful_tease", "withheld_attention",
-        "sensory_immediacy", "private_trust", "confident_display",
-        "interrupted_transition", "close_proximity", "atmospheric_suggestion",
+        None,
+        "direct_invitation",
+        "playful_tease",
+        "withheld_attention",
+        "sensory_immediacy",
+        "private_trust",
+        "confident_display",
+        "interrupted_transition",
+        "close_proximity",
+        "atmospheric_suggestion",
     )
     contracts = [
         choose_facial_contract(
@@ -162,10 +233,21 @@ def test_facial_matrix_exposes_broad_social_and_visible_action_variety() -> None
 
     strategies = {strategy.strategy_family for strategy, _micro in contracts}
     assert {
-        "present_and_available", "warm_connection", "amusement_leaking",
-        "deliberate_cuteness", "mock_defiance", "comic_self_exposure", "proud_display",
-        "consultative_check", "frustrated_complaint", "embarrassed_repair", "tired_access",
-        "vulnerable_disclosure", "tender_private", "desire_direct", "desire_withheld",
+        "present_and_available",
+        "warm_connection",
+        "amusement_leaking",
+        "deliberate_cuteness",
+        "mock_defiance",
+        "comic_self_exposure",
+        "proud_display",
+        "consultative_check",
+        "frustrated_complaint",
+        "embarrassed_repair",
+        "tired_access",
+        "vulnerable_disclosure",
+        "tender_private",
+        "desire_direct",
+        "desire_withheld",
         "neutral_evidence",
     }.issubset(strategies)
     assert len({micro.mouth_action for _strategy, micro in contracts}) >= 9
@@ -174,7 +256,33 @@ def test_facial_matrix_exposes_broad_social_and_visible_action_variety() -> None
     assert len({micro.performance_authorship for _strategy, micro in contracts}) >= 6
     assert len({micro.temporal_phase for _strategy, micro in contracts}) >= 6
     assert all(strategy.catalog_version == "media-facial-catalog-v1" for strategy, _ in contracts)
-    assert all(micro.recipe_id and micro.catalog_version == "media-facial-catalog-v1" for _, micro in contracts)
+    assert all(
+        micro.recipe_id and micro.catalog_version == "media-facial-catalog-v1"
+        for _, micro in contracts
+    )
+
+
+def test_legacy_facial_micro_contract_round_trips_without_v2_expression_beat() -> None:
+    legacy = FacialMicroPerformance.create(
+        brow_action="neutral",
+        eye_aperture="natural",
+        gaze_target="lens",
+        gaze_sequence="held_lens",
+        nose_cheek_action="relaxed",
+        mouth_action="small_smile",
+        facial_asymmetry="balanced",
+        display_intensity="subtle",
+        performance_authorship="recipient_aware",
+        temporal_phase="held_beat",
+        facial_energy="contained",
+        recipe_id="warm_connection:legacy",
+        version=FACIAL_MICRO_VERSION_V1,
+    )
+
+    payload = legacy.to_payload()
+    assert "expression_beat_id" not in payload
+    assert "visible_evidence" not in payload
+    assert FacialMicroPerformance.from_payload(payload) == legacy
 
 
 def test_facial_performance_respects_camera_authorship_and_face_visibility() -> None:
@@ -274,19 +382,28 @@ def test_subject_candidate_matrix_exposes_every_social_strategy_without_flat_rul
 
 def test_different_opportunities_stably_change_social_candidate_order() -> None:
     first = build_subject_candidates(
-        snapshot=_snapshot(), opportunity_id="op:variation:a",
-        capture_mode="character_front_camera", character_visibility="identifiable",
-        config_path=CONFIG, limit=32,
+        snapshot=_snapshot(),
+        opportunity_id="op:variation:a",
+        capture_mode="character_front_camera",
+        character_visibility="identifiable",
+        config_path=CONFIG,
+        limit=32,
     )
     repeated = build_subject_candidates(
-        snapshot=_snapshot(), opportunity_id="op:variation:a",
-        capture_mode="character_front_camera", character_visibility="identifiable",
-        config_path=CONFIG, limit=32,
+        snapshot=_snapshot(),
+        opportunity_id="op:variation:a",
+        capture_mode="character_front_camera",
+        character_visibility="identifiable",
+        config_path=CONFIG,
+        limit=32,
     )
     second = build_subject_candidates(
-        snapshot=_snapshot(), opportunity_id="op:variation:b",
-        capture_mode="character_front_camera", character_visibility="identifiable",
-        config_path=CONFIG, limit=32,
+        snapshot=_snapshot(),
+        opportunity_id="op:variation:b",
+        capture_mode="character_front_camera",
+        character_visibility="identifiable",
+        config_path=CONFIG,
+        limit=32,
     )
 
     assert first == repeated
@@ -306,9 +423,7 @@ def test_recent_social_strategy_axes_are_softly_downranked_before_seeded_samplin
     assert first_strategy is not None
     historical_near_match = baseline[0].presentation.subject_signature + "|historical-extra"
 
-    varied = build_subject_candidates(
-        **kwargs, recent_subject_signatures=(historical_near_match,)
-    )
+    varied = build_subject_candidates(**kwargs, recent_subject_signatures=(historical_near_match,))
 
     assert varied[0].presentation.display_strategy is not None
     assert varied[0].presentation.display_strategy.strategy_id != first_strategy.strategy_id
@@ -316,33 +431,49 @@ def test_recent_social_strategy_axes_are_softly_downranked_before_seeded_samplin
 
 def test_world_context_only_filters_privacy_and_clear_affect_conflicts() -> None:
     ordinary = build_subject_candidates(
-        snapshot=_snapshot(), opportunity_id="op:ordinary",
-        capture_mode="mirror", character_visibility="identifiable",
-        privacy_ceiling="ordinary", config_path=CONFIG, limit=64,
+        snapshot=_snapshot(),
+        opportunity_id="op:ordinary",
+        capture_mode="mirror",
+        character_visibility="identifiable",
+        privacy_ceiling="ordinary",
+        config_path=CONFIG,
+        limit=64,
     )
     severe = build_subject_candidates(
-        snapshot=_snapshot(), opportunity_id="op:severe",
-        capture_mode="character_front_camera", character_visibility="identifiable",
-        privacy_ceiling="personal", relationship_stage="close_friend",
-        public_affect={"severity": "severe"}, config_path=CONFIG, limit=64,
+        snapshot=_snapshot(),
+        opportunity_id="op:severe",
+        capture_mode="character_front_camera",
+        character_visibility="identifiable",
+        privacy_ceiling="personal",
+        relationship_stage="close_friend",
+        public_affect={"severity": "severe"},
+        config_path=CONFIG,
+        limit=64,
     )
     no_relationship = build_subject_candidates(
-        snapshot=_snapshot(), opportunity_id="op:no-relationship",
-        capture_mode="character_front_camera", character_visibility="identifiable",
-        privacy_ceiling="personal", config_path=CONFIG, limit=64,
+        snapshot=_snapshot(),
+        opportunity_id="op:no-relationship",
+        capture_mode="character_front_camera",
+        character_visibility="identifiable",
+        privacy_ceiling="personal",
+        config_path=CONFIG,
+        limit=64,
     )
 
     ordinary_strategies = {
         item.presentation.display_strategy.strategy_id
-        for item in ordinary if item.presentation.display_strategy
+        for item in ordinary
+        if item.presentation.display_strategy
     }
     severe_strategies = {
         item.presentation.display_strategy.strategy_id
-        for item in severe if item.presentation.display_strategy
+        for item in severe
+        if item.presentation.display_strategy
     }
     no_relationship_strategies = {
         item.presentation.display_strategy.strategy_id
-        for item in no_relationship if item.presentation.display_strategy
+        for item in no_relationship
+        if item.presentation.display_strategy
     }
     assert "composed_attraction" not in ordinary_strategies
     assert "playful_challenge" not in no_relationship_strategies

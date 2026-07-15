@@ -19,6 +19,7 @@ from companion_daemon.event_media import (
     RenderedMedia,
     compile_media_prompt,
     _enforce_inspection_contract,
+    _history_perceptual_signature,
     _inspection_prompt,
     _repair_prompt,
 )
@@ -385,9 +386,10 @@ async def test_v5_freezes_complete_expression_candidate_without_free_direction_t
     tampered_moment["moment_capture"]["scene_anchor"] = "social_context"
     with pytest.raises(ValueError, match="invalid media plan payload"):
         MediaPlan.from_payload(tampered_moment)
-    assert "photographic_authenticity" not in replace(
-        result.plan, photographic_authenticity=None
-    ).to_payload()
+    assert (
+        "photographic_authenticity"
+        not in replace(result.plan, photographic_authenticity=None).to_payload()
+    )
     prompt = compile_media_prompt(result.plan, None)
     assert prompt.index("Selected event evidence") < prompt.index("Interaction Bid")
     assert prompt.index("Interaction Bid") < prompt.index("Media Address Strategy")
@@ -396,6 +398,8 @@ async def test_v5_freezes_complete_expression_candidate_without_free_direction_t
     assert prompt.index("Camera Geometry") < prompt.index("Photographic Authenticity")
     assert "Facial Display Strategy" in prompt
     assert "Facial Micro-Performance" in prompt
+    assert "frozen expression beat" in prompt
+    assert "Character-photo realism" in prompt
     assert "nose/cheek" in prompt
     assert "action unit" not in prompt.lower()
     assert "facial micro performance v1" not in prompt.lower()
@@ -519,7 +523,7 @@ async def test_v5_candidate_space_is_replay_stable_and_varies_across_opportuniti
                 result.plan.camera_geometry.camera_height,
                 result.plan.camera_geometry.view_axis,
                 result.plan.camera_geometry.orientation,
-                    result.plan.subject_presentation.facial_display_strategy.strategy_family,
+                result.plan.subject_presentation.facial_display_strategy.strategy_family,
                 result.plan.subject_presentation.performance.head_yaw,
             )
         )
@@ -1648,6 +1652,44 @@ def _inspection(
     )
 
 
+def test_history_upcasts_v2_perceptual_signature_without_axis_drift() -> None:
+    legacy = "|".join(
+        (
+            "media-perceptual-v2",
+            "presence",
+            "none",
+            "medium",
+            "eye",
+            "front",
+            "near",
+            "center",
+            "balanced",
+            "center",
+            "portrait",
+            "warm_connection",
+            "held_lens",
+            "cheek_lift",
+            "small_smile",
+            "recipient_aware",
+            "held_beat",
+            "yaw:posture:gesture",
+            "none",
+            "pleasant_share",
+            "lived_in",
+            "casual_offset",
+            "portrait_context",
+            "canonical",
+        )
+    )
+
+    result = _history_perceptual_signature({"inspection": {"perceptual_signature": legacy}})
+
+    parts = result.split("|")
+    assert parts[0] == "media-perceptual-v3"
+    assert parts[17] == "legacy_expression_beat"
+    assert parts[18] == "yaw:posture:gesture"
+
+
 @pytest.mark.asyncio
 async def test_v5_renderer_repairs_generic_portrait_without_replanning(
     monkeypatch: pytest.MonkeyPatch,
@@ -1697,7 +1739,13 @@ async def test_v5_renderer_repairs_generic_smile_and_commercial_render_dilution(
 ) -> None:
     monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
     proposal = _proposal(interaction_bid_id="share_presence")
-    for field in ("composition", "action", "camera_direction", "sharing_motive", "subject_variant_id"):
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
         proposal.pop(field, None)
     planned = await MediaPlanner(V5SelectingModel(proposal)).plan(_opportunity())
     assert isinstance(planned, PlannedMedia)
@@ -1709,7 +1757,9 @@ async def test_v5_renderer_repairs_generic_smile_and_commercial_render_dilution(
             "commercial_render_dilution": True,
         }
     )
-    accepted = MediaInspection(**{**_inspection(True).__dict__, "rule_version": "media-inspection-v7"})
+    accepted = MediaInspection(
+        **{**_inspection(True).__dict__, "rule_version": "media-inspection-v7"}
+    )
     generator = FakeGenerator()
 
     rendered = await MediaRenderer(

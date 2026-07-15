@@ -22,29 +22,59 @@ AUTHENTICITY_CATALOG_VERSION = "media-authenticity-catalog-v1"
 DEFAULT_AUTHENTICITY_CATALOG = Path("configs/media_photographic_authenticity_templates.yaml")
 
 DEVICE_RENDERINGS = {
-    "front_wide", "rear_standard", "rear_ultrawide", "tele_crop",
-    "unknown_phone", "artifact_inherited",
+    "front_wide",
+    "rear_standard",
+    "rear_ultrawide",
+    "tele_crop",
+    "unknown_phone",
+    "artifact_inherited",
 }
 EXPOSURE_BEHAVIORS = {
-    "stable", "highlight_protected", "shadow_lifted", "backlit_compromise",
-    "mixed_light_compromise", "low_light_stack", "flash_falloff", "artifact_inherited",
+    "stable",
+    "highlight_protected",
+    "shadow_lifted",
+    "backlit_compromise",
+    "mixed_light_compromise",
+    "low_light_stack",
+    "flash_falloff",
+    "artifact_inherited",
 }
 COLOR_BEHAVIORS = {
-    "neutral_phone", "warm_cast", "cool_cast", "mixed_white_balance",
-    "moderately_vivid", "muted", "artifact_inherited",
+    "neutral_phone",
+    "warm_cast",
+    "cool_cast",
+    "mixed_white_balance",
+    "moderately_vivid",
+    "muted",
+    "artifact_inherited",
 }
 PROCESSING_LEVELS = {
-    "light", "typical_phone", "social_edit", "strong_filter", "artifact_inherited",
+    "light",
+    "typical_phone",
+    "social_edit",
+    "strong_filter",
+    "artifact_inherited",
 }
 SCENE_ORDERLINESS = {"lived_in", "ordinary", "lightly_arranged", "display_ready", "commercial"}
 CAPTURE_IMPERFECTIONS = {
-    "clean", "off_center", "partial_crop", "minor_motion", "focus_transition",
-    "reflection_layer", "foreground_interrupt", "lens_smudge_or_flare", "artifact_inherited",
+    "clean",
+    "off_center",
+    "partial_crop",
+    "minor_motion",
+    "focus_transition",
+    "reflection_layer",
+    "foreground_interrupt",
+    "lens_smudge_or_flare",
+    "artifact_inherited",
 }
 ENVIRONMENT_ENTROPIES = {"sparse", "normal", "busy", "transient", "artifact_inherited"}
 REGIONAL_GROUNDINGS = {"explicit", "weak", "none", "artifact_inherited"}
 AESTHETIC_INTENTS = {
-    "documentary", "pleasant_share", "atmospheric", "editorial", "commercial",
+    "documentary",
+    "pleasant_share",
+    "atmospheric",
+    "editorial",
+    "commercial",
     "artifact_inherited",
 }
 
@@ -69,10 +99,17 @@ class PhotographicAuthenticityProfile:
     def create(cls, **values: str) -> "PhotographicAuthenticityProfile":
         catalog_version = str(values.get("catalog_version") or AUTHENTICITY_CATALOG_VERSION)
         payload = (
-            values["profile_id"], values["device_rendering"], values["exposure_behavior"],
-            values["color_behavior"], values["processing_level"], values["scene_orderliness"],
-            values["capture_imperfection"], values["environment_entropy"],
-            values["regional_grounding"], values["aesthetic_intent"], catalog_version,
+            values["profile_id"],
+            values["device_rendering"],
+            values["exposure_behavior"],
+            values["color_behavior"],
+            values["processing_level"],
+            values["scene_orderliness"],
+            values["capture_imperfection"],
+            values["environment_entropy"],
+            values["regional_grounding"],
+            values["aesthetic_intent"],
+            catalog_version,
         )
         result = cls(*payload, contract_signature=_signature(payload))
         result._validate()
@@ -98,12 +135,21 @@ class PhotographicAuthenticityProfile:
             raise ValueError("invalid photographic authenticity profile")
         if any(value not in allowed for value, allowed in enums):
             raise ValueError("invalid photographic authenticity enum")
-        expected = _signature((
-            self.profile_id, self.device_rendering, self.exposure_behavior,
-            self.color_behavior, self.processing_level, self.scene_orderliness,
-            self.capture_imperfection, self.environment_entropy,
-            self.regional_grounding, self.aesthetic_intent, self.catalog_version,
-        ))
+        expected = _signature(
+            (
+                self.profile_id,
+                self.device_rendering,
+                self.exposure_behavior,
+                self.color_behavior,
+                self.processing_level,
+                self.scene_orderliness,
+                self.capture_imperfection,
+                self.environment_entropy,
+                self.regional_grounding,
+                self.aesthetic_intent,
+                self.catalog_version,
+            )
+        )
         if self.contract_signature != expected:
             raise ValueError("invalid photographic authenticity contract")
 
@@ -115,10 +161,19 @@ class PhotographicAuthenticityProfile:
         if not isinstance(value, dict):
             raise ValueError("photographic authenticity must be an object")
         names = (
-            "profile_id", "device_rendering", "exposure_behavior", "color_behavior",
-            "processing_level", "scene_orderliness", "capture_imperfection",
-            "environment_entropy", "regional_grounding", "aesthetic_intent", "catalog_version",
-            "contract_signature", "version",
+            "profile_id",
+            "device_rendering",
+            "exposure_behavior",
+            "color_behavior",
+            "processing_level",
+            "scene_orderliness",
+            "capture_imperfection",
+            "environment_entropy",
+            "regional_grounding",
+            "aesthetic_intent",
+            "catalog_version",
+            "contract_signature",
+            "version",
         )
         result = cls(**{name: str(value.get(name) or "") for name in names})
         result._validate()
@@ -132,6 +187,7 @@ def choose_authenticity_profile(
     family: str,
     staging_degree: str,
     visual_form: str,
+    character_visible: bool = False,
     event_snapshot: Mapping[str, object] | None = None,
     catalog_path: Path = DEFAULT_AUTHENTICITY_CATALOG,
 ) -> PhotographicAuthenticityProfile:
@@ -141,11 +197,16 @@ def choose_authenticity_profile(
 
     if capture_mode == "existing_artifact":
         return PhotographicAuthenticityProfile.create(
-            profile_id="artifact_inherited", device_rendering="artifact_inherited",
-            exposure_behavior="artifact_inherited", color_behavior="artifact_inherited",
-            processing_level="artifact_inherited", scene_orderliness="ordinary",
-            capture_imperfection="artifact_inherited", environment_entropy="artifact_inherited",
-            regional_grounding="artifact_inherited", aesthetic_intent="artifact_inherited",
+            profile_id="artifact_inherited",
+            device_rendering="artifact_inherited",
+            exposure_behavior="artifact_inherited",
+            color_behavior="artifact_inherited",
+            processing_level="artifact_inherited",
+            scene_orderliness="ordinary",
+            capture_imperfection="artifact_inherited",
+            environment_entropy="artifact_inherited",
+            regional_grounding="artifact_inherited",
+            aesthetic_intent="artifact_inherited",
         )
     device_options = {
         "character_front_camera": ("front_wide",),
@@ -179,8 +240,18 @@ def choose_authenticity_profile(
         intent_options = (explicit_intent,)
     if family == "life_share":
         intent_options = tuple(
-            item for item in intent_options
+            item
+            for item in intent_options
             if item not in {"editorial", "commercial"} or explicit_intent == item
+        )
+    # Character presence should still read as an event photo, not as a product
+    # shoot.  Community workflows solve identity, eyes and local repair in
+    # separate modules; they do not require the whole frame to become a beauty
+    # render. Explicit world requirements remain an escape hatch for a genuine
+    # professional artifact, but ordinary character media stays phone-native.
+    if character_visible and not explicit_intent:
+        intent_options = tuple(
+            item for item in intent_options if item not in {"editorial", "commercial"}
         )
     intent = _pick(stable_seed + ":intent", intent_options)
     device = _pick(stable_seed + ":device", device_options)
@@ -214,6 +285,10 @@ def choose_authenticity_profile(
             "commercial": ("social_edit", "strong_filter"),
         }[intent]
     )
+    if character_visible and not explicit_processing:
+        processing_options = tuple(
+            item for item in processing_options if item in {"light", "typical_phone"}
+        )
     scene_state = str(environment.get("scene_orderliness") or "")
     if scene_state in SCENE_ORDERLINESS:
         orderliness_options = (scene_state,)
@@ -232,13 +307,20 @@ def choose_authenticity_profile(
     entropy_value = str(environment.get("entropy") or "")
     if entropy_value in ENVIRONMENT_ENTROPIES:
         entropy_options = (entropy_value,)
-    elif any(token in activity_text for token in ("travel", "walking", "running", "transit", "旅行", "步行", "跑", "候车")):
+    elif any(
+        token in activity_text
+        for token in ("travel", "walking", "running", "transit", "旅行", "步行", "跑", "候车")
+    ):
         entropy_options = ("transient", "normal")
     elif any(token in lighting + activity_text for token in ("crowd", "busy", "拥挤", "人多")):
         entropy_options = ("busy", "normal")
     else:
         entropy_options = ("normal", "sparse")
     imperfection_options = ["clean", "off_center", "partial_crop"]
+    if character_visible and capture_mode in {"character_front_camera", "mirror"}:
+        # A chosen private or friendly photo can be good-looking without having
+        # the centred, airbrushed regularity of a commercial portrait.
+        imperfection_options = ["off_center", "partial_crop"]
     if any(token in activity_text for token in ("walking", "running", "dance", "步行", "跑", "舞")):
         imperfection_options.extend(("minor_motion", "focus_transition"))
     if capture_mode in {"known_companion", "external_sender", "timer_fixed"}:
@@ -313,4 +395,6 @@ def _validate_catalog(path: Path) -> None:
 
 
 def _signature(value: object) -> str:
-    return sha256(json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()[:24]
+    return sha256(
+        json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode()
+    ).hexdigest()[:24]

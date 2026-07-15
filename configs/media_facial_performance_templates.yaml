@@ -29,6 +29,253 @@ attraction_affinities:
   private_trust: [tender_private, desire_withheld, desire_direct]
   close_proximity: [tender_private, desire_withheld, desire_direct]
 
+# Complete, compatible still-frame performances.  These are deliberately
+# complete candidates instead of independent sliders: a rendered face gets one
+# coherent beat, including gaze, mouth, temporal phase and authorship.  IDs are
+# frozen into MediaPlan payloads and may be extended without runtime code.
+micro_recipes:
+  present_and_available:
+    - id: present_and_available_0
+      axes: {brow_action: neutral, eye_aperture: natural, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: relaxed, mouth_action: relaxed_closed, facial_asymmetry: balanced, display_intensity: subtle, performance_authorship: recipient_aware, temporal_phase: held_beat, facial_energy: contained}
+    - id: present_and_available_1
+      axes: {brow_action: settled, eye_aperture: natural, gaze_target: screen_preview, gaze_sequence: screen_then_lens, nose_cheek_action: relaxed, mouth_action: soft_parted, facial_asymmetry: dynamic_natural, display_intensity: low, performance_authorship: selfie_micro_pose, temporal_phase: onset, facial_energy: contained}
+    - id: present_and_available_2
+      axes: {brow_action: settled, eye_aperture: natural, gaze_target: companion, gaze_sequence: companion_then_camera, nose_cheek_action: relaxed, mouth_action: mid_speech, facial_asymmetry: dynamic_natural, display_intensity: medium, performance_authorship: responsive_candid, temporal_phase: after_reaction, facial_energy: lively}
+  warm_connection:
+    - id: warm_connection_0
+      axes: {brow_action: neutral, eye_aperture: natural, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: cheek_lift, mouth_action: small_smile, facial_asymmetry: dynamic_natural, display_intensity: subtle, performance_authorship: recipient_aware, temporal_phase: held_beat, facial_energy: contained}
+    - id: warm_connection_1
+      axes: {brow_action: soft_lift, eye_aperture: smile_narrowed, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: cheek_lift, mouth_action: suppressed_smile, facial_asymmetry: subtle_left, display_intensity: medium, performance_authorship: selfie_micro_pose, temporal_phase: leaking, facial_energy: contained}
+    - id: warm_connection_2
+      axes: {brow_action: settled, eye_aperture: natural, gaze_target: companion, gaze_sequence: companion_then_camera, nose_cheek_action: cheek_lift, mouth_action: small_smile, facial_asymmetry: dynamic_natural, display_intensity: low, performance_authorship: responsive_candid, temporal_phase: after_reaction, facial_energy: lively}
+  amusement_leaking:
+    - id: amusement_leaking_0
+      axes: {brow_action: soft_lift, eye_aperture: smile_narrowed, gaze_target: lens, gaze_sequence: just_returned_to_lens, nose_cheek_action: small_nose_scrunch, mouth_action: suppressed_smile, facial_asymmetry: dynamic_natural, display_intensity: clear, performance_authorship: spontaneous, temporal_phase: leaking, facial_energy: lively}
+    - id: amusement_leaking_1
+      axes: {brow_action: neutral, eye_aperture: brief_squint, gaze_target: off_frame, gaze_sequence: caught_off_frame, nose_cheek_action: cheek_lift, mouth_action: asymmetric_half_smile, facial_asymmetry: subtle_left, display_intensity: clear, performance_authorship: spontaneous, temporal_phase: after_reaction, facial_energy: lively}
+    - id: amusement_leaking_2
+      axes: {brow_action: bilateral_lift, eye_aperture: brief_squeeze, gaze_target: lens, gaze_sequence: just_returned_to_lens, nose_cheek_action: small_nose_scrunch, mouth_action: open_laugh, facial_asymmetry: momentary_irregular, display_intensity: high, performance_authorship: responsive_candid, temporal_phase: apex, facial_energy: lively}
+    - id: amusement_leaking_3
+      axes: {brow_action: settled, eye_aperture: smile_narrowed, gaze_target: screen_preview, gaze_sequence: screen_then_lens, nose_cheek_action: asymmetric_cheek, mouth_action: suppressed_smile, facial_asymmetry: subtle_right, display_intensity: medium, performance_authorship: selfie_micro_pose, temporal_phase: leaking, facial_energy: contained}
+  deliberate_cuteness:
+    - id: deliberate_cuteness_0
+      axes: {brow_action: soft_lift, eye_aperture: slightly_widened, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: relaxed, mouth_action: subtle_pout, facial_asymmetry: balanced, display_intensity: clear, performance_authorship: deliberately_performed, temporal_phase: held_beat, facial_energy: held}
+    - id: deliberate_cuteness_1
+      axes: {brow_action: soft_lift, eye_aperture: natural, gaze_target: lens, gaze_sequence: just_returned_to_lens, nose_cheek_action: one_cheek_tension, mouth_action: suppressed_smile, facial_asymmetry: subtle_right, display_intensity: clear, performance_authorship: deliberately_performed, temporal_phase: onset, facial_energy: lively}
+    - id: deliberate_cuteness_2
+      axes: {brow_action: bilateral_lift, eye_aperture: wide_playful, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: cheek_puff, mouth_action: relaxed_closed, facial_asymmetry: balanced, display_intensity: medium, performance_authorship: playfully_performed, temporal_phase: held_beat, facial_energy: held}
+    - id: deliberate_cuteness_3
+      axes: {brow_action: soft_lift, eye_aperture: single_wink, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: asymmetric_cheek, mouth_action: asymmetric_half_smile, facial_asymmetry: subtle_left, display_intensity: medium, performance_authorship: playfully_performed, temporal_phase: apex, facial_energy: lively}
+    - id: deliberate_cuteness_4
+      axes: {brow_action: brief_question, eye_aperture: natural, gaze_target: lens, gaze_sequence: about_to_look_away, nose_cheek_action: small_nose_scrunch, mouth_action: subtle_pout, facial_asymmetry: dynamic_natural, display_intensity: low, performance_authorship: selfie_micro_pose, temporal_phase: onset, facial_energy: contained}
+  mock_defiance:
+    - id: mock_defiance_0
+      axes: {brow_action: one_brow_lift, eye_aperture: natural, gaze_target: off_frame, gaze_sequence: just_returned_to_lens, nose_cheek_action: one_cheek_tension, mouth_action: lightly_pressed, facial_asymmetry: subtle_right, display_intensity: clear, performance_authorship: deliberately_performed, temporal_phase: held_beat, facial_energy: contained}
+    - id: mock_defiance_1
+      axes: {brow_action: one_brow_lift, eye_aperture: brief_squint, gaze_target: lens, gaze_sequence: about_to_look_away, nose_cheek_action: relaxed, mouth_action: asymmetric_half_smile, facial_asymmetry: subtle_left, display_intensity: clear, performance_authorship: recipient_aware, temporal_phase: held_beat, facial_energy: lively}
+    - id: mock_defiance_2
+      axes: {brow_action: one_brow_lift, eye_aperture: natural, gaze_target: lens, gaze_sequence: lens_then_away, nose_cheek_action: asymmetric_cheek, mouth_action: asymmetric_half_smile, facial_asymmetry: subtle_left, display_intensity: medium, performance_authorship: playfully_performed, temporal_phase: release, facial_energy: contained}
+    - id: mock_defiance_3
+      axes: {brow_action: slight_knit, eye_aperture: brief_squint, gaze_target: off_frame, gaze_sequence: just_returned_to_lens, nose_cheek_action: one_cheek_tension, mouth_action: subtle_pout, facial_asymmetry: subtle_right, display_intensity: medium, performance_authorship: selfie_micro_pose, temporal_phase: held_beat, facial_energy: held}
+  comic_self_exposure:
+    - id: comic_self_exposure_0
+      axes: {brow_action: slight_inward_draw, eye_aperture: natural, gaze_target: lens, gaze_sequence: evidence_then_recipient, nose_cheek_action: small_nose_scrunch, mouth_action: lightly_pressed, facial_asymmetry: dynamic_natural, display_intensity: clear, performance_authorship: recipient_aware, temporal_phase: after_reaction, facial_energy: recovering}
+    - id: comic_self_exposure_1
+      axes: {brow_action: settled, eye_aperture: relaxed_heavy, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: relaxed, mouth_action: lightly_pressed, facial_asymmetry: balanced, display_intensity: medium, performance_authorship: playfully_performed, temporal_phase: held_beat, facial_energy: low}
+    - id: comic_self_exposure_2
+      axes: {brow_action: bilateral_lift, eye_aperture: wide_playful, gaze_target: primary_evidence, gaze_sequence: evidence_then_recipient, nose_cheek_action: small_nose_scrunch, mouth_action: mid_speech, facial_asymmetry: momentary_irregular, display_intensity: high, performance_authorship: responsive_candid, temporal_phase: after_reaction, facial_energy: lively}
+  proud_display:
+    - id: proud_display_0
+      axes: {brow_action: soft_lift, eye_aperture: natural, gaze_target: lens, gaze_sequence: evidence_then_recipient, nose_cheek_action: cheek_lift, mouth_action: asymmetric_half_smile, facial_asymmetry: subtle_left, display_intensity: clear, performance_authorship: recipient_aware, temporal_phase: held_beat, facial_energy: contained}
+    - id: proud_display_1
+      axes: {brow_action: settled, eye_aperture: natural, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: relaxed, mouth_action: relaxed_closed, facial_asymmetry: subtle_right, display_intensity: low, performance_authorship: polished_portrait_performance, temporal_phase: held_beat, facial_energy: contained}
+    - id: proud_display_2
+      axes: {brow_action: soft_lift, eye_aperture: smile_narrowed, gaze_target: primary_evidence, gaze_sequence: evidence_then_recipient, nose_cheek_action: cheek_lift, mouth_action: small_smile, facial_asymmetry: dynamic_natural, display_intensity: medium, performance_authorship: selfie_micro_pose, temporal_phase: release, facial_energy: lively}
+  consultative_check:
+    - id: consultative_check_0
+      axes: {brow_action: soft_lift, eye_aperture: natural, gaze_target: lens, gaze_sequence: evidence_then_recipient, nose_cheek_action: relaxed, mouth_action: soft_parted, facial_asymmetry: balanced, display_intensity: clear, performance_authorship: recipient_aware, temporal_phase: held_beat, facial_energy: held}
+    - id: consultative_check_1
+      axes: {brow_action: brief_question, eye_aperture: natural, gaze_target: screen_preview, gaze_sequence: screen_then_lens, nose_cheek_action: relaxed, mouth_action: lightly_pressed, facial_asymmetry: balanced, display_intensity: medium, performance_authorship: selfie_micro_pose, temporal_phase: held_beat, facial_energy: held}
+    - id: consultative_check_2
+      axes: {brow_action: bilateral_lift, eye_aperture: slightly_widened, gaze_target: primary_evidence, gaze_sequence: evidence_then_recipient, nose_cheek_action: relaxed, mouth_action: mid_speech, facial_asymmetry: dynamic_natural, display_intensity: medium, performance_authorship: recipient_aware, temporal_phase: onset, facial_energy: contained}
+  frustrated_complaint:
+    - id: frustrated_complaint_0
+      axes: {brow_action: slight_inward_draw, eye_aperture: brief_squint, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: one_cheek_tension, mouth_action: lightly_pressed, facial_asymmetry: dynamic_natural, display_intensity: clear, performance_authorship: recipient_aware, temporal_phase: after_reaction, facial_energy: contained}
+    - id: frustrated_complaint_1
+      axes: {brow_action: slight_knit, eye_aperture: relaxed_heavy, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: one_cheek_tension, mouth_action: mid_speech, facial_asymmetry: dynamic_natural, display_intensity: medium, performance_authorship: selfie_micro_pose, temporal_phase: apex, facial_energy: low}
+    - id: frustrated_complaint_2
+      axes: {brow_action: slight_inward_draw, eye_aperture: brief_squeeze, gaze_target: off_frame, gaze_sequence: lens_then_away, nose_cheek_action: small_nose_scrunch, mouth_action: lightly_pressed, facial_asymmetry: momentary_irregular, display_intensity: medium, performance_authorship: responsive_candid, temporal_phase: after_reaction, facial_energy: recovering}
+  embarrassed_repair:
+    - id: embarrassed_repair_0
+      axes: {brow_action: slight_inward_draw, eye_aperture: smile_narrowed, gaze_target: off_frame, gaze_sequence: just_returned_to_lens, nose_cheek_action: small_nose_scrunch, mouth_action: suppressed_smile, facial_asymmetry: subtle_right, display_intensity: clear, performance_authorship: recipient_aware, temporal_phase: release, facial_energy: recovering}
+    - id: embarrassed_repair_1
+      axes: {brow_action: brief_question, eye_aperture: natural, gaze_target: off_frame, gaze_sequence: just_returned_to_lens, nose_cheek_action: cheek_lift, mouth_action: subtle_pout, facial_asymmetry: subtle_left, display_intensity: low, performance_authorship: selfie_micro_pose, temporal_phase: onset, facial_energy: held}
+    - id: embarrassed_repair_2
+      axes: {brow_action: slight_inward_draw, eye_aperture: smile_narrowed, gaze_target: lens, gaze_sequence: about_to_look_away, nose_cheek_action: small_nose_scrunch, mouth_action: asymmetric_half_smile, facial_asymmetry: momentary_irregular, display_intensity: medium, performance_authorship: responsive_candid, temporal_phase: release, facial_energy: recovering}
+  tired_access:
+    - id: tired_access_0
+      axes: {brow_action: relaxed_lowered, eye_aperture: heavy_lidded, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: relaxed, mouth_action: soft_parted, facial_asymmetry: dynamic_natural, display_intensity: subtle, performance_authorship: spontaneous, temporal_phase: after_reaction, facial_energy: low}
+    - id: tired_access_1
+      axes: {brow_action: relaxed_lowered, eye_aperture: relaxed_heavy, gaze_target: screen_preview, gaze_sequence: screen_then_lens, nose_cheek_action: relaxed, mouth_action: relaxed_closed, facial_asymmetry: dynamic_natural, display_intensity: trace, performance_authorship: unperformed_capture, temporal_phase: after_reaction, facial_energy: low}
+    - id: tired_access_2
+      axes: {brow_action: settled, eye_aperture: relaxed_heavy, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: flushed_relaxation, mouth_action: breath_recovery, facial_asymmetry: momentary_irregular, display_intensity: medium, performance_authorship: private_recipient_performance, temporal_phase: release, facial_energy: breathless}
+  vulnerable_disclosure:
+    - id: vulnerable_disclosure_0
+      axes: {brow_action: slight_inward_draw, eye_aperture: natural, gaze_target: lens, gaze_sequence: about_to_look_away, nose_cheek_action: relaxed, mouth_action: soft_parted, facial_asymmetry: balanced, display_intensity: subtle, performance_authorship: recipient_aware, temporal_phase: held_beat, facial_energy: low}
+    - id: vulnerable_disclosure_1
+      axes: {brow_action: slight_inward_draw, eye_aperture: natural, gaze_target: off_frame, gaze_sequence: just_returned_to_lens, nose_cheek_action: relaxed, mouth_action: lightly_pressed, facial_asymmetry: subtle_left, display_intensity: low, performance_authorship: private_recipient_performance, temporal_phase: onset, facial_energy: held}
+    - id: vulnerable_disclosure_2
+      axes: {brow_action: settled, eye_aperture: relaxed_heavy, gaze_target: lens, gaze_sequence: about_to_look_away, nose_cheek_action: relaxed, mouth_action: soft_parted, facial_asymmetry: dynamic_natural, display_intensity: medium, performance_authorship: private_recipient_performance, temporal_phase: held_beat, facial_energy: low}
+  tender_private:
+    - id: tender_private_0
+      axes: {brow_action: relaxed_lowered, eye_aperture: heavy_lidded, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: cheek_lift, mouth_action: soft_parted, facial_asymmetry: dynamic_natural, display_intensity: subtle, performance_authorship: recipient_aware, temporal_phase: held_beat, facial_energy: held}
+    - id: tender_private_1
+      axes: {brow_action: settled, eye_aperture: natural, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: cheek_lift, mouth_action: relaxed_closed, facial_asymmetry: subtle_left, display_intensity: low, performance_authorship: private_recipient_performance, temporal_phase: held_beat, facial_energy: contained}
+    - id: tender_private_2
+      axes: {brow_action: relaxed_lowered, eye_aperture: relaxed_heavy, gaze_target: screen_preview, gaze_sequence: screen_then_lens, nose_cheek_action: relaxed, mouth_action: soft_parted, facial_asymmetry: dynamic_natural, display_intensity: medium, performance_authorship: private_recipient_performance, temporal_phase: onset, facial_energy: held}
+  desire_direct:
+    - id: desire_direct_0
+      axes: {brow_action: neutral, eye_aperture: heavy_lidded, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: flushed_relaxation, mouth_action: soft_parted, facial_asymmetry: subtle_left, display_intensity: clear, performance_authorship: deliberately_performed, temporal_phase: held_beat, facial_energy: held}
+    - id: desire_direct_1
+      axes: {brow_action: settled, eye_aperture: natural, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: flushed_relaxation, mouth_action: relaxed_closed, facial_asymmetry: subtle_right, display_intensity: medium, performance_authorship: private_recipient_performance, temporal_phase: held_beat, facial_energy: held}
+    - id: desire_direct_2
+      axes: {brow_action: one_brow_lift, eye_aperture: relaxed_heavy, gaze_target: lens, gaze_sequence: held_lens, nose_cheek_action: asymmetric_cheek, mouth_action: asymmetric_half_smile, facial_asymmetry: subtle_left, display_intensity: medium, performance_authorship: polished_portrait_performance, temporal_phase: held_beat, facial_energy: contained}
+  desire_withheld:
+    - id: desire_withheld_0
+      axes: {brow_action: relaxed_lowered, eye_aperture: natural, gaze_target: off_frame, gaze_sequence: just_returned_to_lens, nose_cheek_action: flushed_relaxation, mouth_action: relaxed_closed, facial_asymmetry: dynamic_natural, display_intensity: clear, performance_authorship: recipient_aware, temporal_phase: onset, facial_energy: held}
+    - id: desire_withheld_1
+      axes: {brow_action: settled, eye_aperture: natural, gaze_target: off_frame, gaze_sequence: lens_then_away, nose_cheek_action: relaxed, mouth_action: suppressed_smile, facial_asymmetry: subtle_left, display_intensity: low, performance_authorship: private_recipient_performance, temporal_phase: release, facial_energy: contained}
+    - id: desire_withheld_2
+      axes: {brow_action: relaxed_lowered, eye_aperture: relaxed_heavy, gaze_target: lens, gaze_sequence: about_to_look_away, nose_cheek_action: flushed_relaxation, mouth_action: soft_parted, facial_asymmetry: dynamic_natural, display_intensity: medium, performance_authorship: private_recipient_performance, temporal_phase: onset, facial_energy: held}
+  neutral_evidence:
+    - id: neutral_evidence_0
+      axes: {brow_action: neutral, eye_aperture: natural, gaze_target: primary_evidence, gaze_sequence: evidence_then_recipient, nose_cheek_action: relaxed, mouth_action: relaxed_closed, facial_asymmetry: balanced, display_intensity: trace, performance_authorship: recipient_aware, temporal_phase: held_beat, facial_energy: contained}
+    - id: neutral_evidence_1
+      axes: {brow_action: settled, eye_aperture: natural, gaze_target: screen_preview, gaze_sequence: screen_then_lens, nose_cheek_action: relaxed, mouth_action: mid_speech, facial_asymmetry: dynamic_natural, display_intensity: low, performance_authorship: unperformed_capture, temporal_phase: onset, facial_energy: contained}
+    - id: neutral_evidence_2
+      axes: {brow_action: brief_question, eye_aperture: natural, gaze_target: primary_evidence, gaze_sequence: evidence_then_recipient, nose_cheek_action: relaxed, mouth_action: relaxed_closed, facial_asymmetry: balanced, display_intensity: low, performance_authorship: selfie_micro_pose, temporal_phase: held_beat, facial_energy: contained}
+
+# A beat is a visible, single-frame performance assembled from compatible face
+# actions below. It is not an emotion diagnosis or an event-to-expression rule.
+# The planner sees only the fully frozen candidate; the renderer receives the
+# evidence phrasing so it does not collapse every choice into a polite smile.
+expression_beats:
+  present_and_available:
+    - id: screen_check_return
+      requires: {gaze_sequence: screen_then_lens}
+      visible_evidence: ["eyes have just lifted from the phone screen", "mouth is relaxed as if a reply is about to begin"]
+    - id: mid_reply_soften
+      requires: {mouth_action: mid_speech}
+      visible_evidence: ["lips are caught at the start of a quiet reply", "attention is returning naturally to the recipient"]
+  warm_connection:
+    - id: smile_arrives_in_eyes
+      requires: {nose_cheek_action: cheek_lift}
+      visible_evidence: ["upper cheeks have lifted before the smile fully settles", "the expression is warm rather than arranged"]
+    - id: companion_reaction_return
+      requires: {gaze_sequence: companion_then_camera}
+      visible_evidence: ["she has just turned back from someone beside the camera", "the small smile is a reaction, not a posed default"]
+  amusement_leaking:
+    - id: nose_scrunch_laugh
+      requires: {nose_cheek_action: small_nose_scrunch}
+      visible_evidence: ["the bridge of the nose is gently scrunched", "the mouth is trying and failing to hold back a laugh"]
+    - id: laugh_recovery
+      requires: {temporal_phase: after_reaction}
+      visible_evidence: ["the laugh has just passed", "eyes and mouth remain a little uneven while composure returns"]
+  deliberate_cuteness:
+    - id: tiny_pout_hold
+      requires: {mouth_action: subtle_pout}
+      visible_evidence: ["a tiny deliberate pout is held for a beat", "the gaze waits for the recipient's reaction without becoming doll-like"]
+    - id: puffed_cheek_wait
+      requires: {nose_cheek_action: cheek_puff}
+      visible_evidence: ["one small cheek puff is visible", "the face looks playfully self-aware rather than like a beauty pose"]
+    - id: nose_scrunch_after_head_shake
+      requires: {nose_cheek_action: small_nose_scrunch, mouth_action: subtle_pout}
+      visible_evidence: ["the nose is lightly scrunched above a mock-serious pout", "a few loose hairs are not fully settled from a just-finished small head shake"]
+  mock_defiance:
+    - id: side_eye_nope
+      requires: {brow_action: one_brow_lift}
+      visible_evidence: ["one brow carries a small 'really?' challenge", "the look has just come back from the side instead of fixing on the lens"]
+    - id: almost_smile_refusal
+      requires: {mouth_action: asymmetric_half_smile}
+      visible_evidence: ["one corner of the mouth nearly gives away a smile", "the expression plays at refusing to be impressed"]
+  comic_self_exposure:
+    - id: deadpan_after_mess
+      requires: {eye_aperture: relaxed_heavy}
+      visible_evidence: ["the eyes go deliberately flat for a comic beat", "the mouth stays pressed as if silently admitting the mess"]
+    - id: caught_laughing_at_it
+      requires: {mouth_action: mid_speech}
+      visible_evidence: ["she is caught halfway through explaining what went wrong", "the reaction is visibly less controlled than a normal selfie"]
+  proud_display:
+    - id: look_then_own_it
+      requires: {gaze_sequence: evidence_then_recipient}
+      visible_evidence: ["the eyes have checked the thing being shown before meeting the recipient", "the expression owns the result without a showroom grin"]
+    - id: quietly_pleased
+      requires: {mouth_action: relaxed_closed}
+      visible_evidence: ["the satisfaction sits in a slight unevenness rather than a broad smile", "she looks aware that the recipient will notice"]
+  consultative_check:
+    - id: ask_with_eyes
+      requires: {brow_action: brief_question}
+      visible_evidence: ["brows lift only enough to make the question readable", "the face waits for an actual opinion rather than praise"]
+    - id: mid_question
+      requires: {mouth_action: mid_speech}
+      visible_evidence: ["the mouth is caught at the beginning of a question", "attention moves from the item or screen back to the recipient"]
+  frustrated_complaint:
+    - id: try_not_to_complain
+      requires: {brow_action: slight_knit}
+      visible_evidence: ["a small brow knit shows irritation without melodrama", "the mouth is caught before the complaint becomes a smile"]
+    - id: tiny_nope_scrunch
+      requires: {nose_cheek_action: small_nose_scrunch}
+      visible_evidence: ["a quick nose scrunch makes the refusal comic", "the face reads like a live reaction rather than a fixed pout"]
+  embarrassed_repair:
+    - id: pout_after_mistake
+      requires: {mouth_action: subtle_pout}
+      visible_evidence: ["a small embarrassed pout appears before she can hide it", "the eyes have just started to return after looking away"]
+    - id: laugh_it_off
+      requires: {mouth_action: asymmetric_half_smile}
+      visible_evidence: ["the mouth is crooked from laughing at herself", "the expression is in the release after an awkward moment"]
+  tired_access:
+    - id: screen_low_energy
+      requires: {gaze_sequence: screen_then_lens}
+      visible_evidence: ["eyes lift slowly from the screen", "the face remains unperformed and low-energy"]
+    - id: breath_out
+      requires: {mouth_action: breath_recovery}
+      visible_evidence: ["the lips show the end of an ordinary exhale", "the expression keeps the tiredness private and believable"]
+  vulnerable_disclosure:
+    - id: look_away_then_share
+      requires: {gaze_sequence: just_returned_to_lens}
+      visible_evidence: ["the gaze has only just come back from looking away", "the mouth stays quiet rather than performing distress"]
+    - id: quiet_check_in
+      requires: {eye_aperture: relaxed_heavy}
+      visible_evidence: ["the low-energy eyes stay soft and present", "the face offers access without asking the camera to dramatize it"]
+  tender_private:
+    - id: soft_held_attention
+      requires: {gaze_sequence: held_lens}
+      visible_evidence: ["attention rests with the recipient for an unhurried beat", "a small cheek lift keeps the closeness warm, not vacant"]
+    - id: just_looked_up
+      requires: {gaze_sequence: screen_then_lens}
+      visible_evidence: ["she has just looked up from what she was doing", "the slight pause feels chosen for one recipient"]
+  desire_direct:
+    - id: knowing_stillness
+      requires: {gaze_sequence: held_lens}
+      visible_evidence: ["the gaze is held with clear awareness of the recipient", "the expression stays deliberately restrained rather than becoming a stock glamour smile"]
+    - id: not_quite_smile
+      requires: {mouth_action: asymmetric_half_smile}
+      visible_evidence: ["one corner of the mouth suggests a smile without completing it", "the invitation comes from attention and timing, not exaggerated facial acting"]
+  desire_withheld:
+    - id: almost_look_back
+      requires: {gaze_sequence: just_returned_to_lens}
+      visible_evidence: ["the eyes have just returned after withholding attention for a moment", "the mouth keeps a small reaction to itself"]
+    - id: held_back_smile
+      requires: {mouth_action: suppressed_smile}
+      visible_evidence: ["a smile is visibly being held back", "the attention remains directed toward the recipient without a direct glamour stare"]
+  neutral_evidence:
+    - id: evidence_then_face
+      requires: {gaze_sequence: evidence_then_recipient}
+      visible_evidence: ["eyes move from the evidence back to the camera", "the face stays secondary to what is being shown"]
+    - id: mid_explanation
+      requires: {mouth_action: mid_speech}
+      visible_evidence: ["the image catches a natural explanatory beat", "the expression does not turn an evidence photo into a portrait pose"]
+
 # All axes are visible still-frame observations. They must never be interpreted as
 # diagnoses, hidden emotions, personality traits, or a time series proven by one image.
 visible_action_axes:
