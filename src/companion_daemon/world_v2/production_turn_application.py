@@ -42,6 +42,7 @@ from .ledger_payload_reader import LedgerAuthorizedPayloadReader
 from .minimal_reply_acceptance import ReplyBudgetPolicy
 from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .pinned_turn import PinnedTurnCompiler
+from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .platform_action_executor import PlatformActionExecutor, PlatformTransport
 from .runtime import WorldRuntime
 from .schemas import BudgetAccount, ClockObservation, RuntimeOutcome, WorldEvent
@@ -165,7 +166,10 @@ def build_sqlite_world_v2_turn_application(
         )
         appraisal_worker = (
             AppraisalProposalWorker(
-                compiler=AppraisalProposalCompiler(ledger=ledger),
+                compiler=AppraisalProposalCompiler(
+                    ledger=ledger,
+                    world_appraisal_subject_ref=config.companion_actor_ref,
+                ),
                 acceptance=appraisal_acceptance,
                 actor=config.appraisal_worker_owner,
             )
@@ -181,6 +185,18 @@ def build_sqlite_world_v2_turn_application(
                 ),
                 companion_actor_ref=config.companion_actor_ref,
                 advisory_compiler=advisory_compiler,
+            )
+            if appraisal_model is not None
+            else None
+        )
+        npc_world_appraisal_turn = (
+            SettledWorldAppraisalTurn(
+                ledger=ledger,
+                capsule_compiler=capsules,
+                deliberation=Deliberation(
+                    router=router, main_model=appraisal_model, quick_recovery=appraisal_model
+                ),
+                companion_actor_ref=config.companion_actor_ref,
             )
             if appraisal_model is not None
             else None
@@ -239,6 +255,7 @@ def build_sqlite_world_v2_turn_application(
             ),
             appraisal_worker=appraisal_worker,
             interaction_appraisal_turn=appraisal_turn,
+            npc_world_appraisal_turn=npc_world_appraisal_turn,
             interaction_fact_owner=(
                 config.fact_worker_owner if fact_acceptance is not None else None
             ),

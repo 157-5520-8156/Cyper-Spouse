@@ -42,6 +42,8 @@ from .interaction_appraisal_trigger_runtime import (
     AppraisalTriggerRunResult,
     InteractionAppraisalTriggerRuntime,
 )
+from .npc_world_appraisal_trigger_runtime import NpcWorldAppraisalTriggerRuntime
+from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .action_pump import ActionExecutor, ActionPump, ActionPumpResult
 from .schemas import (
     ClockObservation,
@@ -77,6 +79,7 @@ class WorldRuntime:
         appraisal_acceptance_actor: str | None = None,
         appraisal_worker: AppraisalProposalWorker | None = None,
         interaction_appraisal_turn: PinnedTurnCompiler | None = None,
+        npc_world_appraisal_turn: SettledWorldAppraisalTurn | None = None,
         interaction_fact_owner: str | None = None,
         fact_acceptance: FactV2AcceptanceRuntime | None = None,
         fact_adapter: FactObservationProposalAdapter | None = None,
@@ -119,6 +122,11 @@ class WorldRuntime:
         if interaction_appraisal_turn is not None and appraisal_worker is None:
             raise ValueError("interaction appraisal turn requires an appraisal worker")
         self._interaction_appraisal_turn = interaction_appraisal_turn
+        if npc_world_appraisal_turn is not None and appraisal_worker is None:
+            raise ValueError("NPC world appraisal turn requires an appraisal worker")
+        if npc_world_appraisal_turn is not None and interaction_appraisal_owner is None:
+            raise ValueError("NPC world appraisal turn requires an appraisal worker owner")
+        self._npc_world_appraisal_turn = npc_world_appraisal_turn
         if interaction_fact_owner is not None and not interaction_fact_owner:
             raise ValueError("interaction fact owner must not be empty")
         if (fact_acceptance is None) != (fact_adapter is None):
@@ -174,6 +182,19 @@ class WorldRuntime:
 
         async with self._lock:
             appraisal_result: AppraisalTriggerRunResult | None = None
+            if self._npc_world_appraisal_turn is not None:
+                assert self._appraisal_worker is not None
+                assert self._interaction_appraisal_owner is not None
+                appraisal = await NpcWorldAppraisalTriggerRuntime(
+                    ledger=self._ledger,
+                    turn=self._npc_world_appraisal_turn,
+                    worker=self._appraisal_worker,
+                    owner_id=self._interaction_appraisal_owner,
+                    affect_owner_id=self._affect_deliberation_owner,
+                ).drain_one()
+                if appraisal.status != "idle":
+                    return appraisal
+                appraisal_result = appraisal
             if self._interaction_appraisal_turn is not None:
                 assert self._appraisal_worker is not None
                 assert self._interaction_appraisal_owner is not None

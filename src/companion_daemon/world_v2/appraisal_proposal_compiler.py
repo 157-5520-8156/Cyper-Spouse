@@ -79,9 +79,12 @@ class AppraisalProposalCompiler:
     remains exclusively owned by :class:`AppraisalAcceptanceRuntime`.
     """
 
-    def __init__(self, *, ledger: LedgerPort) -> None:
+    def __init__(self, *, ledger: LedgerPort, world_appraisal_subject_ref: str | None = None) -> None:
+        if world_appraisal_subject_ref is not None and not world_appraisal_subject_ref:
+            raise ValueError("world appraisal subject must not be empty")
         self._ledger = ledger
         self._reader = DecisionProposalAuthorityReader(ledger=ledger)
+        self._world_appraisal_subject_ref = world_appraisal_subject_ref
 
     @property
     def ledger(self) -> LedgerPort:
@@ -111,12 +114,11 @@ class AppraisalProposalCompiler:
             raise AppraisalProposalCompilerError("transition_not_implemented")
         projection = self._ledger.project_at(cursor)
         source_event = self._event(authority.audit.trigger_ref)
-        observation = self._observation(source_event)
         typed = self._compile_activate(
             authority=authority,
             change=change,
             projection=projection,
-            observation=observation,
+            source_event=source_event,
         )
         event = self._proposal_event(
             typed=typed,
@@ -145,28 +147,80 @@ class AppraisalProposalCompiler:
             commit=commit,
         )
 
-    def _compile_activate(self, *, authority, change, projection, observation: Observation):
-        trigger_id = interaction_appraisal_trigger_identity(self._ledger.world_id, observation.observation_id)
-        trigger = next(
-            (item for item in projection.trigger_processes if item.trigger_id == trigger_id), None
+    def _compile_activate(self, *, authority, change, projection, source_event: WorldEvent):
+        """Bind one appraisal candidate to its claimed message or settlement trigger."""
+
+        if source_event.event_type == "ObservationRecorded":
+            observation = self._observation(source_event)
+            trigger_id = interaction_appraisal_trigger_identity(
+                self._ledger.world_id, observation.observation_id
+            )
+            trigger = next(
+                (item for item in projection.trigger_processes if item.trigger_id == trigger_id),
+                None,
+            )
+            if (
+                trigger is None
+                or trigger.process_kind != "interaction_appraisal"
+                or trigger.state != "claimed"
+                or trigger.source_evidence_ref != observation.observation_id
+            ):
+                raise AppraisalProposalCompilerError("source_trigger_not_claimed")
+            source_evidence_ref = observation.observation_id
+            source_evidence_type = "observed_message"
+            subject_ref = observation.actor
+            source_cluster_ref = self._source_cluster(observation)
+        elif source_event.event_type == "WorldOccurrenceSettled":
+            trigger = next(
+                (
+                    item
+                    for item in projection.trigger_processes
+                    if item.process_kind == "npc_world_appraisal"
+                    and item.source_evidence_ref == source_event.event_id
+                ),
+                None,
+            )
+            if trigger is None or trigger.state != "claimed" or trigger.trigger_ref != trigger.trigger_id:
+                raise AppraisalProposalCompilerError("source_trigger_not_claimed")
+            source_evidence_ref = source_event.event_id
+            source_evidence_type = "settled_world_event"
+            subject_ref = self._companion_subject(projection)
+            source_cluster_ref = "world-occurrence:" + _digest({"event": source_event.event_id})
+        else:
+            raise AppraisalProposalCompilerError("trigger_source_unsupported")
+        return self._compile_bound_activate(
+            authority=authority,
+            change=change,
+            projection=projection,
+            trigger=trigger,
+            source_evidence_ref=source_evidence_ref,
+            source_evidence_type=source_evidence_type,
+            subject_ref=subject_ref,
+            source_cluster_ref=source_cluster_ref,
         )
-        if (
-            trigger is None
-            or trigger.process_kind != "interaction_appraisal"
-            or trigger.state != "claimed"
-            or trigger.source_evidence_ref != observation.observation_id
-        ):
-            raise AppraisalProposalCompilerError("source_trigger_not_claimed")
+
+    def _compile_bound_activate(
+        self,
+        *,
+        authority,
+        change,
+        projection,
+        trigger,
+        source_evidence_ref: str,
+        source_evidence_type: str,
+        subject_ref: str,
+        source_cluster_ref: str,
+    ):
         if change.expected_entity_revision != 0:
             raise AppraisalProposalCompilerError("activate_requires_new_entity")
         raw = change.payload.value()
         evidence = self._evidence(proposal=authority.proposal, refs=change.evidence_refs)
         source_evidence = next(
-            (item for item in evidence if item.ref_id == observation.observation_id), None
+            (item for item in evidence if item.ref_id == source_evidence_ref), None
         )
         if source_evidence is None:
             raise AppraisalProposalCompilerError("source_evidence_missing")
-        if source_evidence.evidence_type != "observed_message":
+        if source_evidence.evidence_type != source_evidence_type:
             raise AppraisalProposalCompilerError("source_evidence_kind_invalid")
         identity = _digest(
             {
@@ -186,8 +240,8 @@ class AppraisalProposalCompiler:
         appraisal = AppraisalProjection(
             appraisal_id=f"appraisal:compiled:{identity}",
             entity_revision=1,
-            subject_ref=observation.actor,
-            source_cluster_ref=self._source_cluster(observation),
+            subject_ref=subject_ref,
+            source_cluster_ref=source_cluster_ref,
             origin=AppraisalOrigin(
                 change_id=change.change_id,
                 transition_id=transition_id,
@@ -212,7 +266,7 @@ class AppraisalProposalCompiler:
             "proposal_id": proposal_id,
             "evaluated_world_revision": projection.world_revision,
             "accepted_change_hash": "0" * 64,
-            "trigger_id": trigger_id,
+            "trigger_id": trigger.trigger_id,
             "appraisal": appraisal.model_dump(mode="json"),
         }
         mutation["accepted_change_hash"] = appraisal_mutation_hash(mutation)
@@ -220,9 +274,9 @@ class AppraisalProposalCompiler:
             proposal_id=proposal_id,
             transition_kind="accept",
             change_id=change.change_id,
-            trigger_id=trigger_id,
+            trigger_id=trigger.trigger_id,
             trigger_ref=trigger.trigger_ref,
-            source_evidence_ref=observation.observation_id,
+            source_evidence_ref=source_evidence_ref,
             evaluated_world_revision=projection.world_revision,
             expected_entity_revision=0,
             proposed_change_hash=str(mutation["accepted_change_hash"]),
@@ -239,6 +293,13 @@ class AppraisalProposalCompiler:
         return "conversation:" + _digest(
             {"actor": observation.actor, "channel": observation.channel}
         )
+
+    def _companion_subject(self, projection) -> str:
+        if self._world_appraisal_subject_ref is not None:
+            return self._world_appraisal_subject_ref
+        if projection.character_core is None:
+            raise AppraisalProposalCompilerError("companion_subject_unavailable")
+        return projection.character_core.actor_ref
 
     @staticmethod
     def _expiry(*, raw: dict[str, object], at):
