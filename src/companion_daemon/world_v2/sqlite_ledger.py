@@ -23,6 +23,16 @@ from .ledger import (
     commit_request_hash,
     derived_commit_id,
 )
+from .ledger_prefix_proof import (
+    IncrementalMmrV1,
+    IncrementalSparseMerkleMapV1,
+    LedgerLeafV1,
+    ObservationLocatorValueV1,
+    PrefixCheckpointLeafV1,
+    commit_result_hash_v1,
+    observation_locator_key,
+    ordered_event_ids_hash_v1,
+)
 from .reducers import (
     REDUCER_BUNDLE_VERSION,
     ReducerState,
@@ -65,6 +75,20 @@ _V16_ONLY_STATE_KEYS = frozenset(
 )
 _V17_ONLY_STATE_KEYS = frozenset({"model_result_audits", "proposal_audits"})
 _V18_ONLY_STATE_KEYS = frozenset({"acceptance_manifests_v2"})
+_PREFIX_PROOF_VERSION = "world-v2-prefix-proof.1"
+_PREFIX_BITS_BYTES = 32
+
+
+def _prefix_bits_blob(prefix: int) -> bytes:
+    if type(prefix) is not int or prefix < 0 or prefix.bit_length() > 256:
+        raise LedgerIntegrityError("persisted locator-node prefix is invalid")
+    return prefix.to_bytes(_PREFIX_BITS_BYTES, "big")
+
+
+def _prefix_bits_int(value: object) -> int:
+    if type(value) is not bytes or len(value) != _PREFIX_BITS_BYTES:
+        raise LedgerIntegrityError("persisted locator-node prefix is invalid")
+    return int.from_bytes(value, "big")
 
 
 def _upcast_legacy_appraisal_trigger(
@@ -173,7 +197,11 @@ class SQLiteWorldLedger:
             self._connection = connection
             self._create_schema()
             self._ensure_head()
+            legacy_prefix_rebuild = self._head_bundle_requires_prefix_rebuild()
             self._migrate_head_bundle()
+            if legacy_prefix_rebuild:
+                self._discard_legacy_prefix_proof_cache()
+            self._ensure_or_restore_prefix_proof_state()
         except Exception:
             connection.close()
             raise
@@ -242,6 +270,70 @@ class SQLiteWorldLedger:
                 FOREIGN KEY (world_id, event_id)
                     REFERENCES world_v2_events(world_id, event_id)
                     DEFERRABLE INITIALLY DEFERRED
+            );
+            CREATE TABLE IF NOT EXISTS world_v2_prefix_mmr_nodes (
+                world_id TEXT NOT NULL,
+                height INTEGER NOT NULL CHECK (height >= 0),
+                node_index INTEGER NOT NULL CHECK (node_index >= 0),
+                node_hash BLOB NOT NULL CHECK (length(node_hash) = 32),
+                PRIMARY KEY (world_id, height, node_index),
+                FOREIGN KEY (world_id) REFERENCES world_v2_heads(world_id)
+            );
+            CREATE TABLE IF NOT EXISTS world_v2_prefix_locator_nodes (
+                world_id TEXT NOT NULL,
+                depth INTEGER NOT NULL CHECK (depth BETWEEN 0 AND 256),
+                prefix_bits BLOB NOT NULL CHECK (length(prefix_bits) = 32),
+                node_hash BLOB NOT NULL CHECK (length(node_hash) = 32),
+                PRIMARY KEY (world_id, depth, prefix_bits),
+                FOREIGN KEY (world_id) REFERENCES world_v2_heads(world_id)
+            );
+            CREATE TABLE IF NOT EXISTS world_v2_prefix_locator_values (
+                world_id TEXT NOT NULL,
+                locator_key BLOB NOT NULL CHECK (length(locator_key) = 32),
+                value_hash BLOB NOT NULL CHECK (length(value_hash) = 32),
+                observation_id TEXT NOT NULL,
+                event_type TEXT NOT NULL CHECK (
+                    event_type IN ('ObservationRecorded', 'OperatorObservationRecorded')
+                ),
+                event_id TEXT NOT NULL,
+                ledger_sequence INTEGER NOT NULL,
+                world_revision INTEGER NOT NULL,
+                deliberation_revision INTEGER NOT NULL,
+                event_leaf_index INTEGER NOT NULL,
+                event_leaf_hash BLOB NOT NULL CHECK (length(event_leaf_hash) = 32),
+                PRIMARY KEY (world_id, locator_key),
+                UNIQUE (world_id, event_id),
+                FOREIGN KEY (world_id, event_id)
+                    REFERENCES world_v2_events(world_id, event_id)
+                    DEFERRABLE INITIALLY DEFERRED
+            );
+            CREATE TABLE IF NOT EXISTS world_v2_prefix_checkpoints (
+                world_id TEXT NOT NULL,
+                world_revision INTEGER NOT NULL,
+                deliberation_revision INTEGER NOT NULL,
+                ledger_sequence INTEGER NOT NULL,
+                commit_id TEXT NOT NULL,
+                first_ledger_sequence INTEGER NOT NULL,
+                last_ledger_sequence INTEGER NOT NULL,
+                request_hash TEXT NOT NULL,
+                result_hash TEXT NOT NULL,
+                ordered_event_ids_hash TEXT NOT NULL,
+                locator_root BLOB NOT NULL CHECK (length(locator_root) = 32),
+                mmr_leaf_count INTEGER NOT NULL,
+                PRIMARY KEY (world_id, world_revision, deliberation_revision, ledger_sequence),
+                UNIQUE (world_id, commit_id),
+                FOREIGN KEY (world_id, commit_id)
+                    REFERENCES world_v2_commits(world_id, commit_id)
+                    DEFERRABLE INITIALLY DEFERRED
+            );
+            CREATE TABLE IF NOT EXISTS world_v2_prefix_heads (
+                world_id TEXT PRIMARY KEY,
+                proof_version TEXT NOT NULL,
+                mmr_leaf_count INTEGER NOT NULL,
+                mmr_root BLOB NOT NULL CHECK (length(mmr_root) = 32),
+                locator_root BLOB NOT NULL CHECK (length(locator_root) = 32),
+                checkpoint_count INTEGER NOT NULL,
+                FOREIGN KEY (world_id) REFERENCES world_v2_heads(world_id)
             );
             """
         )
@@ -315,6 +407,425 @@ class SQLiteWorldLedger:
             ),
         )
 
+    def _ensure_or_restore_prefix_proof_state(self) -> None:
+        """Restore derived proof state, or atomically derive it for a legacy ledger.
+
+        The event/commit tables remain the only authority.  The proof tables are
+        a mechanically checked, append-only acceleration structure; a partially
+        written structure is therefore an integrity failure rather than a cue to
+        silently replace evidence.
+        """
+
+        connection = self._connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            prefix_head = connection.execute(
+                "SELECT * FROM world_v2_prefix_heads WHERE world_id = ?",
+                (self._world_id,),
+            ).fetchone()
+            event_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM world_v2_events WHERE world_id = ?",
+                    (self._world_id,),
+                ).fetchone()[0]
+            )
+            commit_count = int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM world_v2_commits WHERE world_id = ?",
+                    (self._world_id,),
+                ).fetchone()[0]
+            )
+            derived_count = sum(
+                int(
+                    connection.execute(
+                        f"SELECT COUNT(*) FROM {table} WHERE world_id = ?",
+                        (self._world_id,),
+                    ).fetchone()[0]
+                )
+                for table in (
+                    "world_v2_prefix_mmr_nodes",
+                    "world_v2_prefix_locator_nodes",
+                    "world_v2_prefix_locator_values",
+                    "world_v2_prefix_checkpoints",
+                )
+            )
+            legacy_head = connection.execute(
+                "SELECT reducer_bundle_version FROM world_v2_heads WHERE world_id = ?",
+                (self._world_id,),
+            ).fetchone()
+            # A database created before prefix proofs has a zero/genesis proof
+            # head if a test or migration seeded legacy rows after construction.
+            # Only that demonstrably pristine cache may be rebuilt; any nonempty
+            # mismatch remains fail-closed.
+            if (
+                prefix_head is not None
+                and event_count
+                and derived_count == 0
+                and int(prefix_head["mmr_leaf_count"]) == 0
+                and int(prefix_head["checkpoint_count"]) == 0
+                and legacy_head is not None
+                and str(legacy_head["reducer_bundle_version"]) != REDUCER_BUNDLE_VERSION
+            ):
+                connection.execute(
+                    "DELETE FROM world_v2_prefix_heads WHERE world_id = ?", (self._world_id,)
+                )
+                prefix_head = None
+            if prefix_head is None:
+                if derived_count:
+                    raise LedgerIntegrityError("prefix proof state is partial")
+                mmr = IncrementalMmrV1()
+                locator_map = IncrementalSparseMerkleMapV1()
+                if event_count or commit_count:
+                    if not event_count or not commit_count:
+                        raise LedgerIntegrityError("legacy ledger commit/event rows are inconsistent")
+                    self._rebuild_prefix_proof_state_locked(mmr=mmr, locator_map=locator_map)
+                self._write_prefix_head_locked(mmr=mmr, locator_map=locator_map)
+                self._prefix_mmr = mmr
+                self._prefix_locator_map = locator_map
+            else:
+                self._prefix_mmr, self._prefix_locator_map = self._load_prefix_proof_state_locked(
+                    prefix_head=prefix_head,
+                    event_count=event_count,
+                    commit_count=commit_count,
+                )
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def _head_bundle_requires_prefix_rebuild(self) -> bool:
+        row = self._connection.execute(
+            "SELECT reducer_bundle_version FROM world_v2_heads WHERE world_id = ?",
+            (self._world_id,),
+        ).fetchone()
+        if row is None:
+            raise LedgerIntegrityError("world head disappeared before prefix migration")
+        return str(row["reducer_bundle_version"]) != REDUCER_BUNDLE_VERSION
+
+    def _discard_legacy_prefix_proof_cache(self) -> None:
+        """A reducer-bundle migration invalidates any previously derived cache."""
+
+        connection = self._connection
+        connection.execute("BEGIN IMMEDIATE")
+        try:
+            for table in (
+                "world_v2_prefix_mmr_nodes",
+                "world_v2_prefix_locator_nodes",
+                "world_v2_prefix_locator_values",
+                "world_v2_prefix_checkpoints",
+                "world_v2_prefix_heads",
+            ):
+                connection.execute(f"DELETE FROM {table} WHERE world_id = ?", (self._world_id,))
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+
+    def _write_prefix_head_locked(
+        self,
+        *,
+        mmr: IncrementalMmrV1,
+        locator_map: IncrementalSparseMerkleMapV1,
+        checkpoint_count: int | None = None,
+    ) -> None:
+        if checkpoint_count is None:
+            checkpoint_count = int(
+                self._connection.execute(
+                    "SELECT COUNT(*) FROM world_v2_prefix_checkpoints WHERE world_id = ?",
+                    (self._world_id,),
+                ).fetchone()[0]
+            )
+        self._connection.execute(
+            """INSERT INTO world_v2_prefix_heads
+                 (world_id, proof_version, mmr_leaf_count, mmr_root, locator_root, checkpoint_count)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(world_id) DO UPDATE SET
+                 proof_version = excluded.proof_version,
+                 mmr_leaf_count = excluded.mmr_leaf_count,
+                 mmr_root = excluded.mmr_root,
+                 locator_root = excluded.locator_root,
+                 checkpoint_count = excluded.checkpoint_count""",
+            (
+                self._world_id,
+                _PREFIX_PROOF_VERSION,
+                mmr.leaf_count,
+                mmr.root,
+                locator_map.root,
+                checkpoint_count,
+            ),
+        )
+
+    def _load_prefix_proof_state_locked(
+        self,
+        *,
+        prefix_head: sqlite3.Row,
+        event_count: int,
+        commit_count: int,
+    ) -> tuple[IncrementalMmrV1, IncrementalSparseMerkleMapV1]:
+        try:
+            if prefix_head["proof_version"] != _PREFIX_PROOF_VERSION:
+                raise LedgerIntegrityError("prefix proof version is unsupported")
+            leaf_count = int(prefix_head["mmr_leaf_count"])
+            if leaf_count != event_count + commit_count:
+                raise LedgerIntegrityError("prefix proof leaf count does not match ledger")
+            mmr_nodes = {
+                (int(row["height"]), int(row["node_index"])): bytes(row["node_hash"])
+                for row in self._connection.execute(
+                    """SELECT height, node_index, node_hash FROM world_v2_prefix_mmr_nodes
+                       WHERE world_id = ?""",
+                    (self._world_id,),
+                )
+            }
+            mmr = IncrementalMmrV1.restore(leaf_count=leaf_count, nodes=mmr_nodes)
+            if not hmac.compare_digest(mmr.root, bytes(prefix_head["mmr_root"])):
+                raise LedgerIntegrityError("prefix MMR root does not match persisted head")
+            locator_nodes = {
+                (int(row["depth"]), _prefix_bits_int(bytes(row["prefix_bits"]))): bytes(row["node_hash"])
+                for row in self._connection.execute(
+                    """SELECT depth, prefix_bits, node_hash FROM world_v2_prefix_locator_nodes
+                       WHERE world_id = ?""",
+                    (self._world_id,),
+                )
+            }
+            locator_values = {
+                bytes(row["locator_key"]): bytes(row["value_hash"])
+                for row in self._connection.execute(
+                    """SELECT locator_key, value_hash FROM world_v2_prefix_locator_values
+                       WHERE world_id = ?""",
+                    (self._world_id,),
+                )
+            }
+            locator_map = IncrementalSparseMerkleMapV1.restore(
+                nodes=locator_nodes, values=locator_values
+            )
+            if not hmac.compare_digest(locator_map.root, bytes(prefix_head["locator_root"])):
+                raise LedgerIntegrityError("prefix locator root does not match persisted head")
+            checkpoint_rows = tuple(
+                self._connection.execute(
+                    """SELECT * FROM world_v2_prefix_checkpoints
+                       WHERE world_id = ? ORDER BY ledger_sequence""",
+                    (self._world_id,),
+                )
+            )
+            if len(checkpoint_rows) != commit_count or int(prefix_head["checkpoint_count"]) != commit_count:
+                raise LedgerIntegrityError("prefix checkpoint count does not match ledger")
+            head = self._connection.execute(
+                "SELECT world_revision, deliberation_revision, ledger_sequence FROM world_v2_heads WHERE world_id = ?",
+                (self._world_id,),
+            ).fetchone()
+            for row in checkpoint_rows:
+                checkpoint = self._prefix_checkpoint_from_row(row)
+                leaf_index = checkpoint.mmr_leaf_count - 1
+                if leaf_index < 0 or mmr.nodes.get((0, leaf_index)) != checkpoint.digest():
+                    raise LedgerIntegrityError("prefix checkpoint MMR leaf is invalid")
+            if checkpoint_rows:
+                latest = checkpoint_rows[-1]
+                if (
+                    int(latest["world_revision"]),
+                    int(latest["deliberation_revision"]),
+                    int(latest["ledger_sequence"]),
+                ) != (int(head["world_revision"]), int(head["deliberation_revision"]), int(head["ledger_sequence"])):
+                    raise LedgerIntegrityError("prefix checkpoint does not match ledger head")
+            elif event_count:
+                raise LedgerIntegrityError("ledger events are missing prefix checkpoints")
+            return mmr, locator_map
+        except LedgerIntegrityError:
+            raise
+        except Exception as exc:
+            raise LedgerIntegrityError("persisted prefix proof state is invalid") from exc
+
+    def _prefix_checkpoint_from_row(self, row: sqlite3.Row) -> PrefixCheckpointLeafV1:
+        return PrefixCheckpointLeafV1(
+            world_id=self._world_id,
+            commit_id=str(row["commit_id"]),
+            first_ledger_sequence=int(row["first_ledger_sequence"]),
+            last_ledger_sequence=int(row["last_ledger_sequence"]),
+            world_revision=int(row["world_revision"]),
+            deliberation_revision=int(row["deliberation_revision"]),
+            request_hash=str(row["request_hash"]),
+            result_hash=str(row["result_hash"]),
+            ordered_event_ids_hash=str(row["ordered_event_ids_hash"]),
+            locator_root=bytes(row["locator_root"]).hex(),
+            mmr_leaf_count=int(row["mmr_leaf_count"]),
+        )
+
+    def _persist_prefix_mmr_append_locked(self, mmr: IncrementalMmrV1, leaf_hash: bytes) -> int:
+        leaf_index = mmr.leaf_count
+        addresses = [(0, leaf_index)]
+        height = 0
+        while (leaf_index >> height) & 1:
+            addresses.append((height + 1, leaf_index >> (height + 1)))
+            height += 1
+        appended = mmr.append(leaf_hash)
+        if appended != leaf_index:
+            raise AssertionError("MMR append index changed unexpectedly")
+        self._connection.executemany(
+            """INSERT INTO world_v2_prefix_mmr_nodes
+                 (world_id, height, node_index, node_hash) VALUES (?, ?, ?, ?)""",
+            ((self._world_id, node_height, node_index, mmr.nodes[(node_height, node_index)])
+             for node_height, node_index in addresses),
+        )
+        return leaf_index
+
+    def _persist_prefix_locator_put_locked(
+        self,
+        locator_map: IncrementalSparseMerkleMapV1,
+        *,
+        key: bytes,
+        value: ObservationLocatorValueV1,
+    ) -> None:
+        locator_map.put(key=key, value_hash=value.digest())
+        key_int = int.from_bytes(key, "big")
+        addresses = [
+            (256, key_int),
+            *((depth, key_int >> (256 - depth)) for depth in range(255, -1, -1)),
+        ]
+        self._connection.executemany(
+            """INSERT INTO world_v2_prefix_locator_nodes
+                 (world_id, depth, prefix_bits, node_hash) VALUES (?, ?, ?, ?)
+               ON CONFLICT(world_id, depth, prefix_bits) DO UPDATE
+                 SET node_hash = excluded.node_hash""",
+            ((self._world_id, depth, _prefix_bits_blob(prefix), locator_map.nodes[(depth, prefix)])
+             for depth, prefix in addresses),
+        )
+        self._connection.execute(
+            """INSERT INTO world_v2_prefix_locator_values
+                 (world_id, locator_key, value_hash, observation_id, event_type, event_id,
+                  ledger_sequence, world_revision, deliberation_revision, event_leaf_index,
+                  event_leaf_hash)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                self._world_id, key, value.digest(), value.observation_id, value.event_type,
+                value.event_id, value.ledger_sequence, value.world_revision,
+                value.deliberation_revision, value.event_leaf_index, value.event_leaf_hash,
+            ),
+        )
+
+    def _rebuild_prefix_proof_state_locked(
+        self, *, mmr: IncrementalMmrV1, locator_map: IncrementalSparseMerkleMapV1
+    ) -> None:
+        """One-time legacy migration from immutable commits/events, inside a transaction."""
+
+        rows = tuple(
+            self._connection.execute(
+                """SELECT e.*, c.request_hash, c.result_json
+                   FROM world_v2_events AS e JOIN world_v2_commits AS c
+                     ON c.world_id = e.world_id AND c.commit_id = e.commit_id
+                   WHERE e.world_id = ? ORDER BY e.ledger_sequence""",
+                (self._world_id,),
+            )
+        )
+        current_commit: str | None = None
+        staged: list[tuple[sqlite3.Row, WorldEvent, bytes, int]] = []
+        completed: set[str] = set()
+        for row in rows + (None,):
+            row_commit = None if row is None else str(row["commit_id"])
+            if current_commit is not None and row_commit != current_commit:
+                if current_commit in completed or not staged:
+                    raise LedgerIntegrityError("legacy commit events are not contiguous")
+                completed.add(current_commit)
+                self._persist_prefix_commit_locked(
+                    mmr=mmr,
+                    locator_map=locator_map,
+                    commit_id=current_commit,
+                    staged=staged,
+                    request_hash=str(staged[0][0]["request_hash"]),
+                    result=CommitResult.model_validate_json(str(staged[0][0]["result_json"])),
+                    strict_metadata=False,
+                )
+                staged = []
+            if row is None:
+                continue
+            event_json = row["event_json"]
+            if not isinstance(event_json, str) or not hmac.compare_digest(
+                hashlib.sha256(event_json.encode("utf-8")).hexdigest(), str(row["event_hash"])
+            ):
+                raise LedgerIntegrityError("legacy event envelope hash mismatch")
+            try:
+                event = WorldEvent.model_validate_json(event_json)
+            except Exception as exc:
+                raise LedgerIntegrityError("legacy event is invalid") from exc
+            if event.world_id != self._world_id or event.event_id != row["event_id"] or event.idempotency_key != row["idempotency_key"]:
+                raise LedgerIntegrityError("legacy event envelope does not match ledger row")
+            if current_commit is None:
+                current_commit = row_commit
+            current_commit = row_commit
+            leaf_hash = LedgerLeafV1(
+                world_id=self._world_id, ledger_sequence=int(row["ledger_sequence"]),
+                world_revision=int(row["world_revision"]), deliberation_revision=int(row["deliberation_revision"]),
+                commit_id=row_commit, event_id=event.event_id, idempotency_key=event.idempotency_key,
+                event_envelope_hash=hashlib.sha256(event_json.encode("utf-8")).hexdigest(),
+            ).digest()
+            staged.append((row, event, leaf_hash, mmr.leaf_count))
+        if not rows:
+            return
+
+    def _persist_prefix_commit_locked(
+        self,
+        *,
+        mmr: IncrementalMmrV1,
+        locator_map: IncrementalSparseMerkleMapV1,
+        commit_id: str,
+        staged: Sequence[tuple[sqlite3.Row, WorldEvent, bytes, int]],
+        request_hash: str,
+        result: CommitResult,
+        strict_metadata: bool = True,
+    ) -> None:
+        events = tuple(item[1] for item in staged)
+        rebuilt_result = CommitResult(
+            world_revision=int(staged[-1][0]["world_revision"]),
+            deliberation_revision=int(staged[-1][0]["deliberation_revision"]),
+            ledger_sequence=int(staged[-1][0]["ledger_sequence"]),
+            event_ids=tuple(event.event_id for event in events),
+        )
+        if strict_metadata:
+            if result != rebuilt_result or request_hash != commit_request_hash(events):
+                raise LedgerIntegrityError("prefix commit metadata does not match event rows")
+        else:
+            # Bundle migration has already accepted/upcast these immutable rows.
+            # Older commit records may not use the current canonical shape.
+            result = rebuilt_result
+            request_hash = commit_request_hash(events)
+        for row, event, leaf_hash, _old_leaf_index in staged:
+            leaf_index = self._persist_prefix_mmr_append_locked(mmr, leaf_hash)
+            observation_id = _observation_id(event)
+            if observation_id is not None:
+                value = ObservationLocatorValueV1(
+                    observation_id=observation_id, event_type=event.event_type, event_id=event.event_id,
+                    ledger_sequence=int(row["ledger_sequence"]), world_revision=int(row["world_revision"]),
+                    deliberation_revision=int(row["deliberation_revision"]), event_leaf_index=leaf_index,
+                    event_leaf_hash=leaf_hash,
+                )
+                self._persist_prefix_locator_put_locked(
+                    locator_map,
+                    key=observation_locator_key(world_id=self._world_id, event_type=event.event_type, idempotency_key=event.idempotency_key),
+                    value=value,
+                )
+        checkpoint = PrefixCheckpointLeafV1(
+            world_id=self._world_id, commit_id=commit_id,
+            first_ledger_sequence=int(staged[0][0]["ledger_sequence"]),
+            last_ledger_sequence=int(staged[-1][0]["ledger_sequence"]),
+            world_revision=result.world_revision, deliberation_revision=result.deliberation_revision,
+            request_hash=request_hash,
+            result_hash=commit_result_hash_v1(world_revision=result.world_revision, deliberation_revision=result.deliberation_revision, ledger_sequence=result.ledger_sequence, event_ids=result.event_ids),
+            ordered_event_ids_hash=ordered_event_ids_hash_v1(result.event_ids),
+            locator_root=locator_map.root.hex(), mmr_leaf_count=mmr.leaf_count + 1,
+        )
+        self._persist_prefix_mmr_append_locked(mmr, checkpoint.digest())
+        self._connection.execute(
+            """INSERT INTO world_v2_prefix_checkpoints
+                 (world_id, world_revision, deliberation_revision, ledger_sequence, commit_id,
+                  first_ledger_sequence, last_ledger_sequence, request_hash, result_hash,
+                  ordered_event_ids_hash, locator_root, mmr_leaf_count)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                self._world_id, checkpoint.world_revision, checkpoint.deliberation_revision,
+                checkpoint.last_ledger_sequence, checkpoint.commit_id, checkpoint.first_ledger_sequence,
+                checkpoint.last_ledger_sequence, checkpoint.request_hash, checkpoint.result_hash,
+                checkpoint.ordered_event_ids_hash, bytes.fromhex(checkpoint.locator_root),
+                checkpoint.mmr_leaf_count,
+            ),
+        )
     def _migrate_head_bundle(self) -> None:
         """Atomically rebuild a verified legacy checkpoint from immutable events."""
 
@@ -823,6 +1334,7 @@ class SQLiteWorldLedger:
             validate_event_identity(event)
 
         connection = self._connection
+        prefix_mutated = False
         connection.execute("BEGIN IMMEDIATE")
         try:
             existing = connection.execute(
@@ -927,6 +1439,22 @@ class SQLiteWorldLedger:
                         event_hash,
                     ),
                 )
+            # Derived proof state is written in this exact commit transaction.  The
+            # live builders only become observable after SQLite commits; failures
+            # reload them from the rolled-back durable state below.
+            # Mark before the first append: persistence can fail after the builder
+            # has changed but before this helper returns.
+            prefix_mutated = True
+            self._persist_prefix_new_commit_locked(
+                events=events,
+                commit_id=commit_id,
+                request_hash=request_hash,
+                result=result,
+            )
+            self._write_prefix_head_locked(
+                mmr=self._prefix_mmr,
+                locator_map=self._prefix_locator_map,
+            )
             projection = make_projection(
                 world_id=self._world_id,
                 world_revision=world_revision,
@@ -968,10 +1496,85 @@ class SQLiteWorldLedger:
             return result
         except sqlite3.IntegrityError as exc:
             connection.rollback()
+            if prefix_mutated:
+                self._restore_prefix_after_rollback()
             raise IdempotencyConflict("ledger identity already exists") from exc
         except Exception:
             connection.rollback()
+            if prefix_mutated:
+                self._restore_prefix_after_rollback()
             raise
+
+    def _restore_prefix_after_rollback(self) -> None:
+        """Undo in-process incremental mutations after the surrounding SQL rollback."""
+
+        prefix_head = self._connection.execute(
+            "SELECT * FROM world_v2_prefix_heads WHERE world_id = ?", (self._world_id,)
+        ).fetchone()
+        if prefix_head is None:
+            raise LedgerIntegrityError("prefix proof head disappeared after rollback")
+        event_count = int(self._connection.execute(
+            "SELECT COUNT(*) FROM world_v2_events WHERE world_id = ?", (self._world_id,)
+        ).fetchone()[0])
+        commit_count = int(self._connection.execute(
+            "SELECT COUNT(*) FROM world_v2_commits WHERE world_id = ?", (self._world_id,)
+        ).fetchone()[0])
+        self._prefix_mmr, self._prefix_locator_map = self._load_prefix_proof_state_locked(
+            prefix_head=prefix_head, event_count=event_count, commit_count=commit_count
+        )
+
+    def _persist_prefix_new_commit_locked(
+        self,
+        *,
+        events: Sequence[WorldEvent],
+        commit_id: str,
+        request_hash: str,
+        result: CommitResult,
+    ) -> None:
+        rows = tuple(
+            self._connection.execute(
+                """SELECT * FROM world_v2_events WHERE world_id = ? AND commit_id = ?
+                   ORDER BY ledger_sequence""",
+                (self._world_id, commit_id),
+            )
+        )
+        if len(rows) != len(events):
+            raise LedgerIntegrityError("prefix commit rows are unavailable")
+        events_by_id = {event.event_id: event for event in events}
+        staged: list[tuple[sqlite3.Row, WorldEvent, bytes, int]] = []
+        for row in rows:
+            event = events_by_id.get(str(row["event_id"]))
+            if event is None:
+                raise LedgerIntegrityError("prefix commit rows do not match staged events")
+            event_json = canonical_event_json(event)
+            event_hash = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
+            if event_json != row["event_json"] or not hmac.compare_digest(event_hash, str(row["event_hash"])):
+                raise LedgerIntegrityError("prefix commit event envelope mismatch")
+            staged.append(
+                (
+                    row,
+                    event,
+                    LedgerLeafV1(
+                        world_id=self._world_id,
+                        ledger_sequence=int(row["ledger_sequence"]),
+                        world_revision=int(row["world_revision"]),
+                        deliberation_revision=int(row["deliberation_revision"]),
+                        commit_id=commit_id,
+                        event_id=event.event_id,
+                        idempotency_key=event.idempotency_key,
+                        event_envelope_hash=event_hash,
+                    ).digest(),
+                    self._prefix_mmr.leaf_count,
+                )
+            )
+        self._persist_prefix_commit_locked(
+            mmr=self._prefix_mmr,
+            locator_map=self._prefix_locator_map,
+            commit_id=commit_id,
+            staged=staged,
+            request_hash=request_hash,
+            result=result,
+        )
 
     def project(self) -> LedgerProjection:
         with self._thread_lock:
