@@ -27,6 +27,7 @@ from .appraisal_acceptance_runtime import (
     AppraisalAcceptanceError,
     AppraisalAcceptanceRuntime,
 )
+from .appraisal_proposal_worker import AppraisalProposalWorker
 from .affect_acceptance_runtime import AffectAcceptanceError, AffectAcceptanceRuntime
 from .schemas import (
     ClockObservation,
@@ -60,6 +61,7 @@ class WorldRuntime:
         interaction_appraisal_owner: str | None = None,
         appraisal_acceptance: AppraisalAcceptanceRuntime | None = None,
         appraisal_acceptance_actor: str | None = None,
+        appraisal_worker: AppraisalProposalWorker | None = None,
         affect_acceptance: AffectAcceptanceRuntime | None = None,
         affect_acceptance_actor: str | None = None,
     ) -> None:
@@ -85,6 +87,11 @@ class WorldRuntime:
             raise ValueError("appraisal acceptance runtime must own this exact ledger")
         self._appraisal_acceptance = appraisal_acceptance
         self._appraisal_acceptance_actor = appraisal_acceptance_actor
+        if appraisal_worker is not None and appraisal_worker.ledger is not self._ledger:
+            raise ValueError("appraisal worker must own this exact ledger")
+        if appraisal_worker is not None and interaction_appraisal_owner is None:
+            raise ValueError("appraisal worker requires interaction appraisal triggers")
+        self._appraisal_worker = appraisal_worker
         if (affect_acceptance is None) != (affect_acceptance_actor is None):
             raise ValueError("affect acceptance runtime and actor must be configured together")
         if affect_acceptance is not None and affect_acceptance.ledger is not self._ledger:
@@ -511,6 +518,7 @@ class WorldRuntime:
         authorized_action_ids: tuple[str, ...] = ()
         reply_deferred_refs: tuple[str, ...] = ()
         reply_terminal_errors: tuple[str, ...] = ()
+        audited = None
         async with self._lock:
             existing = await self._lookup_event_commit(event.event_id)
             if existing is not None:
@@ -531,17 +539,6 @@ class WorldRuntime:
                 world_revision=before.world_revision,
                 deliberation_revision=before.deliberation_revision,
             )
-            if self._interaction_appraisal_owner is not None:
-                trigger_events = interaction_appraisal_trigger_events(
-                    observation=observation,
-                    observation_event=event,
-                    owner_id=self._interaction_appraisal_owner,
-                )
-                committed = await self._commit(
-                    list(trigger_events),
-                    world_revision=committed.world_revision,
-                    deliberation_revision=committed.deliberation_revision,
-                )
             if self._pinned_turn is not None:
                 audited = await self._pinned_turn.audit_observation(
                     observation=observation,
@@ -552,6 +549,52 @@ class WorldRuntime:
                         ledger_sequence=committed.ledger_sequence,
                     ),
                 )
+            if self._interaction_appraisal_owner is not None:
+                trigger_events = interaction_appraisal_trigger_events(
+                    observation=observation,
+                    observation_event=event,
+                    owner_id=self._interaction_appraisal_owner,
+                )
+                trigger_head = await self._project_for_write()
+                committed = await self._commit(
+                    list(trigger_events),
+                    world_revision=trigger_head.world_revision,
+                    deliberation_revision=trigger_head.deliberation_revision,
+                )
+            if self._appraisal_worker is not None and audited is not None and audited.proposal_id:
+                after_audit = await self._project_for_write()
+                audit = next(
+                    (
+                        item
+                        for item in after_audit.proposal_audits
+                        if item.proposal_id == audited.proposal_id
+                    ),
+                    None,
+                )
+                if audit is not None and audit.proposal_kind == "decision":
+                    try:
+                        cursor = ProjectionCursor(
+                            world_revision=committed.world_revision,
+                            deliberation_revision=committed.deliberation_revision,
+                            ledger_sequence=committed.ledger_sequence,
+                        )
+                        if self._ledger.blocks_event_loop:
+                            await asyncio.to_thread(
+                                self._appraisal_worker.process,
+                                world_id=self._world_id,
+                                cursor=cursor,
+                                proposal_id=audited.proposal_id,
+                            )
+                        else:
+                            self._appraisal_worker.process(
+                                world_id=self._world_id,
+                                cursor=cursor,
+                                proposal_id=audited.proposal_id,
+                            )
+                    except (AppraisalAcceptanceError, ConcurrencyConflict, ValueError) as exc:
+                        code = getattr(exc, "code", "appraisal.worker_failed")
+                        reply_deferred_refs = (*reply_deferred_refs, str(code))
+            if self._pinned_turn is not None and audited is not None:
                 if self._reply_policy is not None and audited.proposal_id is not None:
                     after_audit = await self._project_for_write()
                     audit = next(

@@ -48,6 +48,12 @@ class AppraisalProposalWorker:
         self._actor = actor
         self._source = source
 
+    @property
+    def ledger(self):
+        """The ledger this worker may compile and accept against."""
+
+        return self._compiler.ledger
+
     def process(
         self, *, world_id: str, cursor: ProjectionCursor, proposal_id: str
     ) -> AppraisalProposalWorkResult:

@@ -23,7 +23,9 @@ ObservationRecorded + 已 claim interaction_appraisal Trigger
 `AppraisalProposalWorker` 是该 compiler 的后台执行 Module。其唯一 Interface 是
 `process(world_id, cursor, proposal_id)`：先编译、再用 opaque acceptance handle
 原子接受。调度器可持久化并重试这三个输入，但不能替换中间 proposal、事件或时间戳；
-worker 也不拥有回复生成能力，因此不能延长用户可见的首 token 路径。
+worker 也不拥有回复生成或外部发送能力。运行时当前在主 Deliberation 审计后、回复
+Action 接受前执行这段纯账本短路径，避免 proposal stale；它不会增加任何模型等待。
+后续持久化调度器会把同一接口移到独立 worker，而不改变来源或 acceptance 语义。
 
 ## 来源与身份
 

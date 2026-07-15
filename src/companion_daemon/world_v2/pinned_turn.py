@@ -34,6 +34,7 @@ from .deliberation import Deliberation
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .ledger import LedgerPort
 from .proposal_audit import ProposalAuditCommit, ProposalAuditContext, ProposalAuditRecorder
+from .proposal_envelope import ProposalEvidenceRef
 from .schemas import LedgerProjection, Observation, ProjectionCursor, WorldEvent
 
 
@@ -124,6 +125,14 @@ class PinnedTurnCompiler:
         result = await self._deliberation.deliberate(
             capsule,
             attempt_id=_attempt_id(trigger_ref=observation_event.event_id, cursor=cursor),
+            trigger_evidence=(
+                ProposalEvidenceRef(
+                    ref_id=observation.observation_id,
+                    evidence_kind="observed_message",
+                    source_world_revision=stored[1].world_revision,
+                    immutable_hash="sha256:" + observation_event.payload_hash,
+                ),
+            ),
         )
         context = ProposalAuditContext(
             world_id=observation.world_id,

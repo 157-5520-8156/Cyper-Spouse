@@ -6,6 +6,9 @@ from hashlib import sha256
 import pytest
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
+from companion_daemon.world_v2.appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
+from companion_daemon.world_v2.appraisal_proposal_compiler import AppraisalProposalCompiler
+from companion_daemon.world_v2.appraisal_proposal_worker import AppraisalProposalWorker
 from companion_daemon.world_v2.context_capsule import ContextCapsuleCompiler
 from companion_daemon.world_v2.advisory_compiler import AdvisoryAdapterInput, AdvisoryCompiler
 from companion_daemon.world_v2.deliberation import (
@@ -25,8 +28,10 @@ from companion_daemon.world_v2.minimal_reply_acceptance import ReplyBudgetPolicy
 from companion_daemon.world_v2.minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from companion_daemon.world_v2.proposal_envelope import (
     CanonicalTypedPayload,
+    DecisionProposal,
     MinimalProposal,
     ProposalActionIntent,
+    ProposalEvidenceRef,
     TypedChange,
 )
 from companion_daemon.world_v2.runtime import WorldRuntime
@@ -135,6 +140,63 @@ class _MinimalReplyModel:
         )
         return ModelOutput(
             model_id="test-minimal-main",
+            model_version="test.1",
+            raw_proposal=proposal.model_dump(mode="json"),
+            input_tokens=1,
+            output_tokens=1,
+        )
+
+
+class _DecisionAppraisalModel:
+    def __init__(self, *, evidence_hash: str) -> None:
+        self._evidence_hash = evidence_hash
+
+    async def propose(self, request: ModelInput) -> ModelOutput:
+        proposal = DecisionProposal(
+            proposal_id="proposal:pinned-turn:appraisal:1",
+            trigger_ref=request.trigger_ref,
+            evaluated_world_revision=request.evaluated_world_revision,
+            evidence_refs=(
+                ProposalEvidenceRef(
+                    ref_id=_observation().observation_id,
+                    evidence_kind="observed_message",
+                    source_world_revision=2,
+                    immutable_hash="sha256:" + self._evidence_hash,
+                ),
+            ),
+            proposed_changes=(
+                TypedChange(
+                    change_id="change:pinned-turn:appraisal:1",
+                    kind="appraisal_transition",
+                    target_id="appraisal:model-hint",
+                    transition="activate",
+                    expected_entity_revision=0,
+                    evidence_refs=(_observation().observation_id,),
+                    payload=CanonicalTypedPayload.from_value(
+                        payload_schema="appraisal_transition.v1",
+                        value={
+                            "appraisal_id": "appraisal:model-hint",
+                            "meaning_candidates": [
+                                {"meaning": "disappointment", "confidence": 7000},
+                                {"meaning": "misunderstanding", "confidence": 3000},
+                            ],
+                            "attribution": "user",
+                            "severity": 6000,
+                            "confidence": 7600,
+                            "expiry": None,
+                        },
+                    ),
+                ),
+            ),
+            action_intents=(),
+            confidence=7600,
+            brief_rationale="Persist a fallible interpretation for later affect deliberation.",
+            behavior_tendency="hold_space",
+            stance="attend",
+            display_strategy="withhold",
+        )
+        return ModelOutput(
+            model_id="test-decision-main",
             model_version="test.1",
             raw_proposal=proposal.model_dump(mode="json"),
             input_tokens=1,
@@ -375,6 +437,62 @@ async def test_runtime_opens_and_claims_one_source_bound_interaction_appraisal_t
     assert first == duplicate
     assert projection.world_revision == 2
     assert projection.deliberation_revision == 2
+
+
+@pytest.mark.asyncio
+async def test_runtime_materializes_audited_appraisal_without_a_second_model_call() -> None:
+    observation = _observation()
+    observation_event = WorldEvent.from_payload(
+        schema_version=observation.schema_version,
+        event_id=(
+            f"event:trigger:observation:{observation.source}:{observation.source_event_id}"
+        ),
+        world_id=WORLD,
+        event_type="ObservationRecorded",
+        logical_time=observation.logical_time,
+        created_at=observation.created_at,
+        actor=observation.actor,
+        source=observation.source,
+        trace_id=observation.trace_id,
+        causation_id=observation.causation_id,
+        correlation_id=observation.correlation_id,
+        idempotency_key=f"observation:{observation.source}:{observation.source_event_id}",
+        payload=observation.model_dump(mode="json"),
+    )
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD, accepted_batch_issuer=issuer)
+    ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
+    turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+        deliberation=Deliberation(
+            router=_Router(),
+            main_model=_DecisionAppraisalModel(evidence_hash=observation_event.payload_hash),
+            quick_recovery=_InvalidQuick(),
+        ),
+        companion_actor_ref="agent:companion",
+    )
+    acceptance = AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
+    runtime = WorldRuntime(
+        world_id=WORLD,
+        ledger=ledger,
+        pinned_turn=turn,
+        interaction_appraisal_owner="worker:interaction-appraisal",
+        appraisal_acceptance=acceptance,
+        appraisal_acceptance_actor="worker:interaction-appraisal",
+        appraisal_worker=AppraisalProposalWorker(
+            compiler=AppraisalProposalCompiler(ledger=ledger),
+            acceptance=acceptance,
+            actor="worker:interaction-appraisal",
+        ),
+    )
+
+    outcome = await runtime.ingest(observation)
+
+    assert outcome.status == "observed_only"
+    projection = ledger.project()
+    assert projection.appraisals[0].hypotheses[0].meaning == "disappointment"
+    assert projection.trigger_processes[0].state == "terminal"
 
 
 @pytest.mark.asyncio

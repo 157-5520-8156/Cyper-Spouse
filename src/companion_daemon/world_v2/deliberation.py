@@ -18,7 +18,12 @@ from typing import Any, Awaitable, Literal, Protocol, TypeVar
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from .context_capsule import ContextCapsule, TrustedContextCapsuleHandle
-from .proposal_envelope import MinimalProposal, ProposalInput, validate_proposal_envelope
+from .proposal_envelope import (
+    MinimalProposal,
+    ProposalEvidenceRef,
+    ProposalInput,
+    validate_proposal_envelope,
+)
 
 
 MAX_MODEL_OUTPUT_BYTES = 512_000
@@ -337,6 +342,7 @@ class Deliberation:
         attempt_id: str,
         catalog_versions: tuple[str, ...] = (),
         recorded_draw_refs: tuple[str, ...] = (),
+        trigger_evidence: tuple[ProposalEvidenceRef, ...] = (),
     ) -> DeliberationResult:
         if not isinstance(capsule_handle, TrustedContextCapsuleHandle):
             raise TypeError("Deliberation requires a compiler-issued Capsule handle")
@@ -355,6 +361,13 @@ class Deliberation:
                 raise ValueError(f"{label} contain an invalid reference")
             if len(set(values)) != len(values):
                 raise ValueError(f"{label} must be unique")
+        if (
+            not isinstance(trigger_evidence, tuple)
+            or len(trigger_evidence) > 8
+            or any(type(item) is not ProposalEvidenceRef for item in trigger_evidence)
+            or len(set(trigger_evidence)) != len(trigger_evidence)
+        ):
+            raise ValueError("trigger evidence must be a bounded unique tuple")
         content_hash = _digest(json.loads(trusted.model_content_json))
         route = await self._route(
             RouteRequest(
@@ -393,7 +406,9 @@ class Deliberation:
                     lane="main",
                 )
             )
-            proposal = self._validated_proposal(output, trusted)
+            proposal = self._validated_proposal(
+                output, trusted, trigger_evidence=trigger_evidence
+            )
             proposal = self._bind_minimal_model_result(proposal, call_id, output)
             status: AuditStatus = "proposal_validated"
         except TimeoutError:
@@ -434,7 +449,12 @@ class Deliberation:
                         lane="quick",
                     )
                 )
-                proposal = self._validated_proposal(quick_output, trusted, minimal_only=True)
+                proposal = self._validated_proposal(
+                    quick_output,
+                    trusted,
+                    minimal_only=True,
+                    trigger_evidence=trigger_evidence,
+                )
                 proposal = self._bind_minimal_model_result(proposal, quick_call_id, quick_output)
                 status = recovered_status
             except TimeoutError:
@@ -589,6 +609,7 @@ class Deliberation:
         capsule: ContextCapsule,
         *,
         minimal_only: bool = False,
+        trigger_evidence: tuple[ProposalEvidenceRef, ...] = (),
     ) -> ProposalInput:
         checked = _checked_output(output)
         proposal = validate_proposal_envelope(checked.raw_proposal)
@@ -627,6 +648,8 @@ class Deliberation:
                 )
             )
         for evidence in proposal.evidence_refs:
+            if evidence in trigger_evidence:
+                continue
             matches = bindings_by_ref.get(evidence.ref_id, set())
             evidence_hash = evidence.immutable_hash.removeprefix("sha256:")
             exact = {
