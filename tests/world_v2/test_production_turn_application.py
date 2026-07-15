@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import json
 from pathlib import Path
 
 import pytest
@@ -11,6 +12,8 @@ from companion_daemon.world_v2.deliberation import (
     ModelRoute,
     RouteRequest,
 )
+from companion_daemon.world_v2.chat_model_deliberation_adapter import ChatModelDeliberationAdapter
+from companion_daemon.world_v2.platform_action_executor import PlatformDispatchReceipt
 from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
@@ -48,6 +51,44 @@ class _Transport:
 
     async def send(self, _request):  # type: ignore[no-untyped-def]
         raise AssertionError("invalid proposal must not create an external dispatch")
+
+    async def lookup(self, **_kwargs):  # type: ignore[no-untyped-def]
+        return None
+
+
+class _DraftChatModel:
+    model = "test-flash"
+
+    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        return json.dumps(
+            {
+                "response_text": "嗯，我刚刚有点飘走了。你继续说，我在听。",
+                "stance": "acknowledge_briefly",
+                "brief_rationale": "Own the missed connection without adding a world claim.",
+                "confidence": 7200,
+            },
+            ensure_ascii=False,
+        )
+
+
+class _DeliveredTransport:
+    provider = "platform:test"
+
+    def __init__(self) -> None:
+        self.bodies: list[str] = []
+
+    async def send(self, request):  # type: ignore[no-untyped-def]
+        self.bodies.append(request.body)
+        return PlatformDispatchReceipt(
+            provider_receipt_id="receipt:production-application:1",
+            provider_ref="message:production-application:1",
+            status="delivered",
+            received_at=NOW,
+            raw_payload_hash="sha256:" + "a" * 64,
+            idempotency_key=request.idempotency_key,
+            request_fingerprint=request.fingerprint,
+        )
 
     async def lookup(self, **_kwargs):  # type: ignore[no-untyped-def]
         return None
@@ -115,3 +156,39 @@ async def test_production_application_bootstraps_sqlite_once_and_exposes_only_tu
         assert ledger.project().budget_accounts[0].account_id == "account:world-v2:chat"
     finally:
         ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_production_application_materializes_a_chat_draft_and_settles_one_platform_reply(
+    tmp_path: Path,
+) -> None:
+    transport = _DeliveredTransport()
+    model = ChatModelDeliberationAdapter(model=_DraftChatModel())
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "world-v2-delivery.sqlite",
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=model,
+        quick_recovery=model,
+        transport=transport,
+        now=NOW,
+    )
+    try:
+        outcome = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:delivery",
+                text="你刚刚没接住我。",
+                observed_at=NOW,
+                trace_id="trace:production-delivery",
+            )
+        )
+        delivery = await app.drain_actions_once()
+    finally:
+        app.close()
+
+    assert outcome.status == "action_authorized"
+    assert delivery is not None and delivery.status == "settled"
+    assert transport.bodies == ["嗯，我刚刚有点飘走了。你继续说，我在听。"]

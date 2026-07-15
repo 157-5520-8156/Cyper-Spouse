@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 
 import pytest
 
@@ -8,7 +9,7 @@ from companion_daemon.world_v2.chat_model_deliberation_adapter import (
     ChatModelDeliberationAdapter,
     RoutedChatModelDeliberationAdapter,
 )
-from companion_daemon.world_v2.deliberation import ModelInput, ModelRoute
+from companion_daemon.world_v2.deliberation import ModelInput, ModelRoute, TriggerMessage
 
 
 def _request() -> ModelInput:
@@ -46,7 +47,7 @@ async def test_adapter_keeps_chat_model_output_inert_and_binds_request_to_prompt
     assert output.raw_proposal == {"proposal_id": "proposal:1"}
     messages, temperature = model.calls[0]
     assert temperature == 0.7
-    assert "MinimalProposal" in messages[0]["content"]
+    assert "ReplyDraft" in messages[0]["content"]
     supplied = json.loads(messages[1]["content"])
     assert supplied["request"]["trigger_ref"] == "trigger:1"
     assert supplied["request"]["evaluated_world_revision"] == 3
@@ -106,3 +107,56 @@ async def test_routed_adapter_fails_closed_when_thinking_was_selected_without_a_
 
     with pytest.raises(RuntimeError, match="not configured"):
         await adapter.propose(thinking_request)
+
+
+@pytest.mark.asyncio
+async def test_adapter_materializes_a_verified_reply_draft_into_a_hash_bound_minimal_proposal() -> None:
+    text = "我刚刚确实有点飘走了。"
+    model = _Model(
+        json.dumps(
+            {
+                "response_text": text,
+                "stance": "acknowledge_briefly",
+                "brief_rationale": "Acknowledge the missed connection without inventing facts.",
+                "confidence": 7300,
+            },
+            ensure_ascii=False,
+        )
+    )
+    request = _request().model_copy(
+        update={
+            "trigger_message": TriggerMessage(
+                event_ref="event:observation:1",
+                event_payload_hash="sha256:" + "a" * 64,
+                observation_ref="observation:1",
+                source_world_revision=3,
+                actor="user:primary",
+                channel="test",
+                reply_target="user:primary",
+                text="你刚刚没接住我。",
+            )
+        }
+    )
+    adapter = ChatModelDeliberationAdapter(model=model)
+
+    output = await adapter.propose(request)
+
+    assert output.raw_proposal["trigger_ref"] == "trigger:1"
+    assert output.raw_proposal["response_text"] == text
+    assert output.raw_proposal["action_intents"][0]["target"] == "user:primary"
+    assert output.raw_proposal["action_intents"][0]["payload_hash"] == "sha256:" + sha256(
+        text.encode("utf-8")
+    ).hexdigest()
+    assert output.raw_proposal["evidence_refs"][0]["ref_id"] == "observation:1"
+
+
+@pytest.mark.asyncio
+async def test_adapter_rejects_a_reply_draft_without_a_verified_current_message() -> None:
+    adapter = ChatModelDeliberationAdapter(
+        model=_Model(
+            '{"response_text":"hi","stance":"plain","brief_rationale":"ordinary response"}'
+        )
+    )
+
+    with pytest.raises(ValueError, match="verified current message"):
+        await adapter.propose(_request())

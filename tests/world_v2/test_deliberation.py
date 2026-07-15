@@ -208,6 +208,7 @@ async def test_trigger_message_reaches_model_only_when_bound_to_current_observat
         event_ref="event:observation:1",
         event_payload_hash=f"sha256:{HASH_B}",
         observation_ref=observed.ref_id,
+        source_world_revision=observed.source_world_revision,
         actor="user:primary",
         channel="test",
         reply_target="user:primary",

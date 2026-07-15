@@ -167,6 +167,7 @@ class TriggerMessage(_FrozenModel):
     event_ref: str = Field(min_length=1, max_length=256)
     event_payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     observation_ref: str = Field(min_length=1, max_length=256)
+    source_world_revision: int = Field(ge=1)
     actor: str = Field(min_length=1, max_length=256)
     channel: str = Field(min_length=1, max_length=256)
     reply_target: str = Field(min_length=1, max_length=256)

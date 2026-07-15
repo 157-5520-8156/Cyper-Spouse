@@ -133,7 +133,9 @@ class PinnedTurnCompiler:
                     immutable_hash="sha256:" + observation_event.payload_hash,
                 ),
             ),
-            trigger_message=self._trigger_message(observation, observation_event),
+            trigger_message=self._trigger_message(
+                observation, observation_event, source_world_revision=stored[1].world_revision
+            ),
         )
         context = ProposalAuditContext(
             world_id=observation.world_id,
@@ -417,7 +419,11 @@ class PinnedTurnCompiler:
 
     @classmethod
     def _trigger_message(
-        cls, observation: Observation, observation_event: WorldEvent
+        cls,
+        observation: Observation,
+        observation_event: WorldEvent,
+        *,
+        source_world_revision: int,
     ) -> TriggerMessage | None:
         """Expose actual inbound text, never a fabricated attachment description."""
 
@@ -427,6 +433,7 @@ class PinnedTurnCompiler:
             event_ref=observation_event.event_id,
             event_payload_hash=f"sha256:{observation_event.payload_hash}",
             observation_ref=observation.observation_id,
+            source_world_revision=source_world_revision,
             actor=observation.actor,
             channel=observation.channel,
             reply_target=cls._reply_target(observation),
