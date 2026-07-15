@@ -211,6 +211,16 @@ class _AffectFamilyCodec:
     def record_identity(
         self, *, world_id: str, event_type: str, payload: dict[str, object]
     ) -> IdentityComponents:
+        if payload.get("authority_contract_ref") == "affect-proposal-compiler.1":
+            source = payload.get("source_audit")
+            if not isinstance(source, dict):
+                return None
+            return (
+                world_id,
+                payload.get("proposal_id"),
+                payload.get("change_id"),
+                source.get("proposal_event_ref"),
+            )
         # Legacy Affect ProposalRecorded events had no installed domain identity.
         return None
 

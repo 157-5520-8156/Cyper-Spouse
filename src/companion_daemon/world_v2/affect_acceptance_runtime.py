@@ -120,7 +120,9 @@ class AffectProposalAuthorityReader:
             or proposal.recorded_event_payload_hash != proposal_event.payload_hash
             or proposal_event.payload()
             != proposal.model_dump(
-                mode="json", exclude={"recorded_event_ref", "recorded_event_payload_hash"}
+                mode="json",
+                exclude={"recorded_event_ref", "recorded_event_payload_hash"},
+                exclude_none=True,
             )
         ):
             raise AffectAcceptanceError("proposal_event_mismatch")

@@ -2486,6 +2486,17 @@ class AffectProposedMutation(FrozenModel):
         return self
 
 
+class AffectProposalAuditBinding(FrozenModel):
+    """Exact generic deliberation authority consumed by the Affect compiler."""
+
+    proposal_event_ref: str = Field(min_length=1)
+    proposal_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    model_result_ref: str = Field(min_length=1)
+    capsule_id: str = Field(pattern=r"^[0-9a-f]{64}$")
+    change_id: str = Field(min_length=1)
+    change_payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
 class AffectProposalProjection(FrozenModel):
     proposal_id: str = Field(min_length=1)
     proposal_kind: Literal["affect_transition"] = "affect_transition"
@@ -2499,6 +2510,8 @@ class AffectProposalProjection(FrozenModel):
     appraisal_refs: tuple[AppraisalMeaningRef, ...] = ()
     policy_refs: tuple[str, ...] = Field(min_length=1)
     proposed_mutation: AffectProposedMutation
+    authority_contract_ref: Literal["affect-proposal-compiler.1"] | None = None
+    source_audit: AffectProposalAuditBinding | None = None
     recorded_event_ref: str | None = Field(default=None, min_length=1)
     recorded_event_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
@@ -2517,6 +2530,8 @@ class AffectProposalProjection(FrozenModel):
             raise ValueError("affect proposal policy refs must be unique")
         if (self.recorded_event_ref is None) != (self.recorded_event_payload_hash is None):
             raise ValueError("affect proposal event provenance must be complete or absent")
+        if (self.authority_contract_ref is None) != (self.source_audit is None):
+            raise ValueError("compiled affect proposal source authority must be complete or absent")
         return self
 
 

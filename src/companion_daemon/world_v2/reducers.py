@@ -103,7 +103,7 @@ from .minimal_reply_manifest import (
     MinimalReplyManifest,
     canonical_minimal_reply_value_hash,
 )
-from .proposal_envelope import MinimalProposal, validate_proposal_envelope
+from .proposal_envelope import DecisionProposal, MinimalProposal, validate_proposal_envelope
 from .proposal_envelope_v2 import (
     canonical_full_change_authority_hash_v2,
     validate_fact_commit_proposal_v2,
@@ -2680,6 +2680,8 @@ def _affect_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reducer
     )
     if proposal.policy_refs != installed_policy:
         raise ValueError("affect proposal references an uninstalled policy")
+    if proposal.source_audit is not None:
+        _validate_compiled_affect_proposal_source(state, proposal)
     proposed_model = AFFECT_PAYLOAD_MODELS[proposal.proposed_mutation.event_type]
     proposed_payload = proposed_model.model_validate_json(proposal.proposed_mutation.payload_json)
     if not isinstance(proposed_payload, AffectAuthorizedMutationPayload):
@@ -2730,6 +2732,38 @@ def _affect_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reducer
             ),
         }
     )
+
+
+def _validate_compiled_affect_proposal_source(
+    state: ReducerState, proposal: AffectProposalProjection
+) -> None:
+    """Reprove that a production Affect candidate came from one generic decision change."""
+
+    source = proposal.source_audit
+    assert source is not None
+    audit = next(
+        (item for item in state.proposal_audits if item.event_ref == source.proposal_event_ref), None
+    )
+    if audit is None or (
+        audit.event_payload_hash != source.proposal_event_payload_hash
+        or audit.model_result_ref != source.model_result_ref
+        or audit.capsule_id != source.capsule_id
+        or audit.evaluated_world_revision != proposal.evaluated_world_revision
+    ):
+        raise ValueError("compiled affect proposal source audit does not resolve")
+    try:
+        generic = validate_proposal_envelope(json.loads(audit.proposal_json))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("compiled affect proposal source proposal is invalid") from exc
+    if not isinstance(generic, DecisionProposal) or generic.affect_decision != "propose":
+        raise ValueError("compiled affect proposal source is not an affect decision")
+    changes = tuple(
+        item
+        for item in generic.proposed_changes
+        if item.kind == "affect_transition" and item.change_id == source.change_id
+    )
+    if len(changes) != 1 or changes[0].payload.payload_hash != source.change_payload_hash:
+        raise ValueError("compiled affect proposal source change does not resolve")
 
 
 def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
