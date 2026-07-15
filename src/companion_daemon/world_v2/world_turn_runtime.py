@@ -8,6 +8,7 @@ import hashlib
 from typing import Protocol
 
 from .runtime import WorldRuntime
+from .action_pump import ActionPumpResult
 from .schemas import Observation, RuntimeOutcome
 
 
@@ -59,6 +60,20 @@ class WorldTurnRuntime:
                 reply_context={"target": target},
             )
         )
+
+    async def drain_actions_once(self) -> ActionPumpResult | None:
+        """Advance one already-authorized delivery without exposing the ledger.
+
+        A platform host normally invokes this from its durable delivery worker
+        immediately after :meth:`respond` and again during recovery.  Keeping
+        that call on the same platform-neutral seam prevents a host from
+        reaching into the legacy Engine or a ``WorldLedger`` to deliver text.
+        It intentionally does not invent a second dispatch loop: scheduling,
+        claiming, receipt settlement, and recovery remain ``WorldRuntime``
+        responsibilities.
+        """
+
+        return await self._runtime.drain_actions_once()
 
 
 __all__ = ["InboundIdentityResolver", "InboundTurn", "WorldTurnRuntime"]
