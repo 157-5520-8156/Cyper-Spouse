@@ -761,7 +761,10 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
     if slice_name == "advisories":
         return tuple(sorted(set(item.source_refs)))
     if slice_name == "world_life" and isinstance(item, WorldLifeContextItem):
-        return (item.source.authority_event_ref,)
+        refs = {item.source.authority_event_ref}
+        if item.content is not None:
+            refs.add(item.content.descriptor_event_ref)
+        return tuple(sorted(refs))
     if slice_name == "relevant_facts" and isinstance(item, FactProjection):
         # The accepted Fact event is the whole immutable authority for the
         # projection.  Its observation id stays an internal Fact anchor.
@@ -796,14 +799,24 @@ def _typed_source_authorities(item: BaseModel) -> tuple[tuple[str, str, int, str
         # uses durable observation identities rather than committed event ids.
         return ()
     if isinstance(item, WorldLifeContextItem):
-        return (
+        authorities = {
             (
                 "committed_event",
                 item.source.authority_event_ref,
                 item.source.authority_world_revision,
                 item.source.authority_payload_hash,
-            ),
-        )
+            )
+        }
+        if item.content is not None:
+            authorities.add(
+                (
+                    "committed_event",
+                    item.content.descriptor_event_ref,
+                    item.content.descriptor_world_revision,
+                    item.content.descriptor_payload_hash,
+                )
+            )
+        return tuple(sorted(authorities))
     authorities: set[tuple[str, str, int, str]] = set()
     values = getattr(item, "values", None)
     for evidence in (

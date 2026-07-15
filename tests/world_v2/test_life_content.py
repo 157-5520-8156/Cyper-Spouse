@@ -9,6 +9,7 @@ from companion_daemon.world_v2.life_content_store import (
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.schemas import CommittedWorldEventRef, LifeContentDescriptorProjection, ProjectionCursor
 from companion_daemon.world_v2.world_life_context import WorldLifeContextCompiler
+from companion_daemon.world_v2.context_capsule import _typed_source_authorities, _typed_source_refs
 from test_life_projection import WORLD_ID, commit, seed_through_proposal, settlement_batch
 
 
@@ -97,6 +98,11 @@ def test_life_content_compiler_emits_only_descriptor_bound_sidecar_text() -> Non
     )
     assert world_life[0].content is not None
     assert world_life[0].content.text == text
+    assert _typed_source_refs("world_life", world_life[0]) == (
+        "life-content-recorded:tea",
+        "occurrence-settled",
+    )
+    assert len(_typed_source_authorities(world_life[0])) == 2
 
 
 def test_life_content_compiler_fails_closed_when_bytes_or_privacy_do_not_match() -> None:
