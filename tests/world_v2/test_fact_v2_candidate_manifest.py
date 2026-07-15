@@ -34,6 +34,8 @@ from companion_daemon.world_v2.fact_v2_accepted_manifest_builder import (
 from companion_daemon.world_v2.fact_v2_reducers import (
     materialized_fact_v2_as_projection_change,
 )
+from companion_daemon.world_v2.fact_v2_atomic_recorder import FactV2AtomicRecorder
+from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.fact_v2_candidate_manifest import (
     FACT_V2_CANDIDATE_EVENT_TYPE,
     FactV2AcceptanceEnvelopeCandidate,
@@ -442,4 +444,45 @@ def test_materialized_fact_v2_maps_to_shared_fact_projection_without_legacy_prop
     assert change.operation == "commit"
     assert change.fact_after.origin.accepted_event_ref == "event:fact-v2:projection"
     assert change.fact_after.entity_revision == 1
+    ledger.close()
+
+
+def test_atomic_recorder_materializes_exact_acceptance_then_fact_batch(tmp_path) -> None:
+    ledger, registry, reader, proposal_handle, prepared, sources, candidate, _ = _bound(tmp_path)
+    envelope_request = FactV2AcceptanceEnvelopeRequestV2.model_validate(
+        candidate.model_dump(mode="python")
+        | {"acceptance_causation_id": reader.audit(handle=proposal_handle).event_ref},
+        strict=True,
+    )
+    envelope_issuer = FactV2AcceptanceEnvelopeAuthorityIssuer()
+    envelope_handle = envelope_issuer.issue(
+        proposal_reader=reader, proposal_handle=proposal_handle, request=envelope_request
+    )
+    plan_issuer = FactV2ProductionPlanIssuer(
+        registry=registry, proposal_reader=reader, envelope_issuer=envelope_issuer
+    )
+    plan_handle = plan_issuer.issue(
+        envelope_handle=envelope_handle,
+        proposal_handle=proposal_handle,
+        prepared=prepared,
+        sources=sources,
+    )
+    builder = FactV2AcceptedManifestBuilder(plan_issuer=plan_issuer)
+    bundle_handle = builder.build(plan_handle=plan_handle)
+    batch_issuer = AcceptedLedgerBatchIssuer()
+    batch_handle = FactV2AtomicRecorder(
+        manifest_builder=builder, batch_issuer=batch_issuer
+    ).prepare_batch(bundle_handle=bundle_handle)
+
+    events, commit_id = batch_issuer.verify(
+        handle=batch_handle, world_id=WORLD_ID, expected_cursor=_cursor(ledger)
+    )
+    assert tuple(event.event_type for event in events) == (
+        "AcceptanceRecorded",
+        FACT_V2_ACCEPTED_EVENT_TYPE,
+    )
+    assert events[0].causation_id == envelope_request.acceptance_causation_id
+    assert events[1].causation_id == events[0].event_id
+    assert events[1].idempotency_key == builder.inspect(handle=bundle_handle).effect_idempotency_key
+    assert commit_id.startswith("commit:accepted-v3:")
     ledger.close()
