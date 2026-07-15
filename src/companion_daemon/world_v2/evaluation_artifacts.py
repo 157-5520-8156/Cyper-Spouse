@@ -215,6 +215,7 @@ class MechanicalTraceEvidence:
     affect_episode_invalid_clears: int
     random_draw_replay_consistency: float
     hot_visible_action_p95_ms: float
+    random_draw_status: str = "not_applicable"
 
     def __post_init__(self) -> None:
         for name, value in self._values.items():
@@ -231,6 +232,8 @@ class MechanicalTraceEvidence:
             raise EvaluationArtifactError("mechanical failure counts must be non-negative integers")
         if not 0 <= self.random_draw_replay_consistency <= 1:
             raise EvaluationArtifactError("random draw replay consistency must be between zero and one")
+        if self.random_draw_status not in {"installed", "not_applicable", "missing_required"}:
+            raise EvaluationArtifactError("random draw status is invalid")
         if self.hot_visible_action_p95_ms < 0:
             raise EvaluationArtifactError("hot visible action p95 must be non-negative")
 
@@ -257,6 +260,7 @@ class MechanicalTraceEvidence:
             "replay_hash_mismatches": self.replay_hash_mismatches,
             "affect_episode_invalid_clears": self.affect_episode_invalid_clears,
             "random_draw_replay_consistency": self.random_draw_replay_consistency,
+            "random_draw_status": self.random_draw_status,
             "hot_visible_action_p95_ms": self.hot_visible_action_p95_ms,
         }
 

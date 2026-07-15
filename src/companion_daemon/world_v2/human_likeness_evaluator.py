@@ -327,6 +327,7 @@ class MechanicalEvaluation:
     affect_evidence_hash: str = ""
     random_draw_evidence_hash: str = ""
     performance_trace_hash: str = ""
+    random_draw_status: Literal["installed", "not_applicable", "missing_required"] = "not_applicable"
 
     def __post_init__(self) -> None:
         if any(
@@ -551,6 +552,7 @@ class ExperienceEvaluator:
                 != trace.affect_episode_invalid_clears
                 or mechanical_evaluation.random_draw_replay_consistency
                 != trace.random_draw_replay_consistency
+                or mechanical_evaluation.random_draw_status != trace.random_draw_status
                 or mechanical_evaluation.hot_visible_action_p95_ms != trace.hot_visible_action_p95_ms
             ):
                 return ["mechanical_evidence_not_bound_to_verified_artifact_bundle"]
@@ -1005,7 +1007,12 @@ class ExperienceEvaluator:
                 blockers.append("replay_hash_mismatch")
             if mechanical_evaluation.affect_episode_invalid_clears:
                 blockers.append("affect_episode_invalid_clear")
-            if mechanical_evaluation.random_draw_replay_consistency < 1:
+            if mechanical_evaluation.random_draw_status == "missing_required":
+                blockers.append("random_draw_evidence_missing")
+            elif (
+                mechanical_evaluation.random_draw_status == "installed"
+                and mechanical_evaluation.random_draw_replay_consistency < 1
+            ):
                 blockers.append("random_draw_replay_inconsistent")
             if mechanical_evaluation.hot_visible_action_p95_ms > 5_000:
                 blockers.append("hot_visible_action_p95_exceeds_5s")

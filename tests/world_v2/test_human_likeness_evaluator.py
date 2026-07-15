@@ -447,6 +447,43 @@ def test_official_gate_includes_mechanical_world_and_latency_evidence() -> None:
     assert "missing_verified_evaluation_artifact_bundle" in report.blockers
 
 
+def test_official_gate_distinguishes_absent_random_authority_from_missing_required_draw_evidence() -> None:
+    protocol = EvaluationProtocol(
+        protocol_version="human-likeness-eval-v1",
+        scenario_set_version="scenarios.1",
+        rubric_version="rubric.1",
+        statistics_version="statistics.1",
+        required_variants=("v2",),
+        required_repetitions=1,
+        minimum_scenario_turns=1,
+        minimum_emotion_gold_turns=0,
+    )
+    base = dict(
+        hard_invariant_violations=0,
+        nonterminal_action_leaks=0,
+        replay_hash_mismatches=0,
+        affect_episode_invalid_clears=0,
+        random_draw_replay_consistency=1.0,
+        hot_visible_action_p95_ms=1.0,
+    )
+
+    unavailable = ExperienceEvaluator().evaluate(
+        protocol=protocol,
+        corpus=(),
+        reviewed_runs=(),
+        mechanical_evaluation=MechanicalEvaluation(**base, random_draw_status="not_applicable"),
+    )
+    missing = ExperienceEvaluator().evaluate(
+        protocol=protocol,
+        corpus=(),
+        reviewed_runs=(),
+        mechanical_evaluation=MechanicalEvaluation(**base, random_draw_status="missing_required"),
+    )
+
+    assert "random_draw_evidence_missing" not in unavailable.blockers
+    assert "random_draw_evidence_missing" in missing.blockers
+
+
 def test_official_review_requires_the_exact_verified_protocol_corpus_output_and_blinding() -> None:
     scenario = ScenarioTurn(
         scenario_turn_id="share.1",
