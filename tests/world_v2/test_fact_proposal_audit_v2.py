@@ -15,6 +15,9 @@ from companion_daemon.world_v2.fact_proposal_audit_v2 import (
     build_fact_commit_proposal_recorded_event_v2,
     fact_commit_proposal_audit_event_id_v2,
 )
+from companion_daemon.world_v2.fact_proof_backed_evidence import (
+    ProofBackedFactEvidenceResolverV2,
+)
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.proposal_envelope_v2 import (
     FactCommitProposalDraftV2,
@@ -22,7 +25,12 @@ from companion_daemon.world_v2.proposal_envelope_v2 import (
     normalize_fact_commit_proposal_v2,
 )
 from companion_daemon.world_v2.schemas import ProjectionCursor, WorldEvent
+from companion_daemon.world_v2.sealed_production_fact_registry_v2 import (
+    SealedProductionFactPreparationRegistryV2,
+    SealedProductionFactRegistryErrorV2,
+)
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
+from companion_daemon.world_v2.sqlite_ledger import SQLiteProofBackedObservationReader
 
 
 WORLD_ID = "world:fact-proposal-audit"
@@ -204,4 +212,34 @@ def test_fact_v2_proposal_audit_event_rejects_a_forged_idempotency_key(tmp_path)
 
     with pytest.raises(ValueError, match="idempotency key"):
         ledger.commit((forged,), expected_world_revision=1, expected_deliberation_revision=0)
+    ledger.close()
+
+
+def test_sealed_registry_derives_complete_durable_authority_only_from_pinned_audit(tmp_path) -> None:
+    ledger, _ = _record(tmp_path)
+    proposal_reader = FactCommitProposalAuthorityReaderV2(ledger=ledger)
+    proposal_handle = proposal_reader.pin(
+        world_id=WORLD_ID, cursor=_cursor(ledger), proposal_id="proposal:fact-audit:1"
+    )
+    resolver = ProofBackedFactEvidenceResolverV2(
+        reader=SQLiteProofBackedObservationReader(ledger=ledger)
+    )
+    registry = SealedProductionFactPreparationRegistryV2(resolver=resolver)
+
+    authority = registry.durable_authority_candidate(
+        proposal_reader=proposal_reader, proposal_handle=proposal_handle
+    )
+    descriptor = registry.descriptor
+    assert authority.authority_version == "effect-compiler-authority.1"
+    assert authority.proposal_event_ref == proposal_reader.audit(handle=proposal_handle).event_ref
+    assert authority.event_catalog_ref == descriptor.event_catalog_ref
+    assert authority.reducer_bundle_digest == descriptor.reducer_bundle_digest
+    assert authority.predicate_matrix_ref == "matrix:fact-predicate.2"
+    assert not hasattr(authority, "to_world_event")
+    assert not hasattr(registry, "durable_authority")
+    with pytest.raises(SealedProductionFactRegistryErrorV2, match="reader-owned"):
+        registry.durable_authority_candidate(
+            proposal_reader=proposal_reader,
+            proposal_handle=PinnedFactCommitProposalAuthorityHandleV2(),
+        )
     ledger.close()

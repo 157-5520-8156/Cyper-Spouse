@@ -30,11 +30,21 @@ from weakref import WeakKeyDictionary
 
 from pydantic import Field, model_validator
 
-from .accepted_effect_contracts import DurableDomainCompilerKeyV1, TypedCompilerDependencyV1
+from .accepted_effect_contracts import (
+    COMPILER_AUTHORITY_VERSION,
+    DurableDomainCompilerKeyV1,
+    DurableEffectCompilerAuthorityV1,
+    TypedCompilerDependencyV1,
+)
 from .fact_accepted_contracts import FactCommitMaterializedPayloadV2
 from .fact_proof_backed_evidence import (
     ProofBackedFactEvidenceResolverV2,
     ResolvedFactCommitSourcesV2,
+)
+from .fact_proposal_audit_v2 import (
+    FactCommitProposalAuditProjectionV2,
+    FactCommitProposalAuthorityReaderV2,
+    PinnedFactCommitProposalAuthorityHandleV2,
 )
 from .proposal_envelope_v2 import FactCommitProposalEnvelopeV2, FactCommitTypedChangeV2
 from .schema_core import FrozenModel
@@ -78,12 +88,28 @@ class SealedFactCommitInstallDescriptorV2(FrozenModel):
     event_types: tuple[str, ...] = Field(min_length=1, max_length=1)
     compiler_ref: str = Field(min_length=1, max_length=512)
     compiler_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    canonical_codec_ref: str = Field(min_length=1, max_length=512)
+    canonical_codec_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     resolver_ref: str = Field(min_length=1, max_length=512)
     resolver_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     reverse_verifier_ref: str = Field(min_length=1, max_length=512)
     reverse_verifier_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     output_contract_ref: str = Field(min_length=1, max_length=512)
     output_contract_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    predicate_matrix_ref: str = Field(min_length=1, max_length=512)
+    predicate_matrix_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    evidence_use_matrix_ref: str = Field(min_length=1, max_length=512)
+    evidence_use_matrix_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    privacy_matrix_ref: str = Field(min_length=1, max_length=512)
+    privacy_matrix_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    observation_authority_contract_ref: str = Field(min_length=1, max_length=512)
+    observation_authority_contract_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    event_catalog_ref: str = Field(min_length=1, max_length=512)
+    event_catalog_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    domain_identity_contract_ref: str = Field(min_length=1, max_length=512)
+    domain_identity_contract_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reducer_bundle_ref: str = Field(min_length=1, max_length=512)
+    reducer_bundle_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     policy_refs: tuple[str, ...] = Field(min_length=1, max_length=64)
     typed_dependencies: tuple[TypedCompilerDependencyV1, ...] = Field(max_length=16)
 
@@ -123,12 +149,28 @@ _SEALED_DESCRIPTOR_RAW: dict[str, object] = {
     "event_types": ("FactCommitted",),
     "compiler_ref": "compiler:fact-commit.2",
     "compiler_digest": _digest("sealed-fact-commit-adapter"),
+    "canonical_codec_ref": "codec:fact-commit.2",
+    "canonical_codec_digest": _digest("fact-commit-canonical-codec"),
     "resolver_ref": "resolver:proof-backed-fact-evidence.2",
     "resolver_digest": _digest("proof-backed-fact-evidence-resolver"),
     "reverse_verifier_ref": "verifier:fact-commit.2",
     "reverse_verifier_digest": _digest("sealed-fact-commit-reverse-verifier"),
     "output_contract_ref": "contract:fact-commit-materialized.2",
     "output_contract_digest": _digest("fact-commit-materialized-contract"),
+    "predicate_matrix_ref": "matrix:fact-predicate.2",
+    "predicate_matrix_digest": _digest("fact-predicate-matrix"),
+    "evidence_use_matrix_ref": "matrix:fact-evidence-use.2",
+    "evidence_use_matrix_digest": _digest("fact-evidence-use-matrix"),
+    "privacy_matrix_ref": "matrix:fact-privacy.2",
+    "privacy_matrix_digest": _digest("fact-privacy-matrix"),
+    "observation_authority_contract_ref": "contract:observation-authority.2",
+    "observation_authority_contract_digest": _digest("observation-authority-contract"),
+    "event_catalog_ref": "event-catalog:world-v2.18",
+    "event_catalog_digest": _digest("event-catalog-world-v2.18"),
+    "domain_identity_contract_ref": "domain-identity:fact.2",
+    "domain_identity_contract_digest": _digest("fact-domain-identity"),
+    "reducer_bundle_ref": "reducer-bundle:world-v2.18",
+    "reducer_bundle_digest": _digest("reducer-bundle-world-v2.18"),
     "policy_refs": _SEALED_POLICY_REFS,
     "typed_dependencies": (
         {
@@ -221,6 +263,37 @@ class SealedProductionFactPreparationRegistryV2:
     def descriptor(self) -> SealedFactCommitInstallDescriptorV2:
         return sealed_fact_commit_install_descriptor_v2()
 
+    def durable_authority_candidate(
+        self,
+        *,
+        proposal_reader: FactCommitProposalAuthorityReaderV2,
+        proposal_handle: PinnedFactCommitProposalAuthorityHandleV2,
+    ) -> DurableEffectCompilerAuthorityV1:
+        """Derive inert v3 compiler metadata from one reader-owned Fact audit.
+
+        The returned value is intentionally a candidate DTO, not a plan or a
+        capability.  FactCommitted-v2 does not yet have its own event/reducer
+        lane, so no recorder may consume this value.
+        Requiring the exact reader and its opaque pin prevents callers from
+        pairing this descriptor with a hand-written proposal summary.  Future
+        plan issuance must additionally bind this same audit to a prepared
+        compilation and an acceptance envelope.
+        """
+
+        if type(proposal_reader) is not FactCommitProposalAuthorityReaderV2:
+            raise SealedProductionFactRegistryErrorV2(
+                "Fact durable authority requires the exact Fact proposal reader"
+            )
+        try:
+            audit = proposal_reader.audit(handle=proposal_handle)
+        except Exception as exc:
+            raise SealedProductionFactRegistryErrorV2(
+                "Fact durable authority requires a reader-owned proposal pin"
+            ) from exc
+        return _durable_authority_from_audit(
+            descriptor=sealed_fact_commit_install_descriptor_v2(), audit=audit
+        )
+
     def prepare(
         self,
         *,
@@ -310,6 +383,52 @@ class SealedProductionFactPreparationRegistryV2:
                 "prepared Fact capability belongs to another registry"
             )
         return material
+
+
+def _durable_authority_from_audit(
+    *,
+    descriptor: SealedFactCommitInstallDescriptorV2,
+    audit: FactCommitProposalAuditProjectionV2,
+) -> DurableEffectCompilerAuthorityV1:
+    """Project all sealed artifacts plus one recorded audit into the v3 DTO."""
+
+    return DurableEffectCompilerAuthorityV1(
+        authority_version=COMPILER_AUTHORITY_VERSION,
+        install_descriptor_ref=descriptor.install_descriptor_ref,
+        install_descriptor_digest=descriptor.install_descriptor_digest,
+        registry_version=descriptor.registry_version,
+        registry_ref=descriptor.registry_ref,
+        registry_digest=descriptor.registry_digest,
+        compiler_key=descriptor.compiler_key,
+        compiler_ref=descriptor.compiler_ref,
+        compiler_digest=descriptor.compiler_digest,
+        reverse_verifier_ref=descriptor.reverse_verifier_ref,
+        reverse_verifier_digest=descriptor.reverse_verifier_digest,
+        canonical_codec_ref=descriptor.canonical_codec_ref,
+        canonical_codec_digest=descriptor.canonical_codec_digest,
+        output_contract_ref=descriptor.output_contract_ref,
+        output_contract_digest=descriptor.output_contract_digest,
+        resolver_ref=descriptor.resolver_ref,
+        resolver_digest=descriptor.resolver_digest,
+        predicate_matrix_ref=descriptor.predicate_matrix_ref,
+        predicate_matrix_digest=descriptor.predicate_matrix_digest,
+        evidence_use_matrix_ref=descriptor.evidence_use_matrix_ref,
+        evidence_use_matrix_digest=descriptor.evidence_use_matrix_digest,
+        privacy_matrix_ref=descriptor.privacy_matrix_ref,
+        privacy_matrix_digest=descriptor.privacy_matrix_digest,
+        observation_authority_contract_ref=descriptor.observation_authority_contract_ref,
+        observation_authority_contract_digest=descriptor.observation_authority_contract_digest,
+        event_catalog_ref=descriptor.event_catalog_ref,
+        event_catalog_digest=descriptor.event_catalog_digest,
+        domain_identity_contract_ref=descriptor.domain_identity_contract_ref,
+        domain_identity_contract_digest=descriptor.domain_identity_contract_digest,
+        reducer_bundle_ref=descriptor.reducer_bundle_ref,
+        reducer_bundle_digest=descriptor.reducer_bundle_digest,
+        typed_dependencies=descriptor.typed_dependencies,
+        proposal_event_ref=audit.event_ref,
+        proposal_event_payload_hash=audit.event_payload_hash,
+        proposal_hash=audit.proposal_hash,
+    )
 
 
 __all__ = [
