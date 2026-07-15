@@ -72,6 +72,7 @@ class ReplayEvaluator:
             reservation = reservations.get(action.budget_reservation_id)
             if reservation is None or reservation.action_id != action.action_id:
                 findings.append(ReplayFinding("reply_budget_missing", "error", action.action_id))
+        self._check_action_recovery(projection, findings)
         if evidence is not None:
             self._check_evidence(evidence, findings)
         checks = (
@@ -79,6 +80,7 @@ class ReplayEvaluator:
             "replay_semantic_hash",
             "reply_expression_payload_binding",
             "reply_budget_action_binding",
+            "action_recovery_liveness",
         )
         return ReplayEvaluation(
             evaluator_version=self.version,
@@ -88,6 +90,58 @@ class ReplayEvaluator:
             mechanism_checks=checks,
             findings=tuple(findings),
         )
+
+    @staticmethod
+    def _check_action_recovery(
+        projection: LedgerProjection, findings: list[ReplayFinding]
+    ) -> None:
+        """Flag state that a durable ActionPump should have recovered.
+
+        This is deliberately a replay-time diagnostic rather than a reducer
+        invariant: a short-lived claimed/dispatch-started action is legitimate
+        during normal execution, while one past its recorded logical deadline
+        is a liveness failure that must be visible to CI and operators.
+        """
+
+        logical_time = projection.logical_time
+        reservations = {item.reservation_id: item for item in projection.budget_reservations}
+        terminal = {"delivered", "failed", "unknown", "cancelled", "expired"}
+        for action in projection.actions:
+            reservation = reservations.get(action.budget_reservation_id)
+            if action.state in terminal and (reservation is None or reservation.state == "reserved"):
+                findings.append(
+                    ReplayFinding("terminal_action_budget_unsettled", "error", action.action_id)
+                )
+            if logical_time is None:
+                continue
+            if (
+                action.expires_at is not None
+                and logical_time >= action.expires_at
+                and action.state in {"authorized", "scheduled", "claimed"}
+            ):
+                findings.append(ReplayFinding("action_expired_unrecovered", "error", action.action_id))
+            if (
+                action.state == "dispatch_started"
+                and action.dispatch_pending is not None
+                and logical_time >= action.dispatch_pending.deadline
+            ):
+                findings.append(
+                    ReplayFinding("dispatch_pending_deadline_elapsed", "error", action.action_id)
+                )
+            lease = action.claim_lease
+            if lease is not None and logical_time >= lease.expires_at:
+                if action.state == "claimed":
+                    findings.append(ReplayFinding("action_claim_expired", "error", action.action_id))
+                elif action.state == "provider_accepted":
+                    findings.append(
+                        ReplayFinding("provider_ack_without_terminal_receipt", "error", action.action_id)
+                    )
+                elif action.state == "dispatch_started":
+                    pending = action.dispatch_pending
+                    if pending is None:
+                        findings.append(
+                            ReplayFinding("dispatch_started_without_recovery", "error", action.action_id)
+                        )
 
     @staticmethod
     def _check_evidence(evidence: ReplayEvidence, findings: list[ReplayFinding]) -> None:

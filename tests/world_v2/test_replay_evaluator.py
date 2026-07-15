@@ -6,7 +6,13 @@ import pytest
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.replay_evaluator import ReplayEvaluator
 from companion_daemon.world_v2.runtime import WorldRuntime
-from companion_daemon.world_v2.schemas import ProjectionCursor, WorldEvent
+from companion_daemon.world_v2.schemas import (
+    Action,
+    ClaimLease,
+    DispatchPending,
+    ProjectionCursor,
+    WorldEvent,
+)
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
 
@@ -51,6 +57,99 @@ def test_replay_evaluator_reports_semantic_divergence() -> None:
     result = ReplayEvaluator().evaluate(projection=projection, replay=replay)
     assert not result.passed
     assert result.findings[0].code == "replay_hash_mismatch"
+
+
+def test_replay_evaluator_reports_an_expired_dispatch_without_recovery() -> None:
+    ledger = WorldLedger.in_memory(world_id="world:replay-action-recovery")
+    projection = ledger.project().model_copy(
+        update={
+            "logical_time": datetime(2026, 7, 15, 13, 0, tzinfo=UTC),
+            "actions": (
+                Action(
+                    schema_version="world-v2.1",
+                    action_id="action:stuck",
+                    world_id=ledger.world_id,
+                    logical_time=datetime(2026, 7, 15, 12, 0, tzinfo=UTC),
+                    created_at=datetime(2026, 7, 15, 12, 0, tzinfo=UTC),
+                    trace_id="trace",
+                    causation_id="cause",
+                    correlation_id="correlation",
+                    kind="reply",
+                    layer="external_action",
+                    intent_ref="intent:stuck",
+                    actor="agent:companion",
+                    target="user:primary",
+                    payload_ref="payload:stuck",
+                    payload_hash="sha256:stuck",
+                    idempotency_key="effect:stuck",
+                    budget_reservation_id="reservation:stuck",
+                    claim_lease=ClaimLease(
+                        owner_id="pump:dead",
+                        attempt_id="attempt:dead",
+                        acquired_at=datetime(2026, 7, 15, 12, 0, tzinfo=UTC),
+                        expires_at=datetime(2026, 7, 15, 12, 2, tzinfo=UTC),
+                    ),
+                    state="dispatch_started",
+                    recovery_policy="effect_once",
+                ),
+            ),
+        }
+    )
+
+    result = ReplayEvaluator().evaluate(projection=projection, replay=projection)
+
+    assert any(item.code == "dispatch_started_without_recovery" for item in result.findings)
+
+
+def test_replay_evaluator_reports_pending_deadline_before_its_claim_lease_expires() -> None:
+    ledger = WorldLedger.in_memory(world_id="world:replay-pending-deadline")
+    action = Action(
+        schema_version="world-v2.1",
+        action_id="action:pending",
+        world_id=ledger.world_id,
+        logical_time=datetime(2026, 7, 15, 12, 0, tzinfo=UTC),
+        created_at=datetime(2026, 7, 15, 12, 0, tzinfo=UTC),
+        trace_id="trace",
+        causation_id="cause",
+        correlation_id="correlation",
+        kind="reply",
+        layer="external_action",
+        intent_ref="intent:pending",
+        actor="agent:companion",
+        target="user:primary",
+        payload_ref="payload:pending",
+        payload_hash="sha256:pending",
+        idempotency_key="effect:pending",
+        budget_reservation_id="reservation:pending",
+        claim_lease=ClaimLease(
+            owner_id="pump",
+            attempt_id="attempt",
+            acquired_at=datetime(2026, 7, 15, 12, 0, tzinfo=UTC),
+            expires_at=datetime(2026, 7, 15, 14, 0, tzinfo=UTC),
+        ),
+        dispatch_pending=DispatchPending(
+            action_id="action:pending",
+            idempotency_key="effect:pending",
+            provider="provider:test",
+            provider_ref="provider-ref:pending",
+            lookup_after=datetime(2026, 7, 15, 12, 1, tzinfo=UTC),
+            deadline=datetime(2026, 7, 15, 12, 5, tzinfo=UTC),
+            dispatch_started_at=datetime(2026, 7, 15, 12, 0, tzinfo=UTC),
+            idempotency_mode="effect_once",
+        ),
+        state="dispatch_started",
+        recovery_policy="effect_once",
+    )
+    projection = ledger.project().model_copy(
+        update={
+            "logical_time": datetime(2026, 7, 15, 12, 10, tzinfo=UTC),
+            "actions": (action,),
+        }
+    )
+
+    result = ReplayEvaluator().evaluate(projection=projection, replay=projection)
+
+    assert any(item.code == "dispatch_pending_deadline_elapsed" for item in result.findings)
 
 
 def test_sqlite_ledger_exports_same_transaction_replay_evidence(tmp_path: Path) -> None:
