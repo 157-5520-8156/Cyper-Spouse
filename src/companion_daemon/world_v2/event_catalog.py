@@ -39,6 +39,7 @@ from .experience_events import (
     LegacyExperienceCommittedPayload,
 )
 from .life_events import LIFE_PAYLOAD_MODELS
+from .life_content_events import LIFE_CONTENT_PAYLOAD_MODELS
 from .memory_events import MEMORY_CANDIDATE_PAYLOAD_MODELS
 from .proposal_audit_schemas import ModelResultRecordedPayload, ProposalRecordedV2Payload
 from .acceptance_manifest import parse_acceptance_manifest_v2
@@ -334,6 +335,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **COMMITMENT_PAYLOAD_MODELS,
         **FACT_PAYLOAD_MODELS,
         **EXPERIENCE_PAYLOAD_MODELS,
+        **LIFE_CONTENT_PAYLOAD_MODELS,
         **MEMORY_CANDIDATE_PAYLOAD_MODELS,
         **CHARACTER_CORE_PAYLOAD_MODELS,
         **V2_GOAL_PAYLOAD_MODELS,
@@ -406,6 +408,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "OutcomeProposalRecorded": "world_id+outcome_proposal_id",
         "WorldOccurrenceSettled": "occurrence_id+result_id+expected_entity_revision",
         "ExperienceCommitted": "world_id+experience_id",
+        "LifeContentRecorded": "world_id+content_id+source_event_ref+content_payload_hash",
         "LegacyExperienceCommitted": "migration-only:original-event-id",
         "WorldOccurrenceCancelled": "occurrence_id+transition_id",
         "WorldOccurrenceExpired": "occurrence_id+transition_id",
@@ -1097,6 +1100,14 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "ExperienceCommittedPayload",
                 allowed_predecessors=("AcceptanceRecorded",),
                 evidence_types=("settled_world_event", "settled_external_result"),
+            ),
+            _contract(
+                "LifeContentRecorded",
+                "life_content_coordinator",
+                "world",
+                "LifeContentRecordedPayload",
+                allowed_predecessors=("WorldOccurrenceSettled", "ExperienceCommitted"),
+                evidence_types=("settled_world_event", "committed_experience"),
             ),
             _contract(
                 "LegacyExperienceCommitted",

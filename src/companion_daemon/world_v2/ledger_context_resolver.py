@@ -48,6 +48,8 @@ from .context_resolver import (
 )
 from .ledger import LedgerPort
 from .memory_retrieval import MemoryRetrievalCompiler, MemoryRetrievalItem
+from .life_content import LifeContentCompiler
+from .life_content_store import ImmutableLifeContentStore
 from .schema_core import PrivacyClass
 from .schemas import CommittedWorldEventRef, FactProjection, LedgerProjection
 from .situation_compiler import SituationCompiler, request_from_ledger_projection
@@ -128,6 +130,7 @@ def context_capsule_compiler_from_ledger(
     situation_compiler: SituationCompiler | None = None,
     policy: ContextCapsuleBudgetPolicy | None = None,
     relevance_scope: ContextRelevanceScope | None = None,
+    life_content_store: ImmutableLifeContentStore | None = None,
 ) -> ContextCapsuleCompiler:
     """Composition-root factory for the production ledger-backed seam."""
 
@@ -136,6 +139,7 @@ def context_capsule_compiler_from_ledger(
             ledger=ledger,
             situation_compiler=situation_compiler or SituationCompiler(),
             relevance_scope=relevance_scope,
+            life_content_store=life_content_store,
         ),
         policy=policy,
     )
@@ -382,13 +386,16 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         ledger: LedgerPort,
         situation_compiler: SituationCompiler,
         relevance_scope: ContextRelevanceScope | None = None,
+        life_content_store: ImmutableLifeContentStore | None = None,
     ) -> None:
         super().__init__()
         self._ledger = ledger
         self._situation_compiler = situation_compiler
         self._relevance_scope = relevance_scope
         self._memory_retrieval = MemoryRetrievalCompiler(ledger=ledger)
-        self._world_life = WorldLifeContextCompiler()
+        self._world_life = WorldLifeContextCompiler(
+            life_content=LifeContentCompiler(store=life_content_store)
+        )
 
     def _scope_for_query(
         self, query: ContextCompileQuery, projection: LedgerProjection
@@ -465,7 +472,11 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             and query.actor_ref in item.values.participant_refs
             and set(item.values.participant_refs).issubset(subject_refs)
         )
-        world_life = self._world_life.compile(projection=projection, actor_ref=query.actor_ref)
+        world_life = self._world_life.compile(
+            projection=projection,
+            actor_ref=query.actor_ref,
+            cursor=query.cursor,
+        )
         scoped_source_ids = {
             *(item.fact_id for item in scoped_facts),
             *(item.thread_id for item in scoped_threads),

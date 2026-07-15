@@ -39,6 +39,7 @@ from .deliberation import (
 )
 from .ledger_context_resolver import ContextRelevanceScope, context_capsule_compiler_from_ledger
 from .ledger_payload_reader import LedgerAuthorizedPayloadReader
+from .life_content_store import SQLiteImmutableLifeContentStore
 from .minimal_reply_acceptance import ReplyBudgetPolicy
 from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .pinned_turn import PinnedTurnCompiler
@@ -96,9 +97,16 @@ class WorldV2TurnApplicationConfig:
 class WorldV2TurnApplication:
     """Small host-facing interface for the persistent single-reply v2 lane."""
 
-    def __init__(self, *, turns: WorldTurnRuntime, ledger: SQLiteWorldLedger) -> None:
+    def __init__(
+        self,
+        *,
+        turns: WorldTurnRuntime,
+        ledger: SQLiteWorldLedger,
+        life_content_store: SQLiteImmutableLifeContentStore,
+    ) -> None:
         self._turns = turns
         self._ledger = ledger
+        self._life_content_store = life_content_store
 
     async def respond(self, inbound: InboundTurn) -> RuntimeOutcome:
         return await self._turns.respond(inbound)
@@ -126,6 +134,7 @@ class WorldV2TurnApplication:
         return await self._turns.drain_background_once()
 
     def close(self) -> None:
+        self._life_content_store.close()
         self._ledger.close()
 
 
@@ -154,6 +163,7 @@ def build_sqlite_world_v2_turn_application(
 
     issuer = AcceptedLedgerBatchIssuer()
     ledger = SQLiteWorldLedger(path=path, world_id=config.world_id, accepted_batch_issuer=issuer)
+    life_content_store = SQLiteImmutableLifeContentStore(path=str(path), world_id=config.world_id)
     try:
         _bootstrap(ledger=ledger, config=config, now=now)
         capsules = context_capsule_compiler_from_ledger(
@@ -162,6 +172,7 @@ def build_sqlite_world_v2_turn_application(
                 actor_ref=config.companion_actor_ref,
                 related_subject_refs=(config.reply_target,),
             ),
+            life_content_store=life_content_store,
         )
         pinned = PinnedTurnCompiler(
             ledger=ledger,
@@ -304,9 +315,12 @@ def build_sqlite_world_v2_turn_application(
             action_pump_owner=config.action_pump_owner,
         )
         return WorldV2TurnApplication(
-            turns=WorldTurnRuntime(runtime=runtime, identities=identities), ledger=ledger
+            turns=WorldTurnRuntime(runtime=runtime, identities=identities),
+            ledger=ledger,
+            life_content_store=life_content_store,
         )
     except Exception:
+        life_content_store.close()
         ledger.close()
         raise
 

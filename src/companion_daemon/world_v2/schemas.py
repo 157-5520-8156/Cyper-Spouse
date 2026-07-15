@@ -809,6 +809,30 @@ class StoredMessagePayloadProjection(FrozenModel):
     event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class LifeContentDescriptorProjection(FrozenModel):
+    """Ledger-visible authority that permits a sidecar text read.
+
+    The descriptor is deliberately separate from both the text store and the
+    lived-world source.  Its event cursor makes historical Context replay
+    deterministic even when the append-only sidecar already contains bytes.
+    """
+
+    content_id: str = Field(min_length=1)
+    content_kind: Literal["occurrence_result", "experience_summary"]
+    content_ref: str = Field(min_length=1)
+    content_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    privacy_class: PrivacyClass
+    source_kind: Literal["occurrence_settlement", "experience"]
+    source_event_ref: str = Field(min_length=1)
+    source_world_revision: int = Field(ge=1)
+    source_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_entity_id: str = Field(min_length=1)
+    source_entity_revision: int = Field(ge=1)
+    descriptor_event_ref: str = Field(min_length=1)
+    descriptor_world_revision: int = Field(ge=1)
+    descriptor_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ExpressionPlanProjection(FrozenModel):
     acceptance_id: str = Field(min_length=1)
     proposal_id: str = Field(min_length=1)
@@ -4077,6 +4101,7 @@ class LedgerProjection(FrozenModel):
     acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()
     minimal_reply_manifests: tuple[MinimalReplyManifestRef, ...] = ()
     stored_message_payloads: tuple[StoredMessagePayloadProjection, ...] = ()
+    life_content_descriptors: tuple[LifeContentDescriptorProjection, ...] = ()
     expression_plans: tuple[ExpressionPlanProjection, ...] = ()
     expression_beats: tuple[ExpressionBeatProjection, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()

@@ -99,6 +99,7 @@ from .minimal_reply_events import (
     ExpressionPlanAcceptedPayload,
     MessagePayloadStoredPayload,
 )
+from .life_content_events import LifeContentRecordedPayload
 from .minimal_reply_manifest import (
     MINIMAL_REPLY_MANIFEST_VERSION,
     MinimalReplyManifest,
@@ -260,6 +261,7 @@ from .schemas import (
     ExperienceProposalProjection,
     ExperienceOccurrenceSettlementBinding,
     LegacyExperienceProjection,
+    LifeContentDescriptorProjection,
     MinimalReplyManifestRef,
     StoredMessagePayloadProjection,
     ExpressionPlanProjection,
@@ -462,6 +464,7 @@ class ReducerState(FrozenModel):
     acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()
     minimal_reply_manifests: tuple[MinimalReplyManifestRef, ...] = ()
     stored_message_payloads: tuple[StoredMessagePayloadProjection, ...] = ()
+    life_content_descriptors: tuple[LifeContentDescriptorProjection, ...] = ()
     expression_plans: tuple[ExpressionPlanProjection, ...] = ()
     expression_beats: tuple[ExpressionBeatProjection, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
@@ -4515,6 +4518,92 @@ def _experience_committed(state: ReducerState, event: WorldEvent) -> ReducerStat
     )
 
 
+_LIFE_CONTENT_PRIVACY_RANK = {
+    "public": 0,
+    "shareable": 1,
+    "personal": 2,
+    "private": 3,
+    "withhold": 4,
+}
+
+
+def _life_content_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    """Expose sidecar bytes only after proving their exact life authority."""
+
+    _require_life_time(state, event)
+    payload = LifeContentRecordedPayload.model_validate_json(event.payload_json)
+    if any(
+        item.content_id == payload.content_id or item.content_ref == payload.content_ref
+        for item in state.life_content_descriptors
+    ):
+        raise ValueError("life content descriptor identity is already registered")
+    source_event = next(
+        (
+            item
+            for item in state.committed_world_event_refs
+            if item.event_id == payload.source_event_ref
+        ),
+        None,
+    )
+    if source_event is None or (
+        source_event.world_revision != payload.source_world_revision
+        or source_event.payload_hash != payload.source_payload_hash
+    ):
+        raise ValueError("life content descriptor source authority is unavailable")
+
+    source_privacy: str
+    if payload.source_kind == "occurrence_settlement":
+        if payload.content_kind != "occurrence_result" or source_event.event_type != "WorldOccurrenceSettled":
+            raise ValueError("occurrence content must bind an exact settlement")
+        occurrence = next(
+            (item for item in state.world_occurrences if item.occurrence_id == payload.source_entity_id),
+            None,
+        )
+        if occurrence is None or (
+            occurrence.status != "settled"
+            or occurrence.entity_revision != payload.source_entity_revision
+            or occurrence.settlement_event_ref != payload.source_event_ref
+            or occurrence.settlement_world_revision != payload.source_world_revision
+            or occurrence.settlement_payload_hash != payload.source_payload_hash
+            or occurrence.result_payload_ref != payload.content_ref
+            or occurrence.result_payload_hash != payload.content_payload_hash
+        ):
+            raise ValueError("life content descriptor does not match settled occurrence")
+        source_privacy = occurrence.visibility
+    else:
+        if payload.content_kind != "experience_summary" or source_event.event_type != "ExperienceCommitted":
+            raise ValueError("experience content must bind an exact experience commit")
+        experience = next(
+            (
+                item
+                for item in state.experiences
+                if isinstance(item, ExperienceProjection)
+                and item.experience_id == payload.source_entity_id
+            ),
+            None,
+        )
+        if experience is None or (
+            experience.entity_revision != payload.source_entity_revision
+            or experience.origin.accepted_event_ref != payload.source_event_ref
+            or experience.values.summary_ref != payload.content_ref
+            or experience.values.summary_payload_hash != payload.content_payload_hash
+        ):
+            raise ValueError("life content descriptor does not match committed experience")
+        source_privacy = experience.values.privacy_class
+
+    if _LIFE_CONTENT_PRIVACY_RANK[payload.privacy_class] < _LIFE_CONTENT_PRIVACY_RANK[source_privacy]:
+        raise ValueError("life content descriptor cannot weaken source privacy")
+    descriptor = LifeContentDescriptorProjection(
+        **payload.model_dump(),
+        descriptor_event_ref=event.event_id,
+        descriptor_world_revision=len(state.committed_world_event_refs) + 1,
+        descriptor_payload_hash=event.payload_hash,
+    )
+    return state.model_copy(
+        update={"life_content_descriptors": (*state.life_content_descriptors, descriptor)}
+    )
+
+
 def _legacy_experience_committed(state: ReducerState, event: WorldEvent) -> ReducerState:
     payload = LegacyExperienceCommittedPayload.model_validate_json(event.payload_json)
     return state.model_copy(
@@ -6099,6 +6188,7 @@ _EVENTS = {
             _world_occurrence_settled,
         ),
         EventDefinition("ExperienceCommitted", RevisionClass.WORLD, _experience_committed),
+        EventDefinition("LifeContentRecorded", RevisionClass.WORLD, _life_content_recorded),
         EventDefinition(
             "LegacyExperienceCommitted",
             RevisionClass.WORLD,
@@ -6391,6 +6481,7 @@ def make_projection(
         acceptance_manifests_v3=state.acceptance_manifests_v3,
         minimal_reply_manifests=state.minimal_reply_manifests,
         stored_message_payloads=state.stored_message_payloads,
+        life_content_descriptors=state.life_content_descriptors,
         expression_plans=state.expression_plans,
         expression_beats=state.expression_beats,
         acceptance_decisions=state.acceptance_decisions,

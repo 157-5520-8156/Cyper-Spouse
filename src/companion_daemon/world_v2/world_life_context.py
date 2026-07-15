@@ -14,8 +14,9 @@ from datetime import datetime
 
 from pydantic import Field
 
+from .life_content import LifeContentCompiler, LifeContentExcerpt
 from .schema_core import FrozenModel, PrivacyClass
-from .schemas import LedgerProjection
+from .schemas import LedgerProjection, ProjectionCursor
 
 
 class WorldLifeSourceBinding(FrozenModel):
@@ -45,14 +46,34 @@ class WorldLifeContextItem(FrozenModel):
     settled_at: datetime
     privacy_class: PrivacyClass
     source: WorldLifeSourceBinding
+    content: LifeContentExcerpt | None = None
 
 
 class WorldLifeContextCompiler:
-    """Compile bounded settled world state without an additional authority."""
+    """Compile settled world state, optionally attaching descriptor-bound prose."""
+
+    def __init__(self, *, life_content: LifeContentCompiler | None = None) -> None:
+        self._life_content = life_content
 
     def compile(
-        self, *, projection: LedgerProjection, actor_ref: str
+        self,
+        *,
+        projection: LedgerProjection,
+        actor_ref: str,
+        cursor: ProjectionCursor | None = None,
+        viewer_privacy_ceiling: PrivacyClass = "private",
     ) -> tuple[WorldLifeContextItem, ...]:
+        excerpts = {}
+        if self._life_content is not None and cursor is not None:
+            excerpts = {
+                item.source_entity_id: item
+                for item in self._life_content.compile(
+                    cursor=cursor,
+                    actor_ref=actor_ref,
+                    viewer_privacy_ceiling=viewer_privacy_ceiling,
+                    projection=projection,
+                ).settled_items
+            }
         owned_plan_ids = {
             plan.plan_id
             for plan in projection.plans
@@ -109,6 +130,7 @@ class WorldLifeContextCompiler:
                         authority_world_revision=settlement.world_revision,
                         authority_payload_hash=settlement.payload_hash,
                     ),
+                    content=excerpts.get(occurrence.occurrence_id),
                 )
             )
         return tuple(sorted(items, key=lambda item: (-item.settled_at.timestamp(), item.occurrence_id)))
