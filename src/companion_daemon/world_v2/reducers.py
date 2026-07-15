@@ -52,6 +52,10 @@ from .outcome_acceptance_manifest import (
 )
 from .media_v2 import (
     MediaArtifact,
+    MediaAutomaticDeliveryApproval,
+    MediaAutomaticDeliveryApprovedPayload,
+    MediaDeliveryShared,
+    MediaDeliverySharedPayload,
     MediaInspectionRecord,
     MediaPreview,
     MediaRenderArtifactRecordedPayload,
@@ -71,6 +75,9 @@ from .media_v2 import (
     media_repair_action_id,
     media_repair_reservation_id,
     media_repair_trigger_id,
+    media_delivery_action_id,
+    media_delivery_id,
+    media_delivery_reservation_id,
     media_digest,
     planning_request_id,
 )
@@ -346,7 +353,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.29"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.30"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -418,11 +425,13 @@ def _actor_authority_transition_semantic_dump(
 
 def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dict[str, Any]:
     dumped = action.model_dump(mode="json")
-    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", "world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", REDUCER_BUNDLE_VERSION}:
+    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", "world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", REDUCER_BUNDLE_VERSION}:
         dumped.pop("expression_plan_id", None)
         dumped.pop("expression_beat_id", None)
-    if reducer_bundle_version not in {"world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", REDUCER_BUNDLE_VERSION}:
+    if reducer_bundle_version not in {"world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", REDUCER_BUNDLE_VERSION}:
         dumped.pop("provider_media_grant", None)
+    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+        dumped.pop("media_delivery_approval", None)
     return dumped
 
 
@@ -516,6 +525,8 @@ class ReducerState(FrozenModel):
     media_inspections: tuple[MediaInspectionRecord, ...] = ()
     media_previews: tuple[MediaPreview, ...] = ()
     media_failed_plan_ids: tuple[str, ...] = ()
+    media_delivery_approvals: tuple[MediaAutomaticDeliveryApproval, ...] = ()
+    media_deliveries: tuple[MediaDeliveryShared, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()
@@ -1294,7 +1305,7 @@ class ReducerState(FrozenModel):
             ),
             "boundaries": tuple(item.model_dump(mode="json") for item in self.boundaries),
         }
-        if declared_reducer_bundle_version in {"world-v2-reducers.26", "world-v2-reducers.27", REDUCER_BUNDLE_VERSION}:
+        if declared_reducer_bundle_version in {"world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", REDUCER_BUNDLE_VERSION}:
             payload["provider_media_grants"] = tuple(
                 item.model_dump(mode="json") for item in self.provider_media_grants
             )
@@ -1306,7 +1317,7 @@ class ReducerState(FrozenModel):
             )
             payload["media_plans"] = tuple(item.model_dump(mode="json") for item in self.media_plans)
             payload["media_unrenderable_opportunity_ids"] = self.media_unrenderable_opportunity_ids
-        if declared_reducer_bundle_version in {"world-v2-reducers.27", REDUCER_BUNDLE_VERSION}:
+        if declared_reducer_bundle_version in {"world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", REDUCER_BUNDLE_VERSION}:
             payload["media_artifacts"] = tuple(item.model_dump(mode="json") for item in self.media_artifacts)
             payload["media_inspections"] = tuple(
                 item.model_dump(mode="json")
@@ -1316,6 +1327,13 @@ class ReducerState(FrozenModel):
             )
             payload["media_previews"] = tuple(item.model_dump(mode="json") for item in self.media_previews)
             payload["media_failed_plan_ids"] = self.media_failed_plan_ids
+        if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            payload["media_delivery_approvals"] = tuple(
+                item.model_dump(mode="json") for item in self.media_delivery_approvals
+            )
+            payload["media_deliveries"] = tuple(
+                item.model_dump(mode="json") for item in self.media_deliveries
+            )
         if reducer_bundle_version in {
             "world-v2-reducers.10",
             "world-v2-reducers.11",
@@ -4343,6 +4361,38 @@ def _action_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
             or any(existing.kind == "media_repair" and existing.intent_ref == plan.plan_id for existing in state.actions)
         ):
             raise ValueError("media repair Action is not exactly bound to its accepted failed inspection")
+    if action.kind == "media_delivery":
+        binding = action.media_delivery_approval
+        approval = next(
+            (
+                item for item in state.media_delivery_approvals
+                if binding is not None and item.approval_id == binding.approval_id
+                and item.entity_revision == binding.approval_revision
+            ),
+            None,
+        )
+        inspection = next(
+            (item for item in state.media_inspections if approval is not None and item.inspection_id == approval.inspection_id),
+            None,
+        )
+        artifact = next(
+            (item for item in state.media_artifacts if approval is not None and item.artifact_id == approval.artifact_id),
+            None,
+        )
+        if (
+            binding is None or approval is None or inspection is None or artifact is None
+            or approval.expires_at <= event.logical_time or not inspection.passed
+            or action.layer != "external_action" or action.intent_ref != inspection.inspection_id
+            or action.payload_ref != artifact.artifact_ref or action.payload_hash != artifact.artifact_hash
+            or action.action_id != media_delivery_action_id(
+                world_id=event.world_id, approval_id=approval.approval_id, approval_revision=approval.entity_revision,
+            )
+            or action.budget_reservation_id != media_delivery_reservation_id(
+                world_id=event.world_id, approval_id=approval.approval_id, approval_revision=approval.entity_revision,
+            )
+            or action.idempotency_key != "media-delivery:" + approval.approval_id + ":" + str(approval.entity_revision)
+        ):
+            raise ValueError("media delivery Action is not exactly bound to one active operator approval")
     generic_manifest = next(
         (
             manifest
@@ -4566,6 +4616,61 @@ def _media_preview_failed(state: ReducerState, event: WorldEvent) -> ReducerStat
         if inspection is None or inspection.plan_id != payload.plan_id or inspection.passed:
             raise ValueError("media preview failure does not bind a failed inspection")
     return state.model_copy(update={"media_failed_plan_ids": (*state.media_failed_plan_ids, payload.plan_id)})
+
+
+def _media_automatic_delivery_approved(state: ReducerState, event: WorldEvent) -> ReducerState:
+    approval = MediaAutomaticDeliveryApprovedPayload.model_validate_json(event.payload_json).approval
+    plan = next((item for item in state.media_plans if item.plan_id == approval.plan_id), None)
+    inspection = next((item for item in state.media_inspections if item.inspection_id == approval.inspection_id), None)
+    artifact = next((item for item in state.media_artifacts if item.artifact_id == approval.artifact_id), None)
+    opportunity = next((item for item in state.media_opportunities if item.opportunity_id == (plan.opportunity_id if plan else None)), None)
+    prior = tuple(item for item in state.media_delivery_approvals if item.approval_id == approval.approval_id)
+    if (
+        event.logical_time != approval.approved_at or event.actor != approval.operator_ref
+        or plan is None or inspection is None or artifact is None or opportunity is None
+        or opportunity.delivery_mode != "automatic" or opportunity.family != approval.family
+        or opportunity.recipient_ref != approval.recipient_ref
+        or plan.media_machine_version != approval.media_machine_version
+        or plan.inspection_contract_version != approval.inspection_contract_version
+        or inspection.plan_id != plan.plan_id or not inspection.passed
+        or inspection.artifact_id != artifact.artifact_id or artifact.plan_id != plan.plan_id
+        or artifact.artifact_hash != approval.artifact_hash
+        or (prior and approval.entity_revision != prior[-1].entity_revision + 1)
+        or (not prior and approval.entity_revision != 1)
+    ):
+        raise ValueError("MediaAutomaticDeliveryApproved must pin one passed automatic-media inspection")
+    return state.model_copy(update={"media_delivery_approvals": (*state.media_delivery_approvals, approval)})
+
+
+def _media_delivery_shared(state: ReducerState, event: WorldEvent) -> ReducerState:
+    delivery = MediaDeliverySharedPayload.model_validate_json(event.payload_json).delivery
+    action = next((item for item in state.actions if item.action_id == delivery.action_id), None)
+    receipt = next((item for item in state.execution_receipts if item.receipt_id == delivery.receipt_id), None)
+    approval = next(
+        (item for item in state.media_delivery_approvals if item.approval_id == delivery.approval_id and item.entity_revision == delivery.approval_revision),
+        None,
+    )
+    plan = next((item for item in state.media_plans if item.plan_id == delivery.plan_id), None)
+    inspection = next((item for item in state.media_inspections if item.inspection_id == delivery.inspection_id), None)
+    artifact = next((item for item in state.media_artifacts if item.artifact_id == delivery.artifact_id), None)
+    if (
+        action is None or action.kind != "media_delivery" or action.state != "delivered"
+        or action.media_delivery_approval is None
+        or receipt is None or receipt.action_id != action.action_id or receipt.observed_state != "delivered" or not receipt.is_terminal
+        or approval is None or plan is None or inspection is None or artifact is None
+        or action.media_delivery_approval.approval_id != approval.approval_id
+        or action.media_delivery_approval.approval_revision != approval.entity_revision
+        or action.intent_ref != approval.inspection_id or action.payload_ref != artifact.artifact_ref or action.payload_hash != artifact.artifact_hash
+        or approval.plan_id != plan.plan_id or approval.inspection_id != inspection.inspection_id
+        or approval.artifact_id != artifact.artifact_id or approval.artifact_hash != artifact.artifact_hash
+        or delivery.plan_id != plan.plan_id or delivery.inspection_id != inspection.inspection_id
+        or delivery.artifact_id != artifact.artifact_id or delivery.artifact_hash != artifact.artifact_hash
+        or delivery.recipient_ref != approval.recipient_ref
+        or delivery.delivery_id != media_delivery_id(action_id=action.action_id, receipt_id=receipt.receipt_id)
+        or any(item.delivery_id == delivery.delivery_id or item.action_id == action.action_id for item in state.media_deliveries)
+    ):
+        raise ValueError("MediaDeliveryShared requires one delivered approved media-delivery Action")
+    return state.model_copy(update={"media_deliveries": (*state.media_deliveries, delivery)})
 
 
 def _provider_media_grant_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -7129,6 +7234,10 @@ _EVENTS = {
         EventDefinition("MediaRepairAuthorized", RevisionClass.WORLD, _media_repair_authorized),
         EventDefinition("MediaPreviewGenerated", RevisionClass.WORLD, _media_preview_generated),
         EventDefinition("MediaPreviewFailed", RevisionClass.WORLD, _media_preview_failed),
+        EventDefinition(
+            "MediaAutomaticDeliveryApproved", RevisionClass.WORLD, _media_automatic_delivery_approved
+        ),
+        EventDefinition("MediaDeliveryShared", RevisionClass.WORLD, _media_delivery_shared),
         EventDefinition("ObservationRecorded", RevisionClass.WORLD, _observation_recorded),
         EventDefinition(
             "OperatorObservationRecorded",
@@ -7568,6 +7677,8 @@ def make_projection(
         media_inspections=state.media_inspections,
         media_previews=state.media_previews,
         media_failed_plan_ids=state.media_failed_plan_ids,
+        media_delivery_approvals=state.media_delivery_approvals,
+        media_deliveries=state.media_deliveries,
         budget_accounts=state.budget_accounts,
         budget_reservations=state.budget_reservations,
         trigger_processes=state.trigger_processes,

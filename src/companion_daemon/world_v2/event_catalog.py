@@ -99,7 +99,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.29"
+    reducer_bundle: str = "world-v2-reducers.30"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -421,6 +421,8 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "MediaRepairAuthorized": "world_id+repair_attempt_id",
         "MediaPreviewGenerated": "world_id+preview_id",
         "MediaPreviewFailed": "world_id+plan_id+preview_failed",
+        "MediaAutomaticDeliveryApproved": "world_id+approval_id+approval_revision",
+        "MediaDeliveryShared": "world_id+delivery_id",
         "BudgetReserved": "reservation_id",
         "BudgetSettled": "reservation_id+result_id+terminal",
         "BudgetReleased": "reservation_id+result_id+terminal",
@@ -793,6 +795,8 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
             _contract("MediaRepairAuthorized", "media_repair_acceptance", "world", "MediaRepairAuthorizedPayload", allowed_predecessors=("TriggerProcessClaimed",), evidence_types=("failed_repairable_media_inspection", "frozen_media_plan", "media_repair_deliberation"), successors=("BudgetReserved", "ActionAuthorized", "TriggerProcessCompleted")),
             _contract("MediaPreviewGenerated", "media_preview_materializer", "world", "MediaPreviewGeneratedPayload", allowed_predecessors=("MediaInspectionRecorded",), evidence_types=("passed_media_inspection",)),
             _contract("MediaPreviewFailed", "media_preview_materializer", "world", "MediaPreviewFailedPayload", allowed_predecessors=("MediaInspectionRecorded",), evidence_types=("failed_media_inspection",)),
+            _contract("MediaAutomaticDeliveryApproved", "operator", "world", "MediaAutomaticDeliveryApprovedPayload", evidence_types=("passed_media_inspection", "operator_media_approval"), successors=("BudgetReserved", "ActionAuthorized")),
+            _contract("MediaDeliveryShared", "media_delivery_settlement", "world", "MediaDeliverySharedPayload", allowed_predecessors=("ExecutionReceiptRecorded",), evidence_types=("delivered_media_action", "operator_media_approval")),
             _contract(
                 "MessagePayloadStored",
                 "expression_plan_recorder",

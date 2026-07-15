@@ -42,7 +42,10 @@ from .resource_authority_schemas import (
 from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditProjection
 from .acceptance_manifest import AcceptanceManifestRefV2
 from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
-from .media_v2 import MediaArtifact, MediaInspectionRecord, MediaOpportunity, MediaPlan, MediaPreview, PhotoCandidate
+from .media_v2 import (
+    MediaArtifact, MediaAutomaticDeliveryApproval, MediaDeliveryShared,
+    MediaInspectionRecord, MediaOpportunity, MediaPlan, MediaPreview, PhotoCandidate,
+)
 
 
 SchemaVersion = Literal["world-v2.1"]
@@ -380,6 +383,13 @@ class ProviderMediaGrantBinding(FrozenModel):
     grant_revision: int = Field(ge=1)
 
 
+class MediaDeliveryApprovalBinding(FrozenModel):
+    """Immutable Action reference to one operator delivery-approval revision."""
+
+    approval_id: str = Field(min_length=1)
+    approval_revision: int = Field(ge=1)
+
+
 class Action(FrozenModel):
     schema_version: SchemaVersion
     action_id: str = Field(min_length=1)
@@ -403,6 +413,7 @@ class Action(FrozenModel):
     expression_plan_id: str | None = Field(default=None, min_length=1)
     expression_beat_id: str | None = Field(default=None, min_length=1)
     provider_media_grant: ProviderMediaGrantBinding | None = None
+    media_delivery_approval: MediaDeliveryApprovalBinding | None = None
     idempotency_key: str = Field(min_length=1)
     not_before: datetime | None = None
     expires_at: datetime | None = None
@@ -423,6 +434,11 @@ class Action(FrozenModel):
                 raise ValueError("provider media Action requires an exact provider media grant")
         elif self.provider_media_grant is not None:
             raise ValueError("only provider media Actions may carry a provider media grant")
+        if self.kind == "media_delivery":
+            if self.layer != "external_action" or self.media_delivery_approval is None:
+                raise ValueError("media delivery Action requires an exact operator approval")
+        elif self.media_delivery_approval is not None:
+            raise ValueError("only media delivery Actions may carry a delivery approval")
         lease_required_states: frozenset[ActionState] = frozenset(
             {
                 "claimed",
@@ -4250,7 +4266,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.29"
+    reducer_bundle_version: str = "world-v2-reducers.30"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -4300,6 +4316,8 @@ class LedgerProjection(FrozenModel):
     media_inspections: tuple[MediaInspectionRecord, ...] = ()
     media_previews: tuple[MediaPreview, ...] = ()
     media_failed_plan_ids: tuple[str, ...] = ()
+    media_delivery_approvals: tuple[MediaAutomaticDeliveryApproval, ...] = ()
+    media_deliveries: tuple[MediaDeliveryShared, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()

@@ -98,6 +98,10 @@ def _life_identity_components(
         return world_id, _nested(payload, "preview", "preview_id")
     if event_type == "MediaPreviewFailed":
         return world_id, payload.get("plan_id"), "preview_failed"
+    if event_type == "MediaAutomaticDeliveryApproved":
+        return world_id, _nested(payload, "approval", "approval_id"), _nested(payload, "approval", "entity_revision")
+    if event_type == "MediaDeliveryShared":
+        return world_id, _nested(payload, "delivery", "delivery_id")
     if event_type == "ActorAuthorityBootstrapped":
         return world_id, payload.get("authority_id"), payload.get("transition_id")
     if event_type in {

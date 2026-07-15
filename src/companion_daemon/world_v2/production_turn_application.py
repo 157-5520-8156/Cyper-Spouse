@@ -58,7 +58,9 @@ from .expression_payload_store import SQLiteImmutableExpressionPayloadStore
 from .media_v2 import SQLiteImmutableMediaPayloadStore
 from .test_economy import CostProfile
 from .media_execution_runtime import MediaExecutionRuntime, MediaExecutionWorker
-from .media_payload_reader import MediaSidecarPayloadReader
+from .media_payload_reader import MediaSidecarPayloadReader, PlatformAndMediaPayloadReader
+from .media_delivery_runtime import MediaDeliveryRuntime
+from .media_v2 import MediaAutomaticDeliveryApproval
 from .occurrence_content_coordinator import (
     OccurrenceContentCommitRequest,
     OccurrenceContentCoordinator,
@@ -150,6 +152,7 @@ class WorldV2TurnApplication:
         media_payload_store: SQLiteImmutableMediaPayloadStore,
         media_execution: MediaExecutionRuntime,
         media_execution_worker: MediaExecutionWorker | None,
+        media_delivery: MediaDeliveryRuntime,
         occurrence_content: OccurrenceContentCoordinator,
         activity_plans: ActivityPlanRuntime,
         deferred_replies: DeferredReplyRuntime,
@@ -161,6 +164,7 @@ class WorldV2TurnApplication:
         self._media_payload_store = media_payload_store
         self.media_execution = media_execution
         self._media_execution_worker = media_execution_worker
+        self._media_delivery = media_delivery
         self._occurrence_content = occurrence_content
         self._activity_plans = activity_plans
         self._deferred_replies = deferred_replies
@@ -453,6 +457,11 @@ class WorldV2TurnApplication:
     async def drain_actions_once(self) -> ActionPumpResult | None:
         return await self._turns.drain_actions_once()
 
+    async def drain_action(self, action_id: str) -> ActionPumpResult | None:
+        """Drain an ingress-bound Action without globally scheduling siblings."""
+
+        return await self._turns.drain_action(action_id)
+
     async def drain_media_results_once(self, *, logical_time: datetime) -> str | None:
         """Materialize one verified Media v2 provider result sidecar.
 
@@ -465,6 +474,31 @@ class WorldV2TurnApplication:
         if self._media_execution_worker is None:
             return None
         return await self._media_execution_worker.drain_once(logical_time=logical_time)
+
+    async def approve_media_automatic_delivery(
+        self, *, approval: MediaAutomaticDeliveryApproval, trace_id: str,
+        correlation_id: str, causation_id: str,
+    ) -> MediaAutomaticDeliveryApproval:
+        """Record an explicit short-lived operator exception to preview-only media."""
+
+        kwargs = dict(approval=approval, trace_id=trace_id, correlation_id=correlation_id, causation_id=causation_id)
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._media_delivery.approve, **kwargs)
+        return self._media_delivery.approve(**kwargs)
+
+    async def authorize_media_delivery(
+        self, *, approval_id: str, approval_revision: int, actor: str, target: str,
+        account_id: str, amount_limit: int, logical_time: datetime, trace_id: str,
+        correlation_id: str,
+    ):
+        """Authorize one approved immutable artifact; no preview auto-sends."""
+
+        kwargs = dict(approval_id=approval_id, approval_revision=approval_revision, actor=actor,
+                      target=target, account_id=account_id, amount_limit=amount_limit,
+                      logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id)
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._media_delivery.authorize_delivery, **kwargs)
+        return self._media_delivery.authorize_delivery(**kwargs)
 
     async def drain_background_once(
         self,
@@ -653,7 +687,10 @@ def build_sqlite_world_v2_turn_application(
             if fact_model is not None
             else None
         )
-        platform_executor = build_platform_action_executor(ledger=ledger, transport=transport, expression_payload_store=expression_payload_store)
+        platform_executor = build_platform_action_executor(
+            ledger=ledger, transport=transport, expression_payload_store=expression_payload_store,
+            media_payload_store=media_payload_store,
+        )
         action_executor: ActionExecutor = platform_executor
         if media_transport is not None:
             action_executor = RoutedActionExecutor(
@@ -760,6 +797,7 @@ def build_sqlite_world_v2_turn_application(
             media_payload_store=media_payload_store,
             media_execution=media_execution,
             media_execution_worker=media_execution_worker,
+            media_delivery=MediaDeliveryRuntime(ledger=ledger),
             occurrence_content=occurrence_content,
             activity_plans=ActivityPlanRuntime(
                 ledger=ledger,
@@ -781,12 +819,18 @@ def build_sqlite_world_v2_turn_application(
 def build_platform_action_executor(
     *, ledger: SQLiteWorldLedger, transport: PlatformTransport,
     expression_payload_store: SQLiteImmutableExpressionPayloadStore | None = None,
+    media_payload_store: SQLiteImmutableMediaPayloadStore | None = None,
 ) -> ActionExecutor:
     """Bind the platform executor to a read-only accepted-payload capability."""
 
-    return PlatformActionExecutor(payloads=LedgerAuthorizedPayloadReader(
+    payloads = LedgerAuthorizedPayloadReader(
         ledger=ledger, expression_payload_store=expression_payload_store
-    ), transport=transport)
+    )
+    if media_payload_store is not None:
+        payloads = PlatformAndMediaPayloadReader(
+            platform=payloads, media=MediaSidecarPayloadReader(store=media_payload_store),
+        )
+    return PlatformActionExecutor(payloads=payloads, transport=transport)
 
 
 def _bootstrap(

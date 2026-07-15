@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from .media_v2 import ImmutableMediaPayloadStore
-from .platform_action_executor import ResolvedActionPayload
+from .platform_action_executor import AuthorizedPayloadReader, ResolvedActionPayload
 from .schemas import Action
 
 
@@ -23,4 +23,17 @@ class MediaSidecarPayloadReader:
         )
 
 
-__all__ = ["MediaSidecarPayloadReader"]
+class PlatformAndMediaPayloadReader:
+    """Route only delivery bytes to the immutable media-sidecar capability."""
+
+    def __init__(self, *, platform: AuthorizedPayloadReader, media: MediaSidecarPayloadReader) -> None:
+        self._platform = platform
+        self._media = media
+
+    async def resolve(self, action: Action) -> ResolvedActionPayload:
+        if action.kind == "media_delivery":
+            return await self._media.resolve(action)
+        return await self._platform.resolve(action)
+
+
+__all__ = ["MediaSidecarPayloadReader", "PlatformAndMediaPayloadReader"]

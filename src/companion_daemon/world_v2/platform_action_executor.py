@@ -14,12 +14,13 @@ from typing import Literal, Protocol
 
 from .action_pump import ActionExecutor
 from .media_provider_grants import require_provider_media_grant
+from .media_delivery_runtime import require_current_media_delivery_approval
 from .schema_core import FrozenModel
 from .schemas import Action, DispatchPending, LedgerProjection, ProviderReceipt
 
 
 SUPPORTED_PLATFORM_ACTION_KINDS = frozenset(
-    {"reply", "followup", "proactive_message", "reaction", "typing", "sticker"}
+    {"reply", "followup", "proactive_message", "reaction", "typing", "sticker", "media_delivery"}
 )
 CONTENT_TYPES_BY_KIND = {
     "reply": frozenset({"text/plain"}),
@@ -31,6 +32,7 @@ CONTENT_TYPES_BY_KIND = {
     "reaction": frozenset({"application/vnd.world-v2.reaction+json"}),
     "typing": frozenset({"application/vnd.world-v2.typing+json"}),
     "sticker": frozenset({"application/vnd.world-v2.sticker+json"}),
+    "media_delivery": frozenset({"application/vnd.world-v2.media-artifact+json"}),
 }
 
 
@@ -45,7 +47,7 @@ class ResolvedActionPayload(FrozenModel):
 
 class PlatformDispatchRequest(FrozenModel):
     action_id: str
-    kind: Literal["reply", "reaction", "typing", "sticker"]
+    kind: Literal["reply", "reaction", "typing", "sticker", "media_delivery"]
     target: str
     payload_ref: str
     payload_hash: str
@@ -105,6 +107,15 @@ class PlatformActionExecutor(ActionExecutor):
         self._payloads = payloads
         self._transport = transport
 
+    async def assert_dispatch_authorized(self, *, action: Action, projection: LedgerProjection) -> None:
+        """Fail closed for the one platform action that carries media bytes."""
+
+        if action.kind == "media_delivery":
+            require_current_media_delivery_approval(
+                action=action, projection=projection,
+                logical_time=projection.logical_time or action.logical_time,
+            )
+
     async def dispatch(self, action: Action) -> ProviderReceipt | DispatchPending | None:
         request = await self._request_for(action)
         result = await self._transport.send(request)
@@ -133,7 +144,7 @@ class PlatformActionExecutor(ActionExecutor):
         )
 
     @staticmethod
-    def _kind(action: Action) -> Literal["reply", "reaction", "typing", "sticker"]:
+    def _kind(action: Action) -> Literal["reply", "reaction", "typing", "sticker", "media_delivery"]:
         if action.layer != "external_action" or action.kind not in SUPPORTED_PLATFORM_ACTION_KINDS:
             raise ValueError(f"platform executor does not support action kind {action.kind!r}")
         if action.kind in {"followup", "proactive_message"}:

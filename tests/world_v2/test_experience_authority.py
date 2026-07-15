@@ -1183,7 +1183,7 @@ def test_sqlite_migrates_nonempty_v12_legacy_experience_without_fabricated_linea
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
     projected = migrated.project()
-    assert projected.reducer_bundle_version == "world-v2-reducers.29"
+    assert projected.reducer_bundle_version == "world-v2-reducers.30"
     assert len(projected.experiences) == 1
     assert isinstance(projected.experiences[0], LegacyExperienceProjection)
     assert projected.experiences[0].authority_contract_version == "legacy-unverified"

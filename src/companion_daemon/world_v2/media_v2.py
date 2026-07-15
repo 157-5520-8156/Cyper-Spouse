@@ -135,6 +135,68 @@ class MediaPreview(FrozenModel):
     delivery_mode: Literal["preview"] = "preview"
 
 
+class MediaAutomaticDeliveryApproval(FrozenModel):
+    """One operator-issued, revisioned exception to preview-only delivery.
+
+    A rendered image is *never* an implicit permission to transmit it.  This
+    object pins the exact inspected artifact (including a human-review sample
+    hash), recipient and contract versions.  Re-approving the same approval
+    id advances its revision, which invalidates any not-yet-dispatched Action
+    bound to an older revision.
+    """
+
+    approval_id: str = Field(min_length=1, max_length=256)
+    entity_revision: int = Field(ge=1)
+    plan_id: str = Field(min_length=1, max_length=256)
+    inspection_id: str = Field(min_length=1, max_length=256)
+    artifact_id: str = Field(min_length=1, max_length=256)
+    artifact_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    sample_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    recipient_ref: str = Field(min_length=1, max_length=256)
+    operator_ref: str = Field(min_length=1, max_length=256)
+    family: MediaFamily
+    media_machine_version: Literal["media-machine.v5"] = "media-machine.v5"
+    inspection_contract_version: Literal["media-inspection.v7"] = "media-inspection.v7"
+    approved_at: datetime
+    expires_at: datetime
+    approval_contract_version: Literal["media-auto-delivery.1"] = "media-auto-delivery.1"
+
+    @model_validator(mode="after")
+    def approval_is_time_bound_and_sample_bound(self) -> "MediaAutomaticDeliveryApproval":
+        if self.approved_at.tzinfo is None or self.approved_at.utcoffset() is None:
+            raise ValueError("media automatic delivery approval time must be timezone-aware")
+        if self.expires_at.tzinfo is None or self.expires_at.utcoffset() is None:
+            raise ValueError("media automatic delivery approval expiry must be timezone-aware")
+        if self.expires_at <= self.approved_at:
+            raise ValueError("media automatic delivery approval must expire after approval")
+        if self.sample_hash != self.artifact_hash:
+            raise ValueError("operator sample hash must bind the exact inspected artifact")
+        return self
+
+
+class MediaDeliveryShared(FrozenModel):
+    """The sole postcondition claiming that a media artifact reached a viewer."""
+
+    delivery_id: str = Field(min_length=1, max_length=256)
+    approval_id: str = Field(min_length=1, max_length=256)
+    approval_revision: int = Field(ge=1)
+    plan_id: str = Field(min_length=1, max_length=256)
+    inspection_id: str = Field(min_length=1, max_length=256)
+    artifact_id: str = Field(min_length=1, max_length=256)
+    artifact_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    recipient_ref: str = Field(min_length=1, max_length=256)
+    action_id: str = Field(min_length=1, max_length=256)
+    receipt_id: str = Field(min_length=1, max_length=512)
+
+
+class MediaAutomaticDeliveryApprovedPayload(FrozenModel):
+    approval: MediaAutomaticDeliveryApproval
+
+
+class MediaDeliverySharedPayload(FrozenModel):
+    delivery: MediaDeliveryShared
+
+
 class MediaRenderArtifactRecordedPayload(FrozenModel):
     action_id: str = Field(min_length=1)
     receipt_id: str = Field(min_length=1)
@@ -280,6 +342,8 @@ MEDIA_V2_PAYLOAD_MODELS = {
     "MediaPreviewGenerated": MediaPreviewGeneratedPayload,
     "MediaPreviewFailed": MediaPreviewFailedPayload,
     "MediaRepairAuthorized": MediaRepairAuthorizedPayload,
+    "MediaAutomaticDeliveryApproved": MediaAutomaticDeliveryApprovedPayload,
+    "MediaDeliveryShared": MediaDeliverySharedPayload,
 }
 
 
@@ -403,9 +467,25 @@ def media_repair_reservation_id(*, world_id: str, repair_attempt_id: str) -> str
     return "reservation:media-repair:" + media_digest({"world": world_id, "repair": repair_attempt_id})
 
 
+def media_delivery_action_id(*, world_id: str, approval_id: str, approval_revision: int) -> str:
+    return "action:media-delivery:" + media_digest({
+        "world": world_id, "approval": approval_id, "revision": approval_revision,
+    })
+
+
+def media_delivery_reservation_id(*, world_id: str, approval_id: str, approval_revision: int) -> str:
+    return "reservation:media-delivery:" + media_digest({
+        "world": world_id, "approval": approval_id, "revision": approval_revision,
+    })
+
+
+def media_delivery_id(*, action_id: str, receipt_id: str) -> str:
+    return "media-delivery:" + media_digest({"action": action_id, "receipt": receipt_id})
+
+
 __all__ = [
-    "MEDIA_V2_PAYLOAD_MODELS", "PhotoCandidate", "MediaEvidenceSource", "FrozenMediaEvidenceSnapshot", "MediaOpportunity", "MediaPlan", "MediaNotRenderable", "MediaArtifact", "MediaInspectionRecord", "MediaPreview", "MediaRepairAuthorization",
-    "PhotoCandidateOpenedPayload", "MediaOpportunityFrozenPayload", "MediaPlanRecordedPayload", "MediaNotRenderableRecordedPayload", "MediaRenderArtifactRecordedPayload", "MediaInspectionRecordedPayload", "MediaPreviewGeneratedPayload", "MediaPreviewFailedPayload", "MediaRepairAuthorizedPayload",
+    "MEDIA_V2_PAYLOAD_MODELS", "PhotoCandidate", "MediaEvidenceSource", "FrozenMediaEvidenceSnapshot", "MediaOpportunity", "MediaPlan", "MediaNotRenderable", "MediaArtifact", "MediaInspectionRecord", "MediaPreview", "MediaRepairAuthorization", "MediaAutomaticDeliveryApproval", "MediaDeliveryShared",
+    "PhotoCandidateOpenedPayload", "MediaOpportunityFrozenPayload", "MediaPlanRecordedPayload", "MediaNotRenderableRecordedPayload", "MediaRenderArtifactRecordedPayload", "MediaInspectionRecordedPayload", "MediaPreviewGeneratedPayload", "MediaPreviewFailedPayload", "MediaRepairAuthorizedPayload", "MediaAutomaticDeliveryApprovedPayload", "MediaDeliverySharedPayload",
     "StoredMediaPayload", "ImmutableMediaPayloadStore", "InMemoryImmutableMediaPayloadStore", "SQLiteImmutableMediaPayloadStore",
-    "MediaPlanner", "MediaPlanningResult", "media_digest", "media_payload_hash", "planning_request_id", "continuation_trigger_id", "media_repair_trigger_id", "media_repair_attempt_id", "media_repair_action_id", "media_repair_reservation_id",
+    "MediaPlanner", "MediaPlanningResult", "media_digest", "media_payload_hash", "planning_request_id", "continuation_trigger_id", "media_repair_trigger_id", "media_repair_attempt_id", "media_repair_action_id", "media_repair_reservation_id", "media_delivery_action_id", "media_delivery_reservation_id", "media_delivery_id",
 ]

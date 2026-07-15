@@ -8,6 +8,7 @@ from .action_lifecycle import settlement_event_type, transition_action
 from .errors import InvalidActionTransition
 from .event_identity import domain_idempotency_key
 from .expression_lifecycle_runtime import ExpressionReceiptLifecycle
+from .media_delivery_runtime import MediaDeliveryReceiptLifecycle
 from .schemas import (
     Action,
     ActionReconciliation,
@@ -41,6 +42,7 @@ class SettlementPlanner:
     def __init__(self, *, world_id: str) -> None:
         self._world_id = world_id
         self._expression_lifecycle = ExpressionReceiptLifecycle()
+        self._media_delivery_lifecycle = MediaDeliveryReceiptLifecycle()
 
     def recording_events(
         self, result: ExternalObservation, *, trigger_id: str
@@ -272,6 +274,18 @@ class SettlementPlanner:
                 action=action,
                 receipt=receipt,
                 receipt_event=receipt_event,
+            )
+        )
+        events.extend(
+            self._event(
+                result,
+                trigger_id=trigger_id,
+                event_type=event_type,
+                suffix=suffix,
+                payload=payload,
+            )
+            for event_type, suffix, payload in self._media_delivery_lifecycle.events_for_terminal_receipt(
+                projection=projection, action=action, receipt=receipt,
             )
         )
         if receipt.is_terminal:
