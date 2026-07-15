@@ -131,26 +131,28 @@ def test_resolver_derives_message_evidence_and_assertion_from_proof_backed_event
         source_event_id="source:message:profile",
     )
 
+    intent = _intent(
+        FactEvidenceUseV2(
+            evidence_ref="message:profile", purpose="current_fact", anchor=True
+        )
+    )
     resolved = resolver.resolve(
         handle=handle,
-        intent=_intent(
-            FactEvidenceUseV2(
-                evidence_ref="message:profile", purpose="current_fact", anchor=True
-            )
-        ),
+        intent=intent,
         locators=(locator,),
     )
+    material = resolver._sealed_material(sources=resolved, intent=intent)
 
-    assert resolved.evidence_refs[0].ref_id == "message:profile"
-    assert resolved.evidence_refs[0].evidence_type == "observed_message"
-    assert resolved.evidence_refs[0].claim_purpose == "current_fact"
-    assert resolved.evidence_refs[0].source_world_revision == 1
-    assert resolved.evidence_refs[0].immutable_hash == event.payload_hash
-    assert resolved.assertion_binding.source_kind == "observed_message"
-    assert resolved.assertion_binding.actor_ref == "user:primary"
-    assert resolved.assertion_binding.channel == "chat"
-    assert resolved.assertion_binding.payload_ref == "payload:message:profile"
-    assert resolved.assertion_binding.content_payload_hash == "a" * 64
+    assert material.evidence_refs[0].ref_id == "message:profile"
+    assert material.evidence_refs[0].evidence_type == "observed_message"
+    assert material.evidence_refs[0].claim_purpose == "current_fact"
+    assert material.evidence_refs[0].source_world_revision == 1
+    assert material.evidence_refs[0].immutable_hash == event.payload_hash
+    assert material.assertion_binding.source_kind == "observed_message"
+    assert material.assertion_binding.actor_ref == "user:primary"
+    assert material.assertion_binding.channel == "chat"
+    assert material.assertion_binding.payload_ref == "payload:message:profile"
+    assert material.assertion_binding.content_payload_hash == "a" * 64
     ledger.close()
 
 
@@ -169,24 +171,26 @@ def test_resolver_derives_operator_evidence_and_assertion_from_proof_backed_even
         world_id=WORLD, observation_id="operator:profile"
     )
 
+    intent = _intent(
+        FactEvidenceUseV2(
+            evidence_ref="operator:profile", purpose="current_fact", anchor=True
+        )
+    )
     resolved = resolver.resolve(
         handle=handle,
-        intent=_intent(
-            FactEvidenceUseV2(
-                evidence_ref="operator:profile", purpose="current_fact", anchor=True
-            )
-        ),
+        intent=intent,
         locators=(locator,),
     )
+    material = resolver._sealed_material(sources=resolved, intent=intent)
 
-    assert resolved.evidence_refs[0].evidence_type == "operator_observation"
-    assert resolved.evidence_refs[0].source_world_revision >= 1
-    assert resolved.evidence_refs[0].immutable_hash == "b" * 64
-    assert resolved.assertion_binding.source_kind == "operator_observation"
-    assert resolved.assertion_binding.actor_ref is None
-    assert resolved.assertion_binding.channel is None
-    assert resolved.assertion_binding.payload_ref is None
-    assert resolved.assertion_binding.content_payload_hash == "b" * 64
+    assert material.evidence_refs[0].evidence_type == "operator_observation"
+    assert material.evidence_refs[0].source_world_revision >= 1
+    assert material.evidence_refs[0].immutable_hash == "b" * 64
+    assert material.assertion_binding.source_kind == "operator_observation"
+    assert material.assertion_binding.actor_ref is None
+    assert material.assertion_binding.channel is None
+    assert material.assertion_binding.payload_ref is None
+    assert material.assertion_binding.content_payload_hash == "b" * 64
     ledger.close()
 
 

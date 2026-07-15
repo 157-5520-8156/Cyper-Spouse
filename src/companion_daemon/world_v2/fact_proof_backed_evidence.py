@@ -10,11 +10,14 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import dataclass
+from threading import RLock
+from weakref import WeakKeyDictionary
 
 from .fact_accepted_contracts import (
     FactAssertionBindingV2,
     FactCommitIntentV2,
     ResolvedFactEvidenceV2,
+    canonical_fact_commit_intent_json,
 )
 from .ledger import HistoricalLedgerEvent, ObservationEventLocator
 from .schemas import Observation
@@ -30,16 +33,35 @@ class FactEvidenceResolutionError(ValueError):
 
 
 @dataclass(frozen=True, slots=True)
-class ResolvedFactCommitSourcesV2:
-    """Inert source material for exactly one Fact commit intent.
+class _ResolvedFactCommitSourceMaterialV2:
+    """Resolver-private source image for one exact canonical Fact intent."""
 
-    ``evidence_refs`` is intentionally the same canonical order as the intent
-    evidence uses.  ``assertion_binding`` is derived from the asserted source
-    event, never from a proposal payload or a projection shortcut.
-    """
-
+    intent_json: str
     evidence_refs: tuple[ResolvedFactEvidenceV2, ...]
     assertion_binding: FactAssertionBindingV2
+
+
+class ResolvedFactCommitSourcesV2:
+    """Opaque resolver-issued capability for one exact Fact intent.
+
+    The evidence and assertion image deliberately do not live on this public
+    object.  A freshly constructed instance has no resolver registry entry and
+    therefore cannot be used to materialize a Fact change.  This still has no
+    ledger-writing authority: it is only a proof that one exact resolver read
+    the source observations at one of its reader-issued historical pins.
+    """
+
+    __slots__ = ("__weakref__",)
+
+    def __reduce__(self) -> object:
+        raise TypeError("resolved Fact source capabilities cannot be serialized")
+
+    def __copy__(self) -> object:
+        raise TypeError("resolved Fact source capabilities cannot be copied")
+
+    def __deepcopy__(self, memo: object) -> object:
+        del memo
+        raise TypeError("resolved Fact source capabilities cannot be copied")
 
 
 class ProofBackedFactEvidenceResolverV2:
@@ -52,12 +74,16 @@ class ProofBackedFactEvidenceResolverV2:
     or a same-named observation.
     """
 
-    __slots__ = ("__reader",)
+    __slots__ = ("__reader", "__sources", "__sources_lock")
 
     def __init__(self, *, reader: SQLiteProofBackedObservationReader) -> None:
         if type(reader) is not SQLiteProofBackedObservationReader:
             raise TypeError("Fact proof resolver requires an exact SQLite proof reader")
         self.__reader = reader
+        self.__sources: WeakKeyDictionary[
+            ResolvedFactCommitSourcesV2, _ResolvedFactCommitSourceMaterialV2
+        ] = WeakKeyDictionary()
+        self.__sources_lock = RLock()
 
     def resolve(
         self,
@@ -104,7 +130,8 @@ class ProofBackedFactEvidenceResolverV2:
             assertion_by_ref[evidence.ref_id] = binding
 
         try:
-            return ResolvedFactCommitSourcesV2(
+            material = _ResolvedFactCommitSourceMaterialV2(
+                intent_json=canonical_fact_commit_intent_json(intent),
                 evidence_refs=tuple(evidence_by_ref[ref] for ref in expected_refs),
                 assertion_binding=assertion_by_ref[intent.assertion_source_ref],
             )
@@ -112,6 +139,38 @@ class ProofBackedFactEvidenceResolverV2:
             raise FactEvidenceResolutionError(
                 "Fact assertion source was not resolved from pinned history"
             ) from exc
+        sources = ResolvedFactCommitSourcesV2()
+        with self.__sources_lock:
+            self.__sources[sources] = material
+        return sources
+
+    def _sealed_material(
+        self,
+        *,
+        sources: ResolvedFactCommitSourcesV2,
+        intent: FactCommitIntentV2,
+    ) -> _ResolvedFactCommitSourceMaterialV2:
+        """Return one issuer-verified source image for the sealed adapter.
+
+        This deliberately remains module-private API.  The adapter passes the
+        canonical intent it sealed from its proposal; a capability issued for a
+        different assertion, purpose, or subject is rejected before any Fact
+        payload is shaped.
+        """
+
+        if type(sources) is not ResolvedFactCommitSourcesV2:
+            raise FactEvidenceResolutionError(
+                "Fact sources must come from the proof-backed resolver result"
+            )
+        if type(intent) is not FactCommitIntentV2:
+            raise FactEvidenceResolutionError("Fact source intent must use its exact v2 contract")
+        with self.__sources_lock:
+            material = self.__sources.get(sources)
+        if material is None:
+            raise FactEvidenceResolutionError("Fact source capability is not owned by this resolver")
+        if material.intent_json != canonical_fact_commit_intent_json(intent):
+            raise FactEvidenceResolutionError("Fact source capability belongs to another Fact intent")
+        return material
 
 
 def _exact_locators_for_refs(

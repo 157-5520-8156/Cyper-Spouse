@@ -15,12 +15,15 @@ and installed policy matrix; it must not make this module's DTO an authority.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Literal
+from weakref import WeakKeyDictionary
 
 from pydantic import Field, model_validator
 
 from .fact_accepted_contracts import (
     FactAssertionBindingV2,
+    FactCommitIntentV2,
     FactCommitMaterializedPayloadV2,
     FactCommitValuesV2,
     ResolvedFactEvidenceV2,
@@ -30,7 +33,11 @@ from .fact_accepted_contracts import (
     rehydrate_fact_commit_intent_v2_json,
     rehydrate_fact_commit_materialized_v2,
 )
-from .fact_proof_backed_evidence import ResolvedFactCommitSourcesV2
+from .fact_proof_backed_evidence import (
+    FactEvidenceResolutionError,
+    ProofBackedFactEvidenceResolverV2,
+    ResolvedFactCommitSourcesV2,
+)
 from .proposal_envelope_v2 import (
     FactCommitProposalEnvelopeV2,
     FactCommitTypedChangeV2,
@@ -65,34 +72,14 @@ class FactCommitPolicyResolutionV2(FrozenModel):
 
 
 class SealedFactCommitCompilationHandleV2:
-    """Non-durable adapter-issued binding of one Fact change and policy result."""
+    """Opaque adapter-issued capability for one bound Fact compilation.
 
-    __slots__ = ("__authority", "__change", "__policy", "__proposal", "__world_id")
+    All inputs are held only by the issuing adapter's weak registry.  Direct
+    construction creates an unowned blank capability, which is rejected by
+    ``compile`` and ``reverse_verify``.
+    """
 
-    def __init__(
-        self,
-        *,
-        authority: object | None = None,
-        proposal: FactCommitProposalEnvelopeV2 | None = None,
-        change: FactCommitTypedChangeV2 | None = None,
-        policy: FactCommitPolicyResolutionV2 | None = None,
-        world_id: str | None = None,
-    ) -> None:
-        if authority is None or proposal is None or change is None or policy is None or world_id is None:
-            raise TypeError("sealed Fact compilation handles are adapter-issued")
-        self.__authority = authority
-        self.__proposal = proposal
-        self.__change = change
-        self.__policy = policy
-        self.__world_id = world_id
-
-    def issued_by(self, authority: object) -> bool:
-        return self.__authority is authority
-
-    def inputs(
-        self,
-    ) -> tuple[FactCommitProposalEnvelopeV2, FactCommitTypedChangeV2, FactCommitPolicyResolutionV2, str]:
-        return self.__proposal, self.__change, self.__policy, self.__world_id
+    __slots__ = ("__weakref__",)
 
     def __reduce__(self) -> object:
         raise TypeError("sealed Fact compilation handles cannot be serialized")
@@ -105,13 +92,26 @@ class SealedFactCommitCompilationHandleV2:
         raise TypeError("sealed Fact compilation handles cannot be copied")
 
 
+@dataclass(frozen=True, slots=True)
+class _SealedFactCommitCompilationInputsV2:
+    proposal: FactCommitProposalEnvelopeV2
+    change: FactCommitTypedChangeV2
+    policy: FactCommitPolicyResolutionV2
+    world_id: str
+
+
 class SealedFactCommitAdapterV2:
     """Deep, side-effect-free module for one sealed Fact commit compilation."""
 
-    __slots__ = ("__authority",)
+    __slots__ = ("__handles", "__resolver")
 
-    def __init__(self) -> None:
-        self.__authority = object()
+    def __init__(self, *, resolver: ProofBackedFactEvidenceResolverV2) -> None:
+        if type(resolver) is not ProofBackedFactEvidenceResolverV2:
+            raise TypeError("sealed Fact adapter requires an exact proof-backed Fact resolver")
+        self.__resolver = resolver
+        self.__handles: WeakKeyDictionary[
+            SealedFactCommitCompilationHandleV2, _SealedFactCommitCompilationInputsV2
+        ] = WeakKeyDictionary()
 
     def bind(
         self,
@@ -134,13 +134,14 @@ class SealedFactCommitAdapterV2:
             raise SealedFactCommitAdapterError(
                 "Fact policy resolution does not exactly bind change policy refs"
             )
-        return SealedFactCommitCompilationHandleV2(
-            authority=self.__authority,
+        handle = SealedFactCommitCompilationHandleV2()
+        self.__handles[handle] = _SealedFactCommitCompilationInputsV2(
             proposal=strict_proposal,
             change=strict_change,
             policy=strict_policy,
             world_id=world_id,
         )
+        return handle
 
     def compile(
         self,
@@ -153,7 +154,12 @@ class SealedFactCommitAdapterV2:
         if type(acceptance_id) is not str or not acceptance_id or len(acceptance_id) > 256:
             raise SealedFactCommitAdapterError("Fact acceptance id is invalid")
         intent = rehydrate_fact_commit_intent_v2_json(change.payload.canonical_json)
-        evidence, assertion = _strict_sources(sources=sources, intent= intent)
+        evidence, assertion = _strict_sources(
+            resolver=self.__resolver,
+            sources=sources,
+            intent=intent,
+            proposal=proposal,
+        )
         full_change_authority_hash = canonical_full_change_authority_hash_v2(change)
         values = FactCommitValuesV2(
             subject_ref=intent.subject_ref,
@@ -224,11 +230,12 @@ class SealedFactCommitAdapterV2:
     def _inputs(
         self, handle: SealedFactCommitCompilationHandleV2
     ) -> tuple[FactCommitProposalEnvelopeV2, FactCommitTypedChangeV2, FactCommitPolicyResolutionV2, str]:
-        if type(handle) is not SealedFactCommitCompilationHandleV2 or not handle.issued_by(
-            self.__authority
-        ):
+        if type(handle) is not SealedFactCommitCompilationHandleV2:
             raise SealedFactCommitAdapterError("Fact compilation handle belongs to another adapter")
-        return handle.inputs()
+        inputs = self.__handles.get(handle)
+        if inputs is None:
+            raise SealedFactCommitAdapterError("Fact compilation handle belongs to another adapter")
+        return inputs.proposal, inputs.change, inputs.policy, inputs.world_id
 
 
 def _strict_proposal(
@@ -266,27 +273,60 @@ def _strict_policy(value: FactCommitPolicyResolutionV2) -> FactCommitPolicyResol
 
 
 def _strict_sources(
-    *, sources: ResolvedFactCommitSourcesV2, intent: object
+    *,
+    resolver: ProofBackedFactEvidenceResolverV2,
+    sources: ResolvedFactCommitSourcesV2,
+    intent: object,
+    proposal: FactCommitProposalEnvelopeV2,
 ) -> tuple[tuple[ResolvedFactEvidenceV2, ...], FactAssertionBindingV2]:
+    if type(intent) is not FactCommitIntentV2:
+        raise SealedFactCommitAdapterError("sealed Fact intent is invalid")
+    if type(resolver) is not ProofBackedFactEvidenceResolverV2:
+        raise SealedFactCommitAdapterError("Fact sources require the bound proof-backed resolver")
     if type(sources) is not ResolvedFactCommitSourcesV2:
         raise SealedFactCommitAdapterError("Fact sources must come from the proof-backed resolver result")
     # ``intent`` is rehydrated immediately above; this guard prevents accepting
     # a duck-typed proposal object as a source of evidence ordering.
     expected_refs = tuple(use.evidence_ref for use in intent.evidence_uses)  # type: ignore[union-attr]
     try:
+        material = resolver._sealed_material(sources=sources, intent=intent)  # noqa: SLF001
         evidence = tuple(
             ResolvedFactEvidenceV2.model_validate(item.model_dump(), strict=True)
-            for item in sources.evidence_refs
+            for item in material.evidence_refs
         )
         assertion = FactAssertionBindingV2.model_validate(
-            sources.assertion_binding.model_dump(), strict=True
+            material.assertion_binding.model_dump(), strict=True
         )
+    except FactEvidenceResolutionError as exc:
+        raise SealedFactCommitAdapterError(str(exc)) from exc
     except Exception as exc:
         raise SealedFactCommitAdapterError("proof-backed Fact sources are structurally invalid") from exc
     if tuple(item.ref_id for item in evidence) != expected_refs:
         raise SealedFactCommitAdapterError("proof-backed Fact sources do not exactly match intent evidence")
     if assertion.source_ref != intent.assertion_source_ref:
         raise SealedFactCommitAdapterError("proof-backed assertion does not match Fact assertion source")
+    if assertion.asserted_subject_ref != intent.subject_ref:
+        raise SealedFactCommitAdapterError("proof-backed assertion does not match Fact subject")
+    uses_by_ref = {item.evidence_ref: item for item in intent.evidence_uses}
+    proposal_by_ref = {item.ref_id: item for item in proposal.evidence_refs}
+    for item in evidence:
+        use = uses_by_ref.get(item.ref_id)
+        proposed = proposal_by_ref.get(item.ref_id)
+        if use is None or item.claim_purpose != use.purpose:
+            raise SealedFactCommitAdapterError("proof-backed Fact source purpose does not match intent")
+        if proposed is None:
+            raise SealedFactCommitAdapterError("proof-backed Fact source is absent from sealed proposal")
+        if (
+            item.evidence_type != proposed.evidence_kind
+            or item.source_world_revision != proposed.source_world_revision
+            or item.immutable_hash != proposed.immutable_hash.removeprefix("sha256:")
+        ):
+            raise SealedFactCommitAdapterError(
+                "proof-backed Fact source does not match sealed proposal evidence"
+            )
+    asserted = next(item for item in evidence if item.ref_id == assertion.source_ref)
+    if assertion.source_kind != asserted.evidence_type:
+        raise SealedFactCommitAdapterError("proof-backed assertion kind does not match its evidence")
     return evidence, assertion
 
 
