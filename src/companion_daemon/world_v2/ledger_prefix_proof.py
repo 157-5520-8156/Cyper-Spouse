@@ -10,11 +10,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import hmac
 from typing import Final
 
 
 _HASH_BYTES: Final = 32
 _SMT_DEPTH: Final = 256
+_MAX_U64: Final = (1 << 63) - 1
+_MAX_MMR_LEAVES: Final = 1_000_000
+_MAX_SMT_ENTRIES: Final = 131_072
 _EMPTY_LEAF: Final = hashlib.sha256(b"world-v2-smt-empty-leaf.1").digest()
 
 
@@ -53,7 +57,9 @@ def _record(contract: str, fields: tuple[tuple[str, str | int | bytes], ...]) ->
 
 
 def _hex_hash(value: str, *, label: str) -> bytes:
-    if type(value) is not str or len(value) != _HASH_BYTES * 2:
+    if type(value) is not str or len(value) != _HASH_BYTES * 2 or any(
+        character not in "0123456789abcdef" for character in value
+    ):
         raise ValueError(f"{label} must be a sha256 hex string")
     try:
         decoded = bytes.fromhex(value)
@@ -139,13 +145,13 @@ class PrefixCheckpointLeafV1:
 
 
 def _require_nonnegative(value: int, *, label: str) -> int:
-    if type(value) is not int or value < 0:
+    if type(value) is not int or not 0 <= value <= _MAX_U64:
         raise ValueError(f"{label} must be a non-negative integer")
     return value
 
 
 def _require_positive(value: int, *, label: str) -> int:
-    if type(value) is not int or value < 1:
+    if type(value) is not int or not 1 <= value <= _MAX_U64:
         raise ValueError(f"{label} must be a positive integer")
     return value
 
@@ -204,7 +210,7 @@ class MmrInclusionProofV1:
             if type(sibling) is not bytes or len(sibling) != _HASH_BYTES:
                 raise ValueError("MMR proof sibling is invalid")
             current = _mmr_parent(sibling, current) if (relative >> level) & 1 else _mmr_parent(current, sibling)
-        if current != self.peaks[self.peak_index] or _mmr_root(self.peaks, self.leaf_count) != expected_root:
+        if not hmac.compare_digest(current, self.peaks[self.peak_index]) or not hmac.compare_digest(_mmr_root(self.peaks, self.leaf_count), expected_root):
             raise ValueError("MMR inclusion proof does not verify")
 
 
@@ -215,7 +221,7 @@ class AppendMmrV1:
     leaves: tuple[bytes, ...] = ()
 
     def __post_init__(self) -> None:
-        if any(type(leaf) is not bytes or len(leaf) != _HASH_BYTES for leaf in self.leaves):
+        if len(self.leaves) > _MAX_MMR_LEAVES or any(type(leaf) is not bytes or len(leaf) != _HASH_BYTES for leaf in self.leaves):
             raise ValueError("MMR leaves must be hash bytes")
 
     @property
@@ -259,6 +265,29 @@ class AppendMmrV1:
         raise AssertionError("unreachable MMR peak lookup")
 
 
+def verify_checkpoint_in_prefix(
+    *,
+    checkpoint: PrefixCheckpointLeafV1,
+    proof: MmrInclusionProofV1,
+    expected_root: bytes,
+    expected_world_id: str,
+    expected_commit_id: str,
+    expected_cursor: tuple[int, int, int],
+) -> None:
+    """Bind a checkpoint inclusion proof to one requested historical cursor."""
+
+    if (
+        checkpoint.world_id != expected_world_id
+        or checkpoint.commit_id != expected_commit_id
+        or (checkpoint.world_revision, checkpoint.deliberation_revision, checkpoint.last_ledger_sequence)
+        != expected_cursor
+    ):
+        raise ValueError("checkpoint proof does not match the requested cursor")
+    if checkpoint.mmr_leaf_count != proof.leaf_index + 1 or proof.leaf_count < checkpoint.mmr_leaf_count:
+        raise ValueError("checkpoint proof position is not its committed prefix tail")
+    proof.verify(leaf_hash=checkpoint.digest(), expected_root=expected_root)
+
+
 def _complete_root(leaves: tuple[bytes, ...]) -> bytes:
     if len(leaves) < 1 or len(leaves) & (len(leaves) - 1):
         raise ValueError("MMR peak must contain a power of two leaves")
@@ -280,6 +309,8 @@ def _complete_siblings(leaves: tuple[bytes, ...], index: int) -> tuple[bytes, ..
 
 
 def observation_locator_key(*, world_id: str, event_type: str, idempotency_key: str) -> bytes:
+    if event_type not in {"ObservationRecorded", "OperatorObservationRecorded"}:
+        raise ValueError("locator event_type is not an observation event")
     return _hash(
         "world-v2-observation-locator-key.1",
         _record(
@@ -317,7 +348,7 @@ class SparseMerkleProofV1:
     value_hash: bytes | None
     siblings: tuple[bytes, ...]
 
-    def verify(self, *, expected_root: bytes) -> None:
+    def _verify(self, *, expected_root: bytes) -> None:
         if type(self.key) is not bytes or len(self.key) != _HASH_BYTES:
             raise ValueError("SMT proof key is invalid")
         if self.value_hash is not None and (type(self.value_hash) is not bytes or len(self.value_hash) != _HASH_BYTES):
@@ -329,8 +360,20 @@ class SparseMerkleProofV1:
         for depth in range(_SMT_DEPTH - 1, -1, -1):
             sibling = self.siblings[depth]
             current = _smt_parent(sibling, current) if (key_int >> (_SMT_DEPTH - 1 - depth)) & 1 else _smt_parent(current, sibling)
-        if type(expected_root) is not bytes or len(expected_root) != _HASH_BYTES or current != expected_root:
+        if type(expected_root) is not bytes or len(expected_root) != _HASH_BYTES or not hmac.compare_digest(current, expected_root):
             raise ValueError("SMT proof does not verify")
+
+    def verify_membership(
+        self, *, expected_root: bytes, expected_key: bytes, expected_value_hash: bytes
+    ) -> None:
+        if not hmac.compare_digest(self.key, expected_key) or self.value_hash is None or not hmac.compare_digest(self.value_hash, expected_value_hash):
+            raise ValueError("SMT membership proof does not match the requested locator")
+        self._verify(expected_root=expected_root)
+
+    def verify_nonmembership(self, *, expected_root: bytes, expected_key: bytes) -> None:
+        if not hmac.compare_digest(self.key, expected_key) or self.value_hash is not None:
+            raise ValueError("SMT non-membership proof does not match the requested locator")
+        self._verify(expected_root=expected_root)
 
 
 @dataclass(frozen=True, slots=True)
@@ -340,6 +383,8 @@ class SparseMerkleMapV1:
     entries: tuple[tuple[bytes, bytes], ...] = ()
 
     def __post_init__(self) -> None:
+        if len(self.entries) > _MAX_SMT_ENTRIES:
+            raise ValueError("SMT entries exceed the proof contract")
         prior: bytes | None = None
         for key, value in self.entries:
             if type(key) is not bytes or len(key) != _HASH_BYTES or type(value) is not bytes or len(value) != _HASH_BYTES:
