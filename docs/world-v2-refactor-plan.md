@@ -2243,12 +2243,14 @@ SQLite 升级纪律：
 
 1. Fact `.12`、Experience A2 `.13`、MemoryCandidate F2 `.14`、CharacterCore `.15`、Goal/Location/Resource/Attention `.16`、Expression/Thread/Commitment `.17` 与 accepted/rejected/stale audit foundation `.18` 已形成既有 authority；不得因 Runtime 消费尚未实现而重复发明写路径。
 2. accepted compiler foundation 已按 `docs/design/world-v2-accepted-effect-compiler.md` 完成第一段 inert seam，专项测试 `28 passed`、World v2 回归 `792 passed`、两轮独立最终 gate 均为 `P0=0、P1=0`。它尚未授权任何 production adapter，也未开启 accepted integration。
-3. 下一片先写 `FactCommitted` commit-only adapter 的冻结规格，不同时开放 correct/withdraw/compensate。必须先补齐或解析 `value_ref`、assertion provenance、evidence purpose/type、confidence、after-image canonical binding 与 observation authority；缺失字段不得由 compiler 猜测。
-4. Fact adapter 必须使用 sealed install manifest 绑定 callable、compiler/verifier/codec digest，并闭合 `ProposalEnvelope full_change_authority_hash ↔ Fact accepted_change_hash ↔ manifest effect authority`；不能复用旧单-change adjacency 冒充 manifest-v2 authority。
-5. 完成 Fact compile → reverse verify → plan → manifest → atomic recorder → reducer → SQLite reopen/replay 的完整纵切和约 30–36 项攻击测试后，才允许把该唯一 coverage 标为 supported；其余 coverage 继续 fail closed。
-6. 随后按 Appraisal → Affect → Expression → read-only Action/Budget 的依赖顺序接入；Action 前必须先完成 enforcement-eligible grant、actor origin、processor/tool consent/privacy scope、预算 origin/window，不得消费 shadow-only authorization projection。
-7. 每包执行 11.2.1 的 proposal、source、clock、privacy、zero-cascade、SQLite/replay/tamper 攻击套件，并更新 10.0 的实际 bundle；接入 trace 必须证明“来源 → head → Capsule → 主模型选择 → accepted/无 accepted → settlement → 后续消费”。
-8. 继续暂停旧 Engine 上的非 P0 行为补丁；平台和 QQ 最后迁移，本轮 authority 测试不依赖 QQ。
+3. 下一片先写 `FactCommitted` commit-only adapter 的冻结规格，不同时开放 correct/withdraw/compensate。必须先补齐或解析 `value_ref`、assertion provenance、evidence purpose/type、confidence 与 observation authority；缺失字段不得由 compiler 猜测，模型也不得注入带 event origin/time 的完整 after-image。
+4. Fact commit-only 的冻结规格见 `docs/design/world-v2-fact-accepted-compiler.md`。它采用 `FactCommitIntentV2 → FactCommitMaterializedPayloadV2`：模型只选择语义和证据用途，trusted reader解析真实provenance，reducer用实际event id/logical time构造最终FactProjection；不得修改全局planner的最终payload-hash身份合同。
+5. Fact adapter 必须使用 sealed install manifest 绑定 callable、compiler/verifier/codec digest，并闭合 `ProposalEnvelope full_change_authority_hash ↔ Fact concrete mutation hash ↔ manifest effect authority`；不能复用旧单-change adjacency冒充manifest-v2 authority。
+6. ManifestBuilder、AtomicRecorder、exact batch、ledger full-cursor CAS、reducer双lane与commit-aware replay的冻结规格见 `docs/design/world-v2-accepted-manifest-recorder.md`。Recorder是唯一WorldEvent materializer，任何DTO/test handle都不能进入accepted commit。
+7. 完成 Fact compile → reverse verify → plan → manifest → atomic recorder → reducer → SQLite reopen/replay 的完整纵切和36项攻击测试后，才允许把该唯一coverage标为supported；其余coverage继续fail closed。
+8. 随后按 Appraisal → Affect → Expression → read-only Action/Budget 的依赖顺序接入；Action 前必须先完成 enforcement-eligible grant、actor origin、processor/tool consent/privacy scope、预算 origin/window，不得消费 shadow-only authorization projection。
+9. 每包执行 11.2.1 的 proposal、source、clock、privacy、zero-cascade、SQLite/replay/tamper 攻击套件，并更新 10.0 的实际 bundle；接入 trace 必须证明“来源 → head → Capsule → 主模型选择 → accepted/无 accepted → settlement → 后续消费”。
+10. 继续暂停旧 Engine 上的非 P0 行为补丁；平台和 QQ 最后迁移，本轮 authority 测试不依赖 QQ。
 
 ## 14. 三份原计划覆盖索引
 
