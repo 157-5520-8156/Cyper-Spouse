@@ -11,9 +11,11 @@ from companion_daemon.world_v2.ledger_prefix_proof import (
     LedgerLeafV1,
     PrefixCheckpointLeafV1,
     SparseMerkleMapV1,
+    mmr_append_plan_from_node_lookup_v1,
     mmr_inclusion_proof_from_node_lookup_v1,
     mmr_root_from_node_lookup_v1,
     observation_locator_key,
+    sparse_merkle_put_from_node_lookup_v1,
     verify_checkpoint_in_prefix,
 )
 
@@ -182,6 +184,55 @@ def test_incremental_builders_match_reference_proofs() -> None:
         )
 
 
+def test_addressed_sparse_put_matches_incremental_map_without_full_restore() -> None:
+    keys = tuple(_hash(f"addressed-key:{index}") for index in range(5))
+    values = tuple(_hash(f"addressed-value:{index}") for index in range(5))
+    reference = SparseMerkleMapV1()
+    persisted_nodes: dict[tuple[int, int], bytes] = {}
+    persisted_values: dict[bytes, bytes] = {}
+
+    for key, value in zip(keys, values, strict=True):
+        requested_addresses: list[tuple[int, int]] = []
+
+        def sibling_at(depth: int, prefix: int) -> bytes | None:
+            requested_addresses.append((depth, prefix))
+            return persisted_nodes.get((depth, prefix))
+
+        update = sparse_merkle_put_from_node_lookup_v1(
+            key=key, value_hash=value, node_lookup=sibling_at
+        )
+        # The adapter reads exactly one sibling per level, never a materialized
+        # map or the path that is about to be overwritten.
+        assert len(requested_addresses) == 256
+        updated_addresses = {(depth, prefix) for depth, prefix, _hash_value in update.node_updates}
+        assert not set(requested_addresses) & updated_addresses
+
+        persisted_nodes.update(
+            {(depth, prefix): node_hash for depth, prefix, node_hash in update.node_updates}
+        )
+        persisted_values[key] = value
+        reference = reference.put(key=key, value_hash=value)
+        assert update.root == reference.root
+
+    restored = IncrementalSparseMerkleMapV1.restore(
+        nodes=persisted_nodes, values=persisted_values
+    )
+    assert restored.root == reference.root
+    for key, value in zip(keys, values, strict=True):
+        restored.prove(key).verify_membership(
+            expected_root=reference.root, expected_key=key, expected_value_hash=value
+        )
+
+
+def test_addressed_sparse_put_fails_closed_for_invalid_persisted_sibling() -> None:
+    with pytest.raises(ValueError, match="persisted SMT sibling"):
+        sparse_merkle_put_from_node_lookup_v1(
+            key=_hash("bad-sibling-key"),
+            value_hash=_hash("bad-sibling-value"),
+            node_lookup=lambda _depth, _prefix: b"too-short",
+        )
+
+
 def test_addressed_mmr_lookup_matches_incremental_proofs_without_full_state() -> None:
     leaves = tuple(_hash(f"lookup-leaf:{index}") for index in range(13))
     incremental = IncrementalMmrV1()
@@ -226,4 +277,42 @@ def test_addressed_mmr_lookup_fails_closed_for_missing_path_node() -> None:
             node_lookup=lambda height, node_index: None
             if (height, node_index) == (0, 2)
             else incremental.nodes.get((height, node_index)),
+        )
+
+
+def test_addressed_mmr_append_plan_matches_incremental_builder_without_full_restore() -> None:
+    leaves = tuple(_hash(f"append-plan:{index}") for index in range(23))
+    persisted_nodes: dict[tuple[int, int], bytes] = {}
+    reference = IncrementalMmrV1()
+
+    for expected_index, leaf in enumerate(leaves):
+        requested_addresses: list[tuple[int, int]] = []
+
+        def node_at(height: int, node_index: int) -> bytes | None:
+            requested_addresses.append((height, node_index))
+            return persisted_nodes.get((height, node_index))
+
+        plan = mmr_append_plan_from_node_lookup_v1(
+            leaf_count=expected_index,
+            leaf_hash=leaf,
+            node_lookup=node_at,
+        )
+        assert plan.leaf_index == expected_index
+        assert plan.leaf_count == expected_index + 1
+        persisted_nodes.update(
+            {(height, node_index): node_hash for height, node_index, node_hash in plan.node_writes}
+        )
+        reference.append(leaf)
+        assert plan.root == reference.root
+        # Carry reads plus next-prefix peaks are logarithmic, not a scan of
+        # persisted_nodes (which has already grown beyond this bound).
+        assert len(requested_addresses) <= 2 * (expected_index + 1).bit_length()
+
+
+def test_addressed_mmr_append_plan_fails_closed_for_missing_carry_node() -> None:
+    with pytest.raises(ValueError, match="carry node is missing"):
+        mmr_append_plan_from_node_lookup_v1(
+            leaf_count=3,
+            leaf_hash=_hash("missing-carry"),
+            node_lookup=lambda _height, _node_index: None,
         )

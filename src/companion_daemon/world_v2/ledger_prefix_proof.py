@@ -283,6 +283,77 @@ class MmrInclusionProofV1:
             raise ValueError("MMR inclusion proof does not verify")
 
 
+@dataclass(frozen=True, slots=True)
+class MmrAppendPlanV1:
+    """The addressed writes and resulting root for one durable MMR append.
+
+    The plan intentionally contains only the leaf and carry-chain nodes that
+    change.  A durable adapter can calculate it through point reads, write the
+    returned nodes in its surrounding transaction, and update its prefix head
+    without constructing :class:`IncrementalMmrV1` or loading old nodes.
+    """
+
+    leaf_index: int
+    leaf_count: int
+    root: bytes
+    node_writes: tuple[tuple[int, int, bytes], ...]
+
+
+def mmr_append_plan_from_node_lookup_v1(
+    *,
+    leaf_count: int,
+    leaf_hash: bytes,
+    node_lookup: Callable[[int, int], bytes | None],
+) -> MmrAppendPlanV1:
+    """Plan an append using only the previous MMR's carry-chain nodes.
+
+    This is the mutation counterpart to
+    :func:`mmr_root_from_node_lookup_v1`: it asks ``node_lookup`` for one
+    existing peak for every trailing-one bit in ``leaf_count`` (at most
+    ``O(log N)``).  It never accepts a full node mapping, so adapter code
+    cannot accidentally turn each append into an all-history restore.
+    """
+
+    _require_nonnegative(leaf_count, label="MMR leaf_count")
+    if leaf_count >= _MAX_I63:
+        raise ValueError("MMR leaf count exceeds the storage contract")
+    _require_hash_bytes(leaf_hash, label="MMR leaf")
+    if not callable(node_lookup):
+        raise TypeError("MMR node lookup must be callable")
+
+    leaf_index = leaf_count
+    writes: dict[tuple[int, int], bytes] = {(0, leaf_index): leaf_hash}
+    carry = leaf_hash
+    height = 0
+    while (leaf_index >> height) & 1:
+        # At height h, the left peak immediately preceding leaf_index is the
+        # final completed h-node block: index (leaf_index >> h) - 1.
+        left = node_lookup(height, (leaf_index >> height) - 1)
+        if left is None:
+            raise ValueError("persisted MMR carry node is missing")
+        carry = _mmr_parent(_require_hash_bytes(left, label="persisted MMR carry node"), carry)
+        height += 1
+        writes[(height, leaf_index >> height)] = carry
+
+    next_leaf_count = leaf_count + 1
+
+    def merged_lookup(node_height: int, node_index: int) -> bytes | None:
+        return writes.get((node_height, node_index), node_lookup(node_height, node_index))
+
+    return MmrAppendPlanV1(
+        leaf_index=leaf_index,
+        leaf_count=next_leaf_count,
+        root=mmr_root_from_node_lookup_v1(
+            leaf_count=next_leaf_count,
+            node_lookup=merged_lookup,
+        ),
+        node_writes=tuple(
+            (node_height, node_index, node_hash)
+            for (node_height, node_index), node_hash in sorted(writes.items())
+        ),
+    )
+
+
 def mmr_root_from_node_lookup_v1(
     *, leaf_count: int, node_lookup: Callable[[int, int], bytes | None]
 ) -> bytes:
@@ -694,6 +765,70 @@ class IncrementalSparseMerkleMapV1:
             for depth in range(_SMT_DEPTH)
         )
         return SparseMerkleProofV1(key=key, value_hash=self.values.get(key), siblings=siblings)
+
+
+@dataclass(frozen=True, slots=True)
+class SparseMerklePutV1:
+    """One append-only sparse-map update derived from a single node path.
+
+    Durable adapters own the append-only value check and persist ``node_updates``
+    atomically.  The pure core only reads the 256 sibling addresses necessary
+    to derive the replacement leaf-to-root path; it neither retains nor asks
+    for the rest of the map.
+    """
+
+    root: bytes
+    node_updates: tuple[tuple[int, int, bytes], ...]
+
+    def __post_init__(self) -> None:
+        _require_hash_bytes(self.root, label="SMT updated root")
+        if len(self.node_updates) != _SMT_DEPTH + 1:
+            raise ValueError("SMT update must contain one leaf-to-root path")
+        expected_depths = tuple(range(_SMT_DEPTH, -1, -1))
+        if tuple(depth for depth, _prefix, _node in self.node_updates) != expected_depths:
+            raise ValueError("SMT update path depths are invalid")
+        for depth, prefix, node_hash in self.node_updates:
+            if type(prefix) is not int or prefix < 0 or prefix.bit_length() > depth:
+                raise ValueError("SMT update node address is invalid")
+            _require_hash_bytes(node_hash, label="SMT update node")
+        if not hmac.compare_digest(self.root, self.node_updates[-1][2]):
+            raise ValueError("SMT update root does not match its path")
+
+
+def sparse_merkle_put_from_node_lookup_v1(
+    *,
+    key: bytes,
+    value_hash: bytes,
+    node_lookup: Callable[[int, int], bytes | None],
+) -> SparseMerklePutV1:
+    """Derive an append-only sparse-map ``put`` from addressed sibling reads.
+
+    ``node_lookup`` is called only for sibling nodes.  The returned path can be
+    written directly to a durable node table, so a SQLite adapter does not need
+    to restore or trust an in-process :class:`IncrementalSparseMerkleMapV1` to
+    append an observation locator.
+    """
+
+    _require_hash_bytes(key, label="SMT key")
+    _require_hash_bytes(value_hash, label="SMT value")
+    if not callable(node_lookup):
+        raise TypeError("SMT node lookup must be callable")
+
+    key_int = int.from_bytes(key, "big")
+    current = _smt_leaf(key, value_hash)
+    updates: list[tuple[int, int, bytes]] = [(_SMT_DEPTH, key_int, current)]
+    for depth in range(_SMT_DEPTH - 1, -1, -1):
+        prefix = key_int >> (_SMT_DEPTH - depth)
+        branch = (key_int >> (_SMT_DEPTH - 1 - depth)) & 1
+        sibling_prefix = (prefix << 1) | (1 - branch)
+        sibling = node_lookup(depth + 1, sibling_prefix)
+        if sibling is None:
+            sibling = _SMT_EMPTY[_SMT_DEPTH - depth - 1]
+        else:
+            sibling = _require_hash_bytes(sibling, label="persisted SMT sibling")
+        current = _smt_parent(sibling, current) if branch else _smt_parent(current, sibling)
+        updates.append((depth, prefix, current))
+    return SparseMerklePutV1(root=current, node_updates=tuple(updates))
 
 
 def sparse_merkle_proof_from_nodes_v1(
