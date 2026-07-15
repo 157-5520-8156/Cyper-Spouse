@@ -675,7 +675,7 @@ class AcceptanceDecisionRef(FrozenModel):
     status: Literal["accepted", "rejected", "stale"]
     accepted_change_id: str | None = None
     accepted_change_hash: str | None = Field(default=None, min_length=64, max_length=64)
-    manifest_version: Literal["acceptance-manifest.2"] | None = None
+    manifest_version: Literal["acceptance-manifest.2", "acceptance-manifest.3"] | None = None
     manifest_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     acceptance_event_ref: str | None = None
     acceptance_event_payload_hash: str | None = Field(
@@ -702,7 +702,7 @@ class AcceptanceDecisionRef(FrozenModel):
         if self.manifest_version is None and any(value is not None for value in manifest_fields):
             raise ValueError("legacy decision cannot carry partial manifest audit")
         if self.manifest_version is not None and any(value is None for value in manifest_fields):
-            raise ValueError("v2 decision requires complete manifest audit")
+            raise ValueError("manifest-backed decision requires complete manifest audit")
         return self
 
 
@@ -3756,6 +3756,13 @@ class CommitResult(FrozenModel):
     event_ids: tuple[str, ...]
 
 
+# These contracts depend on ``WorldEvent`` / ``ProjectionCursor`` above.  Keep
+# the imports at this seam so the Fact audit module can in turn use the core
+# event and cursor models without creating a module-import cycle.
+from .accepted_effect_contracts import AcceptanceManifestRefV3  # noqa: E402
+from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
+
+
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
     reducer_bundle_version: str = "world-v2-reducers.18"
@@ -3853,6 +3860,8 @@ class LedgerProjection(FrozenModel):
     model_result_audits: tuple[ModelResultAuditProjection, ...] = ()
     proposal_audits: tuple[ProposalAuditProjection, ...] = ()
     acceptance_manifests_v2: tuple[AcceptanceManifestRefV2, ...] = ()
+    fact_commit_proposal_audits_v2: tuple[FactCommitProposalAuditRefV2, ...] = ()
+    acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
     outcome_proposals: tuple[OutcomeProposalProjection, ...] = ()
     semantic_hash: str
