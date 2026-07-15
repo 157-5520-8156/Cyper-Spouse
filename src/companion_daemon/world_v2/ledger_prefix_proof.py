@@ -333,6 +333,52 @@ class AppendMmrV1:
         raise AssertionError("unreachable MMR peak lookup")
 
 
+class IncrementalMmrV1:
+    """Mutable O(log N) MMR builder; adapters persist ``nodes`` transactionally."""
+
+    __slots__ = ("leaf_count", "nodes", "peaks")
+
+    def __init__(self) -> None:
+        self.leaf_count = 0
+        self.nodes: dict[tuple[int, int], bytes] = {}
+        self.peaks: dict[int, bytes] = {}
+
+    @property
+    def root(self) -> bytes:
+        return _mmr_root(tuple(self.peaks[height] for height in sorted(self.peaks, reverse=True)), self.leaf_count)
+
+    def append(self, leaf_hash: bytes) -> int:
+        _require_hash_bytes(leaf_hash, label="MMR leaf")
+        if self.leaf_count >= _MAX_I63:
+            raise ValueError("MMR leaf count exceeds the storage contract")
+        leaf_index = self.leaf_count
+        self.nodes[(0, leaf_index)] = leaf_hash
+        carry = leaf_hash
+        height = 0
+        while height in self.peaks:
+            left = self.peaks.pop(height)
+            carry = _mmr_parent(left, carry)
+            self.nodes[(height + 1, leaf_index >> (height + 1))] = carry
+            height += 1
+        self.peaks[height] = carry
+        self.leaf_count += 1
+        return leaf_index
+
+    def prove(self, leaf_index: int) -> MmrInclusionProofV1:
+        if type(leaf_index) is not int or not 0 <= leaf_index < self.leaf_count:
+            raise ValueError("MMR leaf index is outside its prefix")
+        offset = 0
+        sizes = _peak_sizes(self.leaf_count)
+        peaks = tuple(self.peaks[height] for height in sorted(self.peaks, reverse=True))
+        for peak_index, size in enumerate(sizes):
+            if leaf_index < offset + size:
+                height = size.bit_length() - 1
+                siblings = tuple(self.nodes[(level, (leaf_index >> level) ^ 1)] for level in range(height))
+                return MmrInclusionProofV1(leaf_index, self.leaf_count, peak_index, siblings, peaks)
+            offset += size
+        raise AssertionError("unreachable MMR peak lookup")
+
+
 def verify_checkpoint_in_prefix(
     *,
     checkpoint: PrefixCheckpointLeafV1,
@@ -502,3 +548,43 @@ class SparseMerkleMapV1:
                 right = nodes.get((depth + 1, (prefix << 1) | 1), _SMT_EMPTY[_SMT_DEPTH - depth - 1])
                 nodes[(depth, prefix)] = _smt_parent(left, right)
         return nodes
+
+
+class IncrementalSparseMerkleMapV1:
+    """Mutable O(256) sparse map builder; ``nodes`` is adapter-persistable state."""
+
+    __slots__ = ("nodes", "values")
+
+    def __init__(self) -> None:
+        self.nodes: dict[tuple[int, int], bytes] = {}
+        self.values: dict[bytes, bytes] = {}
+
+    @property
+    def root(self) -> bytes:
+        return self.nodes.get((0, 0), _SMT_EMPTY[_SMT_DEPTH])
+
+    def put(self, *, key: bytes, value_hash: bytes) -> None:
+        _require_hash_bytes(key, label="SMT key")
+        _require_hash_bytes(value_hash, label="SMT value")
+        if key in self.values:
+            raise ValueError("SMT locator keys are append-only")
+        self.values[key] = value_hash
+        key_int = int.from_bytes(key, "big")
+        self.nodes[(_SMT_DEPTH, key_int)] = _smt_leaf(key, value_hash)
+        for depth in range(_SMT_DEPTH - 1, -1, -1):
+            prefix = key_int >> (_SMT_DEPTH - depth)
+            left = self.nodes.get((depth + 1, prefix << 1), _SMT_EMPTY[_SMT_DEPTH - depth - 1])
+            right = self.nodes.get((depth + 1, (prefix << 1) | 1), _SMT_EMPTY[_SMT_DEPTH - depth - 1])
+            self.nodes[(depth, prefix)] = _smt_parent(left, right)
+
+    def prove(self, key: bytes) -> SparseMerkleProofV1:
+        _require_hash_bytes(key, label="SMT key")
+        key_int = int.from_bytes(key, "big")
+        siblings = tuple(
+            self.nodes.get(
+                (depth + 1, (key_int >> (_SMT_DEPTH - depth) << 1) | (1 - ((key_int >> (_SMT_DEPTH - 1 - depth)) & 1))),
+                _SMT_EMPTY[_SMT_DEPTH - depth - 1],
+            )
+            for depth in range(_SMT_DEPTH)
+        )
+        return SparseMerkleProofV1(key=key, value_hash=self.values.get(key), siblings=siblings)

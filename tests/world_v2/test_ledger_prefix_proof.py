@@ -6,6 +6,8 @@ import pytest
 
 from companion_daemon.world_v2.ledger_prefix_proof import (
     AppendMmrV1,
+    IncrementalMmrV1,
+    IncrementalSparseMerkleMapV1,
     LedgerLeafV1,
     PrefixCheckpointLeafV1,
     SparseMerkleMapV1,
@@ -150,3 +152,27 @@ def test_leaf_hash_contract_rejects_noncanonical_uppercase_hex() -> None:
     )
     with pytest.raises(ValueError, match="sha256 hex"):
         leaf.digest()
+
+
+def test_incremental_builders_match_reference_proofs() -> None:
+    leaves = tuple(_hash(f"leaf:{index}") for index in range(9))
+    reference = AppendMmrV1(leaves)
+    incremental = IncrementalMmrV1()
+    for leaf in leaves:
+        incremental.append(leaf)
+    assert incremental.root == reference.root
+    for index, leaf in enumerate(leaves):
+        incremental.prove(index).verify(leaf_hash=leaf, expected_root=incremental.root)
+
+    reference_map = SparseMerkleMapV1()
+    incremental_map = IncrementalSparseMerkleMapV1()
+    keys = tuple(_hash(f"key:{index}") for index in range(4))
+    for index, key in enumerate(keys):
+        value = _hash(f"value:{index}")
+        reference_map = reference_map.put(key=key, value_hash=value)
+        incremental_map.put(key=key, value_hash=value)
+    assert incremental_map.root == reference_map.root
+    for index, key in enumerate(keys):
+        incremental_map.prove(key).verify_membership(
+            expected_root=incremental_map.root, expected_key=key, expected_value_hash=_hash(f"value:{index}")
+        )
