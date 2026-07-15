@@ -9,6 +9,7 @@ from pathlib import Path
 import sqlite3
 from threading import RLock
 from typing import Literal
+from weakref import WeakKeyDictionary
 
 from .batch_invariants import validate_commit_batch
 from .errors import ConcurrencyConflict, IdempotencyConflict, LedgerIntegrityError
@@ -84,6 +85,7 @@ _V18_ONLY_STATE_KEYS = frozenset({"acceptance_manifests_v2"})
 _PREFIX_PROOF_VERSION = "world-v2-prefix-proof.2"
 _PREVIOUS_PREFIX_PROOF_VERSION = "world-v2-prefix-proof.1"
 _PREFIX_BITS_BYTES = 32
+_MAX_PINNED_OBSERVATION_HISTORY_HANDLES = 1_024
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +106,7 @@ class _PinnedObservationHistoryProof:
     anchor_leaf_count: int
     anchor_mmr_root: bytes
     checkpoint: PrefixCheckpointLeafV1 | None
+    proof_version: str
 
 
 class PinnedObservationHistoryHandle:
@@ -114,7 +117,7 @@ class PinnedObservationHistoryHandle:
     produce a usable capability because it has no registry entry.
     """
 
-    __slots__ = ()
+    __slots__ = ("__weakref__",)
 
     def __reduce__(self) -> object:
         raise TypeError("pinned observation history handles cannot be serialized")
@@ -139,7 +142,9 @@ class SQLiteProofBackedObservationReader:
 
     def __init__(self, *, ledger: "SQLiteWorldLedger") -> None:
         self.__ledger = ledger
-        self.__pins: dict[PinnedObservationHistoryHandle, _PinnedObservationHistoryProof] = {}
+        self.__pins: WeakKeyDictionary[
+            PinnedObservationHistoryHandle, _PinnedObservationHistoryProof
+        ] = WeakKeyDictionary()
         self.__pins_lock = RLock()
 
     def pin(self, *, world_id: str, cursor: ProjectionCursor) -> PinnedObservationHistoryHandle:
@@ -148,6 +153,8 @@ class SQLiteProofBackedObservationReader:
         pin = self.__ledger._pin_observation_history_proof(cursor=cursor)
         handle = PinnedObservationHistoryHandle()
         with self.__pins_lock:
+            if len(self.__pins) >= _MAX_PINNED_OBSERVATION_HISTORY_HANDLES:
+                raise ValueError("observation proof reader has too many live pins")
             self.__pins[handle] = pin
         return handle
 
@@ -163,6 +170,8 @@ class SQLiteProofBackedObservationReader:
             pin = self.__pins.get(handle)
         if pin is None:
             raise ValueError("observation proof handle is not owned by this reader")
+        if pin.proof_version != _PREFIX_PROOF_VERSION:
+            raise LedgerIntegrityError("pinned observation history proof version is stale")
         return self.__ledger._read_observation_history_proof(pin=pin, locators=locators)
 
 
@@ -2024,6 +2033,7 @@ class SQLiteWorldLedger:
                     anchor_leaf_count=anchor_leaf_count,
                     anchor_mmr_root=anchor_root,
                     checkpoint=checkpoint,
+                    proof_version=_PREFIX_PROOF_VERSION,
                 )
                 # Checking the root while the snapshot is open makes an empty
                 # cursor just as explicit as a checkpoint cursor.
@@ -2106,6 +2116,13 @@ class SQLiteWorldLedger:
                     )
                     for locator in validated
                 )
+                returned_bytes = sum(
+                    len(canonical_event_json(item.event.event).encode("utf-8"))
+                    for item in lookups
+                    if item.event is not None
+                )
+                if returned_bytes > OBSERVATION_HISTORY_MAX_BYTES:
+                    raise LedgerIntegrityError("proof-backed observation read exceeds byte budget")
                 connection.commit()
                 return lookups
             except sqlite3.DatabaseError as exc:
@@ -2287,6 +2304,11 @@ class SQLiteWorldLedger:
         event_json = row["event_json"]
         if not isinstance(event_json, str):
             raise LedgerIntegrityError("proof-backed observation bytes are invalid")
+        try:
+            if len(event_json.encode("utf-8")) > OBSERVATION_HISTORY_MAX_BYTES:
+                raise LedgerIntegrityError("proof-backed observation event exceeds byte budget")
+        except UnicodeError as exc:
+            raise LedgerIntegrityError("proof-backed observation bytes are invalid") from exc
         envelope_hash = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
         if not hmac.compare_digest(envelope_hash, str(row["event_hash"])):
             raise LedgerIntegrityError("proof-backed observation envelope hash is invalid")
