@@ -122,6 +122,12 @@ class WorldRuntime:
         self._affect_acceptance_actor = affect_acceptance_actor
         self._lock = asyncio.Lock()
 
+    @property
+    def world_id(self) -> str:
+        """Stable identity exposed to platform-neutral ingress adapters."""
+
+        return self._world_id
+
     async def drain_background_once(self) -> AffectTriggerRunResult | None:
         """Run one low-priority affect job without delaying an interactive turn.
 
