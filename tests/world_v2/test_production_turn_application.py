@@ -20,6 +20,7 @@ from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
+from companion_daemon.world_v2.schemas import ClockObservation
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn
 
@@ -214,6 +215,42 @@ async def test_production_application_bootstraps_sqlite_once_and_exposes_only_tu
         assert ledger.project().budget_accounts[0].account_id == "account:world-v2:chat"
     finally:
         ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_production_application_advances_clock_without_exposing_ledger_writes(
+    tmp_path: Path,
+) -> None:
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "world-v2-clock.sqlite",
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_InvalidModel(),
+        quick_recovery=_InvalidQuick(),
+        transport=_Transport(),
+        now=NOW,
+    )
+    try:
+        outcome = await app.advance(
+            ClockObservation(
+                schema_version="world-v2.1",
+                tick_id="clock:production-application:1",
+                world_id=_config().world_id,
+                logical_time=NOW,
+                created_at=NOW,
+                trace_id="trace:production-clock",
+                causation_id="cause:production-clock",
+                correlation_id="correlation:production-clock",
+                logical_time_from=NOW,
+                logical_time_to=NOW.replace(minute=1),
+                reason="scheduler_tick",
+            )
+        )
+    finally:
+        app.close()
+
+    assert outcome.status == "observed_only"
 
 
 @pytest.mark.asyncio

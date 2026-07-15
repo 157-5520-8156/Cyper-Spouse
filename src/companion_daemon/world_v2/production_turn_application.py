@@ -39,7 +39,7 @@ from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .pinned_turn import PinnedTurnCompiler
 from .platform_action_executor import PlatformActionExecutor, PlatformTransport
 from .runtime import WorldRuntime
-from .schemas import BudgetAccount, RuntimeOutcome, WorldEvent
+from .schemas import BudgetAccount, ClockObservation, RuntimeOutcome, WorldEvent
 from .sqlite_ledger import SQLiteWorldLedger
 from .world_turn_runtime import InboundIdentityResolver, InboundTurn, WorldTurnRuntime
 
@@ -88,6 +88,11 @@ class WorldV2TurnApplication:
 
     async def respond(self, inbound: InboundTurn) -> RuntimeOutcome:
         return await self._turns.respond(inbound)
+
+    async def advance(self, clock: ClockObservation) -> RuntimeOutcome:
+        """Advance logical time through the sole World v2 host seam."""
+
+        return await self._turns.advance(clock)
 
     async def drain_actions_once(self) -> ActionPumpResult | None:
         return await self._turns.drain_actions_once()

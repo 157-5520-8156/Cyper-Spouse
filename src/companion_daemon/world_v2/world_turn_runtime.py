@@ -11,7 +11,7 @@ from .runtime import WorldRuntime
 from .action_pump import ActionPumpResult
 from .affect_trigger_runtime import AffectTriggerRunResult
 from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
-from .schemas import Observation, RuntimeOutcome
+from .schemas import ClockObservation, Observation, RuntimeOutcome
 
 
 class InboundIdentityResolver(Protocol):
@@ -62,6 +62,16 @@ class WorldTurnRuntime:
                 reply_context={"target": target},
             )
         )
+
+    async def advance(self, clock: ClockObservation) -> RuntimeOutcome:
+        """Advance the durable world clock without exposing a ledger writer.
+
+        Platform hosts and schedulers use the same runtime seam for message
+        ingress and time progression.  They cannot manufacture lifecycle
+        events, run reducers, or access the legacy engine directly.
+        """
+
+        return await self._runtime.advance(clock)
 
     async def drain_actions_once(self) -> ActionPumpResult | None:
         """Advance one already-authorized delivery without exposing the ledger.
