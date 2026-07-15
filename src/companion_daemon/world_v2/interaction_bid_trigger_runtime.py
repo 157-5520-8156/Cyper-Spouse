@@ -110,20 +110,29 @@ class InteractionBidTriggerRuntime:
             if stored is None:
                 raise RuntimeError("interaction bid audit event is unavailable")
             audit_cursor = self._cursor_from_commit(stored[1])
-            typed = next(
+            typed_id = next(
                 (
-                    item
+                    item.interaction_bid_proposal_id
                     for item in current.interaction_bid_proposals
                     if item.decision_proposal_id == audit.proposal_id
                 ),
                 None,
             )
-            if typed is not None:
+            if typed_id is None:
+                typed_id = next(
+                    (
+                        item.media_thread_proposal_id
+                        for item in current.media_thread_proposals
+                        if item.decision_proposal_id == audit.proposal_id
+                    ),
+                    None,
+                )
+            if typed_id is not None:
                 accepted = next(
                     (
                         item
                         for item in current.acceptance_decisions
-                        if item.proposal_id == typed.interaction_bid_proposal_id
+                        if item.proposal_id == typed_id
                     ),
                     None,
                 )
@@ -132,7 +141,7 @@ class InteractionBidTriggerRuntime:
                         process=active,
                         source_event=source_event,
                         cursor=current_cursor,
-                        outcome_ref=f"outcome:{active.trigger_id}:accepted:{typed.interaction_bid_proposal_id}",
+                        outcome_ref=f"outcome:{active.trigger_id}:accepted:{typed_id}",
                     )
                     return InteractionBidTriggerRunResult(
                         trigger_id=active.trigger_id,

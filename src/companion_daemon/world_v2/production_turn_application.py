@@ -49,6 +49,8 @@ from .interaction_bid_deliberation_turn import InteractionBidDeliberationTurn
 from .interaction_bid_proposal_compiler import InteractionBidProposalCompiler
 from .interaction_bid_proposal_worker import InteractionBidProposalWorker
 from .interaction_bid_trigger_runtime import InteractionBidTriggerRunResult
+from .media_thread_acceptance_runtime import MediaDeliveryThreadAcceptanceRuntime
+from .media_thread_proposal_compiler import MediaDeliveryThreadProposalCompiler
 from .advisory_compiler import AdvisoryCompiler
 from .deliberation import (
     DeliberationModelAdapter,
@@ -695,6 +697,11 @@ def build_sqlite_world_v2_turn_application(
             if interaction_bid_model is not None
             else None
         )
+        media_thread_acceptance = (
+            MediaDeliveryThreadAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
+            if interaction_bid_model is not None
+            else None
+        )
         interaction_bid_turn = (
             InteractionBidDeliberationTurn(
                 ledger=ledger,
@@ -714,9 +721,11 @@ def build_sqlite_world_v2_turn_application(
             InteractionBidProposalWorker(
                 compiler=InteractionBidProposalCompiler(ledger=ledger),
                 acceptance=interaction_bid_acceptance,
+                media_thread_compiler=MediaDeliveryThreadProposalCompiler(ledger=ledger),
+                media_thread_acceptance=media_thread_acceptance,
                 actor=config.interaction_bid_worker_owner,
             )
-            if interaction_bid_acceptance is not None
+            if interaction_bid_acceptance is not None and media_thread_acceptance is not None
             else None
         )
         affect_acceptance = (

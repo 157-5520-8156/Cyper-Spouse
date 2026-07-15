@@ -53,6 +53,12 @@ class MediaDeliveryThreadProposalCompiler:
     def __init__(self, *, ledger: LedgerPort) -> None:
         self._ledger, self._reader = ledger, DecisionProposalAuthorityReader(ledger=ledger)
 
+    @property
+    def ledger(self) -> LedgerPort:
+        """The sole ledger this specialized compiler may mutate."""
+
+        return self._ledger
+
     def record(
         self, *, world_id: str, cursor: ProjectionCursor, proposal_id: str
     ) -> MediaThreadProposalCompilation:

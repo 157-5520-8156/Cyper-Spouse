@@ -32,6 +32,9 @@ from .outcome_proposal_compiler import OutcomeProposalCompiler
 from .interaction_bid_acceptance_manifest import InteractionBidAcceptanceManifest
 from .interaction_bid_acceptance_runtime import InteractionBidAcceptanceRuntime
 from .interaction_bid_proposal_compiler import InteractionBidProposalCompiler
+from .media_thread_acceptance_manifest import MediaDeliveryThreadAcceptanceManifest
+from .media_thread_acceptance_runtime import MediaDeliveryThreadAcceptanceRuntime
+from .media_thread_proposal_compiler import MediaDeliveryThreadProposalCompiler
 
 from .proposal_envelope import (
     CHANGE_TRANSITION_REGISTRY,
@@ -171,6 +174,20 @@ _INTERACTION_BID = SpecializedProposalCapability(
     manifest_ref="interaction-bid-acceptance-manifest.1",
     reverse_verifier_ref="interaction-bid-acceptance-runtime.1",
 )
+_MEDIA_DELIVERY_THREAD = SpecializedProposalCapability(
+    change_kind="media_delivery_thread_transition",
+    transition="open",
+    compiler_ref="media-delivery-thread-proposal-compiler.1",
+    manifest_ref="media-delivery-thread-acceptance-manifest.1",
+    reverse_verifier_ref="media-delivery-thread-acceptance-runtime.1",
+)
+_MEDIA_DELIVERY_THREAD_UPDATE = SpecializedProposalCapability(
+    change_kind="media_delivery_thread_transition",
+    transition="update",
+    compiler_ref="media-delivery-thread-proposal-compiler.1",
+    manifest_ref="media-delivery-thread-acceptance-manifest.1",
+    reverse_verifier_ref="media-delivery-thread-acceptance-runtime.1",
+)
 
 
 _SPECIALIZED_AUTHORITY_SEAMS: Mapping[tuple[str, str, str], SpecializedAuthoritySeam] = (
@@ -219,6 +236,17 @@ _SPECIALIZED_AUTHORITY_SEAMS: Mapping[tuple[str, str, str], SpecializedAuthority
                     reverse_verifier=InteractionBidAcceptanceRuntime.accept_runtime_owned,
                 )
             ),
+            (
+                _MEDIA_DELIVERY_THREAD.compiler_ref,
+                _MEDIA_DELIVERY_THREAD.manifest_ref,
+                _MEDIA_DELIVERY_THREAD.reverse_verifier_ref,
+            ): (
+                SpecializedAuthoritySeam(
+                    compiler=MediaDeliveryThreadProposalCompiler,
+                    manifest=MediaDeliveryThreadAcceptanceManifest,
+                    reverse_verifier=MediaDeliveryThreadAcceptanceRuntime.accept_runtime_owned,
+                )
+            ),
         }
     )
 )
@@ -251,7 +279,16 @@ _EXPECTED_PRODUCTION_PROPOSAL_GRAMMARS: Mapping[
         ),
         "interaction_bid": ProductionProposalGrammar(
             lane_id="interaction_bid",
-            capabilities=(_INTERACTION_BID,),
+            # A delivered artifact can lead to exactly one bounded private
+            # continuation: a bid, a durable follow-up thread, or no change.
+            # Both mutations have independent compiler/manifest/recorder
+            # chains; sharing this deliberation trigger never grants a
+            # generic Thread authority.
+            capabilities=(
+                _INTERACTION_BID,
+                _MEDIA_DELIVERY_THREAD,
+                _MEDIA_DELIVERY_THREAD_UPDATE,
+            ),
             allows_no_change_decision=True,
         ),
     }
