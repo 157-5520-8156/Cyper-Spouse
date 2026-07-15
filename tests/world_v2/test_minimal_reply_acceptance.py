@@ -10,6 +10,7 @@ from companion_daemon.world_v2.minimal_reply_acceptance import (
     ReplyBudgetPolicy,
     derive_minimal_reply_material,
 )
+from companion_daemon.world_v2.minimal_reply_manifest import build_minimal_reply_manifest
 from companion_daemon.world_v2.proposal_audit_schemas import (
     ProposalAuditProjection,
     canonical_json,
@@ -161,6 +162,25 @@ def test_rejects_stale_or_unaffordable_reply_without_deriving_an_action() -> Non
             trace_id="trace:1",
             correlation_id="correlation:1",
         )
+
+
+def test_manifest_binds_every_reply_side_effect_to_its_audited_material() -> None:
+    material = derive_minimal_reply_material(
+        audit=_audit(),
+        cursor=ProjectionCursor(world_revision=4, deliberation_revision=2, ledger_sequence=7),
+        world_id=WORLD,
+        policy=_policy(),
+        account=_account(),
+        logical_time=NOW,
+        created_at=NOW,
+        trace_id="trace:1",
+        correlation_id="correlation:1",
+    )
+    manifest = build_minimal_reply_manifest(acceptance_id="acceptance:reply:1", material=material)
+
+    assert manifest.action_id == material.action.action_id
+    assert manifest.reservation_id == material.reservation.reservation_id
+    assert manifest.message_payload_hash == material.beat.payload.payload_hash
     with pytest.raises(MinimalReplyAcceptanceError, match="budget_unavailable"):
         derive_minimal_reply_material(
             audit=_audit(),
