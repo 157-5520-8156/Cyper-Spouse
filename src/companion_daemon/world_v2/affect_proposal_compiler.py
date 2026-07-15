@@ -112,7 +112,9 @@ class AffectProposalCompiler:
         projection = self._ledger.project_at(cursor)
         typed = self._compile_open(authority=authority, change=change, projection=projection)
         source_event = self._event(authority.audit.event_ref)
-        event = self._proposal_event(typed=typed, source_event=source_event)
+        event = self._proposal_event(
+            typed=typed, source_event=source_event, logical_time=projection.logical_time
+        )
         commit = self._ledger.commit(
             [event],
             expected_world_revision=cursor.world_revision,
@@ -324,7 +326,11 @@ class AffectProposalCompiler:
             )
         return tuple(result)
 
-    def _proposal_event(self, *, typed: AffectProposalProjection, source_event: WorldEvent) -> WorldEvent:
+    def _proposal_event(
+        self, *, typed: AffectProposalProjection, source_event: WorldEvent, logical_time
+    ) -> WorldEvent:
+        if logical_time is None:
+            raise AffectProposalCompilerError("logical_time_missing")
         payload = typed.model_dump(mode="json", exclude_none=True)
         identity = domain_idempotency_key(
             event_type="ProposalRecorded", world_id=self._ledger.world_id, payload=payload
@@ -337,7 +343,7 @@ class AffectProposalCompiler:
             + _digest({"world": self._ledger.world_id, "proposal": typed.proposal_id}),
             world_id=self._ledger.world_id,
             event_type="ProposalRecorded",
-            logical_time=source_event.logical_time,
+            logical_time=logical_time,
             created_at=source_event.created_at,
             actor="world-v2:affect-proposal-compiler",
             source="world-v2:affect-proposal-compiler",

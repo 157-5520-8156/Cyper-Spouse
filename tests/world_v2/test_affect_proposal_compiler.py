@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.affect_proposal_compiler import AffectProposalCompiler
+from companion_daemon.world_v2.affect_acceptance_runtime import AffectAcceptanceRuntime
 from companion_daemon.world_v2.deliberation import DeliberationResult
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.proposal_audit import ProposalAuditContext, ProposalAuditRecorder
@@ -11,6 +12,7 @@ from companion_daemon.world_v2.proposal_envelope import (
     ProposalEvidenceRef,
     TypedChange,
 )
+from companion_daemon.world_v2.schemas import ProjectionCursor
 
 from test_affect_acceptance_runtime import _accept_ready_appraisal
 from test_appraisal_authority import WORLD_ID
@@ -120,3 +122,19 @@ def test_compiler_records_a_source_bound_open_affect_candidate() -> None:
     assert typed.source_audit is not None
     assert typed.source_audit.proposal_event_ref == ledger.project().proposal_audits[0].event_ref
     assert typed.proposed_mutation.event_type == "AffectEpisodeOpened"
+    assert compilation.commit is not None
+    runtime = AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
+    accepted = runtime.accept_runtime_owned(
+        handle=runtime.pin_proposal(
+            cursor=ProjectionCursor(
+                world_revision=compilation.commit.world_revision,
+                deliberation_revision=compilation.commit.deliberation_revision,
+                ledger_sequence=compilation.commit.ledger_sequence,
+            ),
+            proposal_id=typed.proposal_id,
+        ),
+        actor="worker:affect",
+        source="test:affect-acceptance",
+    )
+    assert accepted.world_revision == ledger.project().world_revision
+    assert ledger.project().affect_episodes[0].components[0].intensity_bp == 4200
