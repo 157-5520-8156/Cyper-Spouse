@@ -49,6 +49,7 @@ class MemoryRetrievalItem(FrozenModel):
     candidate_id: str = Field(min_length=1)
     cue_kind: str = Field(min_length=1)
     retention_rationales: tuple[str, ...] = Field(min_length=1)
+    privacy_ceiling: PrivacyClass
     retrieval_strength_bp: int = Field(ge=1, le=10_000)
     source_excerpts: tuple[MemorySourceExcerpt, ...] = Field(min_length=1)
     truncated: bool
@@ -95,8 +96,15 @@ class MemoryRetrievalCompiler:
         cursor: ProjectionCursor,
         candidates: tuple[MemoryCandidateProjection, ...],
         viewer_privacy_ceiling: PrivacyClass,
+        projection=None,
     ) -> MemoryRetrievalResult:
-        projection = self._ledger.project_at(cursor)
+        projection = projection if projection is not None else self._ledger.project_at(cursor)
+        if (
+            projection.world_revision != cursor.world_revision
+            or projection.deliberation_revision != cursor.deliberation_revision
+            or projection.ledger_sequence != cursor.ledger_sequence
+        ):
+            raise ValueError("memory retrieval projection does not match its pinned cursor")
         decisions = {
             item.candidate_id: item
             for item in evaluate_memory_retrieval(
@@ -158,6 +166,7 @@ class MemoryRetrievalCompiler:
                     candidate_id=candidate.candidate_id,
                     cue_kind=candidate.values.cue_kind,
                     retention_rationales=candidate.values.retention_rationales,
+                    privacy_ceiling=candidate.values.privacy_ceiling,
                     retrieval_strength_bp=candidate.values.retrieval_strength_bp,
                     source_excerpts=tuple(excerpts),
                     truncated=any(item.truncated for item in excerpts),

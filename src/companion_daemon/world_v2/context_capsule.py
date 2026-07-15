@@ -20,6 +20,7 @@ from .context_resolver import (
     context_query_hash,
     resolver_capability_is_valid,
 )
+from .memory_retrieval import MemoryRetrievalItem
 from .schema_core import PrivacyClass
 from .schemas import (
     AffectEpisodeProjection,
@@ -389,7 +390,9 @@ class ContextCapsuleRequest(_FrozenModel):
     open_threads: ResolvedSlice[tuple[ThreadProjection, ...]] | None = None
     relevant_facts: ResolvedSlice[tuple[FactProjection, ...]] | None = None
     recent_experiences: ResolvedSlice[tuple[ExperienceProjection, ...]] | None = None
-    active_memory_candidates: ResolvedSlice[tuple[MemoryCandidateProjection, ...]] | None = None
+    active_memory_candidates: ResolvedSlice[
+        tuple[MemoryCandidateProjection | MemoryRetrievalItem, ...]
+    ] | None = None
     available_capabilities: ResolvedSlice[tuple[CapabilityStateProjection, ...]] | None = None
     action_budget: ResolvedSlice[tuple[BudgetAccount, ...]] | None = None
     private_impressions: ResolvedSlice[tuple[PrivateImpressionProjection, ...]] | None = None
@@ -733,7 +736,10 @@ def _derived_privacy_floor(slice_name: SliceName, item: BaseModel) -> PrivacyCla
     if slice_name in {"open_threads", "relevant_facts", "recent_experiences"}:
         typed.append(item.values.privacy_class)
     if slice_name == "active_memory_candidates":
-        typed.append(item.values.privacy_ceiling)
+        typed.append(
+            getattr(getattr(item, "values", None), "privacy_ceiling", None)
+            or getattr(item, "privacy_ceiling")
+        )
     return _strictest_privacy(tuple(typed))
 
 
@@ -745,6 +751,8 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
         return tuple(sorted(set(item.source_refs)))
     if slice_name == "advisories":
         return tuple(sorted(set(item.source_refs)))
+    if slice_name == "active_memory_candidates" and isinstance(item, MemoryRetrievalItem):
+        return tuple(sorted({source.authority_event_ref for source in item.source_excerpts}))
 
     refs: set[str] = set()
     origin = getattr(item, "origin", None)
@@ -787,6 +795,16 @@ def _typed_source_authorities(item: BaseModel) -> tuple[tuple[str, str, int, str
         immutable_hash = getattr(binding, "authority_payload_hash", None)
         if ref is not None and revision is not None and immutable_hash is not None:
             authorities.add(("committed_event", ref, revision, immutable_hash))
+    if isinstance(item, MemoryRetrievalItem):
+        for source in item.source_excerpts:
+            authorities.add(
+                (
+                    "committed_event",
+                    source.authority_event_ref,
+                    source.authority_world_revision,
+                    source.authority_payload_hash,
+                )
+            )
     return tuple(sorted(authorities))
 
 
@@ -1214,7 +1232,8 @@ def _validate_input_contract(request: ContextCapsuleRequest) -> None:
     ):
         raise ValueError("Context Capsule accepts only active facts")
     if request.active_memory_candidates is not None and any(
-        item.values.status != "active" for item in request.active_memory_candidates.value
+        isinstance(item, MemoryCandidateProjection) and item.values.status != "active"
+        for item in request.active_memory_candidates.value
     ):
         raise ValueError("Context Capsule accepts only active memory candidates")
     if request.available_capabilities is not None and any(

@@ -47,6 +47,7 @@ from .context_resolver import (
     projection_snapshot_id,
 )
 from .ledger import LedgerPort
+from .memory_retrieval import MemoryRetrievalCompiler, MemoryRetrievalItem
 from .schema_core import PrivacyClass
 from .schemas import CommittedWorldEventRef, LedgerProjection
 from .situation_compiler import SituationCompiler, request_from_ledger_projection
@@ -169,6 +170,8 @@ def _observation_event_aliases(projection: LedgerProjection) -> dict[str, str]:
 
 
 def _typed_refs(item: BaseModel, *, observation_aliases: dict[str, str]) -> tuple[str, ...] | None:
+    if isinstance(item, MemoryRetrievalItem):
+        return tuple(sorted({source.authority_event_ref for source in item.source_excerpts}))
     refs: set[str] = set()
     origin = getattr(item, "origin", None)
     for field in ("accepted_event_ref", "event_ref"):
@@ -244,6 +247,15 @@ def _typed_authority_claims(
         if revision is None or immutable_hash is None:
             return None
         claims.add((ref, revision, immutable_hash))
+    if isinstance(item, MemoryRetrievalItem):
+        claims.update(
+            (
+                source.authority_event_ref,
+                source.authority_world_revision,
+                source.authority_payload_hash,
+            )
+            for source in item.source_excerpts
+        )
     return tuple(sorted(claims))
 
 
@@ -254,6 +266,7 @@ def _privacy(slice_name: SliceName, item: BaseModel) -> PrivacyClass:
         getattr(item, "privacy_class", None),
         getattr(values, "privacy_class", None),
         getattr(values, "privacy_ceiling", None),
+        getattr(item, "privacy_ceiling", None),
     ):
         if value in _PRIVACY_RANK:
             candidates.append(value)
@@ -349,6 +362,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         self._ledger = ledger
         self._situation_compiler = situation_compiler
         self._relevance_scope = relevance_scope
+        self._memory_retrieval = MemoryRetrievalCompiler(ledger=ledger)
 
     def _scope_for_query(
         self, query: ContextCompileQuery, projection: LedgerProjection
@@ -438,6 +452,12 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 binding.source_id in scoped_source_ids for binding in item.values.source_bindings
             )
         )
+        memory_retrievals = self._memory_retrieval.compile(
+            cursor=query.cursor,
+            candidates=scoped_memories,
+            viewer_privacy_ceiling="private",
+            projection=projection,
+        )
         appraisal_by_id = {item.appraisal_id: item for item in projection.appraisals}
         active_affect = tuple(
             item for item in projection.affect_episodes if item.status == "active"
@@ -485,7 +505,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             "open_threads": tuple(item for item in scoped_threads if item.values.status == "open"),
             "relevant_facts": scoped_facts,
             "recent_experiences": scoped_experiences,
-            "active_memory_candidates": scoped_memories,
+            "active_memory_candidates": memory_retrievals.items,
             "available_capabilities": tuple(
                 item
                 for item in projection.capability_grants
