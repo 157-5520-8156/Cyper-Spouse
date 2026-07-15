@@ -293,9 +293,42 @@ async def test_platform_neutral_turn_runs_authorize_dispatch_and_settle_without_
         observed_at=datetime(2026, 7, 15, tzinfo=UTC),
         raw_payload_hash="sha256:" + "a" * 64,
     )
-    duplicate_settlement = await runtime.settle(terminal)
+    duplicate_settlement = await turn.settle(terminal)
     assert duplicate_settlement.status == "action_executed"
     assert ledger.project().expression_plans[0].state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_platform_neutral_turn_retains_media_only_and_coalescing_observation_evidence() -> None:
+    ledger = WorldLedger.in_memory(world_id="world:media-only-ingress")
+    runtime = WorldRuntime(world_id="world:media-only-ingress", ledger=ledger)
+    turn = WorldTurnRuntime(runtime=runtime, identities=_Identities())
+    inbound = InboundTurn(
+        platform="test",
+        platform_user_id="user.1",
+        platform_message_id="message:media-only",
+        text=None,
+        observed_at=datetime(2026, 7, 15, tzinfo=UTC),
+        trace_id="trace:media-only",
+        attachment_refs=("attachment:image:1",),
+        coalescing_metadata={"provider_event": "attachment", "window_ms": 400},
+    )
+
+    first = await turn.respond(inbound)
+    duplicate = await turn.respond(inbound)
+    stored = ledger.lookup_event_commit(
+        "event:trigger:observation:platform:test:test:user.1:message:media-only"
+    )
+
+    assert duplicate == first
+    assert stored is not None
+    payload = stored[0].payload()
+    assert payload["text"] is None
+    assert payload["attachment_refs"] == ["attachment:image:1"]
+    assert payload["coalescing_metadata"] == {
+        "provider_event": "attachment",
+        "window_ms": 400,
+    }
 
 
 @pytest.mark.asyncio

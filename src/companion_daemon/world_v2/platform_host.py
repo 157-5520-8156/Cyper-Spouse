@@ -11,7 +11,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Protocol
+import json
+from typing import Literal, Mapping, Protocol
 
 from .production_turn_application import WorldV2TurnApplication
 
@@ -34,18 +35,32 @@ class PlatformInbound:
     platform: str
     platform_user_id: str
     platform_message_id: str
-    text: str
+    text: str | None
     observed_at: datetime
     trace_id: str
+    attachment_refs: tuple[str, ...] = ()
+    coalescing_metadata: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         _require_nonempty(
             platform=self.platform,
             platform_user_id=self.platform_user_id,
             platform_message_id=self.platform_message_id,
-            text=self.text,
             trace_id=self.trace_id,
         )
+        if self.text == "":
+            raise ValueError("text must not be empty when supplied")
+        if any(not ref for ref in self.attachment_refs):
+            raise ValueError("attachment_refs must not contain an empty ref")
+        metadata = dict(self.coalescing_metadata or {})
+        try:
+            json.dumps(metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("coalescing_metadata must be JSON-serializable") from exc
+        if self.text is None and not self.attachment_refs and not metadata:
+            raise ValueError("inbound must carry text, an attachment, or coalescing metadata")
+        object.__setattr__(self, "attachment_refs", tuple(self.attachment_refs))
+        object.__setattr__(self, "coalescing_metadata", metadata)
         _require_aware("observed_at", self.observed_at)
 
 
@@ -90,6 +105,62 @@ class PlatformInboundTransport(Protocol):
     async def receive(self) -> PlatformInbound | None: ...
 
 
+@dataclass(frozen=True, slots=True)
+class PlatformReceipt:
+    """Normalized asynchronous provider receipt, before World v2 settlement."""
+
+    source: str
+    source_event_id: str
+    action_id: str
+    idempotency_key: str
+    status: Literal[
+        "provider_accepted", "delivered", "failed", "cancelled", "expired", "unknown"
+    ]
+    provider_ref: str
+    observed_at: datetime
+    trace_id: str
+    causation_id: str
+    correlation_id: str
+    raw_payload_hash: str
+    kind: Literal[
+        "provider_ack",
+        "execution_receipt",
+        "tool_result",
+        "media_result",
+        "reconciliation_result",
+    ] = "execution_receipt"
+    artifact_refs: tuple[str, ...] = ()
+    cost_actual: int = 0
+    error_class: str | None = None
+    retryability: Literal["retryable", "not_retryable", "unknown"] | None = None
+
+    def __post_init__(self) -> None:
+        _require_nonempty(
+            source=self.source,
+            source_event_id=self.source_event_id,
+            action_id=self.action_id,
+            idempotency_key=self.idempotency_key,
+            status=self.status,
+            provider_ref=self.provider_ref,
+            trace_id=self.trace_id,
+            causation_id=self.causation_id,
+            correlation_id=self.correlation_id,
+            raw_payload_hash=self.raw_payload_hash,
+        )
+        _require_aware("observed_at", self.observed_at)
+        if self.cost_actual < 0:
+            raise ValueError("cost_actual must not be negative")
+        if any(not ref for ref in self.artifact_refs):
+            raise ValueError("artifact_refs must not contain an empty ref")
+        object.__setattr__(self, "artifact_refs", tuple(self.artifact_refs))
+
+
+class PlatformReceiptTransport(Protocol):
+    """One-way provider receipt ingress used by a host callback/poll loop."""
+
+    async def receive_receipt(self) -> PlatformReceipt | None: ...
+
+
 class WorldV2PlatformHost:
     """A platform process facade with one dependency: ``WorldV2TurnApplication``.
 
@@ -116,6 +187,8 @@ class WorldV2PlatformHost:
             text=message.text,
             observed_at=message.observed_at,
             trace_id=message.trace_id,
+            attachment_refs=message.attachment_refs,
+            coalescing_metadata=message.coalescing_metadata,
         )
 
     async def tick(self, tick: PlatformClockTick):
@@ -134,6 +207,28 @@ class WorldV2PlatformHost:
             policy_digest=tick.policy_digest,
         )
 
+    async def receipt(self, receipt: PlatformReceipt):
+        """Forward an asynchronous provider callback to application settlement."""
+
+        return await self._application.receipt(
+            source=receipt.source,
+            source_event_id=receipt.source_event_id,
+            action_id=receipt.action_id,
+            idempotency_key=receipt.idempotency_key,
+            status=receipt.status,
+            provider_ref=receipt.provider_ref,
+            observed_at=receipt.observed_at,
+            trace_id=receipt.trace_id,
+            causation_id=receipt.causation_id,
+            correlation_id=receipt.correlation_id,
+            raw_payload_hash=receipt.raw_payload_hash,
+            kind=receipt.kind,
+            artifact_refs=receipt.artifact_refs,
+            cost_actual=receipt.cost_actual,
+            error_class=receipt.error_class,
+            retryability=receipt.retryability,
+        )
+
     async def drain_inbound_once(self, transport: PlatformInboundTransport):
         """Poll one normalized ingress envelope; no message means no work."""
 
@@ -141,6 +236,14 @@ class WorldV2PlatformHost:
         if message is None:
             return None
         return await self.inbound(message)
+
+    async def drain_receipts_once(self, transport: PlatformReceiptTransport):
+        """Poll one external receipt; no callback means no settlement work."""
+
+        receipt = await transport.receive_receipt()
+        if receipt is None:
+            return None
+        return await self.receipt(receipt)
 
     async def drain_actions_once(self):
         """Advance one durable Action through the application's ActionPump."""
@@ -162,5 +265,7 @@ __all__ = [
     "PlatformClockTick",
     "PlatformInbound",
     "PlatformInboundTransport",
+    "PlatformReceipt",
+    "PlatformReceiptTransport",
     "WorldV2PlatformHost",
 ]

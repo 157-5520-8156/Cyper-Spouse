@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 import hashlib
+import json
 from typing import Protocol
 
 from .runtime import WorldRuntime
@@ -14,7 +15,7 @@ from .interaction_fact_trigger_runtime import FactTriggerRunResult
 from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
 from .outcome_trigger_runtime import OutcomeTriggerRunResult
 from .expression_reconsideration_runtime import ExpressionReconsiderationRunResult
-from .schemas import ClockObservation, Observation, OutcomeObservation, RuntimeOutcome
+from .schemas import ClockObservation, ExternalObservation, Observation, OutcomeObservation, RuntimeOutcome
 
 
 class InboundIdentityResolver(Protocol):
@@ -26,9 +27,11 @@ class InboundTurn:
     platform: str
     platform_user_id: str
     platform_message_id: str
-    text: str
+    text: str | None
     observed_at: datetime
     trace_id: str
+    attachment_refs: tuple[str, ...] = ()
+    coalescing_metadata: dict[str, object] = field(default_factory=dict)
 
 
 class WorldTurnRuntime:
@@ -43,7 +46,7 @@ class WorldTurnRuntime:
             platform=turn.platform, platform_user_id=turn.platform_user_id
         )
         source_event_id = f"{turn.platform}:{turn.platform_user_id}:{turn.platform_message_id}"
-        payload_hash = hashlib.sha256(turn.text.encode("utf-8")).hexdigest()
+        payload_hash = _inbound_payload_hash(turn)
         return await self._runtime.ingest(
             Observation(
                 schema_version="world-v2.1",
@@ -63,8 +66,15 @@ class WorldTurnRuntime:
                 text=turn.text,
                 received_at=turn.observed_at,
                 reply_context={"target": target},
+                attachment_refs=turn.attachment_refs,
+                coalescing_metadata=turn.coalescing_metadata,
             )
         )
+
+    async def settle(self, result: ExternalObservation) -> RuntimeOutcome:
+        """Settle an asynchronous provider receipt through the same v2 seam."""
+
+        return await self._runtime.settle(result)
 
     async def advance(self, clock: ClockObservation) -> RuntimeOutcome:
         """Advance the durable world clock without exposing a ledger writer.
@@ -119,6 +129,20 @@ class WorldTurnRuntime:
         """
 
         return await self._runtime.drain_background_once()
+
+
+def _inbound_payload_hash(turn: InboundTurn) -> str:
+    """Bind every non-text ingress field without invalidating legacy text retries."""
+
+    if turn.text is not None and not turn.attachment_refs and not turn.coalescing_metadata:
+        return hashlib.sha256(turn.text.encode("utf-8")).hexdigest()
+    payload = {
+        "text": turn.text,
+        "attachment_refs": turn.attachment_refs,
+        "coalescing_metadata": turn.coalescing_metadata,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 __all__ = ["InboundIdentityResolver", "InboundTurn", "WorldTurnRuntime"]

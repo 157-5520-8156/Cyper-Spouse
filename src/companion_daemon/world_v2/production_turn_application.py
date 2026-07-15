@@ -15,6 +15,7 @@ from datetime import datetime
 import hashlib
 import json
 from pathlib import Path
+from typing import Literal, Mapping
 
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .action_pump import ActionExecutor, ActionPumpResult
@@ -59,7 +60,10 @@ from .minimal_reply_acceptance import ReplyBudgetPolicy
 from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .expression_plan_acceptance import ExpressionPlanBudgetPolicy
 from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder
-from .expression_reconsideration_runtime import ExpressionReconsiderationReviewer
+from .expression_reconsideration_runtime import (
+    ExpressionReconsiderationReviewer,
+    ExpressionReconsiderationRunResult,
+)
 from .pinned_turn import PinnedTurnCompiler
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .platform_action_executor import (
@@ -71,6 +75,7 @@ from .schemas import (
     BudgetAccount,
     ClockObservation,
     CommitResult,
+    ExternalObservation,
     OutcomeObservation,
     RuntimeOutcome,
     WorldEvent,
@@ -151,9 +156,11 @@ class WorldV2TurnApplication:
         platform: str,
         platform_user_id: str,
         platform_message_id: str,
-        text: str,
+        text: str | None,
         observed_at: datetime,
         trace_id: str,
+        attachment_refs: tuple[str, ...] = (),
+        coalescing_metadata: Mapping[str, object] | None = None,
     ) -> RuntimeOutcome:
         """Accept one platform-neutral message through the sole v2 ingress seam.
 
@@ -171,6 +178,8 @@ class WorldV2TurnApplication:
                 text=text,
                 observed_at=observed_at,
                 trace_id=trace_id,
+                attachment_refs=attachment_refs,
+                coalescing_metadata=dict(coalescing_metadata or {}),
             )
         )
 
@@ -213,6 +222,66 @@ class WorldV2TurnApplication:
             )
         )
 
+    async def receipt(
+        self,
+        *,
+        source: str,
+        source_event_id: str,
+        action_id: str,
+        idempotency_key: str,
+        status: Literal[
+            "provider_accepted", "delivered", "failed", "cancelled", "expired", "unknown"
+        ],
+        provider_ref: str,
+        observed_at: datetime,
+        trace_id: str,
+        causation_id: str,
+        correlation_id: str,
+        raw_payload_hash: str,
+        kind: Literal[
+            "provider_ack",
+            "execution_receipt",
+            "tool_result",
+            "media_result",
+            "reconciliation_result",
+        ] = "execution_receipt",
+        artifact_refs: tuple[str, ...] = (),
+        cost_actual: int = 0,
+        error_class: str | None = None,
+        retryability: Literal["retryable", "not_retryable", "unknown"] | None = None,
+    ) -> RuntimeOutcome:
+        """Settle one provider callback without exposing the runtime or ledger.
+
+        ``source + source_event_id`` is the callback's immutable idempotency
+        identity.  The host cannot select a world, reducer, or settlement
+        handler: all it can supply is the provider evidence it received.
+        """
+
+        result = ExternalObservation(
+            schema_version="world-v2.1",
+            result_id=f"result:{source}:{source_event_id}",
+            world_id=self._ledger.world_id,
+            logical_time=observed_at,
+            created_at=observed_at,
+            trace_id=trace_id,
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+            kind=kind,
+            source=source,
+            source_event_id=source_event_id,
+            action_id=action_id,
+            idempotency_key=idempotency_key,
+            status=status,
+            provider_ref=provider_ref,
+            artifact_refs=artifact_refs,
+            cost_actual=cost_actual,
+            observed_at=observed_at,
+            error_class=error_class,
+            retryability=retryability,
+            raw_payload_hash=raw_payload_hash,
+        )
+        return await self._turns.settle(result)
+
     async def record_outcome_observation(
         self, observation: OutcomeObservation
     ) -> RuntimeOutcome:
@@ -237,7 +306,14 @@ class WorldV2TurnApplication:
 
     async def drain_background_once(
         self,
-    ) -> AppraisalTriggerRunResult | OutcomeTriggerRunResult | AffectTriggerRunResult | FactTriggerRunResult | None:
+    ) -> (
+        AppraisalTriggerRunResult
+        | OutcomeTriggerRunResult
+        | AffectTriggerRunResult
+        | FactTriggerRunResult
+        | ExpressionReconsiderationRunResult
+        | None
+    ):
         """Run one separately scheduled mental-state or memory work unit."""
 
         return await self._turns.drain_background_once()
