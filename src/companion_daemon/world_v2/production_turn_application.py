@@ -19,7 +19,12 @@ from typing import Literal, Mapping
 
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .action_pump import ActionExecutor, ActionPumpResult
-from .activity_plan_runtime import ActivityPlanCommand, ActivityPlanRuntime
+from .activity_plan_runtime import (
+    ActivityPlanCommand,
+    ActivityPlanRuntime,
+    ActivityPlanTransitionCommand,
+)
+from .deferred_reply_runtime import DeferredReplyRuntime, ReplyLaterCommand
 from .affect_trigger_runtime import AffectTriggerRunResult
 from .fact_draft_adapter import FactDraftChatModel, FactObservationProposalAdapter
 from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
@@ -80,6 +85,7 @@ from .schemas import (
     CommitResult,
     ExternalObservation,
     OutcomeObservation,
+    ProjectionCursor,
     ProjectionRequest,
     RuntimeOutcome,
     WorldEvent,
@@ -146,6 +152,7 @@ class WorldV2TurnApplication:
         media_execution_worker: MediaExecutionWorker | None,
         occurrence_content: OccurrenceContentCoordinator,
         activity_plans: ActivityPlanRuntime,
+        deferred_replies: DeferredReplyRuntime,
     ) -> None:
         self._turns = turns
         self._ledger = ledger
@@ -156,6 +163,7 @@ class WorldV2TurnApplication:
         self._media_execution_worker = media_execution_worker
         self._occurrence_content = occurrence_content
         self._activity_plans = activity_plans
+        self._deferred_replies = deferred_replies
 
     async def respond(self, inbound: InboundTurn) -> RuntimeOutcome:
         return await self._turns.respond(inbound)
@@ -195,8 +203,44 @@ class WorldV2TurnApplication:
 
     async def advance(self, clock: ClockObservation) -> RuntimeOutcome:
         """Advance logical time through the sole World v2 host seam."""
-
-        return await self._turns.advance(clock)
+        before = (
+            await asyncio.to_thread(self._ledger.project)
+            if self._ledger.blocks_event_loop
+            else self._ledger.project()
+        )
+        outcome = await self._turns.advance(clock)
+        clock_event_id = f"event:trigger:clock:{clock.tick_id}"
+        located = (
+            await asyncio.to_thread(self._ledger.lookup_event_commit, clock_event_id)
+            if self._ledger.blocks_event_loop
+            else self._ledger.lookup_event_commit(clock_event_id)
+        )
+        if located is None:
+            raise RuntimeError("clock outcome has no durable clock event")
+        clock_event, _clock_commit = located
+        events = self._deferred_replies.clock_events(projection=before, clock_event=clock_event)
+        if events:
+            existing = (
+                await asyncio.to_thread(self._ledger.lookup_event_commit, events[0].event_id)
+                if self._ledger.blocks_event_loop
+                else self._ledger.lookup_event_commit(events[0].event_id)
+            )
+            if existing is None:
+                current = (
+                    await asyncio.to_thread(self._ledger.project)
+                    if self._ledger.blocks_event_loop
+                    else self._ledger.project()
+                )
+                kwargs = dict(events=events, expected_cursor=ProjectionCursor(
+                    world_revision=current.world_revision,
+                    deliberation_revision=current.deliberation_revision,
+                    ledger_sequence=current.ledger_sequence,
+                ), commit_id="reply-later:clock:" + clock.tick_id)
+                if self._ledger.blocks_event_loop:
+                    await asyncio.to_thread(self._ledger.commit_at_cursor, **kwargs)
+                else:
+                    self._ledger.commit_at_cursor(**kwargs)
+        return outcome
 
     async def tick(
         self,
@@ -290,7 +334,20 @@ class WorldV2TurnApplication:
             retryability=retryability,
             raw_payload_hash=raw_payload_hash,
         )
-        return await self._turns.settle(result)
+        outcome = await self._turns.settle(result)
+        if status in {"delivered", "failed", "cancelled", "expired", "unknown"}:
+            if self._ledger.blocks_event_loop:
+                await asyncio.to_thread(
+                    self._deferred_replies.settle_terminal_action,
+                    action_id=action_id, logical_time=observed_at, created_at=observed_at,
+                    trace_id=trace_id, causation_id=causation_id, correlation_id=correlation_id,
+                )
+            else:
+                self._deferred_replies.settle_terminal_action(
+                    action_id=action_id, logical_time=observed_at, created_at=observed_at,
+                    trace_id=trace_id, causation_id=causation_id, correlation_id=correlation_id,
+                )
+        return outcome
 
     async def record_outcome_observation(
         self, observation: OutcomeObservation
@@ -339,6 +396,59 @@ class WorldV2TurnApplication:
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(self._activity_plans.plan, **kwargs)
         return self._activity_plans.plan(**kwargs)
+
+    async def transition_activity(
+        self,
+        command: ActivityPlanTransitionCommand,
+        *,
+        logical_time: datetime,
+        created_at: datetime,
+        trace_id: str,
+        causation_id: str,
+        correlation_id: str,
+    ) -> CommitResult:
+        """Move/cancel an ActivityPlan without giving a host ledger access."""
+        kwargs = dict(command=command, logical_time=logical_time, created_at=created_at,
+                      trace_id=trace_id, causation_id=causation_id, correlation_id=correlation_id)
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._activity_plans.transition, **kwargs)
+        return self._activity_plans.transition(**kwargs)
+
+    async def replace_activity(
+        self,
+        command: ActivityPlanCommand,
+        *,
+        predecessor_plan_id: str,
+        logical_time: datetime,
+        created_at: datetime,
+        trace_id: str,
+        causation_id: str,
+        correlation_id: str,
+    ) -> CommitResult:
+        """Atomically substitute an unfinished plan; it never asserts completion."""
+        kwargs = dict(command=command, predecessor_plan_id=predecessor_plan_id,
+                      logical_time=logical_time, created_at=created_at, trace_id=trace_id,
+                      causation_id=causation_id, correlation_id=correlation_id)
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._activity_plans.replace, **kwargs)
+        return self._activity_plans.replace(**kwargs)
+
+    async def defer_reply(
+        self,
+        command: ReplyLaterCommand,
+        *,
+        logical_time: datetime,
+        created_at: datetime,
+        trace_id: str,
+        causation_id: str,
+        correlation_id: str,
+    ) -> CommitResult:
+        """Open exactly one source-bound reply-later commitment and Action."""
+        kwargs = dict(command=command, logical_time=logical_time, created_at=created_at,
+                      trace_id=trace_id, causation_id=causation_id, correlation_id=correlation_id)
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._deferred_replies.defer, **kwargs)
+        return self._deferred_replies.defer(**kwargs)
 
     async def drain_actions_once(self) -> ActionPumpResult | None:
         return await self._turns.drain_actions_once()
@@ -654,6 +764,10 @@ def build_sqlite_world_v2_turn_application(
             activity_plans=ActivityPlanRuntime(
                 ledger=ledger,
                 owner_actor_ref=config.companion_actor_ref,
+            ),
+            deferred_replies=DeferredReplyRuntime(
+                ledger=ledger,
+                actor=config.companion_actor_ref,
             ),
         )
     except Exception:
