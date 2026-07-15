@@ -58,7 +58,11 @@ class ScenarioVerificationError(AssertionError):
 # Filled after the complete, fixed fake suite has been run.  A change to this
 # value is a new offline mechanism baseline, not evidence of a human-likeness
 # improvement.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "f4e4439f702023b7b95f728c9cfe09730f4bcf7794404e82f85f714e679e5fd7"
+# Updated after the source-bound affect turn was corrected to read an
+# Appraisal that precedes (rather than equals) its later trigger cursor. The
+# fixed suite was run twice in independent clean archives before freezing this
+# deterministic mechanism baseline.
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "aae528f5e935d05673ef99e984f0068fd4bddf768f25b0034e6e8be506b906aa"
 
 
 class _FixedScenarioRouter:

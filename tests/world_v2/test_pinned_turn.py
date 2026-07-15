@@ -585,6 +585,10 @@ async def test_runtime_materializes_audited_appraisal_without_a_second_model_cal
     stored = ledger.lookup_event_commit(appraisal_event_ref)
     assert stored is not None
     appraisal_event, appraisal_commit = stored
+    # Claiming the source-bound affect trigger is a separate durable commit.
+    # The affect turn must still accept the earlier Appraisal as immutable
+    # evidence at this later pinned cursor.
+    assert appraisal_commit.ledger_sequence < projection.ledger_sequence
     affect_model = _AffectDecisionModel(
         appraisal_change_id=projection.appraisals[0].origin.change_id,
         evidence_ref=appraisal_event.event_id,

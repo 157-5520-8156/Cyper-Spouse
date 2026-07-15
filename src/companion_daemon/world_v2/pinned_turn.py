@@ -179,11 +179,15 @@ class PinnedTurnCompiler:
         if appraisal_event.event_type != "AppraisalAccepted":
             raise ValueError("Pinned turn affect trigger requires AppraisalAccepted")
         stored = await self._lookup_event_commit(appraisal_event.event_id)
+        # The source Appraisal is immutable evidence, rather than the state
+        # proposed by this turn. Opening/claiming its durable affect trigger
+        # can legitimately advance the ledger before this worker runs, so the
+        # source need only be present in the pinned projection. Ledger
+        # sequence is the total order enforced by ``project_at``.
         if (
             stored is None
             or stored[0] != appraisal_event
-            or stored[1].world_revision != cursor.world_revision
-            or stored[1].ledger_sequence != cursor.ledger_sequence
+            or stored[1].ledger_sequence > cursor.ledger_sequence
         ):
             raise ValueError("Pinned turn appraisal event is not the committed authority")
         projection = await self._project_at(cursor)
