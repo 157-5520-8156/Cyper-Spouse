@@ -119,6 +119,7 @@ async def test_production_application_bootstraps_sqlite_once_and_exposes_only_tu
         now=NOW,
     )
     try:
+        assert await app.drain_background_once() is None
         outcome = await app.respond(
             InboundTurn(
                 platform="test",
