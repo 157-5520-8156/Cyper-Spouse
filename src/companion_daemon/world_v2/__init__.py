@@ -5,6 +5,7 @@ behind :class:`WorldRuntime`.
 """
 
 from .runtime import WorldRuntime
+from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
 from .projection import ProjectionAuthority, ProjectionGrant
 from .matrix_catalog import (
     CandidateDistribution,
@@ -53,6 +54,7 @@ __all__ = [
     "ExternalObservation",
     "ExecutionReceipt",
     "FrequencyBudget",
+    "FactV2AcceptanceRuntime",
     "MatrixCatalog",
     "MatrixField",
     "MatrixSchemaError",
