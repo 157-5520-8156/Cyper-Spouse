@@ -127,6 +127,41 @@ def _compiler(ledger: LedgerPort) -> ContextCapsuleCompiler:
     return context_capsule_compiler_from_ledger(ledger=ledger)
 
 
+def test_default_scope_includes_only_the_committed_incoming_actor() -> None:
+    world_id = "world:context-interlocutor"
+    ledger = WorldLedger.in_memory(world_id=world_id)
+    incoming = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:incoming",
+        world_id=world_id,
+        event_type="ObservationRecorded",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="user:primary",
+        source="test",
+        trace_id="trace:incoming",
+        causation_id="cause:incoming",
+        correlation_id="correlation:incoming",
+        idempotency_key="identity:incoming",
+        payload={"observation_id": "observation:incoming"},
+    )
+    ledger.commit(
+        [_event(world_id), incoming], expected_world_revision=0, expected_deliberation_revision=0
+    )
+    projection = ledger.project()
+    query = query_from_projection(
+        projection, actor_ref="actor:companion", trigger_ref=incoming.event_id
+    )
+    resolver = LedgerProjectionContextResolver(
+        ledger=ledger, situation_compiler=SituationCompiler()
+    )
+
+    scope = resolver._scope_for_query(query, projection)
+
+    assert scope.actor_ref == "actor:companion"
+    assert scope.related_subject_refs == ("user:primary",)
+
+
 def test_real_ledger_resolves_situation_core_and_authoritative_empty_domains(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
