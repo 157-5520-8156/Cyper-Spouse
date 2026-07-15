@@ -1267,7 +1267,7 @@ def test_sqlite_roundtrip_and_verified_v8_to_v9_migration(monkeypatch, tmp_path)
             (legacy_state_json(raw_state), legacy_hash, "world-v2-reducers.8", WORLD),
         )
     migrated = SQLiteWorldLedger(path=migration_path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.23"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.24"
     assert migrated.project() == old_expected
     assert migrated.rebuild() == old_expected
     migrated.close()

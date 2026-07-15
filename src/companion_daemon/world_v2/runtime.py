@@ -23,6 +23,12 @@ from .minimal_reply_acceptance import (
 )
 from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .minimal_reply_events import minimal_reply_event_id
+from .expression_plan_acceptance import (
+    ExpressionPlanAcceptanceError,
+    ExpressionPlanBudgetPolicy,
+    derive_expression_plan_material,
+)
+from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder, expression_plan_event_id
 from .appraisal_trigger import interaction_appraisal_trigger_events
 from .fact_trigger import interaction_fact_trigger_event
 from .fact_draft_adapter import FactObservationProposalAdapter
@@ -107,6 +113,8 @@ class WorldRuntime:
         pinned_turn: PinnedTurnCompiler | None = None,
         reply_policy: ReplyBudgetPolicy | None = None,
         reply_recorder: MinimalReplyAtomicRecorder | None = None,
+        expression_policy: ExpressionPlanBudgetPolicy | None = None,
+        expression_recorder: ExpressionPlanAtomicRecorder | None = None,
         interaction_appraisal_owner: str | None = None,
         appraisal_acceptance: AppraisalAcceptanceRuntime | None = None,
         appraisal_acceptance_actor: str | None = None,
@@ -143,6 +151,10 @@ class WorldRuntime:
             raise ValueError("minimal reply policy and recorder must be configured together")
         self._reply_policy = reply_policy
         self._reply_recorder = reply_recorder
+        if (expression_policy is None) != (expression_recorder is None):
+            raise ValueError("expression plan policy and recorder must be configured together")
+        self._expression_policy = expression_policy
+        self._expression_recorder = expression_recorder
         if interaction_appraisal_owner is not None and not interaction_appraisal_owner:
             raise ValueError("interaction appraisal owner must not be empty")
         self._interaction_appraisal_owner = interaction_appraisal_owner
@@ -930,6 +942,49 @@ class WorldRuntime:
                                 committed = await self._commit_accepted(batch, cursor=material.cursor)
                                 reply_authorized = True
                                 authorized_action_ids = (material.action.action_id,)
+                    elif audit is not None and audit.proposal_kind == "decision" and self._expression_policy is not None:
+                        account = next(
+                            (item for item in after_audit.budget_accounts if item.account_id == self._expression_policy.account_id),
+                            None,
+                        )
+                        if account is None:
+                            reply_deferred_refs = (f"expression-budget-account:{self._expression_policy.account_id}",)
+                        else:
+                            try:
+                                material = derive_expression_plan_material(
+                                    audit=audit,
+                                    cursor=ProjectionCursor(
+                                        world_revision=after_audit.world_revision,
+                                        deliberation_revision=after_audit.deliberation_revision,
+                                        ledger_sequence=after_audit.ledger_sequence,
+                                    ),
+                                    world_id=self._world_id,
+                                    policy=self._expression_policy,
+                                    account=account,
+                                    logical_time=after_audit.logical_time or observation.logical_time,
+                                    created_at=observation.created_at,
+                                    trace_id=observation.trace_id,
+                                    correlation_id=observation.correlation_id,
+                                )
+                            except ExpressionPlanAcceptanceError as exc:
+                                if exc.code in {
+                                    "expression_plan_acceptance.budget_unavailable",
+                                    "expression_plan_acceptance.budget_account_unavailable",
+                                }:
+                                    reply_deferred_refs = (exc.code,)
+                                else:
+                                    reply_terminal_errors = (exc.code,)
+                            else:
+                                assert self._expression_recorder is not None
+                                batch = self._expression_recorder.prepare_batch(
+                                    acceptance_id=f"acceptance:expression-plan:{audit.proposal_id}",
+                                    material=material,
+                                    actor=self._expression_policy.actor,
+                                    source="world-runtime:expression-acceptance",
+                                )
+                                committed = await self._commit_accepted(batch, cursor=material.cursor)
+                                reply_authorized = True
+                                authorized_action_ids = tuple(item.action.action_id for item in material.beats)
         if reply_authorized:
             status = "action_authorized"
         elif reply_terminal_errors:
@@ -981,6 +1036,40 @@ class WorldRuntime:
             ),
             None,
         )
+        generic_manifest = next(
+            (
+                item
+                for item in projection.expression_plan_manifests
+                if any(
+                    audit.proposal_id == item.proposal_id
+                    and audit.event_ref == item.proposal_event_ref
+                    and audit.trigger_ref == observation_event.event_id
+                    for audit in projection.proposal_audits
+                )
+            ),
+            None,
+        )
+        if generic_manifest is not None:
+            committed = original_commit
+            for beat in generic_manifest.beats:
+                persisted = await self._lookup_event_commit(
+                    expression_plan_event_id(
+                        manifest_hash=generic_manifest.manifest_hash,
+                        role="action",
+                        stable_id=beat.action.action_id,
+                    )
+                )
+                if persisted is None or persisted[0].event_type != "ActionAuthorized":
+                    raise RuntimeError("expression plan manifest has no durable action event")
+                committed = persisted[1]
+            return RuntimeOutcome(
+                outcome_id=f"outcome:{trigger_id}", trigger_id=trigger_id,
+                observation_ref=observation.observation_id,
+                committed_world_revision=committed.world_revision, ledger_sequence=committed.ledger_sequence,
+                status="action_authorized",
+                authorized_action_ids=tuple(item.action.action_id for item in generic_manifest.beats),
+                projection_hint=f"world-revision:{committed.world_revision}",
+            )
         if manifest is None:
             if self._interaction_appraisal_owner is not None and any(
                 item.trigger_id

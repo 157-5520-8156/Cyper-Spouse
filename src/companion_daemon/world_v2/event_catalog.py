@@ -59,6 +59,10 @@ from .outcome_acceptance_manifest import (
 from .fact_accepted_contracts import FactCommitMaterializedPayloadV2
 from .minimal_reply_events import MINIMAL_REPLY_EVENT_PAYLOAD_MODELS
 from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION, MinimalReplyManifest
+from .expression_plan_manifest import (
+    EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
+    ExpressionPlanAcceptanceManifest,
+)
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .thread_events import THREAD_MECHANICAL_PAYLOAD_MODELS, THREAD_PAYLOAD_MODELS
 from .schemas import (
@@ -92,7 +96,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.23"
+    reducer_bundle: str = "world-v2-reducers.24"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -134,6 +138,7 @@ class EventContract:
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
                 AFFECT_ACCEPTANCE_MANIFEST_VERSION,
                 OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+                EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
             }:
                 raise ValueError("acceptance_manifest.unsupported_manifest_version")
         model = (
@@ -165,6 +170,15 @@ class EventContract:
             and payload.get("manifest_version") == MINIMAL_REPLY_MANIFEST_VERSION
         ):
             MinimalReplyManifest.model_validate(dict(payload), strict=True)
+            return
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version") == EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION
+        ):
+            ExpressionPlanAcceptanceManifest.model_validate_json(
+                json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+                strict=True,
+            )
             return
         if (
             self.event_type == "AcceptanceRecorded"
@@ -747,7 +761,7 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
             ),
             _contract(
                 "MessagePayloadStored",
-                "minimal_reply_recorder",
+                "expression_plan_recorder",
                 "world",
                 "MessagePayloadStoredPayload",
                 allowed_predecessors=("AcceptanceRecorded",),
@@ -756,7 +770,7 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
             ),
             _contract(
                 "ExpressionPlanAccepted",
-                "minimal_reply_recorder",
+                "expression_plan_recorder",
                 "world",
                 "ExpressionPlanAcceptedPayload",
                 allowed_predecessors=("MessagePayloadStored",),
@@ -765,7 +779,7 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
             ),
             _contract(
                 "ExpressionBeatAuthorized",
-                "minimal_reply_recorder",
+                "expression_plan_recorder",
                 "world",
                 "ExpressionBeatAuthorizedPayload",
                 allowed_predecessors=("ExpressionPlanAccepted",),

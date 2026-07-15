@@ -53,6 +53,8 @@ from .occurrence_content_coordinator import (
 )
 from .minimal_reply_acceptance import ReplyBudgetPolicy
 from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
+from .expression_plan_acceptance import ExpressionPlanBudgetPolicy
+from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder
 from .pinned_turn import PinnedTurnCompiler
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .platform_action_executor import PlatformActionExecutor, PlatformTransport
@@ -330,6 +332,14 @@ def build_sqlite_world_v2_turn_application(
                 recovery_policy=config.reply_recovery_policy,
             ),
             reply_recorder=MinimalReplyAtomicRecorder(batch_issuer=issuer),
+            expression_policy=ExpressionPlanBudgetPolicy(
+                account_id=config.chat_account_id,
+                amount_limit_per_action=config.reply_budget_amount,
+                actor=config.companion_actor_ref,
+                allowed_targets=(config.reply_target,),
+                recovery_policy=config.reply_recovery_policy,
+            ),
+            expression_recorder=ExpressionPlanAtomicRecorder(batch_issuer=issuer),
             interaction_appraisal_owner=(
                 config.appraisal_worker_owner if appraisal_turn is not None else None
             ),

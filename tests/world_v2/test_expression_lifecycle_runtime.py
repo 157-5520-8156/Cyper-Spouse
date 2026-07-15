@@ -220,6 +220,48 @@ def test_lifecycle_rejects_tampered_receipt_binding() -> None:
         validate_commit_batch((receipt_event, beat_event), expected_world_revision=0)
 
 
+def test_multibeat_plan_completes_only_after_the_last_independent_receipt() -> None:
+    first = _beat()
+    second_action = _action().model_copy(
+        update={"action_id": "action:expression:2", "expression_beat_id": "beat:expression:2"}
+    )
+    second = _beat().model_copy(
+        update={"beat_id": "beat:expression:2", "action_id": second_action.action_id, "dependency_beat_ids": ("beat:expression:1",)}
+    )
+    receipt = _receipt()
+    receipt_event = _event("ExecutionReceiptRecorded", {"receipt": receipt.model_dump(mode="json")}, "receipt")
+    projection = _projection().model_copy(update={"expression_beats": (first, second)})
+    first_events = ExpressionReceiptLifecycle().events_for_terminal_receipt(
+        projection=projection, action=_action(), receipt=receipt, receipt_event=receipt_event
+    )
+    assert [item.event_type for item in first_events] == ["ExpressionBeatSettled"]
+    settled_first = first.model_copy(update={
+        "state": "settled",
+        "history": (*first.history, ExpressionBeatLifecycleEntry(
+            state="settled", event_ref="event:expression-lifecycle:first-settled",
+            event_payload_hash="f" * 64, receipt_id="receipt:expression:1",
+            terminal_action_state="delivered",
+        )),
+    })
+    second_receipt = receipt.model_copy(update={"receipt_id": "receipt:expression:2", "action_id": second_action.action_id})
+    second_event = _event("ExecutionReceiptRecorded", {"receipt": second_receipt.model_dump(mode="json")}, "receipt-2")
+    last_events = ExpressionReceiptLifecycle().events_for_terminal_receipt(
+        projection=projection.model_copy(update={"expression_beats": (settled_first, second)}),
+        action=second_action, receipt=second_receipt, receipt_event=second_event,
+    )
+    assert [item.event_type for item in last_events] == ["ExpressionBeatSettled", "ExpressionPlanCompleted"]
+
+
+def test_failed_terminal_beat_settles_but_never_completes_the_expression_plan() -> None:
+    failed_action = _action().model_copy(update={"state": "failed"})
+    failed_receipt = _receipt().model_copy(update={"observed_state": "failed"})
+    receipt_event = _event("ExecutionReceiptRecorded", {"receipt": failed_receipt.model_dump(mode="json")}, "failed-receipt")
+    events = ExpressionReceiptLifecycle().events_for_terminal_receipt(
+        projection=_projection(), action=failed_action, receipt=failed_receipt, receipt_event=receipt_event
+    )
+    assert [item.event_type for item in events] == ["ExpressionBeatSettled"]
+
+
 def test_settlement_planner_appends_lifecycle_as_one_receipt_suffix() -> None:
     action = _action().model_copy(update={"state": "dispatch_started"})
     trigger_id = "trigger:settlement:provider:test:source:expression:1"

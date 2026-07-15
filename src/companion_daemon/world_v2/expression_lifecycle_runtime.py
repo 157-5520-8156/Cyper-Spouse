@@ -98,12 +98,20 @@ class ExpressionReceiptLifecycle:
                 payload=settled.model_dump(mode="json"),
             )
         ]
-        # This vertical intentionally supports exactly the minimal lane's one
-        # beat.  A later scheduler can add additional beats and complete only
-        # after their individual receipt settlements; this compiler must not
-        # invent that policy.
+        # Every beat is settled strictly by its own receipt.  Complete only
+        # when this receipt settles the final unresolved beat; dependencies are
+        # dispatch eligibility, not a reason to skip lifecycle authority.
         plan_beats = tuple(item for item in projection.expression_beats if item.plan_id == plan_id)
-        if len(plan_beats) == 1:
+        prior_beats_delivered = all(
+            item.beat_id == beat_id
+            or (
+                item.state == "settled"
+                and bool(item.history)
+                and item.history[-1].terminal_action_state == "delivered"
+            )
+            for item in plan_beats
+        )
+        if terminal_state == "delivered" and prior_beats_delivered:
             completed = ExpressionPlanCompletedPayload(
                 acceptance_id=plan.acceptance_id,
                 proposal_id=plan.proposal_id,

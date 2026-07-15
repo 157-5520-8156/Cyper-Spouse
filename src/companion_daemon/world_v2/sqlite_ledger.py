@@ -105,6 +105,7 @@ _V20_ONLY_STATE_KEYS = frozenset(
         "expression_beats",
     }
 )
+_V24_ONLY_STATE_KEYS = frozenset({"expression_plan_manifests"})
 _PREFIX_PROOF_VERSION = "world-v2-prefix-proof.2"
 _PREVIOUS_PREFIX_PROOF_VERSION = "world-v2-prefix-proof.1"
 _PREFIX_BITS_BYTES = 32
@@ -1361,6 +1362,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.20",
                 "world-v2-reducers.21",
                 "world-v2-reducers.22",
+                "world-v2-reducers.23",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -1469,6 +1471,17 @@ class SQLiteWorldLedger:
             if not isinstance(raw_state, dict):
                 raise ValueError("legacy state is not an object")
             raw_state = dict(raw_state)
+            injected_v24_keys = tuple(
+                sorted(
+                    key
+                    for key in _V24_ONLY_STATE_KEYS.intersection(raw_state)
+                    if raw_state.get(key) not in (None, [], {})
+                )
+            )
+            if injected_v24_keys and reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+                raise ValueError(
+                    f"legacy head cannot claim v24 expression fields {injected_v24_keys!r}"
+                )
             injected_v20_keys = tuple(
                 sorted(
                     key
@@ -1480,6 +1493,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.20",
                 "world-v2-reducers.21",
                 "world-v2-reducers.22",
+                "world-v2-reducers.23",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v20 reply fields {injected_v20_keys!r}"
@@ -1496,6 +1510,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.20",
                 "world-v2-reducers.21",
                 "world-v2-reducers.22",
+                "world-v2-reducers.23",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v19 Fact fields {injected_v19_keys!r}"
@@ -1521,6 +1536,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.20",
                 "world-v2-reducers.21",
                 "world-v2-reducers.22",
+                "world-v2-reducers.23",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v17 audit fields {injected_v17_keys!r}"
@@ -1534,6 +1550,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.20",
                 "world-v2-reducers.21",
                 "world-v2-reducers.22",
+                "world-v2-reducers.23",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v16 authority fields {injected_v16_keys!r}"
@@ -1553,7 +1570,8 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.19",
                     "world-v2-reducers.20",
                     "world-v2-reducers.21",
-                    "world-v2-reducers.22",
+                "world-v2-reducers.22",
+                "world-v2-reducers.23",
                 }
                 and isinstance(actor_transitions, list)
                 and any(
@@ -1577,6 +1595,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.20",
                     "world-v2-reducers.21",
                     "world-v2-reducers.22",
+                    "world-v2-reducers.23",
                 }
                 and isinstance(plans, list)
                 and any(
@@ -1596,6 +1615,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.20",
                     "world-v2-reducers.21",
                     "world-v2-reducers.22",
+                    "world-v2-reducers.23",
                 }
                 and isinstance(occurrences, list)
                 and any(
@@ -1738,7 +1758,8 @@ class SQLiteWorldLedger:
             "world-v2-reducers.19",
             "world-v2-reducers.20",
             "world-v2-reducers.21",
-            "world-v2-reducers.22",
+                    "world-v2-reducers.22",
+                    "world-v2-reducers.23",
             REDUCER_BUNDLE_VERSION,
         }:
             payload.pop("commitments", None)
@@ -1847,6 +1868,7 @@ class SQLiteWorldLedger:
             fact_commit_proposal_audits_v2=projection.fact_commit_proposal_audits_v2,
             acceptance_manifests_v3=projection.acceptance_manifests_v3,
             minimal_reply_manifests=projection.minimal_reply_manifests,
+            expression_plan_manifests=projection.expression_plan_manifests,
             stored_message_payloads=projection.stored_message_payloads,
             expression_plans=projection.expression_plans,
             expression_beats=projection.expression_beats,

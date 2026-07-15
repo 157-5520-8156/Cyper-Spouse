@@ -48,6 +48,12 @@ from .minimal_reply_manifest import (
     MinimalReplyManifest,
     canonical_minimal_reply_value_hash,
 )
+from .expression_plan_manifest import (
+    EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
+    ExpressionPlanAcceptanceManifest,
+    canonical_expression_plan_value_hash,
+)
+from .expression_plan_atomic_recorder import expression_plan_event_id, expression_plan_idempotency_key
 from .appraisal_events import (
     AppraisalAcceptedPayload,
     AppraisalContradictedPayload,
@@ -83,6 +89,7 @@ def validate_commit_batch(
         reject_appraisal_acceptance_manifest_without_recorder(events)
         reject_affect_acceptance_manifest_without_recorder(events)
         reject_outcome_acceptance_manifest_without_recorder(events)
+        reject_expression_plan_manifest_without_recorder(events)
     _validate_deliberation_audit_transaction(events)
     _validate_acceptance_manifest_v2_batch(events)
     _validate_authorized_fact_manifest_v3_batch(
@@ -91,6 +98,11 @@ def validate_commit_batch(
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_authorized_minimal_reply_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_expression_plan_manifest_batch(
         events,
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
@@ -431,6 +443,7 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
                 AFFECT_ACCEPTANCE_MANIFEST_VERSION,
                 OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+                EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
         }
     ]
     if unknown:
@@ -742,6 +755,113 @@ def reject_minimal_reply_manifest_without_recorder(events: Sequence[WorldEvent])
         for event in events
     ):
         raise ValueError("minimal_reply.recorder_capability_required")
+
+
+def reject_expression_plan_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("expression_plan.recorder_capability_required")
+
+
+def _validate_authorized_expression_plan_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    manifests = [
+        event for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("expression_plan.recorder_capability_required")
+    if len(manifests) != 1:
+        raise ValueError("expression_plan.accepted_batch_must_have_one_manifest")
+    acceptance = manifests[0]
+    try:
+        manifest = ExpressionPlanAcceptanceManifest.model_validate_json(acceptance.payload_json)
+    except Exception as exc:
+        raise ValueError("expression_plan.accepted_batch_payload_is_invalid") from exc
+    if manifest.evaluated_world_revision != expected_world_revision:
+        raise ValueError("expression_plan.accepted_batch_authority_is_not_pinned")
+    expected_types = (
+        ("AcceptanceRecorded",)
+        + ("MessagePayloadStored",) * len(manifest.beats)
+        + ("ExpressionPlanAccepted",)
+        + sum((("ExpressionBeatAuthorized", "BudgetReserved", "ActionAuthorized") for _ in manifest.beats), ())
+    )
+    if tuple(event.event_type for event in events) != expected_types:
+        raise ValueError("expression_plan.accepted_batch_shape_is_not_exact")
+    if acceptance.causation_id != manifest.proposal_event_ref or any(
+        current.causation_id != previous.event_id for previous, current in zip(events, events[1:])
+    ):
+        raise ValueError("expression_plan.accepted_batch_causation_is_not_exact")
+    first = events[0]
+    if any(
+        item.world_id != first.world_id
+        or item.logical_time != first.logical_time
+        or item.created_at != first.created_at
+        or item.actor != first.actor
+        or item.source != first.source
+        or item.trace_id != first.trace_id
+        or item.correlation_id != first.correlation_id
+        for item in events[1:]
+    ):
+        raise ValueError("expression_plan.accepted_batch_envelope_metadata_mismatch")
+    messages = events[1 : 1 + len(manifest.beats)]
+    plan_event = events[1 + len(manifest.beats)]
+    tails = events[2 + len(manifest.beats) :]
+    _validate_expression_plan_identity(acceptance, manifest=manifest, role="acceptance", stable_id=manifest.acceptance_id, domain_identity=True)
+    for message_event, item in zip(messages, manifest.beats, strict=True):
+        _validate_expression_plan_identity(message_event, manifest=manifest, role="message", stable_id=item.beat.payload.payload_ref, domain_identity=True)
+        message = MessagePayloadStoredPayload.model_validate_json(message_event.payload_json)
+        if (
+            message.acceptance_id != manifest.acceptance_id
+            or message.proposal_id != manifest.proposal_id
+            or message.message != item.beat.payload
+            or canonical_expression_plan_value_hash(message.message.model_dump(mode="json")) != item.message_hash
+        ):
+            raise ValueError("expression_plan.message_does_not_match_manifest")
+    _validate_expression_plan_identity(plan_event, manifest=manifest, role="plan", stable_id=manifest.plan_id, domain_identity=True)
+    plan = ExpressionPlanAcceptedPayload.model_validate_json(plan_event.payload_json)
+    if (
+        plan.acceptance_id != manifest.acceptance_id or plan.proposal_id != manifest.proposal_id
+        or plan.expression_change_id != manifest.expression_change_id or plan.plan_id != manifest.plan_id
+    ):
+        raise ValueError("expression_plan.plan_does_not_match_manifest")
+    for offset, item in enumerate(manifest.beats):
+        beat_event, reservation_event, action_event = tails[offset * 3 : offset * 3 + 3]
+        _validate_expression_plan_identity(beat_event, manifest=manifest, role="beat", stable_id=item.beat.beat_id, domain_identity=True)
+        _validate_expression_plan_identity(reservation_event, manifest=manifest, role="reservation", stable_id=item.reservation.reservation_id)
+        _validate_expression_plan_identity(action_event, manifest=manifest, role="action", stable_id=item.action.action_id)
+        beat = ExpressionBeatAuthorizedPayload.model_validate_json(beat_event.payload_json)
+        reservation = BudgetReservation.model_validate_json(json.dumps(reservation_event.payload()["reservation"], ensure_ascii=False))
+        action = Action.model_validate_json(json.dumps(action_event.payload()["action"], ensure_ascii=False))
+        if (
+            beat.acceptance_id != manifest.acceptance_id or beat.proposal_id != manifest.proposal_id
+            or beat.expression_change_id != manifest.expression_change_id or beat.beat != item.beat
+            or canonical_expression_plan_value_hash(beat.beat.model_dump(mode="json")) != item.beat_hash
+            or reservation != item.reservation or action != item.action
+            or canonical_expression_plan_value_hash(reservation.model_dump(mode="json")) != item.reservation_hash
+            or canonical_expression_plan_value_hash(action.model_dump(mode="json")) != item.action_hash
+        ):
+            raise ValueError("expression_plan.effect_does_not_match_manifest")
+
+
+def _validate_expression_plan_identity(
+    event: WorldEvent, *, manifest: ExpressionPlanAcceptanceManifest, role: str, stable_id: str, domain_identity: bool = False
+) -> None:
+    if event.event_id != expression_plan_event_id(manifest_hash=manifest.manifest_hash, role=role, stable_id=stable_id):
+        raise ValueError("expression_plan.event_id_is_not_deterministic")
+    expected = (
+        domain_idempotency_key(event_type=event.event_type, world_id=event.world_id, payload=event.payload())
+        if domain_identity else expression_plan_idempotency_key(world_id=event.world_id, manifest_hash=manifest.manifest_hash, role=role, stable_id=stable_id)
+    )
+    if expected is None or event.idempotency_key != expected:
+        raise ValueError("expression_plan.idempotency_key_is_not_deterministic")
 
 
 def _validate_authorized_appraisal_acceptance_manifest_batch(

@@ -811,6 +811,52 @@ class MinimalReplyManifestRef(FrozenModel):
     recorded_at_world_revision: int = Field(ge=1)
 
 
+class ExpressionPlanManifestBeatRef(FrozenModel):
+    """Projection-safe copy of one immutable accepted multi-beat triple."""
+
+    beat_id: str = Field(min_length=1)
+    payload_ref: str = Field(min_length=1)
+    payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    text: str = Field(min_length=1, max_length=4_096)
+    content_type: str = Field(min_length=1, max_length=128)
+    dependency_beat_ids: tuple[str, ...] = ()
+    not_before: datetime | None = None
+    expires_at: datetime | None = None
+    cancel_policy: str = Field(min_length=1, max_length=128)
+    reconsider_policy: str = Field(min_length=1, max_length=128)
+    merge_policy: str = Field(min_length=1, max_length=128)
+    intent_id: str = Field(min_length=1)
+    intent_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    message_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    beat_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reservation: BudgetReservation
+    reservation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    action: Action
+    action_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ExpressionPlanManifestRef(FrozenModel):
+    """Durable authority for one generic accepted expression plan."""
+
+    acceptance_id: str = Field(min_length=1)
+    proposal_id: str = Field(min_length=1)
+    proposal_event_ref: str = Field(min_length=1)
+    proposal_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    proposal_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    evaluated_world_revision: int = Field(ge=0)
+    policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expression_change_id: str = Field(min_length=1)
+    expression_change_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    plan_id: str = Field(min_length=1)
+    ordering_policy: str = Field(min_length=1, max_length=128)
+    terminal_policy: str = Field(min_length=1, max_length=128)
+    beats: tuple[ExpressionPlanManifestBeatRef, ...] = Field(min_length=1, max_length=32)
+    manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    acceptance_event_ref: str = Field(min_length=1)
+    acceptance_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recorded_at_world_revision: int = Field(ge=1)
+
+
 class StoredMessagePayloadProjection(FrozenModel):
     acceptance_id: str = Field(min_length=1)
     proposal_id: str = Field(min_length=1)
@@ -887,6 +933,8 @@ class ExpressionBeatProjection(FrozenModel):
     payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     action_id: str | None = Field(default=None, min_length=1)
     dependency_beat_ids: tuple[str, ...] = ()
+    not_before: datetime | None = None
+    expires_at: datetime | None = None
     cancel_policy: str = Field(min_length=1, max_length=128)
     reconsider_policy: str = Field(min_length=1, max_length=128)
     merge_policy: str = Field(min_length=1, max_length=128)
@@ -4093,7 +4141,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.23"
+    reducer_bundle_version: str = "world-v2-reducers.24"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -4191,6 +4239,7 @@ class LedgerProjection(FrozenModel):
     fact_commit_proposal_audits_v2: tuple[FactCommitProposalAuditRefV2, ...] = ()
     acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()
     minimal_reply_manifests: tuple[MinimalReplyManifestRef, ...] = ()
+    expression_plan_manifests: tuple[ExpressionPlanManifestRef, ...] = ()
     stored_message_payloads: tuple[StoredMessagePayloadProjection, ...] = ()
     life_content_descriptors: tuple[LifeContentDescriptorProjection, ...] = ()
     expression_plans: tuple[ExpressionPlanProjection, ...] = ()

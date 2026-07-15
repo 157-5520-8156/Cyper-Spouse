@@ -75,9 +75,19 @@ class ExpressionBeatMaterial(FrozenModel):
     beat_id: str = Field(min_length=1, max_length=512)
     payload: MessagePayloadMaterial
     dependency_beat_ids: tuple[str, ...] = ()
+    not_before: datetime | None = None
+    expires_at: datetime | None = None
     cancel_policy: str = Field(min_length=1, max_length=128)
     reconsider_policy: str = Field(min_length=1, max_length=128)
     merge_policy: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def delay_window_is_valid(self) -> "ExpressionBeatMaterial":
+        if (self.not_before is None) != (self.expires_at is None):
+            raise ValueError("expression beat delay window must be complete")
+        if self.not_before is not None and self.expires_at <= self.not_before:
+            raise ValueError("expression beat delay window is invalid")
+        return self
 
 
 class MinimalReplyAcceptanceMaterial(FrozenModel):
