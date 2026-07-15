@@ -1125,6 +1125,7 @@ class DecisionProposal(ProposalEnvelope):
     proposal_kind: Literal["decision"] = "decision"
     appraisals: tuple[AppraisalSummary, ...] = Field(default=(), max_length=32)
     affect_tendencies: tuple[BoundedLabel, ...] = Field(default=(), max_length=32)
+    affect_decision: Literal["no_change", "propose"] = "no_change"
     drives: tuple[BoundedLabel, ...] = Field(default=(), max_length=3)
     conflicts: tuple[BoundedLabel, ...] = Field(default=(), max_length=32)
     activity_transition: ReferencedSummary | None = None
@@ -1153,6 +1154,13 @@ class DecisionProposal(ProposalEnvelope):
             self.conversation_thread_changes
         ):
             raise ValueError("thread summary change refs must be unique")
+        affect_changes = tuple(
+            change for change in self.proposed_changes if change.kind == "affect_transition"
+        )
+        if self.affect_decision == "no_change" and affect_changes:
+            raise ValueError("no_change affect decision cannot include an affect transition")
+        if self.affect_decision == "propose" and len(affect_changes) != 1:
+            raise ValueError("propose affect decision requires exactly one affect transition")
         return self
 
 

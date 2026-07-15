@@ -110,6 +110,26 @@ def _reply_intent() -> ProposalActionIntent:
     )
 
 
+def _affect_change() -> TypedChange:
+    return TypedChange(
+        change_id="change:affect:1",
+        kind="affect_transition",
+        target_id="affect:source-cluster:1",
+        transition="open",
+        evidence_refs=("event:message:1",),
+        payload=_payload(
+            "affect_transition.v1",
+            {
+                "episode_id": "affect:proposal:1",
+                "appraisal_change_refs": ["change:appraisal:1"],
+                "component_deltas": [{"name": "hurt", "value": 4200}],
+                "decay_config": _binding("policy:decay:standard"),
+                "residue_config": _binding("policy:residue:standard"),
+            },
+        ),
+    )
+
+
 def _minimal_expression_change(response_text: str) -> TypedChange:
     payload_hash = _hash(response_text)
     return TypedChange(
@@ -184,6 +204,23 @@ def test_decision_is_frozen_extra_forbid_and_has_stable_canonical_hash() -> None
         DecisionProposal.model_validate({**proposal.model_dump(), "secret_reasoning": "chain"})
     with pytest.raises(ValidationError):
         DecisionProposal.model_validate({**proposal.model_dump(), "brief_rationale": "x" * 241})
+
+
+def test_decision_makes_affect_no_change_or_one_candidate_explicit() -> None:
+    no_change = _decision()
+    proposal = _decision(
+        affect_decision="propose",
+        proposed_changes=(_expression_change(), _affect_change()),
+    )
+
+    assert no_change.affect_decision == "no_change"
+    assert proposal.affect_decision == "propose"
+    assert proposal.proposed_changes[-1].kind == "affect_transition"
+
+    with pytest.raises(ValidationError, match="no_change affect decision"):
+        _decision(proposed_changes=(_expression_change(), _affect_change()))
+    with pytest.raises(ValidationError, match="requires exactly one affect transition"):
+        _decision(affect_decision="propose")
 
 
 def test_manifest_authority_summary_derives_every_change_and_action_field() -> None:
