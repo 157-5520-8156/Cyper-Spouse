@@ -60,6 +60,7 @@ from .outcome_acceptance_manifest import (
 from .fact_accepted_contracts import FactCommitMaterializedPayloadV2
 from .minimal_reply_events import MINIMAL_REPLY_EVENT_PAYLOAD_MODELS
 from .media_provider_grants import ProviderMediaGrantRecordedPayload
+from .media_v2 import MEDIA_V2_PAYLOAD_MODELS
 from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION, MinimalReplyManifest
 from .expression_plan_manifest import (
     EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
@@ -98,7 +99,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.25"
+    reducer_bundle: str = "world-v2-reducers.26"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -311,6 +312,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
             "BudgetAccountConfiguredPayload", {"account": (BudgetAccount, ...)}
         ),
         "ProviderMediaGrantRecorded": ProviderMediaGrantRecordedPayload,
+        **MEDIA_V2_PAYLOAD_MODELS,
         "BudgetReserved": _payload_model(
             "BudgetReservedPayload", {"reservation": (BudgetReservation, ...)}
         ),
@@ -410,6 +412,10 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "AffectBaselineAdjusted": "world_id+dimension+calibration_revision+transition_id",
         "BudgetAccountConfigured": "account_id+window_id",
         "ProviderMediaGrantRecorded": "world_id+grant_id+grant_revision",
+        "PhotoCandidateOpened": "world_id+candidate_id",
+        "MediaOpportunityFrozen": "world_id+opportunity_id",
+        "MediaPlanRecorded": "world_id+planning_request_id+plan_id",
+        "MediaNotRenderableRecorded": "world_id+planning_request_id+not_renderable",
         "BudgetReserved": "reservation_id",
         "BudgetSettled": "reservation_id+result_id+terminal",
         "BudgetReleased": "reservation_id+result_id+terminal",
@@ -773,6 +779,10 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 evidence_types=("enforcement_capability", "enforcement_consent", "enforcement_privacy"),
                 successors=("ActionAuthorized",),
             ),
+            _contract("PhotoCandidateOpened", "media_acceptance", "world", "PhotoCandidateOpenedPayload", evidence_types=("committed_world_event",)),
+            _contract("MediaOpportunityFrozen", "media_acceptance", "world", "MediaOpportunityFrozenPayload", allowed_predecessors=("PhotoCandidateOpened",), evidence_types=("frozen_media_snapshot",)),
+            _contract("MediaPlanRecorded", "media_planning_settlement", "world", "MediaPlanRecordedPayload", allowed_predecessors=("ExecutionReceiptRecorded",), evidence_types=("planning_receipt", "frozen_media_opportunity")),
+            _contract("MediaNotRenderableRecorded", "media_planning_settlement", "world", "MediaNotRenderableRecordedPayload", allowed_predecessors=("ExecutionReceiptRecorded",), evidence_types=("planning_receipt", "frozen_media_opportunity")),
             _contract(
                 "MessagePayloadStored",
                 "expression_plan_recorder",

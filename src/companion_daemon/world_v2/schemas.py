@@ -42,6 +42,7 @@ from .resource_authority_schemas import (
 from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditProjection
 from .acceptance_manifest import AcceptanceManifestRefV2
 from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
+from .media_v2 import MediaOpportunity, MediaPlan, PhotoCandidate
 
 
 SchemaVersion = Literal["world-v2.1"]
@@ -461,6 +462,7 @@ class TriggerProcess(FrozenModel):
         "affect_deliberation",
         "outcome_deliberation",
         "expression_reconsideration",
+        "media_continuation",
     ]
     source_evidence_ref: str | None = None
     state: Literal["open", "claimed", "terminal"]
@@ -479,6 +481,7 @@ class TriggerProcess(FrozenModel):
                 "affect_deliberation",
                 "outcome_deliberation",
                 "expression_reconsideration",
+                "media_continuation",
             }
             and self.source_evidence_ref is not None
         ):
@@ -4153,6 +4156,10 @@ class InternalWorldSnapshot(FrozenModel):
     consents: tuple[ConsentStateProjection, ...] = ()
     privacy_policy: PrivacyPolicyProjection | None = None
     pending_actions: tuple[Action, ...] = ()
+    photo_candidates: tuple[PhotoCandidate, ...] = ()
+    media_opportunities: tuple[MediaOpportunity, ...] = ()
+    media_plans: tuple[MediaPlan, ...] = ()
+    media_unrenderable_opportunity_ids: tuple[str, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     pending_external_observations: tuple[ExternalObservation, ...] = ()
@@ -4237,7 +4244,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.25"
+    reducer_bundle_version: str = "world-v2-reducers.26"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -4279,6 +4286,10 @@ class LedgerProjection(FrozenModel):
     attention_proposal_ids: tuple[str, ...] = ()
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
+    photo_candidates: tuple[PhotoCandidate, ...] = ()
+    media_opportunities: tuple[MediaOpportunity, ...] = ()
+    media_plans: tuple[MediaPlan, ...] = ()
+    media_unrenderable_opportunity_ids: tuple[str, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()

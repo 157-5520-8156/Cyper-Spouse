@@ -80,6 +80,14 @@ def _life_identity_components(
         )
     if event_type == "NpcRegistered":
         return world_id, _nested(payload, "npc", "npc_id")
+    if event_type == "PhotoCandidateOpened":
+        return world_id, _nested(payload, "candidate", "candidate_id")
+    if event_type == "MediaOpportunityFrozen":
+        return world_id, _nested(payload, "opportunity", "opportunity_id")
+    if event_type == "MediaPlanRecorded":
+        return world_id, _nested(payload, "plan", "planning_request_id"), _nested(payload, "plan", "plan_id")
+    if event_type == "MediaNotRenderableRecorded":
+        return world_id, _nested(payload, "result", "planning_request_id"), "not_renderable"
     if event_type == "ActorAuthorityBootstrapped":
         return world_id, payload.get("authority_id"), payload.get("transition_id")
     if event_type in {

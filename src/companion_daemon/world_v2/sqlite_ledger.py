@@ -107,6 +107,7 @@ _V20_ONLY_STATE_KEYS = frozenset(
 )
 _V24_ONLY_STATE_KEYS = frozenset({"expression_plan_manifests"})
 _V25_ONLY_STATE_KEYS = frozenset({"provider_media_grants"})
+_V26_ONLY_STATE_KEYS = frozenset({"photo_candidates", "media_opportunities", "media_plans", "media_unrenderable_opportunity_ids"})
 _PREFIX_PROOF_VERSION = "world-v2-prefix-proof.2"
 _PREVIOUS_PREFIX_PROOF_VERSION = "world-v2-prefix-proof.1"
 _PREFIX_BITS_BYTES = 32
@@ -1365,6 +1366,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.22",
                 "world-v2-reducers.23",
                 "world-v2-reducers.24",
+                "world-v2-reducers.25",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -1473,6 +1475,11 @@ class SQLiteWorldLedger:
             if not isinstance(raw_state, dict):
                 raise ValueError("legacy state is not an object")
             raw_state = dict(raw_state)
+            injected_v26_keys = tuple(
+                sorted(key for key in _V26_ONLY_STATE_KEYS.intersection(raw_state) if raw_state.get(key) not in (None, [], {}))
+            )
+            if injected_v26_keys and reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+                raise ValueError(f"legacy head cannot claim v26 media fields {injected_v26_keys!r}")
             injected_v25_keys = tuple(
                 sorted(
                     key
@@ -1825,6 +1832,10 @@ class SQLiteWorldLedger:
             logical_time=projection.logical_time,
             actions=projection.actions,
             pending_actions=projection.pending_actions,
+            photo_candidates=projection.photo_candidates,
+            media_opportunities=projection.media_opportunities,
+            media_plans=projection.media_plans,
+            media_unrenderable_opportunity_ids=projection.media_unrenderable_opportunity_ids,
             budget_accounts=projection.budget_accounts,
             budget_reservations=projection.budget_reservations,
             trigger_processes=projection.trigger_processes,

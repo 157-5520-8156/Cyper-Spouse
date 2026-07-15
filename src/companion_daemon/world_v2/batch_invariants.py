@@ -61,6 +61,10 @@ from .appraisal_events import (
     AppraisalSupersededPayload,
 )
 from .affect_events import AFFECT_PAYLOAD_MODELS, AffectAuthorizedMutationPayload
+from .media_v2 import (
+    MediaPlanRecordedPayload,
+    continuation_trigger_id,
+)
 from .schemas import (
     Action,
     BudgetReservation,
@@ -124,6 +128,7 @@ def validate_commit_batch(
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_expression_receipt_lifecycle_batch(events)
+    _validate_media_planning_settlement_batch(events)
 
     appraisal_triggers: dict[str, list[tuple[str, str, str | None]]] = {}
     experiences: list[ExperienceCommittedPayload] = []
@@ -1147,6 +1152,65 @@ def _validate_authorized_outcome_acceptance_manifest_batch(
         )
         if expected is None or event.idempotency_key != expected:
             raise ValueError("outcome_acceptance.event_identity_is_not_deterministic")
+
+
+def _validate_media_planning_settlement_batch(events: Sequence[WorldEvent]) -> None:
+    """A planning result is one effect-once terminal transaction, never a loose DTO.
+
+    The candidate/opportunity are already validated by their reducers.  This
+    guard closes the externally observable half: a plan/not-renderable result
+    cannot be appended without the terminal Action, exact receipt, and budget
+    settlement that made the planner call accountable.  A plan additionally
+    opens exactly one render continuation; preview never creates delivery here.
+    """
+
+    indices = [
+        index for index, event in enumerate(events)
+        if event.event_type in {"MediaPlanRecorded", "MediaNotRenderableRecorded"}
+    ]
+    for index in indices:
+        if index < 3:
+            raise ValueError("media planning result lacks terminal action/receipt/budget prefix")
+        delivered, receipt_event, budget_event, result_event = events[index - 3 : index + 1]
+        if tuple(item.event_type for item in (delivered, receipt_event, budget_event)) != (
+            "ActionDelivered", "ExecutionReceiptRecorded", "BudgetSettled",
+        ):
+            raise ValueError("media planning result requires adjacent terminal settlement events")
+        action_id = result_event.payload().get("action_id")
+        receipt_id = result_event.payload().get("receipt_id")
+        if not isinstance(action_id, str) or not isinstance(receipt_id, str):
+            raise ValueError("media planning result identity is invalid")
+        if delivered.payload().get("action_id") != action_id:
+            raise ValueError("media planning delivered Action does not match result")
+        receipt = receipt_event.payload().get("receipt")
+        settlement = budget_event.payload().get("settlement")
+        if not isinstance(receipt, dict) or not isinstance(settlement, dict):
+            raise ValueError("media planning receipt or budget payload is invalid")
+        if (
+            receipt.get("receipt_id") != receipt_id
+            or receipt.get("action_id") != action_id
+            or receipt.get("observed_state") != "delivered"
+            or receipt.get("is_terminal") is not True
+            or settlement.get("action_id") != action_id
+            or settlement.get("result_id") != receipt.get("result_id")
+            or settlement.get("state") != "settled"
+        ):
+            raise ValueError("media planning receipt/budget do not bind terminal action")
+        if result_event.event_type == "MediaNotRenderableRecorded":
+            continue
+        result = MediaPlanRecordedPayload.model_validate_json(result_event.payload_json)
+        if index + 1 >= len(events) or events[index + 1].event_type != "TriggerProcessOpened":
+            raise ValueError("frozen MediaPlan must open one render continuation")
+        process = TriggerProcess.model_validate(events[index + 1].payload().get("process"))
+        expected = continuation_trigger_id(result.plan)
+        if (
+            process.trigger_id != expected
+            or process.trigger_ref != expected
+            or process.process_kind != "media_continuation"
+            or process.state != "open"
+            or process.source_evidence_ref != result_event.event_id
+        ):
+            raise ValueError("media planning continuation is not bound to frozen plan")
 
 
 def appraisal_trigger_identity(occurrence_id: str, result_id: str) -> str:

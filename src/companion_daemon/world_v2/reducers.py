@@ -50,6 +50,17 @@ from .outcome_acceptance_manifest import (
     OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
     OutcomeAcceptanceManifest,
 )
+from .media_v2 import (
+    MediaNotRenderableRecordedPayload,
+    MediaOpportunityFrozenPayload,
+    MediaPlanRecordedPayload,
+    MediaOpportunity,
+    MediaPlan,
+    PhotoCandidate,
+    PhotoCandidateOpenedPayload,
+    continuation_trigger_id,
+    planning_request_id,
+)
 from .appraisal_reducers import (
     accept_appraisal,
     contradict_appraisal,
@@ -322,7 +333,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.25"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.26"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -484,6 +495,10 @@ class ReducerState(FrozenModel):
     logical_time: datetime | None = None
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
+    photo_candidates: tuple[PhotoCandidate, ...] = ()
+    media_opportunities: tuple[MediaOpportunity, ...] = ()
+    media_plans: tuple[MediaPlan, ...] = ()
+    media_unrenderable_opportunity_ids: tuple[str, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()
@@ -1266,6 +1281,14 @@ class ReducerState(FrozenModel):
             payload["provider_media_grants"] = tuple(
                 item.model_dump(mode="json") for item in self.provider_media_grants
             )
+            payload["photo_candidates"] = tuple(
+                item.model_dump(mode="json") for item in self.photo_candidates
+            )
+            payload["media_opportunities"] = tuple(
+                item.model_dump(mode="json") for item in self.media_opportunities
+            )
+            payload["media_plans"] = tuple(item.model_dump(mode="json") for item in self.media_plans)
+            payload["media_unrenderable_opportunity_ids"] = self.media_unrenderable_opportunity_ids
         if reducer_bundle_version in {
             "world-v2-reducers.10",
             "world-v2-reducers.11",
@@ -4250,6 +4273,24 @@ def _action_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
             projection=state,
             logical_time=event.logical_time,
         )
+    if action.kind == "media_planning":
+        opportunity = next(
+            (item for item in state.media_opportunities if item.opportunity_id == action.intent_ref), None
+        )
+        if opportunity is None:
+            raise ValueError("media planning Action must bind a frozen opportunity")
+        if any(item.opportunity_id == opportunity.opportunity_id for item in state.media_plans):
+            raise ValueError("media planning Action cannot replan an already planned opportunity")
+        if opportunity.opportunity_id in state.media_unrenderable_opportunity_ids:
+            raise ValueError("media planning Action cannot replan an unrenderable opportunity")
+        if (
+            action.layer != "media_action"
+            or action.payload_ref != opportunity.event_snapshot_ref
+            or action.payload_hash != opportunity.event_snapshot_hash
+            or action.idempotency_key != planning_request_id(opportunity.opportunity_id)
+            or action.target != "provider:media-planner"
+        ):
+            raise ValueError("media planning Action is not exactly bound to its frozen opportunity")
     generic_manifest = next(
         (
             manifest
@@ -4301,6 +4342,77 @@ def _action_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
             "pending_actions": (*state.pending_actions, action),
         }
     )
+
+
+def _photo_candidate_opened(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = PhotoCandidateOpenedPayload.model_validate_json(event.payload_json)
+    candidate = payload.candidate
+    if any(item.candidate_id == candidate.candidate_id for item in state.photo_candidates):
+        raise ValueError("photo candidate identity is already registered")
+    committed = {item.event_id for item in state.committed_world_event_refs}
+    if not set(candidate.source_event_refs) <= committed:
+        raise ValueError("photo candidate must be bound only to prior committed world events")
+    return state.model_copy(update={"photo_candidates": (*state.photo_candidates, candidate)})
+
+
+def _media_opportunity_frozen(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = MediaOpportunityFrozenPayload.model_validate_json(event.payload_json)
+    opportunity = payload.opportunity
+    candidate = next((item for item in state.photo_candidates if item.candidate_id == opportunity.candidate_id), None)
+    if candidate is None:
+        raise ValueError("media opportunity requires an existing photo candidate")
+    if any(item.opportunity_id == opportunity.opportunity_id for item in state.media_opportunities):
+        raise ValueError("media opportunity identity is already registered")
+    if (
+        candidate.family != opportunity.family
+        or candidate.privacy_ceiling != opportunity.privacy_ceiling
+        or candidate.source_event_refs != opportunity.source_event_refs
+        or event.logical_time >= opportunity.expires_at
+    ):
+        raise ValueError("media opportunity does not exactly freeze its candidate")
+    return state.model_copy(update={"media_opportunities": (*state.media_opportunities, opportunity)})
+
+
+def _media_plan_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = MediaPlanRecordedPayload.model_validate_json(event.payload_json)
+    plan = payload.plan
+    action = next((item for item in state.actions if item.action_id == payload.action_id), None)
+    opportunity = next((item for item in state.media_opportunities if item.opportunity_id == plan.opportunity_id), None)
+    receipt = next((item for item in state.execution_receipts if item.receipt_id == payload.receipt_id), None)
+    if (
+        action is None or action.kind != "media_planning" or action.state != "delivered"
+        or receipt is None or not receipt.is_terminal or receipt.observed_state != "delivered"
+        or opportunity is None or plan.planning_request_id != action.idempotency_key
+        or plan.event_snapshot_hash != opportunity.event_snapshot_hash
+        or plan.family != opportunity.family
+        or plan.media_machine_version != opportunity.media_machine_version
+        or plan.inspection_contract_version != opportunity.inspection_contract_version
+        or plan.media_lane != opportunity.media_lane
+        or any(item.plan_id == plan.plan_id or item.opportunity_id == plan.opportunity_id for item in state.media_plans)
+    ):
+        raise ValueError("MediaPlanRecorded is not bound to one delivered planning Action")
+    return state.model_copy(update={"media_plans": (*state.media_plans, plan)})
+
+
+def _media_not_renderable_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = MediaNotRenderableRecordedPayload.model_validate_json(event.payload_json)
+    action = next((item for item in state.actions if item.action_id == payload.action_id), None)
+    opportunity = next((item for item in state.media_opportunities if item.opportunity_id == payload.result.opportunity_id), None)
+    receipt = next((item for item in state.execution_receipts if item.receipt_id == payload.receipt_id), None)
+    if (
+        action is None or action.kind != "media_planning" or action.state != "delivered"
+        or receipt is None or receipt.observed_state != "delivered" or not receipt.is_terminal
+        or opportunity is None or payload.result.planning_request_id != action.idempotency_key
+        or payload.result.event_snapshot_hash != opportunity.event_snapshot_hash
+        or any(item.opportunity_id == opportunity.opportunity_id for item in state.media_plans)
+        or opportunity.opportunity_id in state.media_unrenderable_opportunity_ids
+    ):
+        raise ValueError("MediaNotRenderableRecorded is not bound to one delivered planning Action")
+    return state.model_copy(update={
+        "media_unrenderable_opportunity_ids": (
+            *state.media_unrenderable_opportunity_ids, opportunity.opportunity_id
+        )
+    })
 
 
 def _provider_media_grant_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -4871,6 +4983,19 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             or process.trigger_ref != f"outcome:{observation.occurrence_id}:{observation.observation_id}"
         ):
             raise ValueError("outcome trigger identity is not deterministic")
+    if process.process_kind == "media_continuation":
+        source = next(
+            (item for item in state.committed_world_event_refs if item.event_id == process.source_evidence_ref),
+            None,
+        )
+        expected_ids = {continuation_trigger_id(item) for item in state.media_plans}
+        if (
+            source is None
+            or source.event_type != "MediaPlanRecorded"
+            or process.trigger_id not in expected_ids
+            or process.trigger_ref != process.trigger_id
+        ):
+            raise ValueError("media continuation trigger is not bound to a frozen MediaPlan")
     if process.process_kind == "expression_reconsideration":
         source = next(
             (
@@ -6830,6 +6955,10 @@ _EVENTS = {
         EventDefinition(
             "ProviderMediaGrantRecorded", RevisionClass.WORLD, _provider_media_grant_recorded
         ),
+        EventDefinition("PhotoCandidateOpened", RevisionClass.WORLD, _photo_candidate_opened),
+        EventDefinition("MediaOpportunityFrozen", RevisionClass.WORLD, _media_opportunity_frozen),
+        EventDefinition("MediaPlanRecorded", RevisionClass.WORLD, _media_plan_recorded),
+        EventDefinition("MediaNotRenderableRecorded", RevisionClass.WORLD, _media_not_renderable_recorded),
         EventDefinition("ObservationRecorded", RevisionClass.WORLD, _observation_recorded),
         EventDefinition(
             "OperatorObservationRecorded",
@@ -7219,6 +7348,7 @@ def make_projection(
     reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
 ) -> LedgerProjection:
     return LedgerProjection(
+        reducer_bundle_version=reducer_bundle_version,
         world_id=world_id,
         world_revision=world_revision,
         deliberation_revision=deliberation_revision,
@@ -7260,6 +7390,10 @@ def make_projection(
         attention_proposal_ids=state.attention_proposal_ids,
         actions=state.actions,
         pending_actions=state.pending_actions,
+        photo_candidates=state.photo_candidates,
+        media_opportunities=state.media_opportunities,
+        media_plans=state.media_plans,
+        media_unrenderable_opportunity_ids=state.media_unrenderable_opportunity_ids,
         budget_accounts=state.budget_accounts,
         budget_reservations=state.budget_reservations,
         trigger_processes=state.trigger_processes,
