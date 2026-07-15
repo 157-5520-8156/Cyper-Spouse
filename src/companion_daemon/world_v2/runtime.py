@@ -30,6 +30,8 @@ from .appraisal_acceptance_runtime import (
 from .appraisal_proposal_worker import AppraisalProposalWorker
 from .affect_trigger import affect_deliberation_trigger_events
 from .affect_acceptance_runtime import AffectAcceptanceError, AffectAcceptanceRuntime
+from .affect_deliberation_worker import AffectDeliberationWorker
+from .affect_trigger_runtime import AffectTriggerRunResult, AffectTriggerRuntime
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -64,6 +66,7 @@ class WorldRuntime:
         appraisal_acceptance_actor: str | None = None,
         appraisal_worker: AppraisalProposalWorker | None = None,
         affect_deliberation_owner: str | None = None,
+        affect_worker: AffectDeliberationWorker | None = None,
         affect_acceptance: AffectAcceptanceRuntime | None = None,
         affect_acceptance_actor: str | None = None,
     ) -> None:
@@ -97,6 +100,11 @@ class WorldRuntime:
         if affect_deliberation_owner is not None and not affect_deliberation_owner:
             raise ValueError("affect deliberation owner must not be empty")
         self._affect_deliberation_owner = affect_deliberation_owner
+        if affect_worker is not None and affect_worker.ledger is not self._ledger:
+            raise ValueError("affect worker must own this exact ledger")
+        if affect_worker is not None and affect_deliberation_owner is None:
+            raise ValueError("affect worker requires affect deliberation triggers")
+        self._affect_worker = affect_worker
         if (affect_acceptance is None) != (affect_acceptance_actor is None):
             raise ValueError("affect acceptance runtime and actor must be configured together")
         if affect_acceptance is not None and affect_acceptance.ledger is not self._ledger:
@@ -104,6 +112,24 @@ class WorldRuntime:
         self._affect_acceptance = affect_acceptance
         self._affect_acceptance_actor = affect_acceptance_actor
         self._lock = asyncio.Lock()
+
+    async def drain_background_once(self) -> AffectTriggerRunResult | None:
+        """Run one low-priority affect job without delaying an interactive turn.
+
+        Hosts call this from their durable worker loop.  It is intentionally
+        separate from :meth:`ingest`: an affect reflection may use a thinking
+        route, while the visible reply path must stay latency-bounded.
+        """
+
+        if self._affect_worker is None:
+            return None
+        assert self._affect_deliberation_owner is not None
+        async with self._lock:
+            return await AffectTriggerRuntime(
+                ledger=self._ledger,
+                worker=self._affect_worker,
+                owner_id=self._affect_deliberation_owner,
+            ).drain_one()
 
     @classmethod
     def in_memory(

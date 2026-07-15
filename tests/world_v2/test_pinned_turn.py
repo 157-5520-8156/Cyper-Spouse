@@ -222,8 +222,10 @@ class _AffectDecisionModel:
         self._evidence_hash = evidence_hash
         self._evidence_revision = evidence_revision
         self.request: ModelInput | None = None
+        self.calls = 0
 
     async def propose(self, request: ModelInput) -> ModelOutput:
+        self.calls += 1
         self.request = request
         proposal = DecisionProposal(
             proposal_id="proposal:pinned-turn:affect:1",
@@ -605,23 +607,57 @@ async def test_runtime_materializes_audited_appraisal_without_a_second_model_cal
         companion_actor_ref="agent:companion",
     )
     affect_acceptance = AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-    affect_result = await AffectDeliberationWorker(
+    affect_worker = AffectDeliberationWorker(
         ledger=ledger,
         pinned_turn=affect_turn,
         compiler=AffectProposalCompiler(ledger=ledger),
         acceptance=affect_acceptance,
         actor="worker:affect",
-    ).process(
-        world_id=WORLD,
+    )
+    # First leave only the expensive generic audit durable, then resume through
+    # the worker.  It must compile that audit rather than call the model again.
+    audited = await affect_turn.audit_appraisal_accepted(
+        appraisal_event=appraisal_event,
         cursor=ProjectionCursor(
             world_revision=projection.world_revision,
             deliberation_revision=projection.deliberation_revision,
             ledger_sequence=projection.ledger_sequence,
         ),
+    )
+    assert audited.proposal_id is not None
+    after_audit = ledger.project()
+    # Simulate a process death after the acceptance batch and before trigger
+    # completion. The recovery runtime must detect that durable effect and
+    # finish the same trigger without another model call.
+    affect_result = await affect_worker.process(
+        world_id=WORLD,
+        cursor=ProjectionCursor(
+            world_revision=after_audit.world_revision,
+            deliberation_revision=after_audit.deliberation_revision,
+            ledger_sequence=after_audit.ledger_sequence,
+        ),
         appraisal_event=appraisal_event,
     )
     assert affect_result.status == "accepted"
-    assert ledger.project().affect_episodes[0].components[0].dimension == "hurt"
+    assert ledger.project().trigger_processes[1].state == "claimed"
+    affect_runtime = WorldRuntime(
+        world_id=WORLD,
+        ledger=ledger,
+        affect_deliberation_owner="worker:affect",
+        affect_worker=affect_worker,
+    )
+    recovered = await affect_runtime.drain_background_once()
+    assert recovered is not None
+    assert recovered.status == "completed_existing"
+    assert recovered.work_status == "accepted"
+    after_affect = ledger.project()
+    assert after_affect.affect_episodes[0].components[0].dimension == "hurt"
+    assert after_affect.trigger_processes[1].state == "terminal"
+    assert affect_model.calls == 1
+
+    # A restart sees the terminal durable outcome and performs no second turn.
+    idle = await affect_runtime.drain_background_once()
+    assert idle is not None and idle.status == "idle"
 
 
 @pytest.mark.asyncio
