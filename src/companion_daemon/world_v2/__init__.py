@@ -24,6 +24,7 @@ from .evaluation_artifacts import (
     MechanicalTraceEvidence,
     ScenarioCorpusEntry,
 )
+from .mechanical_evaluation_scope import MechanicalEvaluationScope
 from .matrix_catalog import (
     CandidateDistribution,
     ClassificationCandidate,
@@ -84,6 +85,7 @@ __all__ = [
     "MatrixSchemaError",
     "MatrixSelection",
     "MechanicalEvaluation",
+    "MechanicalEvaluationScope",
     "MechanicalTraceEvidence",
     "Observation",
     "ProjectionRequest",
