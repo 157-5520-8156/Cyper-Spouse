@@ -36,6 +36,7 @@ from .schemas import (
     ThreadProjection,
 )
 from .situation_compiler import SituationProjection
+from .world_life_context import WorldLifeContextItem
 
 
 T = TypeVar("T")
@@ -48,6 +49,7 @@ SliceName = Literal[
     "open_threads",
     "relevant_facts",
     "recent_experiences",
+    "world_life",
     "active_memory_candidates",
     "available_capabilities",
     "action_budget",
@@ -99,6 +101,7 @@ RANK_DOMAIN_IMPORTANCE_BP: dict[SliceName, int] = {
     "open_threads": 8_000,
     "relevant_facts": 7_500,
     "recent_experiences": 7_000,
+    "world_life": 7_250,
     "active_memory_candidates": 7_500,
     "available_capabilities": 6_000,
     "action_budget": 6_000,
@@ -358,6 +361,7 @@ class ContextCapsuleBudgetPolicy(_FrozenModel):
         default_factory=lambda: SliceBudget(max_items=16, max_fields=192, max_characters=4_000)
     )
     recent_experiences: SliceBudget = Field(default_factory=SliceBudget)
+    world_life: SliceBudget = Field(default_factory=SliceBudget)
     active_memory_candidates: SliceBudget = Field(default_factory=SliceBudget)
     available_capabilities: SliceBudget = Field(
         default_factory=lambda: SliceBudget(max_items=8, max_fields=96, max_characters=2_000)
@@ -390,6 +394,7 @@ class ContextCapsuleRequest(_FrozenModel):
     open_threads: ResolvedSlice[tuple[ThreadProjection, ...]] | None = None
     relevant_facts: ResolvedSlice[tuple[FactProjection, ...]] | None = None
     recent_experiences: ResolvedSlice[tuple[ExperienceProjection, ...]] | None = None
+    world_life: ResolvedSlice[tuple[WorldLifeContextItem, ...]] | None = None
     active_memory_candidates: ResolvedSlice[
         tuple[MemoryCandidateProjection | MemoryRetrievalItem, ...]
     ] | None = None
@@ -559,6 +564,7 @@ class ContextCapsule(_FrozenModel):
     open_threads: CapsuleSlice
     relevant_facts: CapsuleSlice
     recent_experiences: CapsuleSlice
+    world_life: CapsuleSlice
     active_memory_candidates: CapsuleSlice
     available_capabilities: CapsuleSlice
     action_budget: CapsuleSlice
@@ -591,6 +597,7 @@ class ContextCapsule(_FrozenModel):
             "open_threads": self.open_threads.model_dump(mode="json"),
             "relevant_facts": self.relevant_facts.model_dump(mode="json"),
             "recent_experiences": self.recent_experiences.model_dump(mode="json"),
+            "world_life": self.world_life.model_dump(mode="json"),
             "active_memory_candidates": self.active_memory_candidates.model_dump(mode="json"),
             "available_capabilities": self.available_capabilities.model_dump(mode="json"),
             "action_budget": self.action_budget.model_dump(mode="json"),
@@ -626,9 +633,10 @@ _ITEM_IDS: dict[SliceName, str] = {
     "appraisals": "appraisal_id",
     "affect_episodes": "episode_id",
     "open_threads": "thread_id",
-    "relevant_facts": "fact_id",
-    "recent_experiences": "experience_id",
-    "active_memory_candidates": "candidate_id",
+        "relevant_facts": "fact_id",
+        "recent_experiences": "experience_id",
+        "world_life": "occurrence_id",
+        "active_memory_candidates": "candidate_id",
     "available_capabilities": "grant_id",
     "action_budget": "account_id",
     "private_impressions": "impression_id",
@@ -697,6 +705,7 @@ def _derived_privacy_floor(slice_name: SliceName, item: BaseModel) -> PrivacyCla
         "open_threads": "private",
         "relevant_facts": "personal",
         "recent_experiences": "personal",
+        "world_life": "personal",
         "active_memory_candidates": "personal",
         "available_capabilities": "private",
         "action_budget": "withhold",
@@ -751,6 +760,8 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
         return tuple(sorted(set(item.source_refs)))
     if slice_name == "advisories":
         return tuple(sorted(set(item.source_refs)))
+    if slice_name == "world_life" and isinstance(item, WorldLifeContextItem):
+        return (item.source.authority_event_ref,)
     if slice_name == "relevant_facts" and isinstance(item, FactProjection):
         # The accepted Fact event is the whole immutable authority for the
         # projection.  Its observation id stays an internal Fact anchor.
@@ -784,6 +795,15 @@ def _typed_source_authorities(item: BaseModel) -> tuple[tuple[str, str, int, str
         # pins the resulting accepted Fact event, while the retained evidence
         # uses durable observation identities rather than committed event ids.
         return ()
+    if isinstance(item, WorldLifeContextItem):
+        return (
+            (
+                "committed_event",
+                item.source.authority_event_ref,
+                item.source.authority_world_revision,
+                item.source.authority_payload_hash,
+            ),
+        )
     authorities: set[tuple[str, str, int, str]] = set()
     values = getattr(item, "values", None)
     for evidence in (
@@ -1074,6 +1094,7 @@ def _validate_input_contract(request: ContextCapsuleRequest) -> None:
         ("open_threads", request.open_threads),
         ("relevant_facts", request.relevant_facts),
         ("recent_experiences", request.recent_experiences),
+        ("world_life", request.world_life),
         ("active_memory_candidates", request.active_memory_candidates),
         ("available_capabilities", request.available_capabilities),
         ("action_budget", request.action_budget),
@@ -1342,6 +1363,7 @@ def _compile_resolved_context(
         ("open_threads", request.open_threads),
         ("relevant_facts", request.relevant_facts),
         ("recent_experiences", request.recent_experiences),
+        ("world_life", request.world_life),
         ("active_memory_candidates", request.active_memory_candidates),
         ("available_capabilities", request.available_capabilities),
         ("action_budget", request.action_budget),

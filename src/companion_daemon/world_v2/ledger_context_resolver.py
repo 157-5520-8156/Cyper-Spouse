@@ -51,6 +51,7 @@ from .memory_retrieval import MemoryRetrievalCompiler, MemoryRetrievalItem
 from .schema_core import PrivacyClass
 from .schemas import CommittedWorldEventRef, FactProjection, LedgerProjection
 from .situation_compiler import SituationCompiler, request_from_ledger_projection
+from .world_life_context import WorldLifeContextCompiler, WorldLifeContextItem
 
 
 _PRIVACY_FLOOR: dict[SliceName, PrivacyClass] = {
@@ -62,6 +63,7 @@ _PRIVACY_FLOOR: dict[SliceName, PrivacyClass] = {
     "open_threads": "private",
     "relevant_facts": "personal",
     "recent_experiences": "personal",
+    "world_life": "personal",
     "active_memory_candidates": "personal",
     "available_capabilities": "private",
     "action_budget": "withhold",
@@ -79,6 +81,7 @@ _ITEM_ID: dict[SliceName, str] = {
     "open_threads": "thread_id",
     "relevant_facts": "fact_id",
     "recent_experiences": "experience_id",
+    "world_life": "occurrence_id",
     "active_memory_candidates": "candidate_id",
     "available_capabilities": "grant_id",
     "action_budget": "account_id",
@@ -172,6 +175,8 @@ def _observation_event_aliases(projection: LedgerProjection) -> dict[str, str]:
 def _typed_refs(item: BaseModel, *, observation_aliases: dict[str, str]) -> tuple[str, ...] | None:
     if isinstance(item, MemoryRetrievalItem):
         return tuple(sorted({source.authority_event_ref for source in item.source_excerpts}))
+    if isinstance(item, WorldLifeContextItem):
+        return (item.source.authority_event_ref,)
     if isinstance(item, FactProjection):
         # A Fact's full assertion/evidence structure is committed by this
         # exact Fact event. Its retained observation id is an internal anchor,
@@ -233,6 +238,14 @@ def _typed_authority_claims(
         # payload through ``origin.accepted_event_ref`` instead of attempting
         # to reinterpret its durable observation identifier as an event id.
         return ()
+    if isinstance(item, WorldLifeContextItem):
+        return (
+            (
+                item.source.authority_event_ref,
+                item.source.authority_world_revision,
+                item.source.authority_payload_hash,
+            ),
+        )
     values = getattr(item, "values", None)
     claims: set[tuple[str, int, str]] = set()
     evidence_values = (
@@ -292,6 +305,7 @@ def _recency_bp(item: BaseModel, logical_time: datetime | None) -> int:
         getattr(item, "last_supported", None),
         getattr(item, "opened_at", None),
         getattr(getattr(item, "values", None), "occurred_to", None),
+        getattr(item, "settled_at", None),
     )
     instant = next((value for value in instants if value is not None), None)
     if instant is None:
@@ -374,6 +388,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         self._situation_compiler = situation_compiler
         self._relevance_scope = relevance_scope
         self._memory_retrieval = MemoryRetrievalCompiler(ledger=ledger)
+        self._world_life = WorldLifeContextCompiler()
 
     def _scope_for_query(
         self, query: ContextCompileQuery, projection: LedgerProjection
@@ -450,6 +465,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             and query.actor_ref in item.values.participant_refs
             and set(item.values.participant_refs).issubset(subject_refs)
         )
+        world_life = self._world_life.compile(projection=projection, actor_ref=query.actor_ref)
         scoped_source_ids = {
             *(item.fact_id for item in scoped_facts),
             *(item.thread_id for item in scoped_threads),
@@ -516,6 +532,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             "open_threads": tuple(item for item in scoped_threads if item.values.status == "open"),
             "relevant_facts": scoped_facts,
             "recent_experiences": scoped_experiences,
+            "world_life": world_life,
             "active_memory_candidates": memory_retrievals.items,
             "available_capabilities": tuple(
                 item
@@ -560,6 +577,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             "open_threads": "open_threads",
             "relevant_facts": "relevant_facts",
             "recent_experiences": "recent_experiences",
+            "world_life": "world_life",
             "active_memory_candidates": "active_memory_candidates",
             "available_capabilities": "available_capabilities",
             "action_budget": "action_budget",
@@ -708,7 +726,12 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 stored_event.event_id != ref
                 or stored_event.event_type != event.event_type
                 or stored_event.payload_hash != event.payload_hash
-                or commit.world_revision != event.world_revision
+                # A batch may atomically append several world events.  The
+                # committed-event index records each event's own revision,
+                # whereas lookup_event_commit returns the batch's terminal
+                # cursor.  Equality would reject every non-final event in a
+                # valid settlement batch.
+                or commit.world_revision < event.world_revision
                 or commit.world_revision > world_revision
             ):
                 raise ValueError("resolved Context authority contradicts its committed event")
