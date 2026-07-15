@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import hmac
+from collections.abc import Callable
 from typing import Final
 
 
@@ -280,6 +281,82 @@ class MmrInclusionProofV1:
             current = _mmr_parent(sibling, current) if (relative >> level) & 1 else _mmr_parent(current, sibling)
         if not hmac.compare_digest(current, self.peaks[self.peak_index]) or not hmac.compare_digest(_mmr_root(self.peaks, self.leaf_count), expected_root):
             raise ValueError("MMR inclusion proof does not verify")
+
+
+def mmr_root_from_node_lookup_v1(
+    *, leaf_count: int, node_lookup: Callable[[int, int], bytes | None]
+) -> bytes:
+    """Build an MMR root from just its ``O(log N)`` current peaks.
+
+    ``node_lookup`` is an adapter-owned point lookup by ``(height,
+    node_index)``.  This keeps durable adapters from rebuilding an in-memory
+    MMR merely to validate a pinned prefix root.
+    """
+
+    _require_nonnegative(leaf_count, label="MMR leaf_count")
+    if not callable(node_lookup):
+        raise TypeError("MMR node lookup must be callable")
+    offset = 0
+    peaks: list[bytes] = []
+    for size in _peak_sizes(leaf_count):
+        height = size.bit_length() - 1
+        node = node_lookup(height, offset >> height)
+        if node is None:
+            raise ValueError("persisted MMR peak is missing")
+        peaks.append(_require_hash_bytes(node, label="persisted MMR peak"))
+        offset += size
+    return _mmr_root(tuple(peaks), leaf_count)
+
+
+def mmr_inclusion_proof_from_node_lookup_v1(
+    *,
+    leaf_index: int,
+    leaf_count: int,
+    node_lookup: Callable[[int, int], bytes | None],
+) -> MmrInclusionProofV1:
+    """Build one MMR proof through adapter-owned addressed node reads only.
+
+    The returned proof has the same wire semantics as
+    :meth:`IncrementalMmrV1.prove`, while reading one path plus one peak per
+    MMR mountain.  It deliberately does not accept a node mapping, preventing
+    a durable adapter from accidentally materializing the whole MMR.
+    """
+
+    _require_nonnegative(leaf_count, label="MMR leaf_count")
+    if type(leaf_index) is not int or not 0 <= leaf_index < leaf_count:
+        raise ValueError("MMR leaf index is outside its prefix")
+    if not callable(node_lookup):
+        raise TypeError("MMR node lookup must be callable")
+    sizes = _peak_sizes(leaf_count)
+    offset = 0
+    peaks: list[bytes] = []
+    peak_index: int | None = None
+    siblings: tuple[bytes, ...] = ()
+    for index, size in enumerate(sizes):
+        height = size.bit_length() - 1
+        peak = node_lookup(height, offset >> height)
+        if peak is None:
+            raise ValueError("persisted MMR peak is missing")
+        peaks.append(_require_hash_bytes(peak, label="persisted MMR peak"))
+        if offset <= leaf_index < offset + size:
+            peak_index = index
+            path: list[bytes] = []
+            for level in range(height):
+                sibling = node_lookup(level, (leaf_index >> level) ^ 1)
+                if sibling is None:
+                    raise ValueError("persisted MMR proof node is missing")
+                path.append(_require_hash_bytes(sibling, label="persisted MMR proof node"))
+            siblings = tuple(path)
+        offset += size
+    if peak_index is None:
+        raise AssertionError("unreachable MMR peak lookup")
+    return MmrInclusionProofV1(
+        leaf_index=leaf_index,
+        leaf_count=leaf_count,
+        peak_index=peak_index,
+        siblings=siblings,
+        peaks=tuple(peaks),
+    )
 
 
 @dataclass(frozen=True, slots=True)

@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import sqlite3
 from threading import RLock
+from typing import Literal
 
 from .batch_invariants import validate_commit_batch
 from .errors import ConcurrencyConflict, IdempotencyConflict, LedgerIntegrityError
@@ -31,6 +32,8 @@ from .ledger_prefix_proof import (
     ObservationLocatorValueV1,
     PrefixCheckpointLeafV1,
     commit_result_hash_v1,
+    mmr_inclusion_proof_from_node_lookup_v1,
+    mmr_root_from_node_lookup_v1,
     observation_locator_key,
     ordered_event_ids_hash_v1,
     sparse_merkle_proof_from_nodes_v1,
@@ -85,65 +88,33 @@ _PREFIX_BITS_BYTES = 32
 
 @dataclass(frozen=True, slots=True)
 class ProofBackedObservationLookup:
-    """One exact locator result; ``event is None`` is an authenticated absence."""
+    """One exact locator result with an authenticated, non-ambiguous status."""
 
     locator: ObservationEventLocator
+    status: Literal["found", "locator_missing"]
     event: HistoricalLedgerEvent | None
 
 
+@dataclass(frozen=True, slots=True)
+class _PinnedObservationHistoryProof:
+    """Reader-private metadata for one verified historical prefix."""
+
+    world_id: str
+    cursor: ProjectionCursor
+    anchor_leaf_count: int
+    anchor_mmr_root: bytes
+    checkpoint: PrefixCheckpointLeafV1 | None
+
+
 class PinnedObservationHistoryHandle:
-    """Non-serializable process-local capability issued by one proof reader."""
+    """Opaque, non-serializable identity for one reader-issued pin.
 
-    __slots__ = (
-        "__world_id",
-        "__cursor",
-        "__anchor_leaf_count",
-        "__anchor_mmr_root",
-        "__checkpoint",
-        "__issuer",
-    )
+    The associated cursor, roots, and checkpoint deliberately live only in the
+    issuing reader's private registry.  Constructing another instance cannot
+    produce a usable capability because it has no registry entry.
+    """
 
-    def __init__(
-        self,
-        *,
-        world_id: str,
-        cursor: ProjectionCursor,
-        anchor_leaf_count: int,
-        anchor_mmr_root: bytes,
-        checkpoint: PrefixCheckpointLeafV1 | None,
-        _issuer: object,
-    ) -> None:
-        self.__world_id = world_id
-        self.__cursor = ProjectionCursor.model_validate(
-            dict(object.__getattribute__(cursor, "__dict__")), strict=True
-        )
-        self.__anchor_leaf_count = anchor_leaf_count
-        self.__anchor_mmr_root = bytes(anchor_mmr_root)
-        self.__checkpoint = checkpoint
-        self.__issuer = _issuer
-
-    @property
-    def world_id(self) -> str:
-        return self.__world_id
-
-    @property
-    def cursor(self) -> ProjectionCursor:
-        return self.__cursor
-
-    @property
-    def anchor_leaf_count(self) -> int:
-        return self.__anchor_leaf_count
-
-    @property
-    def anchor_mmr_root(self) -> bytes:
-        return self.__anchor_mmr_root
-
-    @property
-    def checkpoint(self) -> PrefixCheckpointLeafV1 | None:
-        return self.__checkpoint
-
-    def issued_by(self, issuer: object) -> bool:
-        return self.__issuer is issuer
+    __slots__ = ()
 
     def __reduce__(self) -> object:
         raise TypeError("pinned observation history handles cannot be serialized")
@@ -164,16 +135,21 @@ class SQLiteProofBackedObservationReader:
     or falls back to an unpinned event family.
     """
 
-    __slots__ = ("__ledger", "__issuer")
+    __slots__ = ("__ledger", "__pins", "__pins_lock")
 
     def __init__(self, *, ledger: "SQLiteWorldLedger") -> None:
         self.__ledger = ledger
-        self.__issuer = object()
+        self.__pins: dict[PinnedObservationHistoryHandle, _PinnedObservationHistoryProof] = {}
+        self.__pins_lock = RLock()
 
     def pin(self, *, world_id: str, cursor: ProjectionCursor) -> PinnedObservationHistoryHandle:
         if world_id != self.__ledger.world_id:
             raise ValueError("proof reader belongs to another world")
-        return self.__ledger._pin_observation_history_proof(cursor=cursor, issuer=self.__issuer)
+        pin = self.__ledger._pin_observation_history_proof(cursor=cursor)
+        handle = PinnedObservationHistoryHandle()
+        with self.__pins_lock:
+            self.__pins[handle] = pin
+        return handle
 
     def read(
         self,
@@ -181,13 +157,13 @@ class SQLiteProofBackedObservationReader:
         handle: PinnedObservationHistoryHandle,
         locators: Sequence[ObservationEventLocator],
     ) -> tuple[ProofBackedObservationLookup, ...]:
-        if (
-            type(handle) is not PinnedObservationHistoryHandle
-            or not handle.issued_by(self.__issuer)
-            or handle.world_id != self.__ledger.world_id
-        ):
+        if type(handle) is not PinnedObservationHistoryHandle:
             raise ValueError("observation proof handle is not owned by this reader")
-        return self.__ledger._read_observation_history_proof(handle=handle, locators=locators)
+        with self.__pins_lock:
+            pin = self.__pins.get(handle)
+        if pin is None:
+            raise ValueError("observation proof handle is not owned by this reader")
+        return self.__ledger._read_observation_history_proof(pin=pin, locators=locators)
 
 
 def _prefix_bits_blob(prefix: int) -> bytes:
@@ -312,6 +288,11 @@ class SQLiteWorldLedger:
             self._migrate_head_bundle()
             if legacy_prefix_rebuild:
                 self._discard_legacy_prefix_proof_cache()
+            # The derived prefix tables live in the same SQLite file as the
+            # ledger.  They are therefore only an acceleration cache: before
+            # they can anchor a process-local historical reader, independently
+            # stream-verify immutable events, commits, revisions and head.
+            self._verify_cold_ledger_history()
             self._ensure_or_restore_prefix_proof_state()
         except Exception:
             connection.close()
@@ -534,6 +515,178 @@ class SQLiteWorldLedger:
                 ),
             ),
         )
+
+    def _verify_cold_ledger_history(self) -> None:
+        """Verify immutable history from genesis before trusting proof caches.
+
+        The event cursor is streamed in ledger order by ``_replay_locked``;
+        commit validation is then streamed in first-event order and bounded by
+        the shared commit contract.  No prefix-table row is an input to this
+        check, so mutually rewritten derived roots cannot create a verified
+        reader capability on process startup.
+        """
+
+        with self._thread_lock:
+            connection = self._connection
+            try:
+                connection.execute("BEGIN")
+                head = self._project_locked()
+                rebuilt = self._replay_locked(
+                    target_cursor=None,
+                    target_schema_version=CURRENT_SCHEMA_VERSION,
+                    reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+                )
+                if rebuilt != head:
+                    raise LedgerIntegrityError("cold replay does not match persisted head")
+                head_cursor = ProjectionCursor(
+                    world_revision=head.world_revision,
+                    deliberation_revision=head.deliberation_revision,
+                    ledger_sequence=head.ledger_sequence,
+                )
+                commit_count = int(
+                    connection.execute(
+                        "SELECT COUNT(*) FROM world_v2_commits WHERE world_id = ?",
+                        (self._world_id,),
+                    ).fetchone()[0]
+                )
+                previous_last_sequence = 0
+                verified_commit_count = 0
+                for row in connection.execute(
+                    """SELECT commit_id, MIN(ledger_sequence) AS first_sequence,
+                              MAX(ledger_sequence) AS last_sequence,
+                              COUNT(*) AS event_count
+                       FROM world_v2_events WHERE world_id = ?
+                       GROUP BY commit_id ORDER BY MIN(ledger_sequence)""",
+                    (self._world_id,),
+                ):
+                    first_sequence = int(row["first_sequence"])
+                    last_sequence = int(row["last_sequence"])
+                    if (
+                        first_sequence != previous_last_sequence + 1
+                        or last_sequence - first_sequence + 1 != int(row["event_count"])
+                    ):
+                        raise LedgerIntegrityError("commit event rows are not contiguous")
+                    self._verify_cold_commit_locked(
+                        str(row["commit_id"]), expected_cursor=head_cursor
+                    )
+                    previous_last_sequence = last_sequence
+                    verified_commit_count += 1
+                if verified_commit_count != commit_count:
+                    raise LedgerIntegrityError("prefix proof rebuild found an empty or orphaned commit")
+                connection.commit()
+            except sqlite3.DatabaseError as exc:
+                try:
+                    connection.rollback()
+                except sqlite3.DatabaseError:
+                    pass
+                raise LedgerIntegrityError("cold ledger verification failed") from exc
+            except Exception:
+                try:
+                    connection.rollback()
+                except sqlite3.DatabaseError:
+                    pass
+                raise
+
+    def _verify_cold_commit_locked(
+        self, commit_id: str, *, expected_cursor: ProjectionCursor
+    ) -> None:
+        """Verify a persisted commit without reinterpreting legacy event bytes.
+
+        Current identity and reducer semantics are already checked by the
+        genesis replay.  This companion check binds the exact stored envelope
+        bytes to its original request/result record.  It intentionally avoids
+        applying the *current* event-identity rule to legacy rows whose replay
+        path performs a documented upcast before validation.
+        """
+
+        commit_row = self._connection.execute(
+            """SELECT request_hash, result_json FROM world_v2_commits
+               WHERE world_id = ? AND commit_id = ?""",
+            (self._world_id, commit_id),
+        ).fetchone()
+        if commit_row is None:
+            raise LedgerIntegrityError("event owning commit is missing")
+        rows = tuple(
+            self._connection.execute(
+                """SELECT * FROM world_v2_events WHERE world_id = ? AND commit_id = ?
+                   ORDER BY ledger_sequence""",
+                (self._world_id, commit_id),
+            )
+        )
+        if not rows:
+            raise LedgerIntegrityError("prefix proof rebuild found an empty or orphaned commit")
+        try:
+            events: list[WorldEvent] = []
+            event_ids: list[str] = []
+            legacy_bytes_present = False
+            for row in rows:
+                event_json = row["event_json"]
+                if not isinstance(event_json, str) or not hmac.compare_digest(
+                    hashlib.sha256(event_json.encode("utf-8")).hexdigest(),
+                    str(row["event_hash"]),
+                ):
+                    raise LedgerIntegrityError("event envelope hash mismatch")
+                raw_event = json.loads(event_json)
+                if not isinstance(raw_event, dict):
+                    raise LedgerIntegrityError("persisted event is invalid")
+                event_id = raw_event.get("event_id")
+                event_world_id = raw_event.get("world_id")
+                idempotency_key = raw_event.get("idempotency_key")
+                if (
+                    event_world_id != self._world_id
+                    or event_id != row["event_id"]
+                    or idempotency_key != row["idempotency_key"]
+                    or int(row["ledger_sequence"]) > expected_cursor.ledger_sequence
+                    or int(row["world_revision"]) > expected_cursor.world_revision
+                    or int(row["deliberation_revision"])
+                    > expected_cursor.deliberation_revision
+                ):
+                    raise LedgerIntegrityError("event envelope does not match its ledger row")
+                if raw_event.get("schema_version") == CURRENT_SCHEMA_VERSION:
+                    events.append(WorldEvent.model_validate_json(event_json))
+                else:
+                    # Legacy envelopes are accepted only through the replay
+                    # upcast policy above.  Their historical request hash was
+                    # not defined over the current canonical event contract.
+                    legacy_bytes_present = True
+                if raw_event.get("event_type") == "AcceptanceRecorded":
+                    payload_json = raw_event.get("payload_json")
+                    try:
+                        raw_payload = json.loads(payload_json) if isinstance(payload_json, str) else None
+                    except (TypeError, json.JSONDecodeError):
+                        raw_payload = None
+                    if not isinstance(raw_payload, dict) or "manifest_version" not in raw_payload:
+                        # The replay path explicitly converts these pre-v18
+                        # audit records to inert legacy events.  Their old
+                        # request hash cannot be checked using v18 bytes.
+                        legacy_bytes_present = True
+                if self._connection.execute(
+                    """SELECT 1 FROM world_v2_legacy_plan_events
+                       WHERE world_id = ? AND event_id = ?""",
+                    (self._world_id, str(event_id)),
+                ).fetchone() is not None:
+                    # v15 ownerless plan lifecycle rows are rewritten only by
+                    # the documented migration replay policy.  Their source
+                    # request hash binds pre-migration event bytes.
+                    legacy_bytes_present = True
+                event_ids.append(str(event_id))
+            if not legacy_bytes_present and not hmac.compare_digest(
+                commit_request_hash(events), str(commit_row["request_hash"])
+            ):
+                raise LedgerIntegrityError("commit request hash does not match event rows")
+            last = rows[-1]
+            expected_result = CommitResult(
+                world_revision=int(last["world_revision"]),
+                deliberation_revision=int(last["deliberation_revision"]),
+                ledger_sequence=int(last["ledger_sequence"]),
+                event_ids=tuple(event_ids),
+            )
+            if CommitResult.model_validate_json(commit_row["result_json"]) != expected_result:
+                raise LedgerIntegrityError("commit result does not match event rows")
+        except LedgerIntegrityError:
+            raise
+        except Exception as exc:
+            raise LedgerIntegrityError("persisted commit is invalid") from exc
 
     def _ensure_or_restore_prefix_proof_state(self) -> None:
         """Restore derived proof state, or atomically derive it for a legacy ledger.
@@ -1806,8 +1959,8 @@ class SQLiteWorldLedger:
             )
 
     def _pin_observation_history_proof(
-        self, *, cursor: ProjectionCursor, issuer: object
-    ) -> PinnedObservationHistoryHandle:
+        self, *, cursor: ProjectionCursor
+    ) -> _PinnedObservationHistoryProof:
         """Freeze a verified-prefix anchor without exposing proof internals."""
 
         if type(cursor) is not ProjectionCursor:
@@ -1823,8 +1976,8 @@ class SQLiteWorldLedger:
                     raise LedgerIntegrityError("prefix proof head is unavailable")
                 anchor_leaf_count = int(prefix_head["mmr_leaf_count"])
                 anchor_root = bytes(prefix_head["mmr_root"])
-                mmr = self._prefix_mmr_at_leaf_count_locked(anchor_leaf_count)
-                if not hmac.compare_digest(mmr.root, anchor_root):
+                computed_anchor_root = self._prefix_mmr_root_at_leaf_count_locked(anchor_leaf_count)
+                if not hmac.compare_digest(computed_anchor_root, anchor_root):
                     raise LedgerIntegrityError("prefix proof anchor does not match persisted head")
                 zero = ProjectionCursor(
                     world_revision=0, deliberation_revision=0, ledger_sequence=0
@@ -1851,7 +2004,10 @@ class SQLiteWorldLedger:
                         raise LedgerIntegrityError("checkpoint is after its prefix anchor")
                     verify_checkpoint_in_prefix(
                         checkpoint=checkpoint,
-                        proof=mmr.prove(checkpoint.mmr_leaf_count - 1),
+                        proof=self._prefix_mmr_proof_at_leaf_count_locked(
+                            leaf_index=checkpoint.mmr_leaf_count - 1,
+                            leaf_count=anchor_leaf_count,
+                        ),
                         expected_root=anchor_root,
                         expected_world_id=self._world_id,
                         expected_commit_id=checkpoint.commit_id,
@@ -1862,20 +2018,19 @@ class SQLiteWorldLedger:
                         ),
                     )
                     locator_root = bytes.fromhex(checkpoint.locator_root)
-                handle = PinnedObservationHistoryHandle(
+                pin = _PinnedObservationHistoryProof(
                     world_id=self._world_id,
                     cursor=cursor,
                     anchor_leaf_count=anchor_leaf_count,
                     anchor_mmr_root=anchor_root,
                     checkpoint=checkpoint,
-                    _issuer=issuer,
                 )
                 # Checking the root while the snapshot is open makes an empty
                 # cursor just as explicit as a checkpoint cursor.
                 if not isinstance(locator_root, bytes) or len(locator_root) != 32:
                     raise LedgerIntegrityError("pinned locator root is invalid")
                 connection.commit()
-                return handle
+                return pin
             except sqlite3.DatabaseError as exc:
                 try:
                     connection.rollback()
@@ -1892,7 +2047,7 @@ class SQLiteWorldLedger:
     def _read_observation_history_proof(
         self,
         *,
-        handle: PinnedObservationHistoryHandle,
+        pin: _PinnedObservationHistoryProof,
         locators: Sequence[ObservationEventLocator],
     ) -> tuple[ProofBackedObservationLookup, ...]:
         validated = _validated_observation_locators(locators)
@@ -1900,11 +2055,13 @@ class SQLiteWorldLedger:
             connection = self._connection
             try:
                 connection.execute("BEGIN")
-                mmr = self._prefix_mmr_at_leaf_count_locked(handle.anchor_leaf_count)
-                if not hmac.compare_digest(mmr.root, handle.anchor_mmr_root):
+                computed_anchor_root = self._prefix_mmr_root_at_leaf_count_locked(
+                    pin.anchor_leaf_count
+                )
+                if not hmac.compare_digest(computed_anchor_root, pin.anchor_mmr_root):
                     raise LedgerIntegrityError("pinned prefix anchor no longer verifies")
-                if handle.checkpoint is None:
-                    if handle.cursor != ProjectionCursor(
+                if pin.checkpoint is None:
+                    if pin.cursor != ProjectionCursor(
                         world_revision=0, deliberation_revision=0, ledger_sequence=0
                     ):
                         raise LedgerIntegrityError("pinned historical cursor lacks a checkpoint")
@@ -1916,33 +2073,36 @@ class SQLiteWorldLedger:
                              AND deliberation_revision = ? AND ledger_sequence = ?""",
                         (
                             self._world_id,
-                            handle.cursor.world_revision,
-                            handle.cursor.deliberation_revision,
-                            handle.cursor.ledger_sequence,
+                            pin.cursor.world_revision,
+                            pin.cursor.deliberation_revision,
+                            pin.cursor.ledger_sequence,
                         ),
                     ).fetchone()
-                    if row is None or self._prefix_checkpoint_from_row(row) != handle.checkpoint:
+                    if row is None or self._prefix_checkpoint_from_row(row) != pin.checkpoint:
                         raise LedgerIntegrityError("pinned checkpoint changed or disappeared")
                     verify_checkpoint_in_prefix(
-                        checkpoint=handle.checkpoint,
-                        proof=mmr.prove(handle.checkpoint.mmr_leaf_count - 1),
-                        expected_root=handle.anchor_mmr_root,
+                        checkpoint=pin.checkpoint,
+                        proof=self._prefix_mmr_proof_at_leaf_count_locked(
+                            leaf_index=pin.checkpoint.mmr_leaf_count - 1,
+                            leaf_count=pin.anchor_leaf_count,
+                        ),
+                        expected_root=pin.anchor_mmr_root,
                         expected_world_id=self._world_id,
-                        expected_commit_id=handle.checkpoint.commit_id,
+                        expected_commit_id=pin.checkpoint.commit_id,
                         expected_cursor=(
-                            handle.cursor.world_revision,
-                            handle.cursor.deliberation_revision,
-                            handle.cursor.ledger_sequence,
+                            pin.cursor.world_revision,
+                            pin.cursor.deliberation_revision,
+                            pin.cursor.ledger_sequence,
                         ),
                     )
-                    locator_root = bytes.fromhex(handle.checkpoint.locator_root)
+                    locator_root = bytes.fromhex(pin.checkpoint.locator_root)
                 lookups = tuple(
                     self._proof_lookup_observation_locator_locked(
                         locator=locator,
-                        cursor=handle.cursor,
+                        cursor=pin.cursor,
                         locator_root=locator_root,
-                        mmr=mmr,
-                        anchor_root=handle.anchor_mmr_root,
+                        anchor_leaf_count=pin.anchor_leaf_count,
+                        anchor_root=pin.anchor_mmr_root,
                     )
                     for locator in validated
                 )
@@ -1961,29 +2121,47 @@ class SQLiteWorldLedger:
                     pass
                 raise
 
-    def _prefix_mmr_at_leaf_count_locked(self, leaf_count: int) -> IncrementalMmrV1:
+    def _prefix_mmr_node_lookup_locked(self, height: int, node_index: int) -> bytes | None:
+        """Read one persisted MMR node at its stable logical address."""
+
+        if type(height) is not int or type(node_index) is not int or height < 0 or node_index < 0:
+            raise LedgerIntegrityError("persisted MMR node address is invalid")
+        row = self._connection.execute(
+            """SELECT node_hash FROM world_v2_prefix_mmr_nodes
+               WHERE world_id = ? AND height = ? AND node_index = ?""",
+            (self._world_id, height, node_index),
+        ).fetchone()
+        if row is None:
+            return None
+        node_hash = bytes(row["node_hash"])
+        if len(node_hash) != 32:
+            raise LedgerIntegrityError("persisted MMR node hash is invalid")
+        return node_hash
+
+    def _prefix_mmr_root_at_leaf_count_locked(self, leaf_count: int) -> bytes:
         if type(leaf_count) is not int or leaf_count < 0:
             raise LedgerIntegrityError("pinned MMR leaf count is invalid")
-        rows = tuple(
-            self._connection.execute(
-                """SELECT height, node_index, node_hash FROM world_v2_prefix_mmr_nodes
-                   WHERE world_id = ?""",
-                (self._world_id,),
-            )
-        )
-        nodes: dict[tuple[int, int], bytes] = {}
-        for row in rows:
-            height, index = int(row["height"]), int(row["node_index"])
-            if height < 0 or index < 0:
-                raise LedgerIntegrityError("persisted MMR node address is invalid")
-            # A node at this height covers [index * 2**height, ...).  Ignore
-            # nodes first created after the frozen prefix.
-            if index * (1 << height) < leaf_count:
-                nodes[(height, index)] = bytes(row["node_hash"])
         try:
-            return IncrementalMmrV1.restore(leaf_count=leaf_count, nodes=nodes)
+            return mmr_root_from_node_lookup_v1(
+                leaf_count=leaf_count,
+                node_lookup=self._prefix_mmr_node_lookup_locked,
+            )
         except Exception as exc:
             raise LedgerIntegrityError("pinned MMR state is invalid") from exc
+
+    def _prefix_mmr_proof_at_leaf_count_locked(
+        self, *, leaf_index: int, leaf_count: int
+    ):
+        if type(leaf_count) is not int or leaf_count < 0:
+            raise LedgerIntegrityError("pinned MMR leaf count is invalid")
+        try:
+            return mmr_inclusion_proof_from_node_lookup_v1(
+                leaf_index=leaf_index,
+                leaf_count=leaf_count,
+                node_lookup=self._prefix_mmr_node_lookup_locked,
+            )
+        except Exception as exc:
+            raise LedgerIntegrityError("pinned MMR proof state is invalid") from exc
 
     def _proof_lookup_observation_locator_locked(
         self,
@@ -1991,7 +2169,7 @@ class SQLiteWorldLedger:
         locator: ObservationEventLocator,
         cursor: ProjectionCursor,
         locator_root: bytes,
-        mmr: IncrementalMmrV1,
+        anchor_leaf_count: int,
         anchor_root: bytes,
     ) -> ProofBackedObservationLookup:
         key = observation_locator_key(
@@ -2028,7 +2206,9 @@ class SQLiteWorldLedger:
         )
         if value is None:
             proof.verify_nonmembership(expected_root=locator_root, expected_key=key)
-            return ProofBackedObservationLookup(locator=locator, event=None)
+            return ProofBackedObservationLookup(
+                locator=locator, status="locator_missing", event=None
+            )
         if (
             value.observation_id != locator.observation_id
             or value.event_type != locator.event_type
@@ -2039,30 +2219,54 @@ class SQLiteWorldLedger:
             expected_root=locator_root, expected_key=key, expected_value_hash=value_hash
         )
         event = self._proof_backed_event_locked(
-            locator=locator, value=value, mmr=mmr, anchor_root=anchor_root, cursor=cursor
+            locator=locator,
+            value=value,
+            anchor_leaf_count=anchor_leaf_count,
+            anchor_root=anchor_root,
+            cursor=cursor,
         )
-        return ProofBackedObservationLookup(locator=locator, event=event)
+        return ProofBackedObservationLookup(locator=locator, status="found", event=event)
 
     def _historical_locator_sibling_nodes_locked(
         self, *, key: bytes, ledger_sequence: int
     ) -> dict[tuple[int, int], bytes]:
         key_int = int.from_bytes(key, "big")
-        nodes: dict[tuple[int, int], bytes] = {}
-        for depth in range(256):
-            address = (
+        addresses = tuple(
+            (
                 depth + 1,
                 (key_int >> (256 - depth) << 1)
                 | (1 - ((key_int >> (255 - depth)) & 1)),
             )
-            row = self._connection.execute(
-                """SELECT node_hash FROM world_v2_prefix_locator_node_history
-                   WHERE world_id = ? AND depth = ? AND prefix_bits = ?
-                     AND ledger_sequence <= ?
-                   ORDER BY ledger_sequence DESC LIMIT 1""",
-                (self._world_id, address[0], _prefix_bits_blob(address[1]), ledger_sequence),
-            ).fetchone()
-            if row is not None:
-                nodes[address] = bytes(row["node_hash"])
+            for depth in range(256)
+        )
+        values = ", ".join("(?, ?)" for _ in addresses)
+        params: tuple[object, ...] = tuple(
+            value for depth, prefix in addresses for value in (depth, _prefix_bits_blob(prefix))
+        ) + (self._world_id, ledger_sequence)
+        rows = tuple(
+            self._connection.execute(
+                f"""WITH requested(depth, prefix_bits) AS (VALUES {values})
+                    SELECT requested.depth, requested.prefix_bits,
+                           (
+                               SELECT node_hash
+                               FROM world_v2_prefix_locator_node_history AS history
+                               WHERE history.world_id = ?
+                                 AND history.depth = requested.depth
+                                 AND history.prefix_bits = requested.prefix_bits
+                                 AND history.ledger_sequence <= ?
+                               ORDER BY history.ledger_sequence DESC LIMIT 1
+                           ) AS node_hash
+                    FROM requested""",
+                params,
+            )
+        )
+        nodes: dict[tuple[int, int], bytes] = {}
+        for row in rows:
+            node_hash = row["node_hash"]
+            if node_hash is not None:
+                nodes[(int(row["depth"]), _prefix_bits_int(bytes(row["prefix_bits"])))] = bytes(
+                    node_hash
+                )
         return nodes
 
     def _proof_backed_event_locked(
@@ -2070,7 +2274,7 @@ class SQLiteWorldLedger:
         *,
         locator: ObservationEventLocator,
         value: ObservationLocatorValueV1,
-        mmr: IncrementalMmrV1,
+        anchor_leaf_count: int,
         anchor_root: bytes,
         cursor: ProjectionCursor,
     ) -> HistoricalLedgerEvent:
@@ -2116,7 +2320,10 @@ class SQLiteWorldLedger:
         if not hmac.compare_digest(leaf, value.event_leaf_hash):
             raise LedgerIntegrityError("proof-backed observation leaf does not match locator value")
         try:
-            mmr.prove(value.event_leaf_index).verify(
+            self._prefix_mmr_proof_at_leaf_count_locked(
+                leaf_index=value.event_leaf_index,
+                leaf_count=anchor_leaf_count,
+            ).verify(
                 leaf_hash=leaf, expected_root=anchor_root
             )
         except Exception as exc:

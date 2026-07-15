@@ -11,6 +11,8 @@ from companion_daemon.world_v2.ledger_prefix_proof import (
     LedgerLeafV1,
     PrefixCheckpointLeafV1,
     SparseMerkleMapV1,
+    mmr_inclusion_proof_from_node_lookup_v1,
+    mmr_root_from_node_lookup_v1,
     observation_locator_key,
     verify_checkpoint_in_prefix,
 )
@@ -177,4 +179,51 @@ def test_incremental_builders_match_reference_proofs() -> None:
     for index, key in enumerate(keys):
         incremental_map.prove(key).verify_membership(
             expected_root=incremental_map.root, expected_key=key, expected_value_hash=_hash(f"value:{index}")
+        )
+
+
+def test_addressed_mmr_lookup_matches_incremental_proofs_without_full_state() -> None:
+    leaves = tuple(_hash(f"lookup-leaf:{index}") for index in range(13))
+    incremental = IncrementalMmrV1()
+    for leaf in leaves:
+        incremental.append(leaf)
+
+    requested_addresses: list[tuple[int, int]] = []
+
+    def node_at(height: int, node_index: int) -> bytes | None:
+        requested_addresses.append((height, node_index))
+        return incremental.nodes.get((height, node_index))
+
+    assert mmr_root_from_node_lookup_v1(
+        leaf_count=incremental.leaf_count, node_lookup=node_at
+    ) == incremental.root
+    # Root validation only needs one peak per binary digit of N.
+    assert len(requested_addresses) == incremental.leaf_count.bit_count()
+
+    requested_addresses.clear()
+    proof = mmr_inclusion_proof_from_node_lookup_v1(
+        leaf_index=9,
+        leaf_count=incremental.leaf_count,
+        node_lookup=node_at,
+    )
+    proof.verify(leaf_hash=leaves[9], expected_root=incremental.root)
+    # A proof uses the peaks plus the height of the selected mountain; it
+    # cannot ask the adapter to enumerate every persisted MMR node.
+    assert len(requested_addresses) <= incremental.leaf_count.bit_count() + 3
+    assert set(requested_addresses) < set(incremental.nodes)
+
+
+def test_addressed_mmr_lookup_fails_closed_for_missing_path_node() -> None:
+    incremental = IncrementalMmrV1()
+    leaves = tuple(_hash(f"missing-leaf:{index}") for index in range(8))
+    for leaf in leaves:
+        incremental.append(leaf)
+
+    with pytest.raises(ValueError, match="proof node is missing"):
+        mmr_inclusion_proof_from_node_lookup_v1(
+            leaf_index=3,
+            leaf_count=incremental.leaf_count,
+            node_lookup=lambda height, node_index: None
+            if (height, node_index) == (0, 2)
+            else incremental.nodes.get((height, node_index)),
         )

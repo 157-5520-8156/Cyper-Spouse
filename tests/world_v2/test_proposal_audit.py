@@ -764,9 +764,8 @@ def test_sqlite_v2_acceptance_replay_never_downgrades_invalid_manifest_to_legacy
             "UPDATE world_v2_events SET event_json = ?, event_hash = ? WHERE event_id = ?",
             (event_json, _hash(event_json), event.event_id),
         )
-    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
     with pytest.raises(LedgerIntegrityError):
-        reopened.rebuild()
+        SQLiteWorldLedger(path=path, world_id=WORLD)
 
 
 def test_v17_head_cannot_claim_v18_acceptance_manifest_projection(tmp_path) -> None:

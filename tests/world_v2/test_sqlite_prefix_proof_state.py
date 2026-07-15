@@ -9,6 +9,7 @@ from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.ledger import ObservationEventLocator, WorldLedger
 from companion_daemon.world_v2.schemas import ProjectionCursor, WorldEvent
 from companion_daemon.world_v2.sqlite_ledger import (
+    PinnedObservationHistoryHandle,
     SQLiteProofBackedObservationReader,
     SQLiteWorldLedger,
 )
@@ -106,10 +107,13 @@ def test_sqlite_proof_reader_authenticates_historical_membership_and_absence(tmp
         locators=tuple(sorted((old_locator, new_locator), key=lambda item: (item.observation_id, item.event_type, item.idempotency_key))),
     )
     by_observation = {item.locator.observation_id: item.event for item in found}
+    status_by_observation = {item.locator.observation_id: item.status for item in found}
 
     assert by_observation["obs:proof:old"] is not None
     assert by_observation["obs:proof:old"].event == old
+    assert status_by_observation["obs:proof:old"] == "found"
     assert by_observation["obs:proof:new"] is None
+    assert status_by_observation["obs:proof:new"] == "locator_missing"
     ledger.close()
 
 
@@ -136,7 +140,14 @@ def test_sqlite_proof_reader_handle_cannot_be_mutated_or_forged(tmp_path) -> Non
         handle.cursor = ProjectionCursor(  # type: ignore[misc]
             world_revision=0, deliberation_revision=0, ledger_sequence=0
         )
+    assert not hasattr(handle, "cursor")
+    assert not hasattr(handle, "checkpoint")
+    assert not hasattr(handle, "anchor_mmr_root")
     assert reader.read(handle=handle, locators=(locator,))[0].event is not None
+
+    forged = PinnedObservationHistoryHandle()
+    with pytest.raises(ValueError, match="not owned"):
+        reader.read(handle=forged, locators=(locator,))
 
     other_reader = SQLiteProofBackedObservationReader(ledger=ledger)
     with pytest.raises(ValueError, match="not owned"):
@@ -175,6 +186,89 @@ def test_sqlite_proof_reader_rejects_tampered_historical_sibling_path(tmp_path) 
     with pytest.raises(ValueError, match="SMT proof does not verify"):
         reader.read(handle=handle, locators=(locator,))
     ledger.close()
+
+
+def test_sqlite_proof_reader_uses_addressed_mmr_reads_not_a_full_node_scan(tmp_path) -> None:
+    path = tmp_path / "proof-reader-mmr-point-reads.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    first: WorldEvent | None = None
+    for number in range(16):
+        event = _observation(
+            f"event:proof:many:{number}", f"obs:proof:many:{number}"
+        )
+        _commit(ledger, event, number + 1)
+        if first is None:
+            first = event
+    assert first is not None
+    projection = ledger.project()
+    cursor = ProjectionCursor(
+        world_revision=projection.world_revision,
+        deliberation_revision=projection.deliberation_revision,
+        ledger_sequence=projection.ledger_sequence,
+    )
+    reader = SQLiteProofBackedObservationReader(ledger=ledger)
+    statements: list[str] = []
+    ledger._connection.set_trace_callback(statements.append)
+    try:
+        handle = reader.pin(world_id=WORLD, cursor=cursor)
+        found = reader.read(
+            handle=handle,
+            locators=(
+                ObservationEventLocator(
+                    observation_id="obs:proof:many:0",
+                    event_type="ObservationRecorded",
+                    idempotency_key=first.idempotency_key,
+                ),
+            ),
+        )
+    finally:
+        ledger._connection.set_trace_callback(None)
+    assert found[0].event is not None
+
+    mmr_selects = tuple(
+        statement.upper()
+        for statement in statements
+        if "WORLD_V2_PREFIX_MMR_NODES" in statement.upper()
+        and statement.lstrip().upper().startswith("SELECT")
+    )
+    # The point lookup is keyed by the table's full primary-key address.  A
+    # reader never asks SQLite for all nodes and reconstructs an MMR in memory.
+    assert mmr_selects
+    assert all("HEIGHT =" in statement and "NODE_INDEX =" in statement for statement in mmr_selects)
+    # At 32 leaves, root validation plus two inclusion proofs remain bounded
+    # by a few logarithmic paths (and far below the 63 stored MMR nodes).
+    assert len(mmr_selects) <= 4 * 6
+    history_reads = tuple(
+        statement.upper()
+        for statement in statements
+        if "WORLD_V2_PREFIX_LOCATOR_NODE_HISTORY" in statement.upper()
+        and statement.lstrip().upper().startswith("WITH REQUESTED")
+    )
+    # One locator's 256 sibling addresses are fetched as a single bounded
+    # query, rather than issuing 256 SQLite round-trips.
+    assert len(history_reads) == 1
+    ledger.close()
+
+
+def test_sqlite_cold_verification_rejects_untouched_event_tampering(tmp_path) -> None:
+    path = tmp_path / "cold-verified-reader.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    old = _observation("event:proof:cold:old", "obs:proof:cold:old")
+    other = _observation("event:proof:cold:other", "obs:proof:cold:other")
+    _commit(ledger, old, 1)
+    _commit(ledger, other, 2)
+    ledger.close()
+
+    # The proof cache for ``old`` could still be internally consistent if a
+    # different immutable event is edited.  Startup must reject that ledger
+    # before any proof-backed reader can pin an apparently valid old cursor.
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE world_v2_events SET event_json = '{}' WHERE world_id = ? AND event_id = ?",
+            (WORLD, other.event_id),
+        )
+    with pytest.raises(LedgerIntegrityError):
+        SQLiteWorldLedger(path=path, world_id=WORLD)
 
 
 def test_sqlite_legacy_prefix_migration_rebuilds_only_when_all_v1_rows_absent(tmp_path) -> None:

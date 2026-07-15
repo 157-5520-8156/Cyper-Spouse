@@ -98,10 +98,8 @@ def test_lookup_event_commit_rejects_tampered_commit_metadata(tmp_path, tamper_s
     with sqlite3.connect(path) as connection:
         connection.execute(tamper_sql)
 
-    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     with pytest.raises(LedgerIntegrityError, match="commit (request hash|result)"):
-        reopened.lookup_event_commit("event-1")
-    reopened.close()
+        SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
 
 
 def test_lookup_event_commit_rejects_coordinated_predecessor_revision_tampering(
@@ -134,10 +132,8 @@ def test_lookup_event_commit_rejects_coordinated_predecessor_revision_tampering(
                WHERE commit_id = 'commit-2'"""
         )
 
-    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     with pytest.raises(LedgerIntegrityError, match="revisions are discontinuous"):
-        reopened.lookup_event_commit("event-2")
-    reopened.close()
+        SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
 
 
 def test_sqlite_ledger_compare_and_swap_across_instances(tmp_path) -> None:
@@ -178,10 +174,8 @@ def test_sqlite_rebuild_detects_tampered_event_envelope(tmp_path) -> None:
             "UPDATE world_v2_events SET event_json = replace(event_json, 'obs-1', 'obs-X')"
         )
 
-    reopened = SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
     with pytest.raises(LedgerIntegrityError):
-        reopened.rebuild()
-    reopened.close()
+        SQLiteWorldLedger(path=path, world_id="world-sqlite-test")
 
 
 def test_sqlite_rebuild_upcasts_verified_legacy_event_bytes(tmp_path) -> None:
