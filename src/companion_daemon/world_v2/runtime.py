@@ -12,6 +12,8 @@ from .pinned_turn import PinnedTurnCompiler
 from .projection import ProjectionAuthority, ProjectionCompiler
 from .settlement import SettlementPlanner
 from .replay_evaluator import ReplayEvaluation, ReplayEvaluator
+from .minimal_reply_acceptance import ReplyBudgetPolicy, derive_minimal_reply_material
+from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -39,6 +41,8 @@ class WorldRuntime:
         ledger: LedgerPort | None = None,
         projection_authority: ProjectionAuthority | None = None,
         pinned_turn: PinnedTurnCompiler | None = None,
+        reply_policy: ReplyBudgetPolicy | None = None,
+        reply_recorder: MinimalReplyAtomicRecorder | None = None,
     ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
@@ -49,6 +53,10 @@ class WorldRuntime:
         self._settlement = SettlementPlanner(world_id=world_id)
         self._projection = ProjectionCompiler(authority=projection_authority)
         self._pinned_turn = pinned_turn
+        if (reply_policy is None) != (reply_recorder is None):
+            raise ValueError("minimal reply policy and recorder must be configured together")
+        self._reply_policy = reply_policy
+        self._reply_recorder = reply_recorder
         self._lock = asyncio.Lock()
 
     @classmethod
@@ -134,6 +142,7 @@ class WorldRuntime:
             or f"observation:{observation.source}:{observation.source_event_id}",
             payload=observation.model_dump(mode="json"),
         )
+        reply_authorized = False
         async with self._lock:
             existing = await self._lookup_event_commit(event.event_id)
             if existing is not None:
@@ -158,7 +167,7 @@ class WorldRuntime:
                 deliberation_revision=before.deliberation_revision,
             )
             if self._pinned_turn is not None:
-                await self._pinned_turn.audit_observation(
+                audited = await self._pinned_turn.audit_observation(
                     observation=observation,
                     observation_event=event,
                     cursor=ProjectionCursor(
@@ -167,13 +176,42 @@ class WorldRuntime:
                         ledger_sequence=committed.ledger_sequence,
                     ),
                 )
+                if self._reply_policy is not None and audited.proposal_id is not None:
+                    after_audit = await self._project_for_write()
+                    audit = next(
+                        (item for item in after_audit.proposal_audits if item.proposal_id == audited.proposal_id),
+                        None,
+                    )
+                    account = next(
+                        (item for item in after_audit.budget_accounts if item.account_id == self._reply_policy.account_id),
+                        None,
+                    )
+                    if audit is not None and audit.proposal_kind == "minimal" and account is not None:
+                        material = derive_minimal_reply_material(
+                            audit=audit,
+                            cursor=ProjectionCursor(
+                                world_revision=after_audit.world_revision,
+                                deliberation_revision=after_audit.deliberation_revision,
+                                ledger_sequence=after_audit.ledger_sequence,
+                            ),
+                            world_id=self._world_id, policy=self._reply_policy, account=account,
+                            logical_time=after_audit.logical_time or observation.logical_time,
+                            created_at=observation.created_at, trace_id=observation.trace_id,
+                            correlation_id=observation.correlation_id,
+                        )
+                        batch = self._reply_recorder.prepare_batch(
+                            acceptance_id=f"acceptance:minimal-reply:{audit.proposal_id}",
+                            material=material, actor=self._reply_policy.actor, source="world-runtime:acceptance",
+                        )
+                        committed = self._ledger.commit_accepted(batch, expected_cursor=material.cursor)
+                        reply_authorized = True
         return RuntimeOutcome(
             outcome_id=f"outcome:{trigger_id}",
             trigger_id=trigger_id,
             observation_ref=observation.observation_id,
             committed_world_revision=committed.world_revision,
             ledger_sequence=committed.ledger_sequence,
-            status="observed_only",
+            status="action_authorized" if reply_authorized else "observed_only",
             projection_hint=f"world-revision:{committed.world_revision}",
         )
 
