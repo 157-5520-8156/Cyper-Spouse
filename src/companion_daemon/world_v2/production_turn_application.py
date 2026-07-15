@@ -46,11 +46,11 @@ from .outcome_proposal_worker import OutcomeProposalWorker
 from .outcome_trigger_runtime import OutcomeTriggerRunResult
 from .advisory_compiler import AdvisoryCompiler
 from .deliberation import (
-    Deliberation,
     DeliberationModelAdapter,
     ModelRouterAdapter,
     QuickRecoveryAdapter,
 )
+from .production_proposal_grammar import compose_production_deliberation
 from .ledger_context_resolver import ContextRelevanceScope, context_capsule_compiler_from_ledger
 from .ledger_payload_reader import LedgerAuthorizedPayloadReader
 from .life_content_store import SQLiteImmutableLifeContentStore
@@ -593,8 +593,11 @@ def build_sqlite_world_v2_turn_application(
         pinned = PinnedTurnCompiler(
             ledger=ledger,
             capsule_compiler=capsules,
-            deliberation=Deliberation(
-                router=router, main_model=main_model, quick_recovery=quick_recovery
+            deliberation=compose_production_deliberation(
+                lane_id="chat_reply",
+                router=router,
+                main_model=main_model,
+                quick_recovery=quick_recovery,
             ),
             companion_actor_ref=config.companion_actor_ref,
             advisory_compiler=advisory_compiler,
@@ -620,8 +623,11 @@ def build_sqlite_world_v2_turn_application(
             PinnedTurnCompiler(
                 ledger=ledger,
                 capsule_compiler=capsules,
-                deliberation=Deliberation(
-                    router=router, main_model=appraisal_model, quick_recovery=appraisal_model
+                deliberation=compose_production_deliberation(
+                    lane_id="interaction_appraisal",
+                    router=router,
+                    main_model=appraisal_model,
+                    quick_recovery=appraisal_model,
                 ),
                 companion_actor_ref=config.companion_actor_ref,
                 advisory_compiler=advisory_compiler,
@@ -633,8 +639,11 @@ def build_sqlite_world_v2_turn_application(
             SettledWorldAppraisalTurn(
                 ledger=ledger,
                 capsule_compiler=capsules,
-                deliberation=Deliberation(
-                    router=router, main_model=appraisal_model, quick_recovery=appraisal_model
+                deliberation=compose_production_deliberation(
+                    lane_id="settled_world_appraisal",
+                    router=router,
+                    main_model=appraisal_model,
+                    quick_recovery=appraisal_model,
                 ),
                 companion_actor_ref=config.companion_actor_ref,
             )
@@ -651,8 +660,11 @@ def build_sqlite_world_v2_turn_application(
             OutcomeDeliberationTurn(
                 ledger=ledger,
                 capsule_compiler=capsules,
-                deliberation=Deliberation(
-                    router=router, main_model=outcome_model, quick_recovery=outcome_model
+                deliberation=compose_production_deliberation(
+                    lane_id="outcome",
+                    router=router,
+                    main_model=outcome_model,
+                    quick_recovery=outcome_model,
                 ),
                 candidate_reader=outcome_reader,
                 companion_actor_ref=config.companion_actor_ref,
@@ -678,8 +690,11 @@ def build_sqlite_world_v2_turn_application(
             PinnedTurnCompiler(
                 ledger=ledger,
                 capsule_compiler=capsules,
-                deliberation=Deliberation(
-                    router=router, main_model=affect_model, quick_recovery=affect_model
+                deliberation=compose_production_deliberation(
+                    lane_id="affect",
+                    router=router,
+                    main_model=affect_model,
+                    quick_recovery=affect_model,
                 ),
                 companion_actor_ref=config.companion_actor_ref,
             )

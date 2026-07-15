@@ -243,6 +243,12 @@ class QuickRecoveryAdapter(Protocol):
     async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput: ...
 
 
+class ProposalGrammar(Protocol):
+    """Composition-owned allow-list for otherwise inert proposal envelopes."""
+
+    def validate(self, proposal: ProposalInput) -> None: ...
+
+
 AuditStatus = Literal[
     "proposal_validated",
     "main_timeout",
@@ -390,6 +396,7 @@ class Deliberation:
         quick_recovery: QuickRecoveryAdapter,
         main_timeout_seconds: float = 8.0,
         quick_timeout_seconds: float = 3.0,
+        proposal_grammar: ProposalGrammar | None = None,
     ) -> None:
         if not 0 < main_timeout_seconds <= 120:
             raise ValueError("main model timeout is out of bounds")
@@ -400,6 +407,7 @@ class Deliberation:
         self._quick = quick_recovery
         self._main_timeout = main_timeout_seconds
         self._quick_timeout = quick_timeout_seconds
+        self._proposal_grammar = proposal_grammar
         self._provider_tasks: set[asyncio.Task[object]] = set()
         self._quick_provider_tasks: set[asyncio.Task[object]] = set()
 
@@ -489,9 +497,7 @@ class Deliberation:
                     lane="main",
                 )
             )
-            proposal = self._validated_proposal(
-                output, trusted, trigger_evidence=trigger_evidence
-            )
+            proposal = self._validated_proposal(output, trusted, trigger_evidence=trigger_evidence)
             proposal = self._bind_minimal_model_result(proposal, call_id, output)
             status: AuditStatus = "proposal_validated"
         except TimeoutError:
@@ -686,8 +692,8 @@ class Deliberation:
             ).model_dump(mode="python")
         )
 
-    @staticmethod
     def _validated_proposal(
+        self,
         output: ModelOutput,
         capsule: ContextCapsule,
         *,
@@ -755,6 +761,8 @@ class Deliberation:
             }
             if evidence.evidence_kind not in allowed_kinds:
                 raise ValueError("proposal evidence kind does not match Capsule source authority")
+        if self._proposal_grammar is not None:
+            self._proposal_grammar.validate(proposal)
         return proposal
 
     @staticmethod
