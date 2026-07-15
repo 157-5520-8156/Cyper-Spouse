@@ -261,10 +261,54 @@ async def test_timed_out_adapter_has_one_outstanding_slot_and_is_permanently_fus
     await compiler.aclose(timeout_seconds=0)
     assert compiler.outstanding_task_count == 1
     await asyncio.sleep(0.22)
+
+
+@pytest.mark.asyncio
+async def test_adapter_self_cancellation_is_one_fail_open_trace_not_a_cancelled_turn() -> None:
+    class SelfCancellingAdapter(StubAdapter):
+        async def classify(
+            self, _request: AdvisoryAdapterInput
+        ) -> tuple[CandidateDistribution, ...]:
+            raise asyncio.CancelledError
+
+    result = await AdvisoryCompiler(
+        catalog=default_matrix_catalog(), adapters=(SelfCancellingAdapter("cancelled"),)
+    ).compile(_request())
+
+    assert result.advisories == ()
+    assert result.trace[0].status == "unavailable"
+    assert result.trace[0].error_code == "adapter_cancelled"
+
+
+@pytest.mark.asyncio
+async def test_timeout_fuse_recovers_after_bounded_cooldown_once_task_has_stopped() -> None:
+    class SlowThenValidAdapter(StubAdapter):
+        calls = 0
+
+        async def classify(
+            self, request: AdvisoryAdapterInput
+        ) -> tuple[CandidateDistribution, ...]:
+            self.calls += 1
+            if self.calls == 1:
+                await asyncio.sleep(1)
+            return (_distribution(producer="recovering@classifier-1"),)
+
+    adapter = SlowThenValidAdapter("recovering")
+    compiler = AdvisoryCompiler(
+        catalog=default_matrix_catalog(),
+        adapters=(adapter,),
+        timeout_seconds=0.01,
+        timeout_cooldown_seconds=0.01,
+    )
+
+    first = await compiler.compile(_request())
+    await asyncio.sleep(0.02)
+    second = await compiler.compile(_request())
+
+    assert first.trace[0].status == "timeout"
+    assert second.trace[0].status == "success"
+    assert adapter.calls == 2
     assert compiler.outstanding_task_count == 0
-    third = await compiler.compile(_request())
-    assert third.trace[0].error_code == "adapter_fused"
-    assert adapter.calls == 1
 
 
 @pytest.mark.asyncio

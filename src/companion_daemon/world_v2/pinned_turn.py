@@ -34,7 +34,7 @@ from .deliberation import Deliberation
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .ledger import LedgerPort
 from .proposal_audit import ProposalAuditCommit, ProposalAuditContext, ProposalAuditRecorder
-from .schemas import Observation, ProjectionCursor, WorldEvent
+from .schemas import LedgerProjection, Observation, ProjectionCursor, WorldEvent
 
 
 def _attempt_id(*, trigger_ref: str, cursor: ProjectionCursor) -> str:
@@ -90,6 +90,21 @@ class PinnedTurnCompiler:
             raise ValueError("Pinned turn observation belongs to another world")
         if observation_event.event_type != "ObservationRecorded":
             raise ValueError("Pinned turn requires an ObservationRecorded event")
+        stored = await self._lookup_event_commit(observation_event.event_id)
+        if (
+            stored is None
+            or stored[0] != observation_event
+            or stored[1].world_revision != cursor.world_revision
+            or stored[1].ledger_sequence != cursor.ledger_sequence
+        ):
+            raise ValueError("Pinned turn observation event is not the committed authority")
+        try:
+            committed_observation = Observation.model_validate_json(stored[0].payload_json)
+        except ValueError as exc:
+            raise ValueError("Pinned turn event has an invalid observation payload") from exc
+        if committed_observation != observation:
+            raise ValueError("Pinned turn observation does not match its committed authority")
+        observation = committed_observation
         projection = await self._project_at(cursor)
         query = query_from_projection(
             projection,
@@ -99,6 +114,7 @@ class PinnedTurnCompiler:
         try:
             capsule = await self._compile_capsule_with_advisories(
                 query=query,
+                projection=projection,
                 observation=observation,
                 observation_event=observation_event,
             )
@@ -143,6 +159,11 @@ class PinnedTurnCompiler:
             return await asyncio.to_thread(self._ledger.project)
         return self._ledger.project()
 
+    async def _lookup_event_commit(self, event_id: str):
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._ledger.lookup_event_commit, event_id)
+        return self._ledger.lookup_event_commit(event_id)
+
     async def _project_at(self, cursor: ProjectionCursor):
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(self._ledger.project_at, cursor)
@@ -155,35 +176,57 @@ class PinnedTurnCompiler:
         self,
         *,
         query,
+        projection: LedgerProjection,
         observation: Observation,
         observation_event: WorldEvent,
     ):
-        base = await self._compile_capsule(query)
         if self._advisories is None:
-            return base
-        request = self._advisory_request(
-            query=query,
-            observation=observation,
-            observation_event=observation_event,
-            context_json=base.capsule.model_content_json,
+            return await self._compile_capsule(query)
+        try:
+            request = self._advisory_request(
+                query=query,
+                observation=observation,
+                observation_event=observation_event,
+                projection=projection,
+            )
+        except (TypeError, ValueError):
+            # Advisory input is deliberately best-effort.  A bounded-input
+            # failure cannot make a normal user turn fail.
+            return await self._compile_capsule(query)
+        # Classifiers are a latency-bounded optional side path.  The Context
+        # compiler and AdvisoryCompiler consume the same pinned cursor but do
+        # not depend on each other's output, so run them concurrently.
+        base_task = asyncio.create_task(self._compile_capsule(query))
+        advisory_task = asyncio.create_task(
+            self._advisories.compile(self._advisories.issue_authenticated_request(request))
         )
-        compilation = await self._advisories.compile(
-            self._advisories.issue_authenticated_request(request)
-        )
+        try:
+            base, compilation = await asyncio.gather(base_task, advisory_task)
+        except (TypeError, ValueError):
+            return await base_task
         inner = self._inner_advisories(compilation)
-        return await asyncio.to_thread(
-            self._capsules.compile_for_deliberation_with_advisories,
-            query,
-            inner,
-        )
+        if not inner:
+            return base
+        try:
+            return await asyncio.to_thread(
+                self._capsules.compile_for_deliberation_with_advisories,
+                query,
+                inner,
+            )
+        except (TypeError, ValueError) as exc:
+            # The re-binding pass is defense in depth.  If it rejects a bad
+            # advisory (rather than a stale cursor), retain the already frozen
+            # authoritative capsule and let the main model continue.
+            await self._raise_if_stale(query.cursor, exc)
+            return base
 
     @staticmethod
     def _advisory_request(
         *,
         query,
+        projection: LedgerProjection,
         observation: Observation,
         observation_event: WorldEvent,
-        context_json: str,
     ) -> AdvisoryCompileRequest:
         """Build the classifier input from only the current cursor's authority."""
 
@@ -207,7 +250,7 @@ class PinnedTurnCompiler:
                 content_hash=canonical_trigger_hash(trigger),
             ),
         )
-        snapshot_values = {"context_capsule": json.loads(context_json)}
+        snapshot_values = PinnedTurnCompiler._advisory_snapshot(projection)
         snapshot = SnapshotMaterial(
             world_revision=query.world_revision,
             values=snapshot_values,
@@ -235,6 +278,44 @@ class PinnedTurnCompiler:
             recent_context=PinnedTurnCompiler._recent_context(observation),
             snapshot=snapshot,
         )
+
+    @staticmethod
+    def _advisory_snapshot(projection: LedgerProjection) -> dict[str, object]:
+        """Small deterministic read model for advisory classifiers only.
+
+        It deliberately exposes no ledger or mutation port.  ContextCapsule
+        remains the richer authority-backed model input; this compact view lets
+        advice run in parallel rather than adding another serial model wait.
+        """
+
+        def values(items, *, limit: int, active=None):
+            selected = [item for item in items if active is None or active(item)]
+            selected.sort(key=lambda item: str(getattr(item, "entity_revision", 0)))
+            return tuple(item.model_dump(mode="json") for item in selected[-limit:])
+
+        return {
+            "cursor": {
+                "world_revision": projection.world_revision,
+                "deliberation_revision": projection.deliberation_revision,
+                "ledger_sequence": projection.ledger_sequence,
+            },
+            "logical_time": projection.logical_time.isoformat()
+            if projection.logical_time is not None
+            else None,
+            "character_core": (
+                projection.character_core.model_dump(mode="json")
+                if projection.character_core is not None
+                else None
+            ),
+            "active_affect_episodes": values(
+                projection.affect_episodes, limit=8, active=lambda item: item.status == "active"
+            ),
+            "relationship_states": values(projection.relationship_states, limit=8),
+            "open_threads": values(
+                projection.threads, limit=8, active=lambda item: item.values.status == "open"
+            ),
+            "recent_message_observations": values(projection.message_observations, limit=8),
+        }
 
     @staticmethod
     def _recent_context(observation: Observation) -> tuple[dict[str, object], ...]:

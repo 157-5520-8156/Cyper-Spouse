@@ -19,7 +19,7 @@ from companion_daemon.world_v2.ledger_context_resolver import (
 )
 from companion_daemon.world_v2.pinned_turn import PinnedTurnCompiler
 from companion_daemon.world_v2.runtime import WorldRuntime
-from companion_daemon.world_v2.schemas import Observation, WorldEvent
+from companion_daemon.world_v2.schemas import Observation, ProjectionCursor, WorldEvent
 from companion_daemon.world_v2.matrix_catalog import (
     CandidateDistribution,
     ClassificationCandidate,
@@ -210,5 +210,37 @@ async def test_invalid_advisory_fails_open_without_blocking_deliberation() -> No
     await WorldRuntime(world_id=WORLD, ledger=ledger, pinned_turn=turn).ingest(_observation())
 
     assert model.request is not None
-    assert '"advisories":{"availability":"available"' in model.request.model_content_json
-    assert '"items":[]' in model.request.model_content_json
+    assert '"advisories":{"availability":"unavailable"' in model.request.model_content_json
+    assert '"disappointment"' not in model.request.model_content_json
+
+
+@pytest.mark.asyncio
+async def test_pinned_turn_rejects_observation_not_equal_to_committed_event_payload() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
+    runtime = WorldRuntime(world_id=WORLD, ledger=ledger)
+    observation = _observation()
+    await runtime.ingest(observation)
+    event_id = "event:trigger:observation:test:message:pinned-turn:1"
+    stored = ledger.lookup_event_commit(event_id)
+    assert stored is not None
+    event, commit = stored
+    turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+        deliberation=Deliberation(
+            router=_Router(), main_model=_InvalidModel(), quick_recovery=_InvalidQuick()
+        ),
+        companion_actor_ref="agent:companion",
+    )
+
+    with pytest.raises(ValueError, match="does not match its committed authority"):
+        await turn.audit_observation(
+            observation=observation.model_copy(update={"payload_ref": "forged:payload"}),
+            observation_event=event,
+            cursor=ProjectionCursor(
+                world_revision=commit.world_revision,
+                deliberation_revision=commit.deliberation_revision,
+                ledger_sequence=commit.ledger_sequence,
+            ),
+        )

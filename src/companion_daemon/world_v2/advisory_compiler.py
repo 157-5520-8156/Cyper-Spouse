@@ -13,6 +13,7 @@ from datetime import datetime
 import hashlib
 import hmac
 import json
+import time
 from typing import Any, Literal, Protocol, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -439,11 +440,14 @@ class AdvisoryCompiler:
         catalog: MatrixCatalog,
         adapters: tuple[AdvisoryClassifierAdapter, ...],
         timeout_seconds: float = 0.25,
+        timeout_cooldown_seconds: float = 1.0,
         limits: AdvisoryCompilerLimits | None = None,
         authority_key: bytes,
     ) -> None:
         if timeout_seconds <= 0 or timeout_seconds > 10:
             raise ValueError("advisory timeout must be in (0, 10] seconds")
+        if timeout_cooldown_seconds < 0 or timeout_cooldown_seconds > 300:
+            raise ValueError("advisory timeout cooldown must be in [0, 300]")
         if type(authority_key) is not bytes or len(authority_key) < 32:
             raise ValueError("advisory authority key must contain at least 32 bytes")
         self._authority_key = authority_key
@@ -462,8 +466,9 @@ class AdvisoryCompiler:
             raise ValueError("advisory producer identity is oversized")
         self._adapters = tuple(sorted(adapters, key=lambda adapter: adapter.adapter_id))
         self._timeout_seconds = timeout_seconds
+        self._timeout_cooldown_seconds = timeout_cooldown_seconds
         self._outstanding_tasks: dict[str, asyncio.Task[object]] = {}
-        self._fused_adapters: set[str] = set()
+        self._fused_until: dict[str, float] = {}
 
     async def compile(self, request: AdvisoryCompileRequest) -> AdvisoryCompilation:
         # Frozen Pydantic objects can still be forged with ``model_construct``.  The public
@@ -553,7 +558,7 @@ class AdvisoryCompiler:
         adapter: AdvisoryClassifierAdapter,
         request: AdvisoryAdapterInput,
     ) -> tuple[tuple[CandidateDistribution, ...], TraceStatus, str | None]:
-        if adapter.adapter_id in self._fused_adapters:
+        if self._adapter_is_in_cooldown(adapter.adapter_id):
             return (), "unavailable", "adapter_fused"
         if adapter.adapter_id in self._outstanding_tasks:
             return (), "unavailable", "adapter_outstanding"
@@ -564,9 +569,13 @@ class AdvisoryCompiler:
             done, _ = await asyncio.wait({task}, timeout=self._timeout_seconds)
             if not done:
                 task.cancel()
-                self._fused_adapters.add(adapter.adapter_id)
+                self._fused_until[adapter.adapter_id] = (
+                    time.monotonic() + self._timeout_cooldown_seconds
+                )
                 return (), "timeout", "adapter_timeout"
             self._outstanding_tasks.pop(adapter.adapter_id, None)
+            if task.cancelled():
+                return (), "unavailable", "adapter_cancelled"
             raw = task.result()
             distributions = self._revalidate_raw_output(raw)
             self._validate_distributions(adapter, request, distributions)
@@ -577,6 +586,15 @@ class AdvisoryCompiler:
         except Exception:
             return (), "exception", "adapter_exception"
         return distributions, "success", None
+
+    def _adapter_is_in_cooldown(self, adapter_id: str) -> bool:
+        deadline = self._fused_until.get(adapter_id)
+        if deadline is None:
+            return False
+        if deadline > time.monotonic():
+            return True
+        self._fused_until.pop(adapter_id, None)
+        return False
 
     def _track_outstanding_task(self, adapter_id: str, task: asyncio.Task[object]) -> None:
         """Consume a late result without awaiting a classifier that suppresses cancellation.
@@ -603,7 +621,12 @@ class AdvisoryCompiler:
         if timeout_seconds < 0 or timeout_seconds > 1:
             raise ValueError("advisory close timeout must be in [0, 1] seconds")
         tasks = set(self._outstanding_tasks.values())
-        self._fused_adapters.update(self._outstanding_tasks)
+        self._fused_until.update(
+            {
+                adapter_id: time.monotonic() + self._timeout_cooldown_seconds
+                for adapter_id in self._outstanding_tasks
+            }
+        )
         for task in tasks:
             task.cancel()
         if tasks and timeout_seconds:
@@ -615,7 +638,7 @@ class AdvisoryCompiler:
 
     @property
     def fused_adapter_ids(self) -> tuple[str, ...]:
-        return tuple(sorted(self._fused_adapters))
+        return tuple(sorted(item for item in self._fused_until if self._adapter_is_in_cooldown(item)))
 
     def _preflight_request(self, request: object) -> None:
         _preflight_request_structure(request)
