@@ -50,6 +50,14 @@ from .outcome_acceptance_manifest import (
     OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
     OutcomeAcceptanceManifest,
 )
+from .interaction_bid_acceptance_manifest import (
+    INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
+    InteractionBidAcceptanceManifest,
+)
+from .interaction_bid_events import (
+    InteractionBidOpenedPayload,
+    InteractionBidProposalRecordedPayload,
+)
 from .media_v2 import (
     MediaArtifact,
     MediaAutomaticDeliveryApproval,
@@ -323,6 +331,8 @@ from .schemas import (
     FactProjection,
     FactProposalProjection,
     FactTransitionProjection,
+    InteractionBidProjection,
+    InteractionBidProposalProjection,
     LedgerProjection,
     MessageObservationRef,
     MemoryCandidateProjection,
@@ -353,7 +363,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.30"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.31"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -425,10 +435,10 @@ def _actor_authority_transition_semantic_dump(
 
 def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dict[str, Any]:
     dumped = action.model_dump(mode="json")
-    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", "world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", REDUCER_BUNDLE_VERSION}:
+    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", "world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", "world-v2-reducers.30", REDUCER_BUNDLE_VERSION}:
         dumped.pop("expression_plan_id", None)
         dumped.pop("expression_beat_id", None)
-    if reducer_bundle_version not in {"world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", REDUCER_BUNDLE_VERSION}:
+    if reducer_bundle_version not in {"world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", "world-v2-reducers.30", REDUCER_BUNDLE_VERSION}:
         dumped.pop("provider_media_grant", None)
     if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
         dumped.pop("media_delivery_approval", None)
@@ -527,6 +537,8 @@ class ReducerState(FrozenModel):
     media_failed_plan_ids: tuple[str, ...] = ()
     media_delivery_approvals: tuple[MediaAutomaticDeliveryApproval, ...] = ()
     media_deliveries: tuple[MediaDeliveryShared, ...] = ()
+    interaction_bids: tuple[InteractionBidProjection, ...] = ()
+    interaction_bid_proposals: tuple[InteractionBidProposalProjection, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()
@@ -1305,7 +1317,7 @@ class ReducerState(FrozenModel):
             ),
             "boundaries": tuple(item.model_dump(mode="json") for item in self.boundaries),
         }
-        if declared_reducer_bundle_version in {"world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", REDUCER_BUNDLE_VERSION}:
+        if declared_reducer_bundle_version in {"world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", "world-v2-reducers.30", REDUCER_BUNDLE_VERSION}:
             payload["provider_media_grants"] = tuple(
                 item.model_dump(mode="json") for item in self.provider_media_grants
             )
@@ -1317,7 +1329,7 @@ class ReducerState(FrozenModel):
             )
             payload["media_plans"] = tuple(item.model_dump(mode="json") for item in self.media_plans)
             payload["media_unrenderable_opportunity_ids"] = self.media_unrenderable_opportunity_ids
-        if declared_reducer_bundle_version in {"world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", REDUCER_BUNDLE_VERSION}:
+        if declared_reducer_bundle_version in {"world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", "world-v2-reducers.30", REDUCER_BUNDLE_VERSION}:
             payload["media_artifacts"] = tuple(item.model_dump(mode="json") for item in self.media_artifacts)
             payload["media_inspections"] = tuple(
                 item.model_dump(mode="json")
@@ -1333,6 +1345,9 @@ class ReducerState(FrozenModel):
             )
             payload["media_deliveries"] = tuple(
                 item.model_dump(mode="json") for item in self.media_deliveries
+            )
+            payload["interaction_bids"] = tuple(
+                item.model_dump(mode="json") for item in self.interaction_bids
             )
         if reducer_bundle_version in {
             "world-v2-reducers.10",
@@ -1603,6 +1618,22 @@ class _LegacyOutcomeProposalStore:
     def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
         # Outcome proposals are a durable deliberation audit used to explain a
         # later settlement or rejection; deciding one does not erase that audit.
+        return state
+
+
+class _InteractionBidProposalStore:
+    """Dedicated records are reduced by their event handler, never ProposalRecorded."""
+
+    def validate_and_store(self, state: ReducerState, event: object, proposal: object) -> ReducerState:
+        raise NotImplementedError("interaction bid record dispatch is not registry-routed")
+
+    def find(self, state: ReducerState, proposal_id: str) -> InteractionBidProposalProjection | None:
+        return next(
+            (item for item in state.interaction_bid_proposals if item.interaction_bid_proposal_id == proposal_id),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
         return state
 
 
@@ -1931,6 +1962,7 @@ _TYPED_PROPOSAL_STORES = {
     "proposal-contract:appraisal-legacy.1": _LegacyAppraisalProposalStore(),
     "proposal-contract:affect-legacy.1": _LegacyAffectProposalStore(),
     "proposal-contract:outcome-legacy.1": _LegacyOutcomeProposalStore(),
+    "proposal-contract:interaction-bid.1": _InteractionBidProposalStore(),
     "proposal-contract:relationship.1": _RelationshipProposalStore(),
     "proposal-contract:thread.1": _ThreadProposalStore(),
     "proposal-contract:commitment.1": _CommitmentProposalStore(),
@@ -3002,6 +3034,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
                 AFFECT_ACCEPTANCE_MANIFEST_VERSION,
                 OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+                INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
         }
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -3019,6 +3052,8 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         return _affect_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == OUTCOME_ACCEPTANCE_MANIFEST_VERSION:
         return _outcome_acceptance_manifest_recorded(state, event)
+    if raw.get("manifest_version") == INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION:
+        return _interaction_bid_acceptance_manifest_recorded(state, event)
     proposal_id = raw.get("proposal_id")
     evaluated_world_revision = raw.get("evaluated_world_revision")
     if not isinstance(proposal_id, str) or not isinstance(evaluated_world_revision, int):
@@ -3736,6 +3771,49 @@ def _outcome_acceptance_manifest_recorded(
             )
         }
     )
+
+
+def _interaction_bid_acceptance_manifest_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    manifest = InteractionBidAcceptanceManifest.model_validate_json(event.payload_json)
+    current_world_revision = len(state.committed_world_event_refs)
+    proposal = next(
+        (item for item in state.interaction_bid_proposals if item.interaction_bid_proposal_id == manifest.proposal_id),
+        None,
+    )
+    trigger = next(
+        (item for item in state.trigger_processes if item.trigger_id == manifest.deliberation_trigger_id),
+        None,
+    )
+    source = next(
+        (item for item in state.committed_world_event_refs if item.event_id == manifest.delivery_event_ref),
+        None,
+    )
+    if (
+        manifest.evaluated_world_revision != current_world_revision
+        or event.causation_id != manifest.proposal_event_ref
+        or proposal is None
+        or proposal.change_id != manifest.accepted_change_id
+        or proposal.proposed_change_hash != manifest.accepted_change_hash
+        or proposal.evaluated_world_revision != manifest.evaluated_world_revision
+        or proposal.delivery_id != manifest.delivery_id
+        or proposal.delivery_event_ref != manifest.delivery_event_ref
+        or proposal.delivery_event_payload_hash != manifest.delivery_event_payload_hash
+        or proposal.deliberation_trigger_id != manifest.deliberation_trigger_id
+        or source is None or source.event_type != "MediaDeliveryShared"
+        or source.payload_hash != manifest.delivery_event_payload_hash
+        or trigger is None or trigger.process_kind != "media_delivery_interaction"
+        or trigger.state != "claimed" or trigger.claim_lease is None
+        or trigger.source_evidence_ref != manifest.delivery_event_ref
+        or any(item.acceptance_id == manifest.acceptance_id or item.proposal_id == manifest.proposal_id for item in state.acceptance_decisions)
+    ):
+        raise ValueError("interaction bid acceptance manifest does not bind a claimed delivery proposal")
+    return state.model_copy(update={"acceptance_decisions": (*state.acceptance_decisions, AcceptanceDecisionRef(
+        proposal_id=manifest.proposal_id, evaluated_world_revision=manifest.evaluated_world_revision,
+        acceptance_id=manifest.acceptance_id, status="accepted", accepted_change_id=manifest.accepted_change_id,
+        accepted_change_hash=manifest.accepted_change_hash, manifest_version=manifest.manifest_version,
+        manifest_hash=manifest.manifest_hash, acceptance_event_ref=event.event_id,
+        acceptance_event_payload_hash=event.payload_hash,
+    ))})
 
 
 def _message_payload_stored(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -4671,6 +4749,57 @@ def _media_delivery_shared(state: ReducerState, event: WorldEvent) -> ReducerSta
     ):
         raise ValueError("MediaDeliveryShared requires one delivered approved media-delivery Action")
     return state.model_copy(update={"media_deliveries": (*state.media_deliveries, delivery)})
+
+
+def _interaction_bid_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = InteractionBidProposalRecordedPayload.model_validate_json(event.payload_json)
+    if payload.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("interaction bid proposal must evaluate current world revision")
+    if any(item.interaction_bid_proposal_id == payload.interaction_bid_proposal_id for item in state.interaction_bid_proposals):
+        raise ValueError("interaction bid proposal identity is already registered")
+    delivery = next((item for item in state.media_deliveries if item.delivery_id == payload.delivery_id), None)
+    source = next((item for item in state.committed_world_event_refs if item.event_id == payload.delivery_event_ref), None)
+    trigger = next((item for item in state.trigger_processes if item.trigger_id == payload.deliberation_trigger_id), None)
+    if (
+        delivery is None or source is None or source.event_type != "MediaDeliveryShared"
+        or source.payload_hash != payload.delivery_event_payload_hash
+        or trigger is None or trigger.process_kind != "media_delivery_interaction"
+        or trigger.state != "claimed" or trigger.claim_lease is None
+        or trigger.source_evidence_ref != payload.delivery_event_ref
+        or not any(item.ref_id == payload.delivery_event_ref for item in payload.evidence_refs)
+        or any(item.bid_id == payload.bid_id for item in state.interaction_bids)
+    ):
+        raise ValueError("interaction bid proposal is not bound to one claimed media delivery")
+    return state.model_copy(update={
+        "interaction_bid_proposals": (*state.interaction_bid_proposals, InteractionBidProposalProjection.model_validate(payload.model_dump())),
+        "proposal_ids": (*state.proposal_ids, payload.interaction_bid_proposal_id),
+        "proposal_revisions": (*state.proposal_revisions, ProposalRevisionRef(
+            proposal_id=payload.interaction_bid_proposal_id,
+            evaluated_world_revision=payload.evaluated_world_revision,
+        )),
+    })
+
+
+def _interaction_bid_opened(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = InteractionBidOpenedPayload.model_validate_json(event.payload_json)
+    proposal = next((item for item in state.interaction_bid_proposals if item.interaction_bid_proposal_id == payload.proposal_id), None)
+    bid = payload.bid
+    if (
+        proposal is None or payload.evaluated_world_revision != len(state.committed_world_event_refs) - 1
+        or proposal.change_id != payload.change_id
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or bid.bid_id != proposal.bid_id or bid.delivery_id != proposal.delivery_id
+        or bid.delivery_event_ref != proposal.delivery_event_ref
+        or bid.delivery_event_payload_hash != proposal.delivery_event_payload_hash
+        or bid.deliberation_trigger_id != proposal.deliberation_trigger_id
+        or bid.goal != proposal.goal or bid.hoped_response != proposal.hoped_response
+        or bid.pressure_bp != proposal.pressure_bp or bid.audience_ref != proposal.audience_ref
+        or bid.due_at != proposal.due_at or bid.evidence_refs != proposal.evidence_refs
+        or bid.opened_at != event.logical_time
+        or any(item.bid_id == bid.bid_id for item in state.interaction_bids)
+    ):
+        raise ValueError("InteractionBidOpened does not match accepted delivered-media proposal")
+    return state.model_copy(update={"interaction_bids": (*state.interaction_bids, bid)})
 
 
 def _provider_media_grant_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -7265,6 +7394,10 @@ _EVENTS = {
             "MediaAutomaticDeliveryApproved", RevisionClass.WORLD, _media_automatic_delivery_approved
         ),
         EventDefinition("MediaDeliveryShared", RevisionClass.WORLD, _media_delivery_shared),
+        EventDefinition(
+            "InteractionBidProposalRecorded", RevisionClass.DELIBERATION, _interaction_bid_proposal_recorded
+        ),
+        EventDefinition("InteractionBidOpened", RevisionClass.WORLD, _interaction_bid_opened),
         EventDefinition("ObservationRecorded", RevisionClass.WORLD, _observation_recorded),
         EventDefinition(
             "OperatorObservationRecorded",
@@ -7706,6 +7839,8 @@ def make_projection(
         media_failed_plan_ids=state.media_failed_plan_ids,
         media_delivery_approvals=state.media_delivery_approvals,
         media_deliveries=state.media_deliveries,
+        interaction_bids=state.interaction_bids,
+        interaction_bid_proposals=state.interaction_bid_proposals,
         budget_accounts=state.budget_accounts,
         budget_reservations=state.budget_reservations,
         trigger_processes=state.trigger_processes,

@@ -57,6 +57,10 @@ from .outcome_acceptance_manifest import (
     OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
     OutcomeAcceptanceManifest,
 )
+from .interaction_bid_acceptance_manifest import (
+    INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
+)
+from .interaction_bid_events import INTERACTION_BID_PAYLOAD_MODELS
 from .fact_accepted_contracts import FactCommitMaterializedPayloadV2
 from .minimal_reply_events import MINIMAL_REPLY_EVENT_PAYLOAD_MODELS
 from .media_provider_grants import ProviderMediaGrantRecordedPayload
@@ -99,7 +103,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.30"
+    reducer_bundle: str = "world-v2-reducers.31"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -141,6 +145,7 @@ class EventContract:
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
                 AFFECT_ACCEPTANCE_MANIFEST_VERSION,
                 OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+                INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
                 EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
             }:
                 raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -313,6 +318,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         ),
         "ProviderMediaGrantRecorded": ProviderMediaGrantRecordedPayload,
         **MEDIA_V2_PAYLOAD_MODELS,
+        **INTERACTION_BID_PAYLOAD_MODELS,
         "BudgetReserved": _payload_model(
             "BudgetReservedPayload", {"reservation": (BudgetReservation, ...)}
         ),
@@ -423,6 +429,8 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "MediaPreviewFailed": "world_id+plan_id+preview_failed",
         "MediaAutomaticDeliveryApproved": "world_id+approval_id+approval_revision",
         "MediaDeliveryShared": "world_id+delivery_id",
+        "InteractionBidProposalRecorded": "world_id+interaction_bid_proposal_id",
+        "InteractionBidOpened": "world_id+bid_id",
         "BudgetReserved": "reservation_id",
         "BudgetSettled": "reservation_id+result_id+terminal",
         "BudgetReleased": "reservation_id+result_id+terminal",
@@ -797,6 +805,8 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
             _contract("MediaPreviewFailed", "media_preview_materializer", "world", "MediaPreviewFailedPayload", allowed_predecessors=("MediaInspectionRecorded",), evidence_types=("failed_media_inspection",)),
             _contract("MediaAutomaticDeliveryApproved", "operator", "world", "MediaAutomaticDeliveryApprovedPayload", evidence_types=("passed_media_inspection", "operator_media_approval"), successors=("BudgetReserved", "ActionAuthorized")),
             _contract("MediaDeliveryShared", "media_delivery_settlement", "world", "MediaDeliverySharedPayload", allowed_predecessors=("ExecutionReceiptRecorded",), evidence_types=("delivered_media_action", "operator_media_approval")),
+            _contract("InteractionBidProposalRecorded", "interaction_bid_proposal_compiler", "deliberation", "InteractionBidProposalRecordedPayload", allowed_predecessors=("ProposalRecorded", "TriggerProcessClaimed", "TriggerProcessReclaimed"), evidence_types=("media_delivery_shared", "claimed_media_delivery_interaction"), successors=("AcceptanceRecorded",)),
+            _contract("InteractionBidOpened", "interaction_bid_atomic_recorder", "world", "InteractionBidOpenedPayload", allowed_predecessors=("AcceptanceRecorded",), evidence_types=("accepted_interaction_bid_manifest", "media_delivery_shared")),
             _contract(
                 "MessagePayloadStored",
                 "expression_plan_recorder",

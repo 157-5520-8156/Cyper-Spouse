@@ -40,6 +40,10 @@ from .resource_authority_contract import V2_RESOURCE_EVENT_TYPES
 from .resource_authority_events import V2_RESOURCE_CODEC
 from .experience_events import EXPERIENCE_PAYLOAD_MODELS, ExperienceCommittedPayload
 from .life_events import OutcomeProposalRecordedPayload, WorldOccurrenceSettledPayload
+from .interaction_bid_events import (
+    InteractionBidOpenedPayload,
+    InteractionBidProposalRecordedPayload,
+)
 from .memory_events import (
     MEMORY_CANDIDATE_PAYLOAD_MODELS,
     MemoryCandidateChangedPayload,
@@ -57,6 +61,7 @@ from .schemas import (
     MemoryCandidateProposalProjection,
     RelationshipProposalProjection,
     ThreadProposalProjection,
+    InteractionBidProposalProjection,
 )
 from .typed_proposals import (
     AcceptedMutationBinding,
@@ -293,6 +298,42 @@ class _OutcomeFamilyCodec:
             payload.get("result_id"),
             payload.get("expected_entity_revision"),
         )
+
+
+class _InteractionBidFamilyCodec:
+    def decode_record(self, *, event_type: str, payload: dict[str, object]) -> InteractionBidProposalProjection:
+        if event_type != "InteractionBidProposalRecorded":
+            raise ValueError("interaction bid codec only accepts InteractionBidProposalRecorded")
+        recorded = _validate_json(InteractionBidProposalRecordedPayload, payload)
+        return InteractionBidProposalProjection.model_validate(recorded.model_dump())
+
+    def bind(self, proposal: object) -> ProposalAuthorityBinding:
+        if not isinstance(proposal, InteractionBidProposalProjection):
+            raise TypeError("interaction bid codec received an incompatible proposal")
+        return ProposalAuthorityBinding(
+            proposal_id=proposal.interaction_bid_proposal_id,
+            proposal_kind="interaction_bid_transition",
+            authority_contract_ref="proposal-contract:interaction-bid.1",
+            change_id=proposal.change_id,
+            proposed_change_hash=proposal.proposed_change_hash,
+            evaluated_world_revision=proposal.evaluated_world_revision,
+            expected_entity_revision=0,
+            mutation_event_type="InteractionBidOpened",
+        )
+
+    def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
+        if event_type != "InteractionBidOpened":
+            raise ValueError("interaction bid codec only owns InteractionBidOpened")
+        return _validate_json(InteractionBidOpenedPayload, payload)
+
+    def bind_mutation(self, mutation: object) -> AcceptedMutationBinding:
+        return _accepted_binding(mutation)
+
+    def record_identity(self, *, world_id: str, event_type: str, payload: dict[str, object]) -> IdentityComponents:
+        return world_id, payload.get("interaction_bid_proposal_id")
+
+    def mutation_identity(self, *, world_id: str, event_type: str, payload: dict[str, object]) -> IdentityComponents:
+        return world_id, _nested(payload, "bid", "bid_id")
 
 
 class _RelationshipFamilyCodec:
@@ -842,6 +883,14 @@ INSTALLED_TYPED_PROPOSAL_FAMILIES = tuple(
                 requires_separate_deliberation_commit=False,
                 mutation_event_types=("WorldOccurrenceSettled",),
                 codec=_OutcomeFamilyCodec(),
+            ),
+            TypedProposalFamily(
+                contract_ref="proposal-contract:interaction-bid.1",
+                selector=RecordSelector("InteractionBidProposalRecorded", "interaction_bid_transition"),
+                record_mode="dedicated_event",
+                requires_separate_deliberation_commit=False,
+                mutation_event_types=("InteractionBidOpened",),
+                codec=_InteractionBidFamilyCodec(),
             ),
             TypedProposalFamily(
                 contract_ref="proposal-contract:relationship.1",

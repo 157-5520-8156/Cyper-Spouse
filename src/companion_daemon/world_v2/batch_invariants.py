@@ -22,6 +22,12 @@ from .outcome_acceptance_manifest import (
     OutcomeAcceptanceManifest,
     canonical_outcome_acceptance_value_hash,
 )
+from .interaction_bid_acceptance_manifest import (
+    INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
+    InteractionBidAcceptanceManifest,
+    canonical_interaction_bid_value_hash,
+)
+from .interaction_bid_events import InteractionBidOpenedPayload
 from .event_identity import domain_idempotency_key
 from .experience_events import ExperienceCommittedPayload
 from .fact_accepted_contracts import (
@@ -95,6 +101,7 @@ def validate_commit_batch(
         reject_appraisal_acceptance_manifest_without_recorder(events)
         reject_affect_acceptance_manifest_without_recorder(events)
         reject_outcome_acceptance_manifest_without_recorder(events)
+        reject_interaction_bid_acceptance_manifest_without_recorder(events)
         reject_expression_plan_manifest_without_recorder(events)
     _validate_deliberation_audit_transaction(events)
     _validate_acceptance_manifest_v2_batch(events)
@@ -126,6 +133,10 @@ def validate_commit_batch(
     _validate_authorized_outcome_acceptance_manifest_batch(
         events,
         expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_interaction_bid_acceptance_manifest_batch(
+        events, expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_expression_receipt_lifecycle_batch(events)
@@ -451,6 +462,7 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
                 AFFECT_ACCEPTANCE_MANIFEST_VERSION,
                 OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+                INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
                 EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
         }
     ]
@@ -1065,6 +1077,62 @@ def reject_outcome_acceptance_manifest_without_recorder(events: Sequence[WorldEv
         for event in events
     ):
         raise ValueError("outcome_acceptance.recorder_capability_required")
+
+
+def reject_interaction_bid_acceptance_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("interaction_bid_acceptance.recorder_capability_required")
+
+
+def _validate_authorized_interaction_bid_acceptance_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    manifests = [
+        event for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("interaction_bid_acceptance.recorder_capability_required")
+    if len(manifests) != 1 or len(events) != 2:
+        raise ValueError("interaction_bid_acceptance.accepted_batch_must_be_exact")
+    acceptance, opened = events
+    try:
+        manifest = InteractionBidAcceptanceManifest.model_validate_json(acceptance.payload_json)
+        payload = InteractionBidOpenedPayload.model_validate_json(opened.payload_json)
+    except Exception as exc:
+        raise ValueError("interaction_bid_acceptance.accepted_batch_payload_is_invalid") from exc
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or tuple(event.event_type for event in events) != ("AcceptanceRecorded", "InteractionBidOpened")
+        or acceptance.causation_id != manifest.proposal_event_ref
+        or opened.causation_id != acceptance.event_id
+        or opened.event_id != manifest.bid_event_id
+        or opened.payload_hash != manifest.bid_payload_hash
+        or payload.acceptance_id != manifest.acceptance_id
+        or payload.proposal_id != manifest.proposal_id
+        or payload.change_id != manifest.accepted_change_id
+        or payload.accepted_change_hash != manifest.accepted_change_hash
+        or payload.evaluated_world_revision != manifest.evaluated_world_revision
+        or payload.bid.delivery_id != manifest.delivery_id
+        or payload.bid.delivery_event_ref != manifest.delivery_event_ref
+        or payload.bid.delivery_event_payload_hash != manifest.delivery_event_payload_hash
+        or payload.bid.deliberation_trigger_id != manifest.deliberation_trigger_id
+        or canonical_interaction_bid_value_hash(opened.payload()) != manifest.bid_payload_hash
+    ):
+        raise ValueError("interaction_bid_acceptance.batch_does_not_match_manifest")
+    if any(
+        getattr(event, field) != getattr(acceptance, field)
+        for event in (opened,)
+        for field in ("world_id", "logical_time", "created_at", "actor", "source", "trace_id", "correlation_id")
+    ):
+        raise ValueError("interaction_bid_acceptance.envelope_metadata_mismatch")
 
 
 def _validate_authorized_outcome_acceptance_manifest_batch(

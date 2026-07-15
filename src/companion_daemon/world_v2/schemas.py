@@ -794,6 +794,7 @@ class AcceptanceDecisionRef(FrozenModel):
         "appraisal-acceptance.1",
         "affect-acceptance.1",
         "outcome-acceptance.1",
+        "interaction-bid-acceptance.1",
     ] | None = None
     manifest_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     acceptance_event_ref: str | None = None
@@ -2090,6 +2091,65 @@ class OutcomeProposalProjection(FrozenModel):
     evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
     confidence_bp: int = Field(ge=0, le=10_000)
     expires_at: datetime
+
+
+class InteractionBidOrigin(FrozenModel):
+    """The accepted authority behind one private bid opened after media delivery."""
+
+    acceptance_id: str = Field(min_length=1)
+    proposal_id: str = Field(min_length=1)
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+
+
+class InteractionBidProjection(FrozenModel):
+    """A behavior-neutral, private invitation to continue an interaction."""
+
+    bid_id: str = Field(min_length=1)
+    entity_revision: Literal[1] = 1
+    delivery_id: str = Field(min_length=1)
+    delivery_event_ref: str = Field(min_length=1)
+    delivery_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    deliberation_trigger_id: str = Field(min_length=1)
+    goal: str = Field(min_length=1, max_length=128)
+    hoped_response: str = Field(min_length=1, max_length=128)
+    pressure_bp: int = Field(ge=0, le=10_000)
+    audience_ref: str = Field(min_length=1)
+    due_at: datetime | None = None
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    status: Literal["open"] = "open"
+    opened_at: datetime
+    origin: InteractionBidOrigin
+
+    @model_validator(mode="after")
+    def source_is_delivery_authority(self) -> "InteractionBidProjection":
+        if self.due_at is not None and self.due_at <= self.opened_at:
+            raise ValueError("interaction bid due time must follow opening")
+        if not any(item.ref_id == self.delivery_event_ref for item in self.evidence_refs):
+            raise ValueError("interaction bid evidence must bind delivery event")
+        return self
+
+
+class InteractionBidProposalProjection(FrozenModel):
+    interaction_bid_proposal_id: str = Field(min_length=1)
+    decision_proposal_id: str = Field(min_length=1)
+    change_id: str = Field(min_length=1)
+    bid_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    delivery_id: str = Field(min_length=1)
+    delivery_event_ref: str = Field(min_length=1)
+    delivery_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    deliberation_trigger_id: str = Field(min_length=1)
+    goal: str = Field(min_length=1)
+    hoped_response: str = Field(min_length=1)
+    pressure_bp: int = Field(ge=0, le=10_000)
+    audience_ref: str = Field(min_length=1)
+    due_at: datetime | None = None
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    confidence_bp: int = Field(ge=0, le=10_000)
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
 
 
 class OutcomeCandidateDescriptor(FrozenModel):
@@ -4268,7 +4328,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.30"
+    reducer_bundle_version: str = "world-v2-reducers.31"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -4320,6 +4380,8 @@ class LedgerProjection(FrozenModel):
     media_failed_plan_ids: tuple[str, ...] = ()
     media_delivery_approvals: tuple[MediaAutomaticDeliveryApproval, ...] = ()
     media_deliveries: tuple[MediaDeliveryShared, ...] = ()
+    interaction_bids: tuple[InteractionBidProjection, ...] = ()
+    interaction_bid_proposals: tuple[InteractionBidProposalProjection, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()

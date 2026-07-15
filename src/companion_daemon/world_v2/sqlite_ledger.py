@@ -1366,12 +1366,14 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.21",
                 "world-v2-reducers.22",
                 "world-v2-reducers.23",
+                "world-v2-reducers.30",
                 "world-v2-reducers.24",
                 "world-v2-reducers.25",
                 "world-v2-reducers.26",
                 "world-v2-reducers.27",
                 "world-v2-reducers.28",
                 "world-v2-reducers.29",
+                "world-v2-reducers.30",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -1483,12 +1485,12 @@ class SQLiteWorldLedger:
             injected_v27_keys = tuple(
                 sorted(key for key in _V27_ONLY_STATE_KEYS.intersection(raw_state) if raw_state.get(key) not in (None, [], {}))
             )
-            if injected_v27_keys and reducer_bundle_version not in {"world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", REDUCER_BUNDLE_VERSION}:
+            if injected_v27_keys and reducer_bundle_version not in {"world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", "world-v2-reducers.30", REDUCER_BUNDLE_VERSION}:
                 raise ValueError(f"legacy head cannot claim v27 media execution fields {injected_v27_keys!r}")
             injected_v26_keys = tuple(
                 sorted(key for key in _V26_ONLY_STATE_KEYS.intersection(raw_state) if raw_state.get(key) not in (None, [], {}))
             )
-            if injected_v26_keys and reducer_bundle_version not in {"world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", REDUCER_BUNDLE_VERSION}:
+            if injected_v26_keys and reducer_bundle_version not in {"world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", "world-v2-reducers.30", REDUCER_BUNDLE_VERSION}:
                 raise ValueError(f"legacy head cannot claim v26 media fields {injected_v26_keys!r}")
             injected_v25_keys = tuple(
                 sorted(
@@ -1497,7 +1499,7 @@ class SQLiteWorldLedger:
                     if raw_state.get(key) not in (None, [], {})
                 )
             )
-            if injected_v25_keys and reducer_bundle_version not in {"world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", REDUCER_BUNDLE_VERSION}:
+            if injected_v25_keys and reducer_bundle_version not in {"world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", "world-v2-reducers.30", REDUCER_BUNDLE_VERSION}:
                 raise ValueError(
                     f"legacy head cannot claim v25 provider media fields {injected_v25_keys!r}"
                 )
@@ -1508,7 +1510,7 @@ class SQLiteWorldLedger:
                     if raw_state.get(key) not in (None, [], {})
                 )
             )
-            if injected_v24_keys and reducer_bundle_version not in {"world-v2-reducers.24", "world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", REDUCER_BUNDLE_VERSION}:
+            if injected_v24_keys and reducer_bundle_version not in {"world-v2-reducers.24", "world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", "world-v2-reducers.30", REDUCER_BUNDLE_VERSION}:
                 raise ValueError(
                     f"legacy head cannot claim v24 expression fields {injected_v24_keys!r}"
                 )
@@ -1524,6 +1526,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.21",
                 "world-v2-reducers.22",
                 "world-v2-reducers.23",
+                "world-v2-reducers.30",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v20 reply fields {injected_v20_keys!r}"
@@ -1550,7 +1553,7 @@ class SQLiteWorldLedger:
                 for key in _V18_ONLY_STATE_KEYS.intersection(raw_state)
                 if raw_state.get(key) not in (None, [], {})
             )
-            if injected_v18_keys and reducer_bundle_version != "world-v2-reducers.18":
+            if injected_v18_keys and reducer_bundle_version not in {"world-v2-reducers.18", "world-v2-reducers.30"}:
                 raise ValueError("legacy head cannot claim v18 manifest fields")
             injected_v17_keys = tuple(
                 sorted(
@@ -1567,6 +1570,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.21",
                 "world-v2-reducers.22",
                 "world-v2-reducers.23",
+                "world-v2-reducers.30",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v17 audit fields {injected_v17_keys!r}"
@@ -1581,6 +1585,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.21",
                 "world-v2-reducers.22",
                 "world-v2-reducers.23",
+                "world-v2-reducers.30",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v16 authority fields {injected_v16_keys!r}"
@@ -1602,6 +1607,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.21",
                 "world-v2-reducers.22",
                 "world-v2-reducers.23",
+                "world-v2-reducers.30",
                 }
                 and isinstance(actor_transitions, list)
                 and any(
