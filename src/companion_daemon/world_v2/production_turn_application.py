@@ -9,6 +9,7 @@ second Engine or Ledger write path.
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -46,6 +47,10 @@ from .deliberation import (
 from .ledger_context_resolver import ContextRelevanceScope, context_capsule_compiler_from_ledger
 from .ledger_payload_reader import LedgerAuthorizedPayloadReader
 from .life_content_store import SQLiteImmutableLifeContentStore
+from .occurrence_content_coordinator import (
+    OccurrenceContentCommitRequest,
+    OccurrenceContentCoordinator,
+)
 from .minimal_reply_acceptance import ReplyBudgetPolicy
 from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .pinned_turn import PinnedTurnCompiler
@@ -55,6 +60,7 @@ from .runtime import WorldRuntime
 from .schemas import (
     BudgetAccount,
     ClockObservation,
+    CommitResult,
     OutcomeObservation,
     RuntimeOutcome,
     WorldEvent,
@@ -111,10 +117,12 @@ class WorldV2TurnApplication:
         turns: WorldTurnRuntime,
         ledger: SQLiteWorldLedger,
         life_content_store: SQLiteImmutableLifeContentStore,
+        occurrence_content: OccurrenceContentCoordinator,
     ) -> None:
         self._turns = turns
         self._ledger = ledger
         self._life_content_store = life_content_store
+        self._occurrence_content = occurrence_content
 
     async def respond(self, inbound: InboundTurn) -> RuntimeOutcome:
         return await self._turns.respond(inbound)
@@ -130,6 +138,18 @@ class WorldV2TurnApplication:
         """Record a verified world observation without exposing the ledger."""
 
         return await self._turns.record_outcome_observation(observation)
+
+    async def commit_occurrence(self, request: OccurrenceContentCommitRequest) -> CommitResult:
+        """Author a new occurrence through the sidecar-first production seam.
+
+        Hosts cannot submit a semantic candidate matrix directly to the ledger:
+        this method requires complete candidate text so its immutable hash and
+        descriptor are frozen with the occurrence in one ledger commit.
+        """
+
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._occurrence_content.commit, request)
+        return self._occurrence_content.commit(request)
 
     async def drain_actions_once(self) -> ActionPumpResult | None:
         return await self._turns.drain_actions_once()
@@ -174,6 +194,9 @@ def build_sqlite_world_v2_turn_application(
     ledger = SQLiteWorldLedger(path=path, world_id=config.world_id, accepted_batch_issuer=issuer)
     life_content_store = SQLiteImmutableLifeContentStore(path=str(path), world_id=config.world_id)
     try:
+        occurrence_content = OccurrenceContentCoordinator(
+            ledger=ledger, store=life_content_store
+        )
         _bootstrap(ledger=ledger, config=config, now=now)
         capsules = context_capsule_compiler_from_ledger(
             ledger=ledger,
@@ -360,6 +383,7 @@ def build_sqlite_world_v2_turn_application(
             turns=WorldTurnRuntime(runtime=runtime, identities=identities),
             ledger=ledger,
             life_content_store=life_content_store,
+            occurrence_content=occurrence_content,
         )
     except Exception:
         life_content_store.close()
