@@ -299,6 +299,21 @@ def test_invite_desire_has_nine_visual_mechanisms_not_two_scene_templates() -> N
     )
 
 
+def test_life_share_candidates_cover_environment_process_and_detail_geometry() -> None:
+    candidates = build_complete_candidates(
+        opportunity_id="op:life-coverage",
+        family="life_share",
+        expression_charge_ceiling="none",
+        limit=24,
+    )
+
+    forms = {item.legal_visual_forms[0] for item in candidates}
+    captures = {item.legal_capture_modes[0] for item in candidates}
+
+    assert {"wide_scene", "contextual_still_life", "process_pov"}.issubset(forms)
+    assert {"character_rear_camera", "known_companion", "external_sender"}.issubset(captures)
+
+
 @pytest.mark.parametrize(
     ("bid", "tactic", "address", "charge", "mechanism"),
     [

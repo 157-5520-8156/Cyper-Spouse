@@ -590,45 +590,53 @@ def _geometry_for(
         ),
         "known_companion": (
             _geo(
-                "medium",
+                "wide" if variant % 3 == 0 else "medium",
                 "eye",
                 "over_shoulder" if variant % 2 else "left_three_quarter",
                 "landscape",
-                "balanced",
-                "left_third",
-                "supporting",
+                "small" if variant % 3 == 0 else "balanced",
+                "edge_right" if variant % 3 == 0 else "left_third",
+                "dominant" if variant % 3 == 0 else "supporting",
                 "external_unseen",
-                "foreground_interrupt",
+                "motion_trace" if variant % 3 == 0 else "foreground_interrupt",
             ),
-            ("portrait_context", "social_frame"),
+            ("wide_scene", "social_frame")
+            if variant % 3 == 0
+            else ("portrait_context", "social_frame"),
         ),
         "external_sender": (
             _geo(
-                "medium",
+                "wide" if variant % 3 == 0 else "medium",
                 "eye",
-                "right_three_quarter",
+                "environment_pov" if variant % 3 == 0 else "right_three_quarter",
                 "landscape",
-                "balanced",
-                "right_third",
-                "supporting",
+                "small" if variant % 3 == 0 else "balanced",
+                "edge_left" if variant % 3 == 0 else "right_third",
+                "dominant" if variant % 3 == 0 else "supporting",
                 "external_unseen",
-                "casual_offset",
+                "motion_trace" if variant % 3 == 0 else "casual_offset",
             ),
-            ("portrait_context", "social_frame"),
+            ("wide_scene",) if variant % 3 == 0 else ("portrait_context", "social_frame"),
         ),
         "character_rear_camera": (
             _geo(
-                "close",
-                "chest",
+                "wide" if variant % 3 == 0 else "close",
+                "eye" if variant % 3 == 0 else "chest",
                 "environment_pov",
                 "landscape",
-                "trace" if family == "life_share" else "detail",
-                "not_applicable" if family == "life_share" else "lower_frame",
-                "supporting",
+                ("trace" if family == "life_share" else "small")
+                if variant % 3 == 0
+                else ("trace" if family == "life_share" else "detail"),
+                "not_applicable"
+                if family == "life_share"
+                else ("edge_left" if variant % 3 == 0 else "lower_frame"),
+                "dominant" if variant % 3 == 0 else "supporting",
                 "out_of_frame",
-                "foreground_interrupt",
+                "motion_trace" if variant % 3 == 0 else "foreground_interrupt",
             ),
-            ("contextual_still_life", "process_pov", "subject_closeup"),
+            ("wide_scene",)
+            if variant % 3 == 0
+            else ("contextual_still_life", "process_pov", "subject_closeup"),
         ),
         "existing_artifact": (
             _geo(
