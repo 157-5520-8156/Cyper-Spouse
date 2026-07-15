@@ -191,7 +191,7 @@ def test_event_backed_v15_sqlite_migrates_reopens_and_replays_v16(
 
     first_ledger = SQLiteWorldLedger(path=path, world_id=EVENT_BACKED_WORLD_ID)
     first = first_ledger.project()
-    assert first.reducer_bundle_version == "world-v2-reducers.20"
+    assert first.reducer_bundle_version == "world-v2-reducers.21"
     assert (
         first.world_revision,
         first.deliberation_revision,

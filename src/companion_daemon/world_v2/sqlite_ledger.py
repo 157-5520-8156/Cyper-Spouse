@@ -1358,6 +1358,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.17",
                 "world-v2-reducers.18",
                 "world-v2-reducers.19",
+                "world-v2-reducers.20",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(

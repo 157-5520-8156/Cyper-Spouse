@@ -298,7 +298,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.20"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.21"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -335,6 +335,7 @@ def _experience_semantic_dump(
             "world-v2-reducers.17",
             "world-v2-reducers.18",
             "world-v2-reducers.19",
+            "world-v2-reducers.20",
             REDUCER_BUNDLE_VERSION,
         }
         and isinstance(experience, LegacyExperienceProjection)
@@ -355,6 +356,7 @@ def _actor_authority_transition_semantic_dump(
         "world-v2-reducers.17",
         "world-v2-reducers.18",
         "world-v2-reducers.19",
+        "world-v2-reducers.20",
         REDUCER_BUNDLE_VERSION,
     }:
         dumped.pop("accepted_event_ref", None)
@@ -1050,6 +1052,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.17",
                         "world-v2-reducers.18",
                         "world-v2-reducers.19",
+                        "world-v2-reducers.20",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else item.model_dump(
@@ -1094,6 +1097,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.17",
                         "world-v2-reducers.18",
                         "world-v2-reducers.19",
+                        "world-v2-reducers.20",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else plan.model_dump(
@@ -1105,16 +1109,18 @@ class ReducerState(FrozenModel):
             "world_occurrences": tuple(
                 (
                     occurrence.model_dump(mode="json")
+                    if reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                    else occurrence.model_dump(mode="json", exclude={"candidate_outcomes"})
                     if reducer_bundle_version
                     in {
                         "world-v2-reducers.16",
                         "world-v2-reducers.17",
                         "world-v2-reducers.18",
                         "world-v2-reducers.19",
-                        REDUCER_BUNDLE_VERSION,
+                        "world-v2-reducers.20",
                     }
                     else occurrence.model_dump(
-                        mode="json", exclude={"settled_outcome_ref"}
+                        mode="json", exclude={"settled_outcome_ref", "candidate_outcomes"}
                     )
                     if reducer_bundle_version
                     in {
@@ -1129,6 +1135,7 @@ class ReducerState(FrozenModel):
                             "settlement_event_ref",
                             "settlement_world_revision",
                             "settlement_payload_hash",
+                            "candidate_outcomes",
                         },
                     )
                 )
@@ -1289,7 +1296,9 @@ class ReducerState(FrozenModel):
             payload["attention_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.attention_transitions
             )
-        if reducer_bundle_version in {"world-v2-reducers.19", REDUCER_BUNDLE_VERSION}:
+        if reducer_bundle_version in {
+            "world-v2-reducers.19", "world-v2-reducers.20", REDUCER_BUNDLE_VERSION
+        }:
             payload["fact_commit_proposal_audits_v2"] = tuple(
                 item.model_dump(mode="json") for item in self.fact_commit_proposal_audits_v2
             )
@@ -1297,6 +1306,9 @@ class ReducerState(FrozenModel):
                 item.model_dump(mode="json") for item in self.acceptance_manifests_v3
             )
         if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            payload["life_content_descriptors"] = tuple(
+                item.model_dump(mode="json") for item in self.life_content_descriptors
+            )
             payload["minimal_reply_manifests"] = tuple(
                 item.model_dump(mode="json") for item in self.minimal_reply_manifests
             )

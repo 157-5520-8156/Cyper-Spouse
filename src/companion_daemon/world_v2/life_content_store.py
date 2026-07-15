@@ -16,7 +16,7 @@ from threading import RLock
 from typing import Literal, Protocol
 
 
-LifeContentKind = Literal["occurrence_result", "experience_summary"]
+LifeContentKind = Literal["outcome_candidate", "occurrence_result", "experience_summary"]
 
 
 def life_content_payload_hash(text: str) -> str:
@@ -43,7 +43,7 @@ class StoredLifeContent:
     def __post_init__(self) -> None:
         if not self.content_ref or len(self.content_ref) > 512:
             raise ValueError("life content ref must contain between 1 and 512 chars")
-        if self.content_kind not in {"occurrence_result", "experience_summary"}:
+        if self.content_kind not in {"outcome_candidate", "occurrence_result", "experience_summary"}:
             raise ValueError("unsupported life content kind")
         if len(self.text) > 12_000:
             raise ValueError("life content exceeds the maximum size")

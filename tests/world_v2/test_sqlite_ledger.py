@@ -21,7 +21,7 @@ from companion_daemon.world_v2.schemas import (
     BudgetSettlement,
     WorldEvent,
 )
-from companion_daemon.world_v2.reducers import ReducerState
+from companion_daemon.world_v2.reducers import REDUCER_BUNDLE_VERSION, ReducerState
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
 
@@ -227,7 +227,7 @@ def test_sqlite_rebuild_selects_only_installed_replay_artifacts(tmp_path) -> Non
     assert (
         ledger.rebuild(
             target_schema_version="world-v2.1",
-            reducer_bundle_version="world-v2-reducers.20",
+            reducer_bundle_version=REDUCER_BUNDLE_VERSION,
         )
         == ledger.project()
     )
@@ -324,7 +324,7 @@ def test_sqlite_atomically_migrates_verified_v1_head_from_event_bytes(tmp_path) 
             "SELECT reducer_bundle_version, state_json FROM world_v2_heads"
         ).fetchone()
         assert migrated is not None
-        assert migrated[0] == "world-v2-reducers.20"
+        assert migrated[0] == REDUCER_BUNDLE_VERSION
         assert "pending_actions" in json.loads(migrated[1])
 
 

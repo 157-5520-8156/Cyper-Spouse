@@ -85,7 +85,7 @@ def test_sqlite_migrates_verified_v18_head_without_fabricating_v19_fields(tmp_pa
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
     projection = migrated.project()
     assert projection == expected
-    assert projection.reducer_bundle_version == "world-v2-reducers.20"
+    assert projection.reducer_bundle_version == "world-v2-reducers.21"
     assert projection.fact_commit_proposal_audits_v2 == ()
     assert projection.acceptance_manifests_v3 == ()
     assert migrated.rebuild() == projection
@@ -152,7 +152,7 @@ def test_sqlite_migrates_verified_v19_head_without_fabricating_reply_state(tmp_p
         )
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.20"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.21"
     assert migrated.project().minimal_reply_manifests == ()
     assert migrated.project().stored_message_payloads == ()
     migrated.close()

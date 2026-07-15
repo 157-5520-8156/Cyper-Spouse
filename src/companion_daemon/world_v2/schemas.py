@@ -1926,6 +1926,30 @@ class OutcomeProposalProjection(FrozenModel):
     expires_at: datetime
 
 
+class OutcomeCandidateDescriptor(FrozenModel):
+    """A frozen, model-selectable result candidate for one occurrence.
+
+    The candidate is an authority declaration made when the occurrence is
+    committed.  Optional prose remains in the immutable sidecar; without its
+    exact hash the candidate is still valid world authority but unavailable to
+    semantic deliberation.
+    """
+
+    candidate_result_ref: str = Field(min_length=1)
+    result_id: str = Field(min_length=1)
+    result_payload_ref: str = Field(min_length=1)
+    result_payload_hash: str = Field(min_length=1)
+    privacy_class: PrivacyClass
+    content_ref: str | None = Field(default=None, min_length=1)
+    content_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def content_binding_is_complete(self) -> OutcomeCandidateDescriptor:
+        if (self.content_ref is None) != (self.content_payload_hash is None):
+            raise ValueError("outcome candidate content binding is incomplete")
+        return self
+
+
 class WorldOccurrenceProjection(FrozenModel):
     occurrence_id: str = Field(min_length=1)
     entity_revision: int = Field(ge=1)
@@ -1936,6 +1960,7 @@ class WorldOccurrenceProjection(FrozenModel):
     precondition_refs: tuple[str, ...] = ()
     satisfied_precondition_refs: tuple[str, ...] = ()
     candidate_outcome_refs: tuple[str, ...] = Field(min_length=1)
+    candidate_outcomes: tuple[OutcomeCandidateDescriptor, ...] = ()
     # Exact chosen outcome is retained only after settlement.  Optional at the
     # field level permits non-settled heads; the state validator closes shape.
     settled_outcome_ref: str | None = Field(default=None, min_length=1)
@@ -1969,7 +1994,13 @@ class WorldOccurrenceProjection(FrozenModel):
             ):
                 raise ValueError("settled occurrence requires one candidate outcome")
         elif self.settled_outcome_ref is not None:
-            raise ValueError("non-settled occurrence cannot retain a settled outcome")
+                raise ValueError("non-settled occurrence cannot retain a settled outcome")
+        if self.candidate_outcomes:
+            refs = tuple(item.candidate_result_ref for item in self.candidate_outcomes)
+            if refs != self.candidate_outcome_refs or len(set(refs)) != len(refs):
+                raise ValueError("outcome candidate descriptors must exactly match frozen refs")
+            if len({item.result_id for item in self.candidate_outcomes}) != len(self.candidate_outcomes):
+                raise ValueError("outcome candidate result ids must be unique")
         return self
 
 
@@ -4004,7 +4035,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.20"
+    reducer_bundle_version: str = "world-v2-reducers.21"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
