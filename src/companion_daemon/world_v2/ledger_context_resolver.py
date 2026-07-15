@@ -52,7 +52,13 @@ from .memory_retrieval import MemoryRetrievalCompiler, MemoryRetrievalItem
 from .life_content import LifeContentCompiler
 from .life_content_store import ImmutableLifeContentStore
 from .schema_core import PrivacyClass
-from .schemas import BudgetAccount, CommittedWorldEventRef, FactProjection, LedgerProjection
+from .schemas import (
+    BudgetAccount,
+    CommittedWorldEventRef,
+    FactProjection,
+    LedgerProjection,
+    PrivateImpressionProjection,
+)
 from .situation_compiler import SituationCompiler, request_from_ledger_projection
 from .world_life_context import WorldLifeContextCompiler, WorldLifeContextItem
 
@@ -187,6 +193,12 @@ def _typed_refs(item: BaseModel, *, observation_aliases: dict[str, str]) -> tupl
         # exact Fact event. Its retained observation id is an internal anchor,
         # not a second event authority that Context must resolve as an event.
         return (item.origin.accepted_event_ref,)
+    if isinstance(item, PrivateImpressionProjection):
+        # Only accepted impressions are a valid Context source.  Their source
+        # refs are recorded event identities, never a model-generated summary.
+        if item.origin is None:
+            return None
+        return tuple(sorted({item.origin.accepted_event_ref, *item.source_refs}))
     refs: set[str] = set()
     origin = getattr(item, "origin", None)
     for field in ("accepted_event_ref", "event_ref"):
@@ -627,8 +639,11 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 if item.values.actor_ref == query.actor_ref and item.values.state == "active"
             ),
             "action_budget": tuple(projection.budget_accounts),
-            # Private impressions are not installed in LedgerProjection yet.
-            "private_impressions": None,
+            "private_impressions": tuple(
+                item
+                for item in projection.private_impressions
+                if item.status == "active" and item.subject_ref in subject_refs and item.origin is not None
+            ),
             "advisories": None,
         }
         domains = {

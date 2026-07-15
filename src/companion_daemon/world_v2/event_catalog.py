@@ -73,6 +73,7 @@ from .expression_plan_manifest import (
     ExpressionPlanAcceptanceManifest,
 )
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
+from .private_impression_events import PRIVATE_IMPRESSION_PAYLOAD_MODELS
 from .thread_events import THREAD_MECHANICAL_PAYLOAD_MODELS, THREAD_PAYLOAD_MODELS
 from .schemas import (
     Action,
@@ -371,6 +372,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **APPRAISAL_PAYLOAD_MODELS,
         **AFFECT_PAYLOAD_MODELS,
         **RELATIONSHIP_PAYLOAD_MODELS,
+        **PRIVATE_IMPRESSION_PAYLOAD_MODELS,
         **THREAD_PAYLOAD_MODELS,
         **COMMITMENT_PAYLOAD_MODELS,
         **FACT_PAYLOAD_MODELS,
@@ -477,6 +479,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "AppraisalContradicted": "appraisal_id+transition_id",
         "AppraisalExpired": "appraisal_id+transition_id",
         "AppraisalSuperseded": "appraisal_id+transition_id",
+        "PrivateImpressionAccepted": "world_id+impression_id+transition_id",
         "RelationshipSignalAccepted": "world_id+signal_semantic_fingerprint",
         "RelationshipSlowVariableAdjusted": "relationship_id+expected_entity_revision+adjustment_id",
         "BoundaryChanged": "boundary_id+expected_entity_revision+transition_id",
@@ -1518,6 +1521,14 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "world",
                 "AppraisalSupersededPayload",
                 allowed_predecessors=("AppraisalAccepted", "AppraisalContradicted"),
+                evidence_types=("observed_message", "committed_world_event"),
+            ),
+            _contract(
+                "PrivateImpressionAccepted",
+                "proposal_acceptance",
+                "world",
+                "PrivateImpressionAcceptedPayload",
+                allowed_predecessors=("AcceptanceRecorded", "AppraisalAccepted"),
                 evidence_types=("observed_message", "committed_world_event"),
             ),
             _contract(

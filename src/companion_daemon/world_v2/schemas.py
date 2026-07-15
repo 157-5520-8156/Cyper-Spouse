@@ -2976,8 +2976,18 @@ class AffectProposalProjection(FrozenModel):
         return self
 
 
+class PrivateImpressionOrigin(FrozenModel):
+    """Accepted authority for an internal-only, revisable user impression."""
+
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+
+
 class PrivateImpressionProjection(FrozenModel):
     impression_id: str = Field(min_length=1)
+    entity_revision: int = Field(default=1, ge=1)
     subject_ref: str = Field(min_length=1)
     interpretation_refs: tuple[str, ...] = Field(min_length=1)
     source_refs: tuple[str, ...] = Field(min_length=1)
@@ -2987,6 +2997,59 @@ class PrivateImpressionProjection(FrozenModel):
     expiry_condition: str = Field(min_length=1)
     contradiction_refs: tuple[str, ...] = ()
     status: Literal["active", "contradicted", "expired", "superseded"]
+    origin: PrivateImpressionOrigin | None = None
+
+    @model_validator(mode="after")
+    def private_impression_is_temporally_consistent(self) -> PrivateImpressionProjection:
+        if self.first_seen.tzinfo is None or self.first_seen.utcoffset() is None:
+            raise ValueError("private impression first_seen must be timezone-aware")
+        if self.last_supported.tzinfo is None or self.last_supported.utcoffset() is None:
+            raise ValueError("private impression last_supported must be timezone-aware")
+        if self.last_supported < self.first_seen:
+            raise ValueError("private impression support precedes first_seen")
+        if len(self.interpretation_refs) != len(set(self.interpretation_refs)):
+            raise ValueError("private impression interpretation refs must be unique")
+        if len(self.source_refs) != len(set(self.source_refs)):
+            raise ValueError("private impression source refs must be unique")
+        return self
+
+
+class PrivateImpressionProposedMutation(FrozenModel):
+    event_type: Literal["PrivateImpressionAccepted"]
+    payload_json: str = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def payload_is_canonical(self) -> PrivateImpressionProposedMutation:
+        decoded = json.loads(self.payload_json)
+        if not isinstance(decoded, dict):
+            raise ValueError("private impression mutation payload must be an object")
+        canonical = json.dumps(decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        if canonical != self.payload_json:
+            raise ValueError("private impression mutation payload must use canonical JSON")
+        return self
+
+
+class PrivateImpressionProposalProjection(FrozenModel):
+    proposal_id: str = Field(min_length=1)
+    proposal_kind: Literal["private_impression_transition"] = "private_impression_transition"
+    proposal_encoding: Literal["typed-authority-v1"]
+    authority_contract_ref: Literal["proposal-contract:private-impression.1"]
+    transition_kind: Literal["open"]
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    evaluated_world_revision: int = Field(ge=0)
+    expected_entity_revision: int = Field(ge=0)
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    appraisal_refs: tuple[AppraisalMeaningRef, ...] = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    proposed_mutation: PrivateImpressionProposedMutation
+
+    @model_validator(mode="after")
+    def transition_matches_only_installed_open(self) -> PrivateImpressionProposalProjection:
+        if self.proposed_mutation.event_type != "PrivateImpressionAccepted":
+            raise ValueError("private impression proposal transition does not match event")
+        return self
 
 
 class RelationshipVariablesProjection(FrozenModel):
@@ -4461,6 +4524,9 @@ class LedgerProjection(FrozenModel):
     boundaries: tuple[BoundaryProjection, ...] = ()
     relationship_proposals: tuple[RelationshipProposalProjection, ...] = ()
     relationship_proposal_ids: tuple[str, ...] = ()
+    private_impressions: tuple[PrivateImpressionProjection, ...] = ()
+    private_impression_proposals: tuple[PrivateImpressionProposalProjection, ...] = ()
+    private_impression_proposal_ids: tuple[str, ...] = ()
     threads: tuple[ThreadProjection, ...] = ()
     thread_transitions: tuple[ThreadTransitionProjection, ...] = ()
     thread_proposals: tuple[ThreadProposalProjection, ...] = ()

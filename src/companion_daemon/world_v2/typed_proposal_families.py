@@ -48,6 +48,7 @@ from .memory_events import (
     MEMORY_CANDIDATE_PAYLOAD_MODELS,
     MemoryCandidateChangedPayload,
 )
+from .private_impression_events import PrivateImpressionAcceptedPayload
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .thread_events import THREAD_PAYLOAD_MODELS
 from .schemas import (
@@ -62,6 +63,7 @@ from .schemas import (
     RelationshipProposalProjection,
     ThreadProposalProjection,
     InteractionBidProposalProjection,
+    PrivateImpressionProposalProjection,
 )
 from .typed_proposals import (
     AcceptedMutationBinding,
@@ -539,6 +541,59 @@ class _FactFamilyCodec:
         )
 
 
+class _PrivateImpressionFamilyCodec:
+    def decode_record(
+        self, *, event_type: str, payload: dict[str, object]
+    ) -> PrivateImpressionProposalProjection:
+        if event_type != "ProposalRecorded":
+            raise ValueError("private impression codec only accepts ProposalRecorded")
+        return _validate_json(PrivateImpressionProposalProjection, payload)  # type: ignore[return-value]
+
+    def bind(self, proposal: object) -> ProposalAuthorityBinding:
+        if not isinstance(proposal, PrivateImpressionProposalProjection):
+            raise TypeError("private impression codec received an incompatible proposal")
+        return ProposalAuthorityBinding(
+            proposal_id=proposal.proposal_id,
+            proposal_kind=proposal.proposal_kind,
+            authority_contract_ref=proposal.authority_contract_ref,
+            change_id=proposal.change_id,
+            proposed_change_hash=proposal.proposed_change_hash,
+            evaluated_world_revision=proposal.evaluated_world_revision,
+            expected_entity_revision=proposal.expected_entity_revision,
+            mutation_event_type=proposal.proposed_mutation.event_type,
+        )
+
+    def decode_mutation(self, *, event_type: str, payload: dict[str, object]) -> object:
+        if event_type != "PrivateImpressionAccepted":
+            raise ValueError("private impression codec received unsupported mutation")
+        return _validate_json(PrivateImpressionAcceptedPayload, payload)
+
+    def bind_mutation(self, mutation: object) -> AcceptedMutationBinding:
+        if not isinstance(mutation, PrivateImpressionAcceptedPayload):
+            raise TypeError("private impression codec received an incompatible mutation")
+        return _accepted_binding(mutation)
+
+    def record_identity(
+        self, *, world_id: str, event_type: str, payload: dict[str, object]
+    ) -> IdentityComponents:
+        return (
+            world_id,
+            payload.get("proposal_id"),
+            payload.get("change_id"),
+            payload.get("authority_contract_ref"),
+        )
+
+    def mutation_identity(
+        self, *, world_id: str, event_type: str, payload: dict[str, object]
+    ) -> IdentityComponents:
+        return (
+            world_id,
+            _nested(payload, "impression", "impression_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("transition_id"),
+        )
+
+
 class _ExperienceFamilyCodec:
     def decode_record(
         self, *, event_type: str, payload: dict[str, object]
@@ -899,6 +954,14 @@ INSTALLED_TYPED_PROPOSAL_FAMILIES = tuple(
                 requires_separate_deliberation_commit=True,
                 mutation_event_types=tuple(RELATIONSHIP_PAYLOAD_MODELS),
                 codec=_RelationshipFamilyCodec(),
+            ),
+            TypedProposalFamily(
+                contract_ref="proposal-contract:private-impression.1",
+                selector=RecordSelector("ProposalRecorded", "private_impression_transition"),
+                record_mode="explicit_contract",
+                requires_separate_deliberation_commit=True,
+                mutation_event_types=("PrivateImpressionAccepted",),
+                codec=_PrivateImpressionFamilyCodec(),
             ),
             TypedProposalFamily(
                 contract_ref="proposal-contract:thread.1",

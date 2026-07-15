@@ -757,7 +757,11 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
         refs = tuple(source.event_ref for source in item.source_revisions)
         return tuple(sorted(set(refs))) or None
     if slice_name == "private_impressions":
-        return tuple(sorted(set(item.source_refs)))
+        origin = getattr(item, "origin", None)
+        refs = set(item.source_refs)
+        if origin is not None and origin.accepted_event_ref:
+            refs.add(origin.accepted_event_ref)
+        return tuple(sorted(refs)) or None
     if slice_name == "advisories":
         return tuple(sorted(set(item.source_refs)))
     if slice_name == "world_life" and isinstance(item, WorldLifeContextItem):

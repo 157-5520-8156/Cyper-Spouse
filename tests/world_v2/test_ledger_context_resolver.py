@@ -187,10 +187,11 @@ def test_real_ledger_resolves_situation_core_and_authoritative_empty_domains(
     assert first.open_threads.availability == "available"
     assert first.active_memory_candidates.availability == "available"
     assert first.relationship_slice.availability == "unavailable"
-    # These are deliberately not "empty".  No PrivateImpression reducer is
-    # installed yet, and advisories exist only as a source-bound per-turn
-    # overlay below; neither absence may be mistaken for an authority result.
-    assert first.private_impressions.availability == "unavailable"
+    # Private impressions now have a reducer-owned, source-bound authority
+    # path, so an empty authority result is distinguishable from absence.
+    assert first.private_impressions.availability == "available"
+    assert first.private_impressions.items == ()
+    # Advisories still exist only as a source-bound per-turn overlay below.
     assert first.advisories.availability == "unavailable"
     assert counted.project_at_calls == 2
     # Situation and CharacterCore request only their consumed refs; no full replay API exists.

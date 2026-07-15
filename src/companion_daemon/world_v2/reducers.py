@@ -272,6 +272,11 @@ from .relationship_reducers import (
     adjust_relationship_slow_variables,
     change_boundary,
 )
+from .private_impression_events import (
+    PrivateImpressionAcceptedPayload,
+    PrivateImpressionAuthorizedPayload,
+)
+from .private_impression_reducers import accept_private_impression
 from .thread_events import (
     THREAD_PAYLOAD_MODELS,
     ThreadAuthorizedMutationPayload,
@@ -361,6 +366,8 @@ from .schemas import (
     RelationshipProposalProjection,
     RelationshipSignalProjection,
     RelationshipStateProjection,
+    PrivateImpressionProjection,
+    PrivateImpressionProposalProjection,
     ThreadProjection,
     ThreadProposalProjection,
     ThreadTransitionProjection,
@@ -607,6 +614,9 @@ class ReducerState(FrozenModel):
     boundaries: tuple[BoundaryProjection, ...] = ()
     relationship_proposals: tuple[RelationshipProposalProjection, ...] = ()
     relationship_proposal_ids: tuple[str, ...] = ()
+    private_impressions: tuple[PrivateImpressionProjection, ...] = ()
+    private_impression_proposals: tuple[PrivateImpressionProposalProjection, ...] = ()
+    private_impression_proposal_ids: tuple[str, ...] = ()
     threads: tuple[ThreadProjection, ...] = ()
     thread_transitions: tuple[ThreadTransitionProjection, ...] = ()
     thread_proposals: tuple[ThreadProposalProjection, ...] = ()
@@ -1678,6 +1688,40 @@ class _RelationshipProposalStore:
         )
 
 
+class _PrivateImpressionProposalStore:
+    def validate_and_store(
+        self, state: ReducerState, event: object, proposal: object
+    ) -> ReducerState:
+        if not isinstance(event, WorldEvent) or not isinstance(
+            proposal, PrivateImpressionProposalProjection
+        ):
+            raise TypeError("private impression proposal adapter received incompatible values")
+        return _private_impression_proposal_recorded(state, event, proposal=proposal)
+
+    def find(
+        self, state: ReducerState, proposal_id: str
+    ) -> PrivateImpressionProposalProjection | None:
+        return next(
+            (
+                item
+                for item in state.private_impression_proposals
+                if item.proposal_id == proposal_id
+            ),
+            None,
+        )
+
+    def discard(self, state: ReducerState, proposal_id: str) -> ReducerState:
+        return state.model_copy(
+            update={
+                "private_impression_proposals": tuple(
+                    item
+                    for item in state.private_impression_proposals
+                    if item.proposal_id != proposal_id
+                )
+            }
+        )
+
+
 class _ThreadProposalStore:
     def validate_and_store(
         self, state: ReducerState, event: object, proposal: object
@@ -1950,6 +1994,7 @@ _TYPED_PROPOSAL_STORES = {
     "proposal-contract:outcome-legacy.1": _LegacyOutcomeProposalStore(),
     "proposal-contract:interaction-bid.1": _InteractionBidProposalStore(),
     "proposal-contract:relationship.1": _RelationshipProposalStore(),
+    "proposal-contract:private-impression.1": _PrivateImpressionProposalStore(),
     "proposal-contract:thread.1": _ThreadProposalStore(),
     "proposal-contract:commitment.1": _CommitmentProposalStore(),
     "proposal-contract:fact.1": _FactProposalStore(),
@@ -2344,6 +2389,62 @@ def _thread_proposal_recorded(
         update={
             "thread_proposals": (*state.thread_proposals, proposal),
             "thread_proposal_ids": (*state.thread_proposal_ids, proposal.proposal_id),
+            "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=proposal.proposal_id,
+                    evaluated_world_revision=proposal.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
+def _private_impression_proposal_recorded(
+    state: ReducerState,
+    event: WorldEvent,
+    *,
+    proposal: PrivateImpressionProposalProjection | None = None,
+) -> ReducerState:
+    proposal = proposal or PrivateImpressionProposalProjection.model_validate_json(event.payload_json)
+    if proposal.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("private impression proposal must evaluate the current world revision")
+    if proposal.proposal_id in state.private_impression_proposal_ids:
+        raise ValueError("private impression proposal identity is already registered")
+    payload = PrivateImpressionAcceptedPayload.model_validate_json(
+        proposal.proposed_mutation.payload_json
+    )
+    if (
+        payload.proposal_id != proposal.proposal_id
+        or payload.change_id != proposal.change_id
+        or payload.transition_id != proposal.transition_id
+        or payload.evaluated_world_revision != proposal.evaluated_world_revision
+        or payload.expected_entity_revision != proposal.expected_entity_revision
+        or payload.accepted_change_hash != proposal.proposed_change_hash
+        or payload.evidence_refs != proposal.evidence_refs
+        or payload.appraisal_refs != proposal.appraisal_refs
+        or payload.policy_refs != proposal.policy_refs
+    ):
+        raise ValueError("persisted private impression proposal body does not match its index")
+    _validate_evidence_authority(state, proposal.evidence_refs, require_all=True)
+    _validate_private_impression_source_events(state, payload)
+    # Dry-run the pure reducer at the pinned revision.  This prevents an LLM
+    # from persisting an arbitrary internal judgement merely because its JSON
+    # is well shaped; every readable meaning must resolve through appraisal.
+    accept_private_impression(
+        state.private_impressions,
+        payload,
+        logical_time=_require_life_time(state, event),
+        appraisals=state.appraisals,
+    )
+    return state.model_copy(
+        update={
+            "private_impression_proposals": (*state.private_impression_proposals, proposal),
+            "private_impression_proposal_ids": (
+                *state.private_impression_proposal_ids,
+                proposal.proposal_id,
+            ),
             "proposal_ids": (*state.proposal_ids, proposal.proposal_id),
             "proposal_revisions": (
                 *state.proposal_revisions,
@@ -7103,6 +7204,29 @@ def _relationship_signal_accepted(state: ReducerState, event: WorldEvent) -> Red
     )
 
 
+def _private_impression_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
+    logical_time = _require_life_time(state, event)
+    payload = PrivateImpressionAcceptedPayload.model_validate_json(event.payload_json)
+    if payload.impression.origin is None or payload.impression.origin.accepted_event_ref != event.event_id:
+        raise ValueError("private impression origin does not identify its mutation event")
+    _validate_evidence_authority(state, payload.evidence_refs, require_all=True)
+    _validate_private_impression_source_events(state, payload)
+    proposal = _require_authorized_private_impression(state, payload)
+    return state.model_copy(
+        update={
+            "private_impressions": accept_private_impression(
+                state.private_impressions,
+                payload,
+                logical_time=logical_time,
+                appraisals=state.appraisals,
+            ),
+            "private_impression_proposals": tuple(
+                item for item in state.private_impression_proposals if item != proposal
+            ),
+        }
+    )
+
+
 def _relationship_slow_variable_adjusted(state: ReducerState, event: WorldEvent) -> ReducerState:
     logical_time = _require_life_time(state, event)
     payload = RelationshipSlowVariableAdjustedPayload.model_validate_json(event.payload_json)
@@ -7954,6 +8078,67 @@ def _require_authorized_appraisal(
     return proposal
 
 
+def _require_authorized_private_impression(
+    state: ReducerState,
+    payload: PrivateImpressionAuthorizedPayload,
+) -> PrivateImpressionProposalProjection:
+    proposal = next(
+        (
+            item
+            for item in state.private_impression_proposals
+            if item.proposal_id == payload.proposal_id
+        ),
+        None,
+    )
+    decision = next(
+        (item for item in state.acceptance_decisions if item.proposal_id == payload.proposal_id),
+        None,
+    )
+    if proposal is None:
+        raise ValueError("private impression requires a persisted typed proposal")
+    if (
+        decision is None
+        or decision.status != "accepted"
+        or decision.acceptance_id != payload.acceptance_id
+        or decision.accepted_change_id != payload.change_id
+        or decision.accepted_change_hash != payload.accepted_change_hash
+    ):
+        raise ValueError("private impression requires its accepted decision")
+    if (
+        proposal.transition_kind != "open"
+        or proposal.change_id != payload.change_id
+        or proposal.transition_id != payload.transition_id
+        or proposal.evaluated_world_revision != payload.evaluated_world_revision
+        or proposal.expected_entity_revision != payload.expected_entity_revision
+        or proposal.proposed_change_hash != payload.accepted_change_hash
+        or proposal.evidence_refs != payload.evidence_refs
+        or proposal.appraisal_refs != payload.appraisal_refs
+        or proposal.policy_refs != payload.policy_refs
+        or json.loads(proposal.proposed_mutation.payload_json) != payload.model_dump(mode="json")
+    ):
+        raise ValueError("accepted private impression does not match its proposal")
+    return proposal
+
+
+def _validate_private_impression_source_events(
+    state: ReducerState, payload: PrivateImpressionAcceptedPayload
+) -> None:
+    """Bind each stored source reference to the exact committed evidence bytes."""
+    for source_ref, evidence in zip(
+        payload.impression.source_refs, payload.evidence_refs, strict=True
+    ):
+        committed = next(
+            (item for item in state.committed_world_event_refs if item.event_id == source_ref),
+            None,
+        )
+        if (
+            committed is None
+            or committed.world_revision != evidence.source_world_revision
+            or committed.payload_hash != evidence.immutable_hash
+        ):
+            raise ValueError("private impression source refs do not bind committed evidence")
+
+
 def _require_installed_appraisal_origin(appraisal: AppraisalProjection) -> None:
     if (
         appraisal.origin.matrix_catalog_version != INSTALLED_APPRAISAL_MATRIX_VERSION
@@ -8236,6 +8421,9 @@ _EVENTS = {
         EventDefinition("AppraisalContradicted", RevisionClass.WORLD, _appraisal_contradicted),
         EventDefinition("AppraisalExpired", RevisionClass.WORLD, _appraisal_expired),
         EventDefinition("AppraisalSuperseded", RevisionClass.WORLD, _appraisal_superseded),
+        EventDefinition(
+            "PrivateImpressionAccepted", RevisionClass.WORLD, _private_impression_accepted
+        ),
         EventDefinition("AffectEpisodeOpened", RevisionClass.WORLD, _affect_episode_opened),
         EventDefinition("AffectEpisodeUpdated", RevisionClass.WORLD, _affect_episode_updated),
         EventDefinition("AffectEpisodeDecayed", RevisionClass.WORLD, _affect_episode_decayed),
@@ -8505,6 +8693,9 @@ def make_projection(
         boundaries=state.boundaries,
         relationship_proposals=state.relationship_proposals,
         relationship_proposal_ids=state.relationship_proposal_ids,
+        private_impressions=state.private_impressions,
+        private_impression_proposals=state.private_impression_proposals,
+        private_impression_proposal_ids=state.private_impression_proposal_ids,
         threads=state.threads,
         thread_transitions=state.thread_transitions,
         thread_proposals=state.thread_proposals,
