@@ -19,6 +19,7 @@ from typing import Literal, Mapping
 
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .action_pump import ActionExecutor, ActionPumpResult
+from .activity_plan_runtime import ActivityPlanCommand, ActivityPlanRuntime
 from .affect_trigger_runtime import AffectTriggerRunResult
 from .fact_draft_adapter import FactDraftChatModel, FactObservationProposalAdapter
 from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
@@ -50,7 +51,7 @@ from .ledger_payload_reader import LedgerAuthorizedPayloadReader
 from .life_content_store import SQLiteImmutableLifeContentStore
 from .expression_payload_store import SQLiteImmutableExpressionPayloadStore
 from .media_v2 import SQLiteImmutableMediaPayloadStore
-from .media_execution_runtime import MediaExecutionRuntime
+from .media_execution_runtime import MediaExecutionRuntime, MediaExecutionWorker
 from .media_payload_reader import MediaSidecarPayloadReader
 from .occurrence_content_coordinator import (
     OccurrenceContentCommitRequest,
@@ -138,7 +139,9 @@ class WorldV2TurnApplication:
         expression_payload_store: SQLiteImmutableExpressionPayloadStore,
         media_payload_store: SQLiteImmutableMediaPayloadStore,
         media_execution: MediaExecutionRuntime,
+        media_execution_worker: MediaExecutionWorker | None,
         occurrence_content: OccurrenceContentCoordinator,
+        activity_plans: ActivityPlanRuntime,
     ) -> None:
         self._turns = turns
         self._ledger = ledger
@@ -146,7 +149,9 @@ class WorldV2TurnApplication:
         self._expression_payload_store = expression_payload_store
         self._media_payload_store = media_payload_store
         self.media_execution = media_execution
+        self._media_execution_worker = media_execution_worker
         self._occurrence_content = occurrence_content
+        self._activity_plans = activity_plans
 
     async def respond(self, inbound: InboundTurn) -> RuntimeOutcome:
         return await self._turns.respond(inbound)
@@ -302,8 +307,45 @@ class WorldV2TurnApplication:
             return await asyncio.to_thread(self._occurrence_content.commit, request)
         return self._occurrence_content.commit(request)
 
+    async def plan_activity(
+        self,
+        command: ActivityPlanCommand,
+        *,
+        logical_time: datetime,
+        created_at: datetime,
+        trace_id: str,
+        causation_id: str,
+        correlation_id: str,
+    ) -> CommitResult:
+        """Create one source-bound Activity plan through the public v2 seam."""
+
+        kwargs = dict(
+            command=command,
+            logical_time=logical_time,
+            created_at=created_at,
+            trace_id=trace_id,
+            causation_id=causation_id,
+            correlation_id=correlation_id,
+        )
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._activity_plans.plan, **kwargs)
+        return self._activity_plans.plan(**kwargs)
+
     async def drain_actions_once(self) -> ActionPumpResult | None:
         return await self._turns.drain_actions_once()
+
+    async def drain_media_results_once(self, *, logical_time: datetime) -> str | None:
+        """Materialize one verified Media v2 provider result sidecar.
+
+        This is intentionally separate from Action dispatch: the ActionPump
+        first records its terminal receipt, then this recovery-safe worker
+        joins only the result bytes that hash-bind to that receipt.  It never
+        sends an image and cannot produce a delivery event.
+        """
+
+        if self._media_execution_worker is None:
+            return None
+        return await self._media_execution_worker.drain_once(logical_time=logical_time)
 
     async def drain_background_once(
         self,
@@ -577,14 +619,29 @@ def build_sqlite_world_v2_turn_application(
             ),
             expression_reconsideration_reviewer=expression_reconsideration_reviewer,
         )
+        media_execution = MediaExecutionRuntime(ledger=ledger, sidecar=media_payload_store)
+        media_execution_worker = (
+            MediaExecutionWorker(
+                runtime=media_execution,
+                ledger=ledger,
+                transport=media_transport,  # type: ignore[arg-type]
+            )
+            if media_transport is not None and hasattr(media_transport, "lookup_execution_result")
+            else None
+        )
         return WorldV2TurnApplication(
             turns=WorldTurnRuntime(runtime=runtime, identities=identities),
             ledger=ledger,
             life_content_store=life_content_store,
             expression_payload_store=expression_payload_store,
             media_payload_store=media_payload_store,
-            media_execution=MediaExecutionRuntime(ledger=ledger, sidecar=media_payload_store),
+            media_execution=media_execution,
+            media_execution_worker=media_execution_worker,
             occurrence_content=occurrence_content,
+            activity_plans=ActivityPlanRuntime(
+                ledger=ledger,
+                owner_actor_ref=config.companion_actor_ref,
+            ),
         )
     except Exception:
         life_content_store.close()

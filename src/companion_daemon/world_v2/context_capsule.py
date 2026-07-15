@@ -340,7 +340,7 @@ class ContextCapsuleBudgetPolicy(_FrozenModel):
         default_factory=lambda: SliceBudget(max_items=1, max_fields=96, max_characters=6_000)
     )
     current_situation: SliceBudget = Field(
-        default_factory=lambda: SliceBudget(max_items=1, max_fields=96, max_characters=5_000)
+        default_factory=lambda: SliceBudget(max_items=1, max_fields=96, max_characters=12_000)
     )
     relationship_slice: SliceBudget = Field(
         default_factory=lambda: SliceBudget(max_items=1, max_fields=48, max_characters=2_000)

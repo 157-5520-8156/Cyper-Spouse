@@ -757,7 +757,13 @@ class ScenarioRunner:
 
     @staticmethod
     def _next_context_has_outcome_affect(*, model: FakeCompanionModel, case: ScenarioCase) -> bool:
-        """Prove the next reply's app-owned Capsule consumed both effects."""
+        """Prove the next reply consumed this exact outcome and Affect episode.
+
+        Merely checking that both slices are non-empty would allow an unrelated
+        interaction appraisal or settled occurrence to mask a broken causal
+        continuation.  The fixture must bind all three source identifiers
+        from the seeded life event into the next app-owned capsule.
+        """
 
         if case.execution != "seeded_world_outcome_affect":
             return True
@@ -771,7 +777,28 @@ class ScenarioRunner:
             affect = slices["affect_episodes"]["items"]
         except (IndexError, KeyError, TypeError, json.JSONDecodeError):
             return False
-        return bool(world_life) and bool(affect)
+        occurrence_id = f"occurrence:phase8:{case.entry.scenario_turn_id}"
+        result_id = f"result:phase8:{case.entry.scenario_turn_id}:settled"
+        appraisal_change_id = f"change:phase8:{case.entry.scenario_turn_id}:npc-appraisal"
+        has_settled_outcome = any(
+            item.get("value", {}).get("occurrence_id") == occurrence_id
+            and item.get("value", {}).get("result_id") == result_id
+            for item in world_life
+            if isinstance(item, dict)
+        )
+        # The compiler assigns the accepted episode a deterministic compiled
+        # id, so the stable source identity is the NPC appraisal change that
+        # every component must retain rather than the model's provisional id.
+        has_causal_affect = any(
+            appraisal_ref.get("accepted_change_id") == appraisal_change_id
+            for item in affect
+            if isinstance(item, dict)
+            for component in item.get("value", {}).get("components", ())
+            if isinstance(component, dict)
+            for appraisal_ref in component.get("appraisal_refs", ())
+            if isinstance(appraisal_ref, dict)
+        )
+        return has_settled_outcome and has_causal_affect
 
     @staticmethod
     async def _seed_world_outcome(

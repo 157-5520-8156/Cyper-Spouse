@@ -18,9 +18,16 @@ from .schema_core import FrozenModel
 from .schemas import Action, DispatchPending, LedgerProjection, ProviderReceipt
 
 
-SUPPORTED_PLATFORM_ACTION_KINDS = frozenset({"reply", "reaction", "typing", "sticker"})
+SUPPORTED_PLATFORM_ACTION_KINDS = frozenset(
+    {"reply", "followup", "proactive_message", "reaction", "typing", "sticker"}
+)
 CONTENT_TYPES_BY_KIND = {
     "reply": frozenset({"text/plain"}),
+    # Expression planning distinguishes the conversational role of a text
+    # beat.  Existing platform transports expose one message primitive, so
+    # these roles are deliberately rendered as that same primitive below.
+    "followup": frozenset({"text/plain"}),
+    "proactive_message": frozenset({"text/plain"}),
     "reaction": frozenset({"application/vnd.world-v2.reaction+json"}),
     "typing": frozenset({"application/vnd.world-v2.typing+json"}),
     "sticker": frozenset({"application/vnd.world-v2.sticker+json"}),
@@ -129,6 +136,8 @@ class PlatformActionExecutor(ActionExecutor):
     def _kind(action: Action) -> Literal["reply", "reaction", "typing", "sticker"]:
         if action.layer != "external_action" or action.kind not in SUPPORTED_PLATFORM_ACTION_KINDS:
             raise ValueError(f"platform executor does not support action kind {action.kind!r}")
+        if action.kind in {"followup", "proactive_message"}:
+            return "reply"
         return action.kind  # type: ignore[return-value]
 
     @staticmethod

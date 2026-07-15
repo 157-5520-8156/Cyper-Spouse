@@ -17,7 +17,7 @@ from companion_daemon.world_v2.schemas import Action
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
 
 
-def action(*, text: str = "我在。") -> Action:
+def action(*, text: str = "我在。", kind: str = "reply") -> Action:
     return Action(
         schema_version="world-v2.1",
         action_id="action:reply:platform.1",
@@ -27,7 +27,7 @@ def action(*, text: str = "我在。") -> Action:
         trace_id="trace:platform-adapter",
         causation_id="acceptance:reply:1",
         correlation_id="conversation:1",
-        kind="reply",
+        kind=kind,
         layer="external_action",
         intent_ref="intent:reply:1",
         actor="agent:companion",
@@ -107,6 +107,17 @@ async def test_platform_executor_dispatches_only_the_authorized_payload_and_bind
     assert request.kind == "reply"
     assert request.body == "我在。"
     assert request.idempotency_key == "platform:reply:1"
+
+
+@pytest.mark.asyncio
+async def test_platform_executor_renders_delayed_followup_as_the_same_message_primitive() -> None:
+    transport = Transport()
+    executor = PlatformActionExecutor(payloads=Payloads("晚一点再把这句话说完。"), transport=transport)
+
+    receipt = await executor.dispatch(action(text="晚一点再把这句话说完。", kind="followup"))
+
+    assert receipt.status == "delivered"
+    assert transport.sent[0].kind == "reply"
 
 
 @pytest.mark.asyncio

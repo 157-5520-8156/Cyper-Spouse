@@ -185,6 +185,11 @@ def test_sidecar_payloads_are_stored_outside_ledger_and_descriptor_authorized(tm
     reader = LedgerAuthorizedPayloadReader(ledger=_Reader(), expression_payload_store=store)
     resolved = asyncio.run(reader.resolve(material.beats[1].action))
     assert resolved.body == encoded
+    # Lifecycle state legitimately changes after authorization.  The payload
+    # reader must retain the immutable authorization image while allowing a
+    # delayed beat to be scheduled before it becomes due.
+    scheduled = material.beats[1].action.model_copy(update={"state": "scheduled"})
+    assert asyncio.run(reader.resolve(scheduled)).body == encoded
     path = str(tmp_path / "expression-sidecar.sqlite")
     durable = SQLiteImmutableExpressionPayloadStore(path=path, world_id=WORLD)
     durable.put_if_absent(StoredExpressionPayload("payload:restart:1", expression_payload_hash("bytes"), "text/plain", "private", "referenced", "bytes"))

@@ -103,7 +103,7 @@ class LedgerAuthorizedPayloadReader:
             or action.payload_hash != beat.payload_hash
             or action.expression_plan_id != manifest.plan_id
             or action.expression_beat_id != beat.beat_id
-            or action != beat.action
+            or _authorization_image(action) != _authorization_image(beat.action)
         ):
             raise ValueError("Action does not exactly bind its expression-plan authorization manifest")
         if beat.storage_kind == "inline_text":
@@ -139,6 +139,22 @@ class LedgerAuthorizedPayloadReader:
         if self._reader.blocks_event_loop:
             return await asyncio.to_thread(self._reader.project)
         return self._reader.project()
+
+
+def _authorization_image(action: Action) -> dict[str, object]:
+    """Return the immutable authority image of an Action.
+
+    ``ActionScheduled``/claim/dispatch/receipt reducers intentionally change
+    lifecycle fields on the live projection.  Those fields must not make a
+    valid, already-authorized payload unreadable.  Every remaining field is
+    compared exactly, so a live action still cannot redirect its target,
+    payload, budget, timing, dependencies or expression lineage.
+    """
+
+    value = action.model_dump(mode="json")
+    for field in ("state", "claim_lease", "dispatch_pending"):
+        value.pop(field, None)
+    return value
 
 
 __all__ = ["LedgerAuthorizedPayloadReader"]
