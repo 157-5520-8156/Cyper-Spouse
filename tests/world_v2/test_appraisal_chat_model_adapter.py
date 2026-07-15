@@ -5,8 +5,12 @@ import json
 import pytest
 
 from companion_daemon.world_v2.appraisal_chat_model_adapter import AppraisalDraftDeliberationAdapter
-from companion_daemon.world_v2.deliberation import ModelInput, ModelRoute, TriggerMessage
-from companion_daemon.world_v2.proposal_envelope import DecisionProposal
+from companion_daemon.world_v2.deliberation import (
+    ModelInput,
+    ModelRoute,
+    TriggerMessage,
+)
+from companion_daemon.world_v2.proposal_envelope import DecisionProposal, ProposalEvidenceRef
 
 
 def _request() -> ModelInput:
@@ -18,6 +22,14 @@ def _request() -> ModelInput:
         trigger_ref="event:observation:1",
         evaluated_world_revision=3,
         model_content_json='{"capsule":"authoritative"}',
+        trigger_evidence=(
+            ProposalEvidenceRef(
+                ref_id="observation:1",
+                evidence_kind="observed_message",
+                source_world_revision=3,
+                immutable_hash="sha256:" + "b" * 64,
+            ),
+        ),
         trigger_message=TriggerMessage(
             event_ref="event:observation:1",
             event_payload_hash="sha256:" + "b" * 64,
@@ -74,6 +86,7 @@ async def test_adapter_materializes_a_bound_fallible_appraisal() -> None:
     payload = proposal.proposed_changes[0].payload.value()
     assert payload["meaning_candidates"][0]["meaning"] == "disappointment"
     assert "AppraisalDraft" in model.calls[0][0]["content"]
+    assert '"trigger_evidence"' in model.calls[0][1]["content"]
 
 
 @pytest.mark.asyncio

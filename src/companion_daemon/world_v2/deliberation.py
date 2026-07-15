@@ -182,6 +182,7 @@ class ModelInput(_FrozenModel):
     trigger_ref: str = Field(min_length=1, max_length=256)
     evaluated_world_revision: int = Field(ge=0)
     model_content_json: str = Field(min_length=2, max_length=512_000)
+    trigger_evidence: tuple[ProposalEvidenceRef, ...] = Field(default=(), max_length=8)
     trigger_message: TriggerMessage | None = None
     catalog_versions: tuple[str, ...] = ()
     recorded_draw_refs: tuple[str, ...] = ()
@@ -424,6 +425,7 @@ class Deliberation:
             trigger_ref=trusted.trigger_ref,
             evaluated_world_revision=trusted.world_revision,
             model_content_json=trusted.model_content_json,
+            trigger_evidence=trigger_evidence,
             trigger_message=trigger_message,
             catalog_versions=catalog_versions,
             recorded_draw_refs=recorded_draw_refs,

@@ -18,6 +18,9 @@ from pathlib import Path
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .action_pump import ActionExecutor, ActionPumpResult
 from .affect_trigger_runtime import AffectTriggerRunResult
+from .affect_acceptance_runtime import AffectAcceptanceRuntime
+from .affect_deliberation_worker import AffectDeliberationWorker
+from .affect_proposal_compiler import AffectProposalCompiler
 from .appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
 from .appraisal_proposal_compiler import AppraisalProposalCompiler
 from .appraisal_proposal_worker import AppraisalProposalWorker
@@ -29,7 +32,7 @@ from .deliberation import (
     ModelRouterAdapter,
     QuickRecoveryAdapter,
 )
-from .ledger_context_resolver import context_capsule_compiler_from_ledger
+from .ledger_context_resolver import ContextRelevanceScope, context_capsule_compiler_from_ledger
 from .ledger_payload_reader import LedgerAuthorizedPayloadReader
 from .minimal_reply_acceptance import ReplyBudgetPolicy
 from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
@@ -55,6 +58,7 @@ class WorldV2TurnApplicationConfig:
     reply_budget_amount: int = 10
     reply_recovery_policy: str = "effect_once"
     appraisal_worker_owner: str = "worker:world-v2:appraisal"
+    affect_worker_owner: str = "worker:world-v2:affect"
 
     def __post_init__(self) -> None:
         for name in (
@@ -63,6 +67,7 @@ class WorldV2TurnApplicationConfig:
             "reply_target",
             "action_pump_owner",
             "appraisal_worker_owner",
+            "affect_worker_owner",
         ):
             if not getattr(self, name):
                 raise ValueError(f"{name} must not be empty")
@@ -109,6 +114,7 @@ def build_sqlite_world_v2_turn_application(
     transport: PlatformTransport,
     advisory_compiler: AdvisoryCompiler | None = None,
     appraisal_model: DeliberationModelAdapter | None = None,
+    affect_model: DeliberationModelAdapter | None = None,
     now: datetime,
 ) -> WorldV2TurnApplication:
     """Build one durable v2 chat lane without importing the legacy application.
@@ -122,9 +128,16 @@ def build_sqlite_world_v2_turn_application(
     ledger = SQLiteWorldLedger(path=path, world_id=config.world_id, accepted_batch_issuer=issuer)
     try:
         _bootstrap(ledger=ledger, config=config, now=now)
+        capsules = context_capsule_compiler_from_ledger(
+            ledger=ledger,
+            relevance_scope=ContextRelevanceScope(
+                actor_ref=config.companion_actor_ref,
+                related_subject_refs=(config.reply_target,),
+            ),
+        )
         pinned = PinnedTurnCompiler(
             ledger=ledger,
-            capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+            capsule_compiler=capsules,
             deliberation=Deliberation(
                 router=router, main_model=main_model, quick_recovery=quick_recovery
             ),
@@ -148,7 +161,7 @@ def build_sqlite_world_v2_turn_application(
         appraisal_turn = (
             PinnedTurnCompiler(
                 ledger=ledger,
-                capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+                capsule_compiler=capsules,
                 deliberation=Deliberation(
                     router=router, main_model=appraisal_model, quick_recovery=appraisal_model
                 ),
@@ -156,6 +169,34 @@ def build_sqlite_world_v2_turn_application(
                 advisory_compiler=advisory_compiler,
             )
             if appraisal_model is not None
+            else None
+        )
+        affect_acceptance = (
+            AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
+            if affect_model is not None
+            else None
+        )
+        affect_turn = (
+            PinnedTurnCompiler(
+                ledger=ledger,
+                capsule_compiler=capsules,
+                deliberation=Deliberation(
+                    router=router, main_model=affect_model, quick_recovery=affect_model
+                ),
+                companion_actor_ref=config.companion_actor_ref,
+            )
+            if affect_model is not None
+            else None
+        )
+        affect_worker = (
+            AffectDeliberationWorker(
+                ledger=ledger,
+                pinned_turn=affect_turn,
+                compiler=AffectProposalCompiler(ledger=ledger),
+                acceptance=affect_acceptance,
+                actor=config.affect_worker_owner,
+            )
+            if affect_acceptance is not None and affect_turn is not None
             else None
         )
         runtime = WorldRuntime(
@@ -179,6 +220,14 @@ def build_sqlite_world_v2_turn_application(
             ),
             appraisal_worker=appraisal_worker,
             interaction_appraisal_turn=appraisal_turn,
+            affect_deliberation_owner=(
+                config.affect_worker_owner if affect_worker is not None else None
+            ),
+            affect_worker=affect_worker,
+            affect_acceptance=affect_acceptance,
+            affect_acceptance_actor=(
+                config.affect_worker_owner if affect_acceptance is not None else None
+            ),
             action_executor=build_platform_action_executor(ledger=ledger, transport=transport),
             action_pump_owner=config.action_pump_owner,
         )

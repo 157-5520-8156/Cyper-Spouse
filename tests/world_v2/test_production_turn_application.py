@@ -14,6 +14,7 @@ from companion_daemon.world_v2.deliberation import (
 )
 from companion_daemon.world_v2.chat_model_deliberation_adapter import ChatModelDeliberationAdapter
 from companion_daemon.world_v2.appraisal_chat_model_adapter import AppraisalDraftDeliberationAdapter
+from companion_daemon.world_v2.affect_chat_model_adapter import AffectDraftDeliberationAdapter
 from companion_daemon.world_v2.platform_action_executor import PlatformDispatchReceipt
 from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
@@ -108,6 +109,44 @@ class _NoChangeAppraisalChat:
                 "stance": "wait",
                 "display_strategy": "withhold",
                 "confidence": 3000,
+            }
+        )
+
+
+class _AppraisingChat:
+    model = "test-appraiser"
+
+    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        return json.dumps(
+            {
+                "appraise": True,
+                "brief_rationale": "The user may be disappointed, but the interpretation remains fallible.",
+                "behavior_tendency": "hold_space",
+                "stance": "attend",
+                "display_strategy": "withhold",
+                "confidence": 7600,
+                "meanings": [{"meaning": "disappointment", "confidence": 7600}],
+                "attribution": "user",
+                "severity": 6000,
+            }
+        )
+
+
+class _OpenAffectChat:
+    model = "test-affect"
+
+    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        return json.dumps(
+            {
+                "affect": "open",
+                "brief_rationale": "The accepted appraisal warrants a bounded residual hurt episode.",
+                "behavior_tendency": "hold_space",
+                "stance": "care_despite_hurt",
+                "display_strategy": "partial_disclosure",
+                "confidence": 7200,
+                "components": [{"dimension": "hurt", "intensity_bp": 4200}],
             }
         )
 
@@ -248,3 +287,48 @@ async def test_production_application_drains_appraisal_after_the_visible_reply_l
     assert background is not None
     assert background.status == "processed"
     assert background.work_status == "no_change"
+
+
+@pytest.mark.asyncio
+async def test_production_application_carries_accepted_appraisal_into_an_affect_episode(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "world-v2-affect.sqlite"
+    reply_model = ChatModelDeliberationAdapter(model=_DraftChatModel())
+    app = build_sqlite_world_v2_turn_application(
+        path=path,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=reply_model,
+        quick_recovery=reply_model,
+        appraisal_model=AppraisalDraftDeliberationAdapter(model=_AppraisingChat()),
+        affect_model=AffectDraftDeliberationAdapter(model=_OpenAffectChat()),
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    try:
+        await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:affect",
+                text="你刚才的回复让我有点失望。",
+                observed_at=NOW,
+                trace_id="trace:production-affect",
+            )
+        )
+        appraisal = await app.drain_background_once()
+        affect = await app.drain_background_once()
+    finally:
+        app.close()
+
+    assert appraisal is not None and appraisal.work_status == "accepted"
+    assert affect is not None and affect.work_status == "accepted"
+    ledger = SQLiteWorldLedger(path=path, world_id=_config().world_id)
+    try:
+        episode = ledger.project().affect_episodes
+    finally:
+        ledger.close()
+    assert len(episode) == 1
+    assert episode[0].components[0].dimension == "hurt"

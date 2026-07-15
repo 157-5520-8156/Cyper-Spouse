@@ -469,6 +469,18 @@ class FakeCompanionModel:
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str:
         self.calls.append(messages)
         joined = "\n".join(message["content"] for message in messages)
+        if "AffectDraft" in joined:
+            return json.dumps(
+                {
+                    "affect": "no_change",
+                    "brief_rationale": "Fake simulator does not persist a new affect episode for this ordinary turn.",
+                    "behavior_tendency": "observe",
+                    "stance": "wait",
+                    "display_strategy": "withhold",
+                    "confidence": 3000,
+                },
+                ensure_ascii=False,
+            )
         if "AppraisalDraft" in joined:
             return json.dumps(
                 {
