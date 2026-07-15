@@ -84,9 +84,47 @@ class OutcomeTriggerRuntime:
             stored = await self._lookup(audit.event_ref)
             if stored is None:
                 raise RuntimeError("outcome deliberation audit event is unavailable")
-            work_cursor = self._cursor_from_commit(stored[1])
-            if work_cursor != current_cursor:
+            audit_cursor = self._cursor_from_commit(stored[1])
+            typed = next(
+                (
+                    item
+                    for item in current.outcome_proposals
+                    if item.decision_proposal_id == audit.proposal_id
+                ),
+                None,
+            )
+            if typed is not None:
+                accepted = next(
+                    (
+                        item
+                        for item in current.acceptance_decisions
+                        if item.proposal_id == typed.outcome_proposal_id
+                    ),
+                    None,
+                )
+                if accepted is not None:
+                    await self._complete(
+                        process=active,
+                        source_event=source_event,
+                        cursor=current_cursor,
+                        outcome_ref=(
+                            f"outcome:{active.trigger_id}:accepted:"
+                            f"{typed.outcome_proposal_id}"
+                        ),
+                    )
+                    return OutcomeTriggerRunResult(
+                        trigger_id=active.trigger_id,
+                        status="completed_existing",
+                        work_status="accepted",
+                    )
+                # The compiler has already persisted the source-bound typed
+                # proposal.  It is valid only at the *current* cursor, where
+                # acceptance can pin it without repeating model work.
+                work_cursor = current_cursor
+            elif audit_cursor != current_cursor:
                 raise RuntimeError("outcome deliberation audit cursor is stale")
+            else:
+                work_cursor = audit_cursor
 
         if self._ledger.blocks_event_loop:
             work = await asyncio.to_thread(self._worker.process, world_id=self._ledger.world_id, cursor=work_cursor, proposal_id=audit.proposal_id)

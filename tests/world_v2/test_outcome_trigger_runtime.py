@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
@@ -17,7 +19,9 @@ from companion_daemon.world_v2.proposal_envelope import (
     DecisionProposal,
     TypedChange,
 )
-from test_outcome_proposal_compiler import _prepare_claimed_outcome
+from companion_daemon.world_v2.runtime import WorldRuntime
+from companion_daemon.world_v2.schemas import ClockObservation
+from test_outcome_proposal_compiler import _audited_proposal, _prepare_claimed_outcome
 
 
 class _Router:
@@ -165,3 +169,180 @@ async def test_outcome_worker_audits_compiles_accepts_and_opens_npc_follow_up() 
     assert outcome.status == "settled"
     assert any(item.process_kind == "npc_world_appraisal" and item.state == "open" for item in projection.trigger_processes)
     assert next(item for item in projection.trigger_processes if item.process_kind == "outcome_deliberation").state == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_outcome_trigger_recovers_a_compiled_candidate_without_recalling_the_model() -> None:
+    """A crash after compilation must continue from the typed proposal.
+
+    ``OutcomeProposalRecorded`` advances the deliberation cursor.  Previously
+    the trigger treated its underlying generic audit as stale on restart and
+    abandoned a source-bound candidate.  The durable typed proposal is the
+    recovery boundary, so the retry must accept it without a second model call.
+    """
+
+    ledger, store, target, _claimed, source_event, source_commit = await _prepare_claimed_outcome()
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger._accepted_batch_issuer = issuer  # noqa: SLF001
+    proposal, audited = _audited_proposal(
+        ledger=ledger,
+        target=target,
+        source_event=source_event,
+        source_commit=source_commit,
+    )
+    reader = OutcomeCandidateReader(store=store)
+    compiled = OutcomeProposalCompiler(ledger=ledger, candidate_reader=reader).record(
+        world_id=ledger.world_id,
+        cursor=audited.cursor,
+        proposal_id=proposal.proposal_id,
+    )
+    worker = OutcomeProposalWorker(
+        compiler=OutcomeProposalCompiler(ledger=ledger, candidate_reader=reader),
+        acceptance=OutcomeAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
+        actor="worker:outcome",
+    )
+    turn = OutcomeDeliberationTurn(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(
+            ledger=ledger,
+            policy=ContextCapsuleBudgetPolicy(
+                hard_max_characters=100_000,
+                current_situation=SliceBudget(max_items=1, max_fields=256, max_characters=20_000),
+            ),
+        ),
+        deliberation=Deliberation(
+            router=_Router(), main_model=_MustNotRunModel(), quick_recovery=_MustNotRunModel()
+        ),
+        candidate_reader=reader,
+        companion_actor_ref="actor:companion",
+    )
+
+    recovered = await OutcomeTriggerRuntime(
+        ledger=ledger, turn=turn, worker=worker, owner_id="worker:outcome"
+    ).drain_one()
+
+    assert recovered.status == "processed"
+    assert recovered.work_status == "accepted"
+    assert any(
+        item.proposal_id == compiled.typed_proposal_id
+        for item in ledger.project().acceptance_decisions
+    )
+    assert next(
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "outcome_deliberation"
+    ).state == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_outcome_trigger_completes_an_already_accepted_batch_after_crash() -> None:
+    """A retry after acceptance writes only source-trigger completion."""
+
+    ledger, store, target, _claimed, source_event, source_commit = await _prepare_claimed_outcome()
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger._accepted_batch_issuer = issuer  # noqa: SLF001
+    proposal, audited = _audited_proposal(
+        ledger=ledger,
+        target=target,
+        source_event=source_event,
+        source_commit=source_commit,
+    )
+    reader = OutcomeCandidateReader(store=store)
+    worker = OutcomeProposalWorker(
+        compiler=OutcomeProposalCompiler(ledger=ledger, candidate_reader=reader),
+        acceptance=OutcomeAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
+        actor="worker:outcome",
+    )
+    # Simulate the durable work that survives a crash just before the trigger
+    # completion commit.
+    accepted = worker.process(
+        world_id=ledger.world_id, cursor=audited.cursor, proposal_id=proposal.proposal_id
+    )
+    turn = OutcomeDeliberationTurn(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(
+            ledger=ledger,
+            policy=ContextCapsuleBudgetPolicy(
+                hard_max_characters=100_000,
+                current_situation=SliceBudget(max_items=1, max_fields=256, max_characters=20_000),
+            ),
+        ),
+        deliberation=Deliberation(
+            router=_Router(), main_model=_MustNotRunModel(), quick_recovery=_MustNotRunModel()
+        ),
+        candidate_reader=reader,
+        companion_actor_ref="actor:companion",
+    )
+
+    recovered = await OutcomeTriggerRuntime(
+        ledger=ledger, turn=turn, worker=worker, owner_id="worker:outcome"
+    ).drain_one()
+
+    assert accepted.acceptance_commit.event_ids
+    assert recovered.status == "completed_existing"
+    assert recovered.work_status == "accepted"
+    assert next(
+        item
+        for item in ledger.project().trigger_processes
+        if item.process_kind == "outcome_deliberation"
+    ).state == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_outcome_trigger_rejects_a_generic_audit_staled_by_another_world_event() -> None:
+    """Only the compiler's own persisted typed hand-off may cross a cursor."""
+
+    ledger, store, target, _claimed, source_event, source_commit = await _prepare_claimed_outcome()
+    proposal, audited = _audited_proposal(
+        ledger=ledger,
+        target=target,
+        source_event=source_event,
+        source_commit=source_commit,
+    )
+    await WorldRuntime(world_id=ledger.world_id, ledger=ledger).advance(
+        ClockObservation(
+            schema_version="world-v2.1",
+            tick_id="outcome-trigger:stale-audit",
+            world_id=ledger.world_id,
+            logical_time=target,
+            created_at=target + timedelta(minutes=1),
+            trace_id="trace:outcome-trigger:stale-audit",
+            causation_id="scheduler:outcome-trigger:stale-audit",
+            correlation_id="correlation:outcome-trigger",
+            logical_time_from=target,
+            logical_time_to=target + timedelta(minutes=1),
+            reason="test_stale_audit",
+        )
+    )
+    reader = OutcomeCandidateReader(store=store)
+    worker = OutcomeProposalWorker(
+        compiler=OutcomeProposalCompiler(ledger=ledger, candidate_reader=reader),
+        acceptance=OutcomeAcceptanceRuntime(ledger=ledger, batch_issuer=AcceptedLedgerBatchIssuer()),
+        actor="worker:outcome",
+    )
+    turn = OutcomeDeliberationTurn(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(
+            ledger=ledger,
+            policy=ContextCapsuleBudgetPolicy(
+                hard_max_characters=100_000,
+                current_situation=SliceBudget(max_items=1, max_fields=256, max_characters=20_000),
+            ),
+        ),
+        deliberation=Deliberation(
+            router=_Router(), main_model=_MustNotRunModel(), quick_recovery=_MustNotRunModel()
+        ),
+        candidate_reader=reader,
+        companion_actor_ref="actor:companion",
+    )
+
+    with pytest.raises(RuntimeError, match="audit cursor is stale"):
+        await OutcomeTriggerRuntime(
+            ledger=ledger, turn=turn, worker=worker, owner_id="worker:outcome"
+        ).drain_one()
+
+    assert proposal.proposal_id in {item.proposal_id for item in ledger.project().proposal_audits}
+    assert not any(
+        item.decision_proposal_id == proposal.proposal_id
+        for item in ledger.project().outcome_proposals
+    )

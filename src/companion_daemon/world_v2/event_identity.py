@@ -295,6 +295,7 @@ def _life_identity_components(
             "interaction_appraisal",
             "interaction_fact",
             "affect_deliberation",
+            "outcome_deliberation",
         }:
             attempts = process.get("attempt_ids")
             attempt_id = attempts[-1] if isinstance(attempts, list) and attempts else None
