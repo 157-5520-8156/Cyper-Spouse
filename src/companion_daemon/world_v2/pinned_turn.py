@@ -30,7 +30,7 @@ from .context_capsule import (
     InnerAdvisoryProjection,
 )
 from .context_resolver import query_from_projection
-from .deliberation import Deliberation
+from .deliberation import Deliberation, TriggerMessage
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .ledger import LedgerPort
 from .proposal_audit import ProposalAuditCommit, ProposalAuditContext, ProposalAuditRecorder
@@ -133,6 +133,7 @@ class PinnedTurnCompiler:
                     immutable_hash="sha256:" + observation_event.payload_hash,
                 ),
             ),
+            trigger_message=self._trigger_message(observation, observation_event),
         )
         context = ProposalAuditContext(
             world_id=observation.world_id,
@@ -405,6 +406,32 @@ class PinnedTurnCompiler:
         if isinstance(recent, list) and all(isinstance(item, dict) for item in recent):
             return tuple(recent)
         return (reply_context,)
+
+    @staticmethod
+    def _reply_target(observation: Observation) -> str:
+        """Read the platform target from the immutable observation, never a model choice."""
+
+        context = observation.reply_context
+        target = context.get("target") if isinstance(context, dict) else None
+        return target if isinstance(target, str) and target else observation.actor
+
+    @classmethod
+    def _trigger_message(
+        cls, observation: Observation, observation_event: WorldEvent
+    ) -> TriggerMessage | None:
+        """Expose actual inbound text, never a fabricated attachment description."""
+
+        if observation.text is None:
+            return None
+        return TriggerMessage(
+            event_ref=observation_event.event_id,
+            event_payload_hash=f"sha256:{observation_event.payload_hash}",
+            observation_ref=observation.observation_id,
+            actor=observation.actor,
+            channel=observation.channel,
+            reply_target=cls._reply_target(observation),
+            text=observation.text,
+        )
 
     @staticmethod
     def _inner_advisories(compilation: AdvisoryCompilation) -> tuple[InnerAdvisoryProjection, ...]:

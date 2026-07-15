@@ -57,7 +57,11 @@ class _InvalidQuick:
 
 
 class _MinimalReplyModel:
+    def __init__(self) -> None:
+        self.request: ModelInput | None = None
+
     async def propose(self, request: ModelInput) -> ModelOutput:
+        self.request = request
         text = "我听见你的失望了，刚刚确实没有接住。"
         payload_hash = "sha256:" + sha256(text.encode("utf-8")).hexdigest()
         proposal = MinimalProposal(
@@ -164,7 +168,7 @@ def _event(event_type: str, payload: dict[str, object], suffix: str) -> WorldEve
     )
 
 
-def _configured_runtime() -> tuple[WorldRuntime, WorldLedger, _Transport]:
+def _configured_runtime() -> tuple[WorldRuntime, WorldLedger, _Transport, _MinimalReplyModel]:
     issuer = AcceptedLedgerBatchIssuer()
     ledger = WorldLedger.in_memory(world_id="world:turn-runtime", accepted_batch_issuer=issuer)
     account = BudgetAccount(
@@ -179,11 +183,12 @@ def _configured_runtime() -> tuple[WorldRuntime, WorldLedger, _Transport]:
         expected_deliberation_revision=0,
     )
     capsules: ContextCapsuleCompiler = context_capsule_compiler_from_ledger(ledger=ledger)
+    model = _MinimalReplyModel()
     turn = PinnedTurnCompiler(
         ledger=ledger,
         capsule_compiler=capsules,
         deliberation=Deliberation(
-            router=_Router(), main_model=_MinimalReplyModel(), quick_recovery=_InvalidQuick()
+            router=_Router(), main_model=model, quick_recovery=_InvalidQuick()
         ),
         companion_actor_ref="agent:companion",
     )
@@ -208,6 +213,7 @@ def _configured_runtime() -> tuple[WorldRuntime, WorldLedger, _Transport]:
         ),
         ledger,
         transport,
+        model,
     )
 
 
@@ -229,7 +235,7 @@ async def test_platform_neutral_turn_ingress_records_one_idempotent_v2_observati
 
 @pytest.mark.asyncio
 async def test_platform_neutral_turn_runs_authorize_dispatch_and_settle_without_legacy_engine() -> None:
-    runtime, ledger, transport = _configured_runtime()
+    runtime, ledger, transport, model = _configured_runtime()
     turn = WorldTurnRuntime(runtime=runtime, identities=_Identities())
     inbound = InboundTurn(
         platform="test",
@@ -249,6 +255,9 @@ async def test_platform_neutral_turn_runs_authorize_dispatch_and_settle_without_
 
     assert first.status == "action_authorized"
     assert duplicate == first
+    assert model.request is not None and model.request.trigger_message is not None
+    assert model.request.trigger_message.text == "我有点失望，感觉你没接住。"
+    assert model.request.trigger_message.reply_target == "user:user.1"
     assert resolved.body == "我听见你的失望了，刚刚确实没有接住。"
     assert delivery is not None and delivery.status == "settled"
     assert [request.body for request in transport.sent] == ["我听见你的失望了，刚刚确实没有接住。"]
@@ -260,7 +269,7 @@ async def test_platform_neutral_turn_runs_authorize_dispatch_and_settle_without_
 
 @pytest.mark.asyncio
 async def test_authorized_payload_reader_rejects_an_action_with_substituted_payload_identity() -> None:
-    runtime, ledger, _transport = _configured_runtime()
+    runtime, ledger, _transport, _model = _configured_runtime()
     turn = WorldTurnRuntime(runtime=runtime, identities=_Identities())
     await turn.respond(
         InboundTurn(

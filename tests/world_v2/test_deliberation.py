@@ -22,8 +22,9 @@ from companion_daemon.world_v2.deliberation import (
     ModelOutput,
     ModelRoute,
     RouteRequest,
+    TriggerMessage,
 )
-from companion_daemon.world_v2.proposal_envelope import MinimalProposal
+from companion_daemon.world_v2.proposal_envelope import MinimalProposal, ProposalEvidenceRef
 from test_context_capsule import HASH_B, NOW, _bound, _request
 from test_proposal_envelope import (
     _decision,
@@ -191,6 +192,45 @@ async def test_normal_flash_deliberation_returns_inert_validated_proposal_and_au
     assert quick.failure_codes == []
     assert not hasattr(unit, "_ledger")
     assert not hasattr(unit, "_action_executor")
+
+
+@pytest.mark.asyncio
+async def test_trigger_message_reaches_model_only_when_bound_to_current_observation_evidence() -> None:
+    main = _Main()
+    unit = Deliberation(router=_Router(), main_model=main, quick_recovery=_Quick())
+    observed = ProposalEvidenceRef(
+        ref_id="observation:current:1",
+        evidence_kind="observed_message",
+        source_world_revision=7,
+        immutable_hash=f"sha256:{HASH_B}",
+    )
+    current = TriggerMessage(
+        event_ref="event:observation:1",
+        event_payload_hash=f"sha256:{HASH_B}",
+        observation_ref=observed.ref_id,
+        actor="user:primary",
+        channel="test",
+        reply_target="user:primary",
+        text="你刚刚没有接住我的意思。",
+    )
+
+    await unit.deliberate(
+        _capsule(),
+        attempt_id="attempt:current-message",
+        trigger_evidence=(_authority_evidence(), observed),
+        trigger_message=current,
+    )
+
+    assert main.requests[0].trigger_message == current
+    forged = current.model_copy(update={"observation_ref": "observation:substituted"})
+    with pytest.raises(ValueError, match="observed-message evidence"):
+        await unit.deliberate(
+            _capsule(),
+            attempt_id="attempt:forged-current-message",
+            trigger_evidence=(_authority_evidence(), observed),
+            trigger_message=forged,
+        )
+    assert len(main.requests) == 1
 
 
 @pytest.mark.asyncio

@@ -154,6 +154,25 @@ class RouteRequest(_FrozenModel):
     model_content_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class TriggerMessage(_FrozenModel):
+    """Current user text with the exact event evidence that authorizes it.
+
+    A world snapshot alone is insufficient for a conversational decision: the
+    model must see the message it is answering.  This is intentionally not a
+    free-form prompt extension.  ``Deliberation`` accepts it only when its
+    event reference and immutable hash match the pinned observed-message
+    evidence for the capsule's trigger.
+    """
+
+    event_ref: str = Field(min_length=1, max_length=256)
+    event_payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    observation_ref: str = Field(min_length=1, max_length=256)
+    actor: str = Field(min_length=1, max_length=256)
+    channel: str = Field(min_length=1, max_length=256)
+    reply_target: str = Field(min_length=1, max_length=256)
+    text: str = Field(min_length=1, max_length=12_000)
+
+
 class ModelInput(_FrozenModel):
     call_id: str = Field(min_length=1, max_length=256)
     attempt_id: str = Field(min_length=1, max_length=256)
@@ -162,6 +181,7 @@ class ModelInput(_FrozenModel):
     trigger_ref: str = Field(min_length=1, max_length=256)
     evaluated_world_revision: int = Field(ge=0)
     model_content_json: str = Field(min_length=2, max_length=512_000)
+    trigger_message: TriggerMessage | None = None
     catalog_versions: tuple[str, ...] = ()
     recorded_draw_refs: tuple[str, ...] = ()
 
@@ -343,6 +363,7 @@ class Deliberation:
         catalog_versions: tuple[str, ...] = (),
         recorded_draw_refs: tuple[str, ...] = (),
         trigger_evidence: tuple[ProposalEvidenceRef, ...] = (),
+        trigger_message: TriggerMessage | None = None,
     ) -> DeliberationResult:
         if not isinstance(capsule_handle, TrustedContextCapsuleHandle):
             raise TypeError("Deliberation requires a compiler-issued Capsule handle")
@@ -368,6 +389,18 @@ class Deliberation:
             or len(set(trigger_evidence)) != len(trigger_evidence)
         ):
             raise ValueError("trigger evidence must be a bounded unique tuple")
+        if trigger_message is not None:
+            if type(trigger_message) is not TriggerMessage:
+                raise TypeError("trigger message must use the exact Deliberation contract")
+            if trigger_message.event_ref != trusted.trigger_ref:
+                raise ValueError("trigger message does not belong to the Capsule trigger")
+            if not any(
+                item.ref_id == trigger_message.observation_ref
+                and item.evidence_kind == "observed_message"
+                and item.immutable_hash == trigger_message.event_payload_hash
+                for item in trigger_evidence
+            ):
+                raise ValueError("trigger message is not bound to observed-message evidence")
         content_hash = _digest(json.loads(trusted.model_content_json))
         route = await self._route(
             RouteRequest(
@@ -390,6 +423,7 @@ class Deliberation:
             trigger_ref=trusted.trigger_ref,
             evaluated_world_revision=trusted.world_revision,
             model_content_json=trusted.model_content_json,
+            trigger_message=trigger_message,
             catalog_versions=catalog_versions,
             recorded_draw_refs=recorded_draw_refs,
         )
@@ -731,6 +765,7 @@ __all__ = [
     "ModelOutput",
     "ModelResultAudit",
     "ModelRoute",
+    "TriggerMessage",
     "ModelRouterAdapter",
     "ProviderHealth",
     "QuickRecoveryAdapter",
