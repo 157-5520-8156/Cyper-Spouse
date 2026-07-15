@@ -14,7 +14,9 @@ from datetime import datetime
 import json
 from typing import Literal, Mapping, Protocol
 
+from .dashboard_projection_adapter import DashboardRoomProjectionDTO
 from .production_turn_application import WorldV2TurnApplication
+from .schemas import ProjectionRequest
 
 
 def _require_nonempty(**values: str) -> None:
@@ -161,6 +163,12 @@ class PlatformReceiptTransport(Protocol):
     async def receive_receipt(self) -> PlatformReceipt | None: ...
 
 
+class DashboardProjectionCapture(Protocol):
+    """A transport-free dashboard snapshot capability owned by composition."""
+
+    def capture(self, request: ProjectionRequest) -> DashboardRoomProjectionDTO: ...
+
+
 class WorldV2PlatformHost:
     """A platform process facade with one dependency: ``WorldV2TurnApplication``.
 
@@ -169,8 +177,14 @@ class WorldV2PlatformHost:
     dispatches, and settles that Action through its configured executor.
     """
 
-    def __init__(self, *, application: WorldV2TurnApplication) -> None:
+    def __init__(
+        self,
+        *,
+        application: WorldV2TurnApplication,
+        dashboard_capture: DashboardProjectionCapture | None = None,
+    ) -> None:
         self._application = application
+        self._dashboard_capture = dashboard_capture
 
     async def inbound(self, message: PlatformInbound):
         """Process a normalized provider message exactly once by source identity."""
@@ -255,6 +269,13 @@ class WorldV2PlatformHost:
 
         return await self._application.drain_background_once()
 
+    def capture_dashboard_room(self, request: ProjectionRequest) -> DashboardRoomProjectionDTO:
+        """Capture one authorized viewer DTO; HTTP/WebSocket remains outside this host."""
+
+        if self._dashboard_capture is None:
+            raise RuntimeError("dashboard capture is not configured for this platform host")
+        return self._dashboard_capture.capture(request)
+
     def close(self) -> None:
         """Close the composition-owned persistent application once the host stops."""
 
@@ -263,6 +284,7 @@ class WorldV2PlatformHost:
 
 __all__ = [
     "PlatformClockTick",
+    "DashboardProjectionCapture",
     "PlatformInbound",
     "PlatformInboundTransport",
     "PlatformReceipt",

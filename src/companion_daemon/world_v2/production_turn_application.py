@@ -80,8 +80,10 @@ from .schemas import (
     CommitResult,
     ExternalObservation,
     OutcomeObservation,
+    ProjectionRequest,
     RuntimeOutcome,
     WorldEvent,
+    WorldProjection,
 )
 from .sqlite_ledger import SQLiteWorldLedger
 from .world_turn_runtime import InboundIdentityResolver, InboundTurn, WorldTurnRuntime
@@ -296,6 +298,11 @@ class WorldV2TurnApplication:
         """Record a verified world observation without exposing the ledger."""
 
         return await self._turns.record_outcome_observation(observation)
+
+    def project(self, viewer: ProjectionRequest) -> WorldProjection:
+        """Expose the capability-authorized read seam without a ledger handle."""
+
+        return self._turns.project(viewer)
 
     async def commit_occurrence(self, request: OccurrenceContentCommitRequest) -> CommitResult:
         """Author a new occurrence through the sidecar-first production seam.

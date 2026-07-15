@@ -7,11 +7,14 @@ from pathlib import Path
 import pytest
 
 from companion_daemon.world_v2.platform_host import (
+    DashboardProjectionCapture,
     PlatformClockTick,
     PlatformInbound,
     PlatformReceipt,
     WorldV2PlatformHost,
 )
+from companion_daemon.world_v2.dashboard_projection_adapter import DashboardRoomProjectionDTO, DashboardSceneRoute
+from companion_daemon.world_v2.schemas import ProjectionRequest
 
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
@@ -64,6 +67,23 @@ class _FakeReceiptTransport:
         if not self._receipts:
             return None
         return self._receipts.pop(0)
+
+
+class _FakeDashboardCapture:
+    def __init__(self) -> None:
+        self.requests: list[ProjectionRequest] = []
+
+    def capture(self, request: ProjectionRequest) -> DashboardRoomProjectionDTO:
+        self.requests.append(request)
+        return DashboardRoomProjectionDTO(
+            schema_version="world-v2-dashboard-room.1",
+            world_revision=4,
+            ledger_sequence=9,
+            projection_hash="c" * 64,
+            route=DashboardSceneRoute(
+                scene_id="zhizhi-home", action_id="study", availability="busy"
+            ),
+        )
 
 
 def _message(message_id: str = "message:1") -> PlatformInbound:
@@ -224,6 +244,34 @@ async def test_platform_host_forwards_tick_and_close_without_exposing_world_inte
     assert application.closed is True
 
 
+def test_platform_host_exposes_dashboard_capture_without_an_http_dependency() -> None:
+    capture: DashboardProjectionCapture = _FakeDashboardCapture()
+    host = WorldV2PlatformHost(
+        application=_FakeApplication(),  # type: ignore[arg-type]
+        dashboard_capture=capture,
+    )
+    request = ProjectionRequest(
+        schema_version="world-v2.1",
+        request_id="request:dashboard",
+        world_id="world:platform-host",
+        viewer_kind="room_renderer",
+        viewer_id="room:dashboard",
+        permissions=frozenset(),
+        trace_id="trace:dashboard",
+        redaction_policy="room-public-v1",
+    )
+
+    assert host.capture_dashboard_room(request).to_payload()["route"] == {
+        "scene_id": "zhizhi-home",
+        "action_id": "study",
+        "availability": "busy",
+    }
+    assert capture.requests == [request]  # type: ignore[attr-defined]
+
+    with pytest.raises(RuntimeError, match="not configured"):
+        WorldV2PlatformHost(application=_FakeApplication()).capture_dashboard_room(request)  # type: ignore[arg-type]
+
+
 def test_platform_host_is_clean_application_adapter_without_legacy_or_ledger_imports() -> None:
     path = Path(__file__).parents[2] / "src/companion_daemon/world_v2/platform_host.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -236,7 +284,9 @@ def test_platform_host_is_clean_application_adapter_without_legacy_or_ledger_imp
     assert imports == {
         "__future__",
         "dataclasses",
+        "dashboard_projection_adapter",
         "datetime",
+        "schemas",
         "typing",
         "production_turn_application",
     }
@@ -250,6 +300,7 @@ def test_platform_host_is_clean_application_adapter_without_legacy_or_ledger_imp
         "WorldLedger",
         "SQLiteWorldLedger",
         "_ledger",
+        "http",
     )
     assert not any(token in source for token in forbidden)
 

@@ -15,7 +15,15 @@ from .interaction_fact_trigger_runtime import FactTriggerRunResult
 from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
 from .outcome_trigger_runtime import OutcomeTriggerRunResult
 from .expression_reconsideration_runtime import ExpressionReconsiderationRunResult
-from .schemas import ClockObservation, ExternalObservation, Observation, OutcomeObservation, RuntimeOutcome
+from .schemas import (
+    ClockObservation,
+    ExternalObservation,
+    Observation,
+    OutcomeObservation,
+    ProjectionRequest,
+    RuntimeOutcome,
+    WorldProjection,
+)
 
 
 class InboundIdentityResolver(Protocol):
@@ -96,6 +104,11 @@ class WorldTurnRuntime:
         """
 
         return await self._runtime.record_outcome_observation(observation)
+
+    def project(self, viewer: ProjectionRequest) -> WorldProjection:
+        """Read a capability-authorized viewer projection through the app seam."""
+
+        return self._runtime.project(viewer)
 
     async def drain_actions_once(self) -> ActionPumpResult | None:
         """Advance one already-authorized delivery without exposing the ledger.
