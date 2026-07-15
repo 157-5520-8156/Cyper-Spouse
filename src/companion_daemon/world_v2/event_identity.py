@@ -281,6 +281,7 @@ def _life_identity_components(
         if isinstance(process, dict) and process.get("process_kind") in {
             "npc_world_appraisal",
             "interaction_appraisal",
+            "affect_deliberation",
         }:
             attempts = process.get("attempt_ids")
             attempt_id = attempts[-1] if isinstance(attempts, list) and attempts else None

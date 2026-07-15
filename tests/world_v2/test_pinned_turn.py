@@ -558,6 +558,7 @@ async def test_runtime_materializes_audited_appraisal_without_a_second_model_cal
         interaction_appraisal_owner="worker:interaction-appraisal",
         appraisal_acceptance=acceptance,
         appraisal_acceptance_actor="worker:interaction-appraisal",
+        affect_deliberation_owner="worker:affect",
         appraisal_worker=AppraisalProposalWorker(
             compiler=AppraisalProposalCompiler(ledger=ledger),
             acceptance=acceptance,
@@ -571,6 +572,8 @@ async def test_runtime_materializes_audited_appraisal_without_a_second_model_cal
     projection = ledger.project()
     assert projection.appraisals[0].hypotheses[0].meaning == "disappointment"
     assert projection.trigger_processes[0].state == "terminal"
+    assert projection.trigger_processes[1].process_kind == "affect_deliberation"
+    assert projection.trigger_processes[1].state == "claimed"
 
     appraisal_event_ref = next(
         ref.event_id
@@ -611,9 +614,9 @@ async def test_runtime_materializes_audited_appraisal_without_a_second_model_cal
     ).process(
         world_id=WORLD,
         cursor=ProjectionCursor(
-            world_revision=appraisal_commit.world_revision,
-            deliberation_revision=appraisal_commit.deliberation_revision,
-            ledger_sequence=appraisal_commit.ledger_sequence,
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            ledger_sequence=projection.ledger_sequence,
         ),
         appraisal_event=appraisal_event,
     )

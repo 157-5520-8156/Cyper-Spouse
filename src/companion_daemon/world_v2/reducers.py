@@ -3994,7 +3994,11 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
     process = _model_from_payload(event, "process", TriggerProcess)
     if process.state != "claimed":
         raise ValueError("TriggerProcessClaimed requires claimed state")
-    if process.process_kind in {"npc_world_appraisal", "interaction_appraisal"}:
+    if process.process_kind in {
+        "npc_world_appraisal",
+        "interaction_appraisal",
+        "affect_deliberation",
+    }:
         if (
             state.logical_time is None
             or event.logical_time != state.logical_time
@@ -4029,7 +4033,11 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
                 )
             }
         )
-    if process.process_kind in {"npc_world_appraisal", "interaction_appraisal"}:
+    if process.process_kind in {
+        "npc_world_appraisal",
+        "interaction_appraisal",
+        "affect_deliberation",
+    }:
         raise ValueError("appraisal trigger must be opened before it is claimed")
     return state.model_copy(update={"trigger_processes": (*state.trigger_processes, process)})
 
@@ -4066,6 +4074,21 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             or process.trigger_ref != process.trigger_id
         ):
             raise ValueError("npc appraisal trigger requires a settled world event")
+    if process.process_kind == "affect_deliberation":
+        source = next(
+            (
+                item
+                for item in state.committed_world_event_refs
+                if item.event_id == process.source_evidence_ref
+            ),
+            None,
+        )
+        if (
+            source is None
+            or source.event_type != "AppraisalAccepted"
+            or process.trigger_ref != f"affect:{process.source_evidence_ref}"
+        ):
+            raise ValueError("affect trigger requires an accepted appraisal event")
     if any(item.trigger_id == process.trigger_id for item in state.trigger_processes):
         raise ValueError(f"trigger {process.trigger_id!r} already exists")
     return state.model_copy(update={"trigger_processes": (*state.trigger_processes, process)})

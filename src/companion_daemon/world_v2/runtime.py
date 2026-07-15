@@ -28,6 +28,7 @@ from .appraisal_acceptance_runtime import (
     AppraisalAcceptanceRuntime,
 )
 from .appraisal_proposal_worker import AppraisalProposalWorker
+from .affect_trigger import affect_deliberation_trigger_events
 from .affect_acceptance_runtime import AffectAcceptanceError, AffectAcceptanceRuntime
 from .schemas import (
     ClockObservation,
@@ -62,6 +63,7 @@ class WorldRuntime:
         appraisal_acceptance: AppraisalAcceptanceRuntime | None = None,
         appraisal_acceptance_actor: str | None = None,
         appraisal_worker: AppraisalProposalWorker | None = None,
+        affect_deliberation_owner: str | None = None,
         affect_acceptance: AffectAcceptanceRuntime | None = None,
         affect_acceptance_actor: str | None = None,
     ) -> None:
@@ -92,6 +94,9 @@ class WorldRuntime:
         if appraisal_worker is not None and interaction_appraisal_owner is None:
             raise ValueError("appraisal worker requires interaction appraisal triggers")
         self._appraisal_worker = appraisal_worker
+        if affect_deliberation_owner is not None and not affect_deliberation_owner:
+            raise ValueError("affect deliberation owner must not be empty")
+        self._affect_deliberation_owner = affect_deliberation_owner
         if (affect_acceptance is None) != (affect_acceptance_actor is None):
             raise ValueError("affect acceptance runtime and actor must be configured together")
         if affect_acceptance is not None and affect_acceptance.ledger is not self._ledger:
@@ -579,17 +584,44 @@ class WorldRuntime:
                             ledger_sequence=committed.ledger_sequence,
                         )
                         if self._ledger.blocks_event_loop:
-                            await asyncio.to_thread(
+                            work = await asyncio.to_thread(
                                 self._appraisal_worker.process,
                                 world_id=self._world_id,
                                 cursor=cursor,
                                 proposal_id=audited.proposal_id,
                             )
                         else:
-                            self._appraisal_worker.process(
+                            work = self._appraisal_worker.process(
                                 world_id=self._world_id,
                                 cursor=cursor,
                                 proposal_id=audited.proposal_id,
+                            )
+                        if (
+                            self._affect_deliberation_owner is not None
+                            and work.status == "accepted"
+                            and work.acceptance_commit is not None
+                        ):
+                            appraisal_event = next(
+                                (
+                                    located[0]
+                                    for event_id in work.acceptance_commit.event_ids
+                                    if (located := self._ledger.lookup_event_commit(event_id)) is not None
+                                    and located[0].event_type == "AppraisalAccepted"
+                                ),
+                                None,
+                            )
+                            if appraisal_event is None:
+                                raise RuntimeError("accepted appraisal has no durable mutation event")
+                            trigger_head = await self._project_for_write()
+                            committed = await self._commit(
+                                list(
+                                    affect_deliberation_trigger_events(
+                                        appraisal_event=appraisal_event,
+                                        owner_id=self._affect_deliberation_owner,
+                                    )
+                                ),
+                                world_revision=trigger_head.world_revision,
+                                deliberation_revision=trigger_head.deliberation_revision,
                             )
                     except (AppraisalAcceptanceError, ConcurrencyConflict, ValueError) as exc:
                         code = getattr(exc, "code", "appraisal.worker_failed")
