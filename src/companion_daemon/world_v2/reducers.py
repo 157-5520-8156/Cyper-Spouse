@@ -46,6 +46,7 @@ from .affect_acceptance_manifest import (
     AffectAcceptanceManifest,
     canonical_affect_acceptance_value_hash,
 )
+from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
 from .appraisal_reducers import (
     accept_appraisal,
     contradict_appraisal,
@@ -2794,6 +2795,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
                 MINIMAL_REPLY_MANIFEST_VERSION,
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
                 AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+                OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
         }
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -2807,6 +2809,8 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         return _appraisal_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == AFFECT_ACCEPTANCE_MANIFEST_VERSION:
         return _affect_acceptance_manifest_recorded(state, event)
+    if raw.get("manifest_version") == OUTCOME_ACCEPTANCE_MANIFEST_VERSION:
+        raise ValueError("outcome_acceptance.runtime_not_installed")
     proposal_id = raw.get("proposal_id")
     evaluated_world_revision = raw.get("evaluated_world_revision")
     if not isinstance(proposal_id, str) or not isinstance(evaluated_world_revision, int):

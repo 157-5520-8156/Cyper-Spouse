@@ -19,6 +19,7 @@ from .schemas import ProjectionCursor, WorldEvent
 from .appraisal_acceptance_manifest import APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
 from .affect_acceptance_manifest import AFFECT_ACCEPTANCE_MANIFEST_VERSION
 from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION
+from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
 
 
 class AcceptedLedgerBatchError(ValueError):
@@ -133,6 +134,7 @@ class AcceptedLedgerBatchIssuer:
                 MINIMAL_REPLY_MANIFEST_VERSION,
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
                 AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+                OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             }
         ):
             raise AcceptedLedgerBatchError("accepted batch must begin with an accepted manifest")

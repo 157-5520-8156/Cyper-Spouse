@@ -17,6 +17,7 @@ from .affect_acceptance_manifest import (
     AffectAcceptanceManifest,
     canonical_affect_acceptance_value_hash,
 )
+from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
 from .event_identity import domain_idempotency_key
 from .experience_events import ExperienceCommittedPayload
 from .fact_accepted_contracts import (
@@ -69,6 +70,7 @@ def validate_commit_batch(
         reject_minimal_reply_manifest_without_recorder(events)
         reject_appraisal_acceptance_manifest_without_recorder(events)
         reject_affect_acceptance_manifest_without_recorder(events)
+        reject_outcome_acceptance_manifest_without_recorder(events)
     _validate_deliberation_audit_transaction(events)
     _validate_acceptance_manifest_v2_batch(events)
     _validate_authorized_fact_manifest_v3_batch(
@@ -370,6 +372,7 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
                 MINIMAL_REPLY_MANIFEST_VERSION,
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
                 AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+                OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
         }
     ]
     if unknown:
@@ -848,6 +851,15 @@ def reject_affect_acceptance_manifest_without_recorder(events: Sequence[WorldEve
         for event in events
     ):
         raise ValueError("affect_acceptance.recorder_capability_required")
+
+
+def reject_outcome_acceptance_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == OUTCOME_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("outcome_acceptance.recorder_capability_required")
 
 
 def appraisal_trigger_identity(occurrence_id: str, result_id: str) -> str:

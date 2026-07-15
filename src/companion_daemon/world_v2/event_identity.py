@@ -11,6 +11,7 @@ from .typed_proposal_families import family_for_mutation, family_for_record
 from .appraisal_acceptance_manifest import APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
 from .affect_acceptance_manifest import AFFECT_ACCEPTANCE_MANIFEST_VERSION
 from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION
+from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
 
 
 def domain_idempotency_key(
@@ -57,6 +58,7 @@ def _life_identity_components(
             MINIMAL_REPLY_MANIFEST_VERSION,
             APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
             AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+            OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
         }
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -187,6 +189,16 @@ def _life_identity_components(
     if (
         event_type == "AcceptanceRecorded"
         and payload.get("manifest_version") == AFFECT_ACCEPTANCE_MANIFEST_VERSION
+    ):
+        return (
+            world_id,
+            payload.get("manifest_version"),
+            payload.get("acceptance_id"),
+            payload.get("manifest_hash"),
+        )
+    if (
+        event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version") == OUTCOME_ACCEPTANCE_MANIFEST_VERSION
     ):
         return (
             world_id,
