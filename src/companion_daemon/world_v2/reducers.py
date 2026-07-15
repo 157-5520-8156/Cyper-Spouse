@@ -51,6 +51,13 @@ from .outcome_acceptance_manifest import (
     OutcomeAcceptanceManifest,
 )
 from .media_v2 import (
+    MediaArtifact,
+    MediaInspectionRecord,
+    MediaPreview,
+    MediaRenderArtifactRecordedPayload,
+    MediaInspectionRecordedPayload,
+    MediaPreviewGeneratedPayload,
+    MediaPreviewFailedPayload,
     MediaNotRenderableRecordedPayload,
     MediaOpportunityFrozenPayload,
     MediaPlanRecordedPayload,
@@ -333,7 +340,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.26"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.27"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -499,6 +506,10 @@ class ReducerState(FrozenModel):
     media_opportunities: tuple[MediaOpportunity, ...] = ()
     media_plans: tuple[MediaPlan, ...] = ()
     media_unrenderable_opportunity_ids: tuple[str, ...] = ()
+    media_artifacts: tuple[MediaArtifact, ...] = ()
+    media_inspections: tuple[MediaInspectionRecord, ...] = ()
+    media_previews: tuple[MediaPreview, ...] = ()
+    media_failed_plan_ids: tuple[str, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()
@@ -1277,7 +1288,7 @@ class ReducerState(FrozenModel):
             ),
             "boundaries": tuple(item.model_dump(mode="json") for item in self.boundaries),
         }
-        if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+        if declared_reducer_bundle_version in {"world-v2-reducers.26", REDUCER_BUNDLE_VERSION}:
             payload["provider_media_grants"] = tuple(
                 item.model_dump(mode="json") for item in self.provider_media_grants
             )
@@ -1289,6 +1300,11 @@ class ReducerState(FrozenModel):
             )
             payload["media_plans"] = tuple(item.model_dump(mode="json") for item in self.media_plans)
             payload["media_unrenderable_opportunity_ids"] = self.media_unrenderable_opportunity_ids
+        if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            payload["media_artifacts"] = tuple(item.model_dump(mode="json") for item in self.media_artifacts)
+            payload["media_inspections"] = tuple(item.model_dump(mode="json") for item in self.media_inspections)
+            payload["media_previews"] = tuple(item.model_dump(mode="json") for item in self.media_previews)
+            payload["media_failed_plan_ids"] = self.media_failed_plan_ids
         if reducer_bundle_version in {
             "world-v2-reducers.10",
             "world-v2-reducers.11",
@@ -4415,6 +4431,67 @@ def _media_not_renderable_recorded(state: ReducerState, event: WorldEvent) -> Re
     })
 
 
+def _media_render_artifact_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = MediaRenderArtifactRecordedPayload.model_validate_json(event.payload_json)
+    artifact = payload.artifact
+    action = next((item for item in state.actions if item.action_id == payload.action_id), None)
+    receipt = next((item for item in state.execution_receipts if item.receipt_id == payload.receipt_id), None)
+    plan = next((item for item in state.media_plans if item.plan_id == artifact.plan_id), None)
+    if (
+        action is None or action.kind != "media_render" or action.intent_ref != artifact.plan_id
+        or action.state != "delivered" or receipt is None or receipt.action_id != action.action_id
+        or receipt.observed_state != "delivered" or not receipt.is_terminal or plan is None
+        or any(item.artifact_id == artifact.artifact_id or item.plan_id == artifact.plan_id for item in state.media_artifacts)
+    ):
+        raise ValueError("MediaRenderArtifactRecorded is not bound to one delivered render Action")
+    return state.model_copy(update={"media_artifacts": (*state.media_artifacts, artifact)})
+
+
+def _media_inspection_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = MediaInspectionRecordedPayload.model_validate_json(event.payload_json)
+    inspection = payload.inspection
+    action = next((item for item in state.actions if item.action_id == payload.action_id), None)
+    receipt = next((item for item in state.execution_receipts if item.receipt_id == payload.receipt_id), None)
+    artifact = next((item for item in state.media_artifacts if item.artifact_id == inspection.artifact_id), None)
+    if (
+        action is None or action.kind != "media_inspection" or action.intent_ref != inspection.artifact_id
+        or action.state != "delivered" or receipt is None or receipt.action_id != action.action_id
+        or receipt.observed_state != "delivered" or not receipt.is_terminal or artifact is None
+        or inspection.plan_id != artifact.plan_id or inspection.inspection_action_id != action.action_id
+        or any(item.inspection_id == inspection.inspection_id or item.artifact_id == inspection.artifact_id for item in state.media_inspections)
+    ):
+        raise ValueError("MediaInspectionRecorded is not bound to one delivered inspection Action")
+    return state.model_copy(update={"media_inspections": (*state.media_inspections, inspection)})
+
+
+def _media_preview_generated(state: ReducerState, event: WorldEvent) -> ReducerState:
+    preview = MediaPreviewGeneratedPayload.model_validate_json(event.payload_json).preview
+    inspection = next((item for item in state.media_inspections if item.inspection_id == preview.inspection_id), None)
+    opportunity = next((item for item in state.media_opportunities if item.opportunity_id == next((plan.opportunity_id for plan in state.media_plans if plan.plan_id == preview.plan_id), None)), None)
+    if (
+        inspection is None or not inspection.passed or inspection.plan_id != preview.plan_id
+        or inspection.artifact_id != preview.artifact_id or opportunity is None
+        or opportunity.delivery_mode != "preview" or preview.delivery_mode != "preview"
+        or preview.recipient_ref != opportunity.recipient_ref
+        or any(item.preview_id == preview.preview_id or item.inspection_id == preview.inspection_id for item in state.media_previews)
+    ):
+        raise ValueError("MediaPreviewGenerated may only materialize an inspected preview; it is never delivery")
+    return state.model_copy(update={"media_previews": (*state.media_previews, preview)})
+
+
+def _media_preview_failed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = MediaPreviewFailedPayload.model_validate_json(event.payload_json)
+    if payload.plan_id in state.media_failed_plan_ids:
+        raise ValueError("media preview failure is already recorded")
+    if not any(item.plan_id == payload.plan_id for item in state.media_plans):
+        raise ValueError("media preview failure requires frozen plan")
+    if payload.inspection_id is not None:
+        inspection = next((item for item in state.media_inspections if item.inspection_id == payload.inspection_id), None)
+        if inspection is None or inspection.plan_id != payload.plan_id or inspection.passed:
+            raise ValueError("media preview failure does not bind a failed inspection")
+    return state.model_copy(update={"media_failed_plan_ids": (*state.media_failed_plan_ids, payload.plan_id)})
+
+
 def _provider_media_grant_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     payload = ProviderMediaGrantRecordedPayload.model_validate_json(event.payload_json)
     grant = payload.grant
@@ -6959,6 +7036,10 @@ _EVENTS = {
         EventDefinition("MediaOpportunityFrozen", RevisionClass.WORLD, _media_opportunity_frozen),
         EventDefinition("MediaPlanRecorded", RevisionClass.WORLD, _media_plan_recorded),
         EventDefinition("MediaNotRenderableRecorded", RevisionClass.WORLD, _media_not_renderable_recorded),
+        EventDefinition("MediaRenderArtifactRecorded", RevisionClass.WORLD, _media_render_artifact_recorded),
+        EventDefinition("MediaInspectionRecorded", RevisionClass.WORLD, _media_inspection_recorded),
+        EventDefinition("MediaPreviewGenerated", RevisionClass.WORLD, _media_preview_generated),
+        EventDefinition("MediaPreviewFailed", RevisionClass.WORLD, _media_preview_failed),
         EventDefinition("ObservationRecorded", RevisionClass.WORLD, _observation_recorded),
         EventDefinition(
             "OperatorObservationRecorded",
@@ -7394,6 +7475,10 @@ def make_projection(
         media_opportunities=state.media_opportunities,
         media_plans=state.media_plans,
         media_unrenderable_opportunity_ids=state.media_unrenderable_opportunity_ids,
+        media_artifacts=state.media_artifacts,
+        media_inspections=state.media_inspections,
+        media_previews=state.media_previews,
+        media_failed_plan_ids=state.media_failed_plan_ids,
         budget_accounts=state.budget_accounts,
         budget_reservations=state.budget_reservations,
         trigger_processes=state.trigger_processes,

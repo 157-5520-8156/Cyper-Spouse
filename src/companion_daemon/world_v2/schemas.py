@@ -42,7 +42,7 @@ from .resource_authority_schemas import (
 from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditProjection
 from .acceptance_manifest import AcceptanceManifestRefV2
 from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
-from .media_v2 import MediaOpportunity, MediaPlan, PhotoCandidate
+from .media_v2 import MediaArtifact, MediaInspectionRecord, MediaOpportunity, MediaPlan, MediaPreview, PhotoCandidate
 
 
 SchemaVersion = Literal["world-v2.1"]
@@ -4160,6 +4160,10 @@ class InternalWorldSnapshot(FrozenModel):
     media_opportunities: tuple[MediaOpportunity, ...] = ()
     media_plans: tuple[MediaPlan, ...] = ()
     media_unrenderable_opportunity_ids: tuple[str, ...] = ()
+    media_artifacts: tuple[MediaArtifact, ...] = ()
+    media_inspections: tuple[MediaInspectionRecord, ...] = ()
+    media_previews: tuple[MediaPreview, ...] = ()
+    media_failed_plan_ids: tuple[str, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     pending_external_observations: tuple[ExternalObservation, ...] = ()
@@ -4244,7 +4248,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.26"
+    reducer_bundle_version: str = "world-v2-reducers.27"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -4290,6 +4294,10 @@ class LedgerProjection(FrozenModel):
     media_opportunities: tuple[MediaOpportunity, ...] = ()
     media_plans: tuple[MediaPlan, ...] = ()
     media_unrenderable_opportunity_ids: tuple[str, ...] = ()
+    media_artifacts: tuple[MediaArtifact, ...] = ()
+    media_inspections: tuple[MediaInspectionRecord, ...] = ()
+    media_previews: tuple[MediaPreview, ...] = ()
+    media_failed_plan_ids: tuple[str, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()

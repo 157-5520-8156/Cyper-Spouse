@@ -1,0 +1,286 @@
+"""Render/inspection continuation for Media v2.
+
+This is intentionally a narrow ledger adapter.  The image machine receives
+only a verified frozen plan sidecar and returns opaque artifact/inspection
+bytes; it never obtains a World projection or a ledger writer.  The runtime
+materializes those bytes *after* the durable provider Action receipt, and
+only emits a ``MediaPreviewGenerated`` record.  There is no delivery event in
+this lane.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+import base64
+import json
+from typing import Protocol
+
+from .event_identity import domain_idempotency_key
+from .ledger import LedgerPort
+from .media_v2 import (
+    ImmutableMediaPayloadStore, MediaArtifact, MediaInspectionRecord,
+    MediaInspectionRecordedPayload, MediaPreview, MediaPreviewFailedPayload,
+    MediaPreviewGeneratedPayload, MediaRenderArtifactRecordedPayload,
+    MediaPlan, StoredMediaPayload, media_digest,
+)
+from .schemas import Action, BudgetReservation, ProjectionCursor, ProviderMediaGrantBinding, WorldEvent
+
+
+class MediaExecutionError(ValueError):
+    pass
+
+
+class MediaExecutionAdapter(Protocol):
+    """Public seam implemented by an ``event_media`` bridge.
+
+    The bridge is deliberately given exact immutable bytes rather than a
+    ``LedgerProjection``.  Artifact and inspection payloads are returned to
+    the runtime, which hashes/stores them before it emits their descriptors.
+    """
+
+    async def render(self, *, plan_payload: StoredMediaPayload, request_id: str) -> StoredMediaPayload: ...
+
+    async def inspect(
+        self, *, plan_payload: StoredMediaPayload, artifact_payload: StoredMediaPayload,
+        request_id: str,
+    ) -> tuple[bool, str, str | None, StoredMediaPayload]: ...
+
+
+class EventMediaExecutionAdapter:
+    """Small bridge to the legacy image machine's public ``MediaRenderer``.
+
+    It neither imports a World v2 projection nor has a ledger reference.  The
+    planned JSON is parsed through ``event_media.MediaPlan.from_payload`` and
+    the renderer is invoked exactly with that frozen plan.  Its inspection is
+    cached only between the paired render/inspection provider calls; durable
+    recovery remains the responsibility of the provider transport/sidecar.
+    """
+
+    def __init__(self, *, renderer) -> None:
+        self._renderer = renderer
+        self._inspection_by_request: dict[str, object] = {}
+
+    async def render(self, *, plan_payload: StoredMediaPayload, request_id: str) -> StoredMediaPayload:
+        from companion_daemon.event_media import MediaPlan as LegacyMediaPlan, MediaRenderFailure
+
+        if plan_payload.content_type != "application/vnd.world-v2.media-plan+json":
+            raise MediaExecutionError("legacy renderer requires a frozen media-plan sidecar")
+        try:
+            plan = LegacyMediaPlan.from_payload(json.loads(plan_payload.body))
+        except Exception as exc:
+            raise MediaExecutionError("frozen MediaPlan bytes are not accepted by event_media") from exc
+        result = await self._renderer.render(plan)
+        if isinstance(result, MediaRenderFailure):
+            raise MediaExecutionError("media_render_failed:" + result.reason)
+        image_bytes = result.path.read_bytes()
+        body = json.dumps({
+            "encoding": "base64", "artifact_hash": result.artifact_hash,
+            "bytes": base64.b64encode(image_bytes).decode("ascii"),
+        }, sort_keys=True, separators=(",", ":"))
+        record = StoredMediaPayload(
+            payload_ref="sidecar:media-artifact:" + media_digest({"request": request_id, "hash": result.artifact_hash}),
+            payload_hash="sha256:" + media_digest(body),
+            content_type="application/vnd.world-v2.media-artifact+json", body=body,
+        )
+        self._inspection_by_request[request_id] = result.inspection
+        return record
+
+    async def inspect(
+        self, *, plan_payload: StoredMediaPayload, artifact_payload: StoredMediaPayload,
+        request_id: str,
+    ) -> tuple[bool, str, str | None, StoredMediaPayload]:
+        inspection = self._inspection_by_request.pop(request_id, None)
+        if inspection is None:
+            raise MediaExecutionError("inspection result unavailable for recovery; query provider receipt")
+        payload = inspection.to_payload()
+        body = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        record = StoredMediaPayload(
+            payload_ref="sidecar:media-inspection:" + media_digest({"request": request_id, "artifact": artifact_payload.payload_hash}),
+            payload_hash="sha256:" + media_digest(body),
+            content_type="application/vnd.world-v2.media-inspection+json", body=body,
+        )
+        return bool(inspection.passed), str(inspection.reason), inspection.observed_summary, record
+
+
+def _event_id(role: str, stable: str) -> str:
+    return "event:media-v2:" + role + ":" + media_digest({"role": role, "stable": stable})
+
+
+def _idempotency(event_type: str, world_id: str, payload: dict[str, object]) -> str:
+    value = domain_idempotency_key(event_type=event_type, world_id=world_id, payload=payload)
+    if value is None:
+        raise MediaExecutionError(f"missing event identity for {event_type}")
+    return value
+
+
+class MediaExecutionRuntime:
+    """Issue render/inspection Actions and materialize their terminal outputs.
+
+    ActionPump owns provider dispatch and generic receipts.  A host calls the
+    idempotent ``record_*`` methods after the matching Action reaches
+    ``delivered``.  This makes crash recovery a re-read of immutable action
+    ids and sidecar refs, never a second semantic planning decision.
+    """
+
+    def __init__(self, *, ledger: LedgerPort, sidecar: ImmutableMediaPayloadStore) -> None:
+        self._ledger, self._sidecar = ledger, sidecar
+
+    @staticmethod
+    def _cursor(projection) -> ProjectionCursor:
+        return ProjectionCursor(world_revision=projection.world_revision, deliberation_revision=projection.deliberation_revision, ledger_sequence=projection.ledger_sequence)
+
+    def authorize_render(
+        self, *, plan_id: str, actor: str, grant: ProviderMediaGrantBinding, account_id: str,
+        amount_limit: int, logical_time: datetime, trace_id: str, correlation_id: str,
+    ):
+        projection = self._ledger.project()
+        plan = next((item for item in projection.media_plans if item.plan_id == plan_id), None)
+        if plan is None:
+            raise MediaExecutionError("render requires a frozen MediaPlan")
+        if plan.opportunity_id in projection.media_unrenderable_opportunity_ids:
+            raise MediaExecutionError("unrenderable opportunity cannot render")
+        existing = next((item for item in projection.actions if item.intent_ref == plan_id and item.kind == "media_render"), None)
+        if existing is not None:
+            return existing
+        continuation = "media-continuation:" + media_digest({"plan_id": plan.plan_id, "step": "plan_to_render"})
+        if not any(item.trigger_id == continuation and item.state in {"open", "claimed"} for item in projection.trigger_processes):
+            raise MediaExecutionError("render requires the exact open continuation of its frozen plan")
+        payload = self._require_plan_payload(plan)
+        action_id = "action:media-render:" + media_digest({"world": self._ledger.world_id, "plan": plan_id})
+        reservation = BudgetReservation(
+            reservation_id="reservation:media-render:" + media_digest({"world": self._ledger.world_id, "plan": plan_id}),
+            account_id=account_id, action_id=action_id, category="image", amount_limit=amount_limit,
+        )
+        action = Action(schema_version="world-v2.1", action_id=action_id, world_id=self._ledger.world_id,
+            logical_time=logical_time, created_at=logical_time, trace_id=trace_id,
+            causation_id=_event_id("MediaPlanRecorded", plan_id), correlation_id=correlation_id,
+            kind="media_render", layer="media_action", intent_ref=plan_id, actor=actor,
+            target="provider:media-renderer", payload_ref=payload.payload_ref, payload_hash=payload.payload_hash,
+            provider_media_grant=grant, idempotency_key="media-render:" + plan_id,
+            budget_reservation_id=reservation.reservation_id, state="authorized", recovery_policy="effect_once")
+        items = (("BudgetReserved", {"reservation": reservation.model_dump(mode="json")}, reservation.reservation_id),
+                 ("ActionAuthorized", {"action": action.model_dump(mode="json")}, action_id))
+        events = self._events(items=items, actor=actor, logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id, causation_id=action.causation_id)
+        self._ledger.commit_at_cursor(events, expected_cursor=self._cursor(projection), commit_id="commit:media-render-authorize:" + media_digest([event.event_id for event in events]))
+        return action
+
+    def record_rendered_artifact(self, *, action_id: str, receipt_id: str, artifact_payload: StoredMediaPayload, logical_time: datetime) -> MediaArtifact:
+        projection = self._ledger.project()
+        action, plan = self._action_and_plan(projection, action_id, "media_render")
+        existing = next((item for item in projection.media_artifacts if item.plan_id == plan.plan_id), None)
+        if existing is not None:
+            return existing
+        if action.state != "delivered" or not any(item.receipt_id == receipt_id and item.action_id == action_id for item in projection.execution_receipts):
+            raise MediaExecutionError("render artifact requires delivered Action and exact receipt")
+        self._sidecar.put_if_absent(artifact_payload)
+        artifact = MediaArtifact(artifact_id="artifact:media:" + media_digest({"plan": plan.plan_id, "ref": artifact_payload.payload_ref}),
+            plan_id=plan.plan_id, render_action_id=action_id, artifact_ref=artifact_payload.payload_ref,
+            artifact_hash=artifact_payload.payload_hash, media_type=artifact_payload.content_type, attempts=1)
+        payload = MediaRenderArtifactRecordedPayload(action_id=action_id, receipt_id=receipt_id, artifact=artifact).model_dump(mode="json")
+        self._commit_one("MediaRenderArtifactRecorded", payload, artifact.artifact_id, logical_time, action.trace_id, action.correlation_id, action_id)
+        return artifact
+
+    def record_render_failure(self, *, action_id: str, reason_code: str, logical_time: datetime) -> None:
+        """Close the preview lane after a terminal render failure.
+
+        This is intentionally not an attempt to select a new opportunity or
+        retry with changed semantics.  Transient retry is owned by the frozen
+        provider request; once ActionPump records a terminal non-delivery the
+        v2 opportunity is visibly failed and effect-once recovery joins it.
+        """
+        projection = self._ledger.project()
+        action, plan = self._action_and_plan(projection, action_id, "media_render")
+        if plan.plan_id in projection.media_failed_plan_ids:
+            return
+        if action.state not in {"failed", "unknown", "expired", "cancelled"}:
+            raise MediaExecutionError("render failure requires a terminal non-delivered Action")
+        payload = MediaPreviewFailedPayload(plan_id=plan.plan_id, reason_code=reason_code).model_dump(mode="json")
+        self._commit_one("MediaPreviewFailed", payload, plan.plan_id, logical_time, action.trace_id, action.correlation_id, action_id)
+
+    def authorize_inspection(self, *, artifact_id: str, actor: str, grant: ProviderMediaGrantBinding, account_id: str, amount_limit: int, logical_time: datetime, trace_id: str, correlation_id: str):
+        projection = self._ledger.project()
+        artifact = next((item for item in projection.media_artifacts if item.artifact_id == artifact_id), None)
+        if artifact is None:
+            raise MediaExecutionError("inspection requires immutable artifact")
+        existing = next((item for item in projection.actions if item.intent_ref == artifact_id and item.kind == "media_inspection"), None)
+        if existing is not None:
+            return existing
+        self._require_payload(artifact.artifact_ref, artifact.artifact_hash)
+        action_id = "action:media-inspection:" + media_digest({"world": self._ledger.world_id, "artifact": artifact_id})
+        reservation = BudgetReservation(reservation_id="reservation:media-inspection:" + media_digest({"world": self._ledger.world_id, "artifact": artifact_id}), account_id=account_id, action_id=action_id, category="image", amount_limit=amount_limit)
+        action = Action(schema_version="world-v2.1", action_id=action_id, world_id=self._ledger.world_id, logical_time=logical_time, created_at=logical_time, trace_id=trace_id, causation_id=_event_id("MediaRenderArtifactRecorded", artifact_id), correlation_id=correlation_id, kind="media_inspection", layer="media_action", intent_ref=artifact_id, actor=actor, target="provider:media-inspector", payload_ref=artifact.artifact_ref, payload_hash=artifact.artifact_hash, provider_media_grant=grant, idempotency_key="media-inspection:" + artifact_id, budget_reservation_id=reservation.reservation_id, state="authorized", recovery_policy="effect_once")
+        events = self._events(items=(("BudgetReserved", {"reservation": reservation.model_dump(mode="json")}, reservation.reservation_id), ("ActionAuthorized", {"action": action.model_dump(mode="json")}, action_id)), actor=actor, logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id, causation_id=action.causation_id)
+        self._ledger.commit_at_cursor(events, expected_cursor=self._cursor(projection), commit_id="commit:media-inspection-authorize:" + media_digest([event.event_id for event in events]))
+        return action
+
+    def record_inspection(self, *, action_id: str, receipt_id: str, passed: bool, reason_code: str, observed_summary: str | None, inspection_payload: StoredMediaPayload, logical_time: datetime) -> MediaInspectionRecord:
+        projection = self._ledger.project()
+        action = next((item for item in projection.actions if item.action_id == action_id), None)
+        artifact = next((item for item in projection.media_artifacts if item.artifact_id == (action.intent_ref if action else None)), None)
+        if action is None or action.kind != "media_inspection" or artifact is None:
+            raise MediaExecutionError("inspection Action or artifact is unavailable")
+        prior = next((item for item in projection.media_inspections if item.artifact_id == artifact.artifact_id), None)
+        if prior is not None:
+            return prior
+        if action.state != "delivered" or not any(item.receipt_id == receipt_id and item.action_id == action_id for item in projection.execution_receipts):
+            raise MediaExecutionError("inspection record requires delivered Action and exact receipt")
+        self._sidecar.put_if_absent(inspection_payload)
+        record = MediaInspectionRecord(inspection_id="inspection:media:" + media_digest({"artifact": artifact.artifact_id}), plan_id=artifact.plan_id, artifact_id=artifact.artifact_id, inspection_action_id=action_id, passed=passed, reason_code=reason_code, observed_summary=observed_summary, inspection_payload_ref=inspection_payload.payload_ref, inspection_payload_hash=inspection_payload.payload_hash)
+        payload = MediaInspectionRecordedPayload(action_id=action_id, receipt_id=receipt_id, inspection=record).model_dump(mode="json")
+        self._commit_one("MediaInspectionRecorded", payload, record.inspection_id, logical_time, action.trace_id, action.correlation_id, action_id)
+        return record
+
+    def materialize_preview(self, *, inspection_id: str, logical_time: datetime, trace_id: str, correlation_id: str):
+        projection = self._ledger.project()
+        inspection = next((item for item in projection.media_inspections if item.inspection_id == inspection_id), None)
+        if inspection is None:
+            raise MediaExecutionError("preview requires inspection")
+        existing = next((item for item in projection.media_previews if item.inspection_id == inspection_id), None)
+        if existing is not None:
+            return existing
+        if inspection.plan_id in projection.media_failed_plan_ids:
+            return None
+        if not inspection.passed:
+            payload = MediaPreviewFailedPayload(plan_id=inspection.plan_id, artifact_id=inspection.artifact_id, inspection_id=inspection_id, reason_code=inspection.reason_code).model_dump(mode="json")
+            self._commit_one("MediaPreviewFailed", payload, inspection.plan_id, logical_time, trace_id, correlation_id, inspection_id)
+            return None
+        plan = next((item for item in projection.media_plans if item.plan_id == inspection.plan_id), None)
+        if plan is None:
+            raise MediaExecutionError("inspection plan is unavailable")
+        opportunity = next((item for item in projection.media_opportunities if item.opportunity_id == plan.opportunity_id), None)
+        if opportunity is None or opportunity.delivery_mode != "preview":
+            raise MediaExecutionError("Media v2 may materialize previews only; delivery is forbidden")
+        preview = MediaPreview(preview_id="preview:media:" + media_digest({"inspection": inspection_id}), plan_id=plan.plan_id, artifact_id=inspection.artifact_id, inspection_id=inspection_id, recipient_ref=opportunity.recipient_ref)
+        self._commit_one("MediaPreviewGenerated", MediaPreviewGeneratedPayload(preview=preview).model_dump(mode="json"), preview.preview_id, logical_time, trace_id, correlation_id, inspection_id)
+        return preview
+
+    def _require_plan_payload(self, plan: MediaPlan) -> StoredMediaPayload:
+        return self._require_payload(plan.plan_payload_ref, plan.plan_payload_hash)
+
+    def _require_payload(self, ref: str, expected_hash: str) -> StoredMediaPayload:
+        record = self._sidecar.read_exact(payload_ref=ref)
+        if record is None or record.payload_hash != expected_hash:
+            raise MediaExecutionError("exact immutable media sidecar payload is unavailable")
+        return record
+
+    @staticmethod
+    def _action_and_plan(projection, action_id: str, kind: str) -> tuple[Action, MediaPlan]:
+        action = next((item for item in projection.actions if item.action_id == action_id), None)
+        plan = next((item for item in projection.media_plans if item.plan_id == (action.intent_ref if action else None)), None)
+        if action is None or action.kind != kind or plan is None:
+            raise MediaExecutionError("media Action or plan is unavailable")
+        return action, plan
+
+    def _events(self, *, items, actor: str, logical_time: datetime, trace_id: str, correlation_id: str, causation_id: str) -> tuple[WorldEvent, ...]:
+        events: list[WorldEvent] = []
+        for event_type, payload, stable in items:
+            events.append(WorldEvent.from_payload(schema_version="world-v2.1", event_id=_event_id(event_type, stable), event_type=event_type, world_id=self._ledger.world_id, logical_time=logical_time, created_at=logical_time, actor=actor, source="world-v2:media-execution", trace_id=trace_id, causation_id=events[-1].event_id if events else causation_id, correlation_id=correlation_id, idempotency_key=_idempotency(event_type, self._ledger.world_id, payload), payload=payload))
+        return tuple(events)
+
+    def _commit_one(self, event_type: str, payload: dict[str, object], stable: str, logical_time: datetime, trace_id: str, correlation_id: str, causation_id: str) -> None:
+        projection = self._ledger.project()
+        event = self._events(items=((event_type, payload, stable),), actor="system:media-execution", logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id, causation_id=causation_id)[0]
+        self._ledger.commit_at_cursor((event,), expected_cursor=self._cursor(projection), commit_id="commit:media-execution:" + event.event_id)
+
+
+__all__ = ["EventMediaExecutionAdapter", "MediaExecutionAdapter", "MediaExecutionError", "MediaExecutionRuntime"]

@@ -76,6 +76,21 @@ class MediaPlanningRuntime:
             or any(committed_hashes.get(item.event_ref) != item.payload_hash for item in snapshot.source_events)
         ):
             raise MediaPlanningError("frozen snapshot is not exactly bound to committed source evidence")
+        # The v5 image machine reads these richer values solely from the
+        # hashed sidecar.  Refuse a partial/mismatched snapshot rather than
+        # letting a later worker fill it from mutable projection state.
+        complete = snapshot.complete_candidate
+        if complete is not None and complete.get("candidate_id") not in {None, candidate.candidate_id}:
+            raise MediaPlanningError("complete candidate snapshot is not bound to candidate")
+        recipient = snapshot.recipient_context
+        if opportunity.recipient_ref is not None:
+            if recipient is None or recipient.get("recipient_ref") != opportunity.recipient_ref:
+                raise MediaPlanningError("private/media recipient must be frozen in snapshot")
+        elif recipient is not None and recipient.get("recipient_ref") is not None:
+            raise MediaPlanningError("snapshot recipient must match opportunity recipient")
+        for label, value in (("location", snapshot.location), ("visible_physical_state", snapshot.visible_physical_state)):
+            if value is not None and not isinstance(value, dict):
+                raise MediaPlanningError(f"frozen snapshot {label} must be an object")
         self._sidecar.put_if_absent(StoredMediaPayload(
             payload_ref=opportunity.event_snapshot_ref, payload_hash=opportunity.event_snapshot_hash,
             content_type="application/vnd.world-v2.media-opportunity+json", body=snapshot_body,

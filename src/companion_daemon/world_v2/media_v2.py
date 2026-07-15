@@ -67,6 +67,14 @@ class FrozenMediaEvidenceSnapshot(FrozenModel):
     """
 
     source_events: tuple[MediaEvidenceSource, ...] = Field(min_length=1, max_length=32)
+    # These values deliberately remain evidence, not a prompt vocabulary.  A
+    # media adapter may consume them only after verifying this exact sidecar
+    # hash.  Keeping the complete selected candidate here prevents a later
+    # planner/render worker from reading the mutable world projection.
+    complete_candidate: dict[str, object] | None = None
+    location: dict[str, object] | None = None
+    visible_physical_state: dict[str, object] | None = None
+    recipient_context: dict[str, object] | None = None
 
     @model_validator(mode="after")
     def source_events_are_canonical(self) -> "FrozenMediaEvidenceSnapshot":
@@ -74,6 +82,66 @@ class FrozenMediaEvidenceSnapshot(FrozenModel):
         if refs != tuple(sorted(set(refs))):
             raise ValueError("media evidence snapshot source events must be sorted and unique")
         return self
+
+
+class MediaArtifact(FrozenModel):
+    """An immutable rendered/reused file, before any viewer-facing preview."""
+
+    artifact_id: str = Field(min_length=1, max_length=256)
+    plan_id: str = Field(min_length=1, max_length=256)
+    render_action_id: str = Field(min_length=1, max_length=256)
+    artifact_ref: str = Field(min_length=1, max_length=1024)
+    artifact_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    media_type: str = Field(default="image/png", min_length=1, max_length=128)
+    attempts: int = Field(ge=0, le=2)
+
+
+class MediaInspectionRecord(FrozenModel):
+    """Bounded inspection output.  World state never stores the image prompt."""
+
+    inspection_id: str = Field(min_length=1, max_length=256)
+    plan_id: str = Field(min_length=1, max_length=256)
+    artifact_id: str = Field(min_length=1, max_length=256)
+    inspection_action_id: str = Field(min_length=1, max_length=256)
+    passed: bool
+    reason_code: str = Field(min_length=1, max_length=256)
+    observed_summary: str | None = Field(default=None, max_length=4_000)
+    inspection_payload_ref: str = Field(min_length=1, max_length=1024)
+    inspection_payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+
+class MediaPreview(FrozenModel):
+    """A preview is an operator/viewer artifact, explicitly not a delivery."""
+
+    preview_id: str = Field(min_length=1, max_length=256)
+    plan_id: str = Field(min_length=1, max_length=256)
+    artifact_id: str = Field(min_length=1, max_length=256)
+    inspection_id: str = Field(min_length=1, max_length=256)
+    recipient_ref: str | None = Field(default=None, min_length=1, max_length=256)
+    delivery_mode: Literal["preview"] = "preview"
+
+
+class MediaRenderArtifactRecordedPayload(FrozenModel):
+    action_id: str = Field(min_length=1)
+    receipt_id: str = Field(min_length=1)
+    artifact: MediaArtifact
+
+
+class MediaInspectionRecordedPayload(FrozenModel):
+    action_id: str = Field(min_length=1)
+    receipt_id: str = Field(min_length=1)
+    inspection: MediaInspectionRecord
+
+
+class MediaPreviewGeneratedPayload(FrozenModel):
+    preview: MediaPreview
+
+
+class MediaPreviewFailedPayload(FrozenModel):
+    plan_id: str = Field(min_length=1)
+    artifact_id: str | None = Field(default=None, min_length=1)
+    inspection_id: str | None = Field(default=None, min_length=1)
+    reason_code: str = Field(min_length=1, max_length=256)
 
 
 class MediaOpportunity(FrozenModel):
@@ -161,6 +229,10 @@ MEDIA_V2_PAYLOAD_MODELS = {
     "MediaOpportunityFrozen": MediaOpportunityFrozenPayload,
     "MediaPlanRecorded": MediaPlanRecordedPayload,
     "MediaNotRenderableRecorded": MediaNotRenderableRecordedPayload,
+    "MediaRenderArtifactRecorded": MediaRenderArtifactRecordedPayload,
+    "MediaInspectionRecorded": MediaInspectionRecordedPayload,
+    "MediaPreviewGenerated": MediaPreviewGeneratedPayload,
+    "MediaPreviewFailed": MediaPreviewFailedPayload,
 }
 
 
@@ -266,8 +338,8 @@ def continuation_trigger_id(plan: MediaPlan) -> str:
 
 
 __all__ = [
-    "MEDIA_V2_PAYLOAD_MODELS", "PhotoCandidate", "MediaEvidenceSource", "FrozenMediaEvidenceSnapshot", "MediaOpportunity", "MediaPlan", "MediaNotRenderable",
-    "PhotoCandidateOpenedPayload", "MediaOpportunityFrozenPayload", "MediaPlanRecordedPayload", "MediaNotRenderableRecordedPayload",
+    "MEDIA_V2_PAYLOAD_MODELS", "PhotoCandidate", "MediaEvidenceSource", "FrozenMediaEvidenceSnapshot", "MediaOpportunity", "MediaPlan", "MediaNotRenderable", "MediaArtifact", "MediaInspectionRecord", "MediaPreview",
+    "PhotoCandidateOpenedPayload", "MediaOpportunityFrozenPayload", "MediaPlanRecordedPayload", "MediaNotRenderableRecordedPayload", "MediaRenderArtifactRecordedPayload", "MediaInspectionRecordedPayload", "MediaPreviewGeneratedPayload", "MediaPreviewFailedPayload",
     "StoredMediaPayload", "ImmutableMediaPayloadStore", "InMemoryImmutableMediaPayloadStore", "SQLiteImmutableMediaPayloadStore",
     "MediaPlanner", "MediaPlanningResult", "media_digest", "media_payload_hash", "planning_request_id", "continuation_trigger_id",
 ]

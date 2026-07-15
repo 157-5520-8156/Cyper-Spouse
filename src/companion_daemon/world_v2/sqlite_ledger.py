@@ -108,6 +108,7 @@ _V20_ONLY_STATE_KEYS = frozenset(
 _V24_ONLY_STATE_KEYS = frozenset({"expression_plan_manifests"})
 _V25_ONLY_STATE_KEYS = frozenset({"provider_media_grants"})
 _V26_ONLY_STATE_KEYS = frozenset({"photo_candidates", "media_opportunities", "media_plans", "media_unrenderable_opportunity_ids"})
+_V27_ONLY_STATE_KEYS = frozenset({"media_artifacts", "media_inspections", "media_previews", "media_failed_plan_ids"})
 _PREFIX_PROOF_VERSION = "world-v2-prefix-proof.2"
 _PREVIOUS_PREFIX_PROOF_VERSION = "world-v2-prefix-proof.1"
 _PREFIX_BITS_BYTES = 32
@@ -1367,6 +1368,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.23",
                 "world-v2-reducers.24",
                 "world-v2-reducers.25",
+                "world-v2-reducers.26",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -1475,10 +1477,15 @@ class SQLiteWorldLedger:
             if not isinstance(raw_state, dict):
                 raise ValueError("legacy state is not an object")
             raw_state = dict(raw_state)
+            injected_v27_keys = tuple(
+                sorted(key for key in _V27_ONLY_STATE_KEYS.intersection(raw_state) if raw_state.get(key) not in (None, [], {}))
+            )
+            if injected_v27_keys and reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+                raise ValueError(f"legacy head cannot claim v27 media execution fields {injected_v27_keys!r}")
             injected_v26_keys = tuple(
                 sorted(key for key in _V26_ONLY_STATE_KEYS.intersection(raw_state) if raw_state.get(key) not in (None, [], {}))
             )
-            if injected_v26_keys and reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+            if injected_v26_keys and reducer_bundle_version not in {"world-v2-reducers.26", REDUCER_BUNDLE_VERSION}:
                 raise ValueError(f"legacy head cannot claim v26 media fields {injected_v26_keys!r}")
             injected_v25_keys = tuple(
                 sorted(

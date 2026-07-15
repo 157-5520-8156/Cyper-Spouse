@@ -10,6 +10,13 @@ from companion_daemon.world_v2.media_v2 import (
     MediaOpportunityFrozenPayload,
     MediaPlan,
     MediaPlanRecordedPayload,
+    MediaArtifact,
+    MediaInspectionRecord,
+    MediaPreview,
+    MediaRenderArtifactRecordedPayload,
+    MediaInspectionRecordedPayload,
+    MediaPreviewGeneratedPayload,
+    MediaPreviewFailedPayload,
     PhotoCandidate,
     FrozenMediaEvidenceSnapshot,
     MediaEvidenceSource,
@@ -165,3 +172,30 @@ def test_media_freeze_replays_across_sqlite_restart_and_sidecar_ref_cannot_rebin
     assert reopened.rebuild() == expected
     reopened.close()
     store.close()
+
+
+def test_render_inspection_preview_are_receipt_bound_and_preview_can_never_be_delivery() -> None:
+    opportunity = _opportunity()
+    candidate = PhotoCandidate(candidate_id="candidate:1", source_event_refs=(SOURCE,), family="life_share", privacy_ceiling="personal")
+    state = reduce_event(_state(), _event("PhotoCandidateOpened", {"candidate": candidate.model_dump(mode="json")}, "candidate"))
+    state = reduce_event(state, _event("MediaOpportunityFrozen", {"opportunity": opportunity.model_dump(mode="json")}, "opportunity"))
+    plan = MediaPlan(plan_id="plan:render", planning_request_id=planning_request_id(opportunity.opportunity_id), opportunity_id=opportunity.opportunity_id, event_snapshot_hash=opportunity.event_snapshot_hash, family="life_share", planner_version="planner.1", schema_version="media-plan.1", plan_payload_ref="sidecar:plan:render", plan_payload_hash=media_payload_hash('{"plan":"render"}'), frozen_at=NOW)
+    planning_action = Action.model_construct(schema_version="world-v2.1", action_id="action:planning:render", world_id=WORLD, logical_time=NOW, created_at=NOW, trace_id="trace:media", causation_id="cause:media", correlation_id="correlation:media", kind="media_planning", layer="media_action", intent_ref=opportunity.opportunity_id, actor="companion:girl", target="provider:media-planner", payload_ref=opportunity.event_snapshot_ref, payload_hash=opportunity.event_snapshot_hash, provider_media_grant=None, idempotency_key=plan.planning_request_id, budget_reservation_id="reservation:planning:render", state="delivered", recovery_policy="effect_once")
+    planning_receipt = ExecutionReceipt(receipt_id="receipt:planning:render", result_id="result:planning:render", action_id=planning_action.action_id, provider="provider", provider_ref="planning", source_event_id="planning", receipt_kind="terminal", observed_state="delivered", is_terminal=True, cost_actual=0, received_at=NOW, raw_payload_hash="sha256:" + "1" * 64)
+    state = state.model_copy(update={"actions": (planning_action,), "execution_receipts": (planning_receipt,)})
+    state = reduce_event(state, _event("MediaPlanRecorded", MediaPlanRecordedPayload(action_id=planning_action.action_id, receipt_id=planning_receipt.receipt_id, plan=plan).model_dump(mode="json"), "plan-render"))
+    render = Action.model_construct(schema_version="world-v2.1", action_id="action:render:1", world_id=WORLD, logical_time=NOW, created_at=NOW, trace_id="trace:media", causation_id="cause:media", correlation_id="correlation:media", kind="media_render", layer="media_action", intent_ref=plan.plan_id, actor="companion:girl", target="provider:media-renderer", payload_ref=plan.plan_payload_ref, payload_hash=plan.plan_payload_hash, provider_media_grant=None, idempotency_key="render:1", budget_reservation_id="reservation:render:1", state="delivered", recovery_policy="effect_once")
+    render_receipt = ExecutionReceipt(receipt_id="receipt:render:1", result_id="result:render:1", action_id=render.action_id, provider="provider", provider_ref="render", source_event_id="render", receipt_kind="terminal", observed_state="delivered", is_terminal=True, cost_actual=0, received_at=NOW, raw_payload_hash="sha256:" + "2" * 64)
+    artifact = MediaArtifact(artifact_id="artifact:1", plan_id=plan.plan_id, render_action_id=render.action_id, artifact_ref="sidecar:artifact:1", artifact_hash="sha256:" + "3" * 64, attempts=1)
+    state = state.model_copy(update={"actions": (*state.actions, render), "execution_receipts": (*state.execution_receipts, render_receipt)})
+    state = reduce_event(state, _event("MediaRenderArtifactRecorded", MediaRenderArtifactRecordedPayload(action_id=render.action_id, receipt_id=render_receipt.receipt_id, artifact=artifact).model_dump(mode="json"), "artifact"))
+    inspect = Action.model_construct(schema_version="world-v2.1", action_id="action:inspection:1", world_id=WORLD, logical_time=NOW, created_at=NOW, trace_id="trace:media", causation_id="cause:media", correlation_id="correlation:media", kind="media_inspection", layer="media_action", intent_ref=artifact.artifact_id, actor="companion:girl", target="provider:media-inspector", payload_ref=artifact.artifact_ref, payload_hash=artifact.artifact_hash, provider_media_grant=None, idempotency_key="inspect:1", budget_reservation_id="reservation:inspection:1", state="delivered", recovery_policy="effect_once")
+    inspect_receipt = ExecutionReceipt(receipt_id="receipt:inspection:1", result_id="result:inspection:1", action_id=inspect.action_id, provider="provider", provider_ref="inspect", source_event_id="inspect", receipt_kind="terminal", observed_state="delivered", is_terminal=True, cost_actual=0, received_at=NOW, raw_payload_hash="sha256:" + "4" * 64)
+    inspection = MediaInspectionRecord(inspection_id="inspection:1", plan_id=plan.plan_id, artifact_id=artifact.artifact_id, inspection_action_id=inspect.action_id, passed=True, reason_code="passed", observed_summary="matches", inspection_payload_ref="sidecar:inspection:1", inspection_payload_hash="sha256:" + "5" * 64)
+    state = state.model_copy(update={"actions": (*state.actions, inspect), "execution_receipts": (*state.execution_receipts, inspect_receipt)})
+    state = reduce_event(state, _event("MediaInspectionRecorded", MediaInspectionRecordedPayload(action_id=inspect.action_id, receipt_id=inspect_receipt.receipt_id, inspection=inspection).model_dump(mode="json"), "inspection"))
+    preview = MediaPreview(preview_id="preview:1", plan_id=plan.plan_id, artifact_id=artifact.artifact_id, inspection_id=inspection.inspection_id, recipient_ref=None)
+    state = reduce_event(state, _event("MediaPreviewGenerated", MediaPreviewGeneratedPayload(preview=preview).model_dump(mode="json"), "preview"))
+    assert state.media_previews == (preview,)
+    with pytest.raises(ValueError, match="preview"):
+        reduce_event(state, _event("MediaPreviewGenerated", {"preview": preview.model_dump(mode="json") | {"delivery_mode": "automatic"}}, "delivery"))

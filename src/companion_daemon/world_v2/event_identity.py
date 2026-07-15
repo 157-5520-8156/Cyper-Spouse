@@ -88,6 +88,14 @@ def _life_identity_components(
         return world_id, _nested(payload, "plan", "planning_request_id"), _nested(payload, "plan", "plan_id")
     if event_type == "MediaNotRenderableRecorded":
         return world_id, _nested(payload, "result", "planning_request_id"), "not_renderable"
+    if event_type == "MediaRenderArtifactRecorded":
+        return world_id, _nested(payload, "artifact", "artifact_id")
+    if event_type == "MediaInspectionRecorded":
+        return world_id, _nested(payload, "inspection", "inspection_id")
+    if event_type == "MediaPreviewGenerated":
+        return world_id, _nested(payload, "preview", "preview_id")
+    if event_type == "MediaPreviewFailed":
+        return world_id, payload.get("plan_id"), "preview_failed"
     if event_type == "ActorAuthorityBootstrapped":
         return world_id, payload.get("authority_id"), payload.get("transition_id")
     if event_type in {

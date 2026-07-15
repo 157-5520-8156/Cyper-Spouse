@@ -48,6 +48,9 @@ from .ledger_context_resolver import ContextRelevanceScope, context_capsule_comp
 from .ledger_payload_reader import LedgerAuthorizedPayloadReader
 from .life_content_store import SQLiteImmutableLifeContentStore
 from .expression_payload_store import SQLiteImmutableExpressionPayloadStore
+from .media_v2 import SQLiteImmutableMediaPayloadStore
+from .media_execution_runtime import MediaExecutionRuntime
+from .media_payload_reader import MediaSidecarPayloadReader
 from .occurrence_content_coordinator import (
     OccurrenceContentCommitRequest,
     OccurrenceContentCoordinator,
@@ -59,7 +62,10 @@ from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder
 from .expression_reconsideration_runtime import ExpressionReconsiderationReviewer
 from .pinned_turn import PinnedTurnCompiler
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
-from .platform_action_executor import PlatformActionExecutor, PlatformTransport
+from .platform_action_executor import (
+    PlatformActionExecutor, PlatformTransport, MediaProviderTransport,
+    ProviderMediaActionExecutor, RoutedActionExecutor,
+)
 from .runtime import WorldRuntime
 from .schemas import (
     BudgetAccount,
@@ -124,12 +130,16 @@ class WorldV2TurnApplication:
         ledger: SQLiteWorldLedger,
         life_content_store: SQLiteImmutableLifeContentStore,
         expression_payload_store: SQLiteImmutableExpressionPayloadStore,
+        media_payload_store: SQLiteImmutableMediaPayloadStore,
+        media_execution: MediaExecutionRuntime,
         occurrence_content: OccurrenceContentCoordinator,
     ) -> None:
         self._turns = turns
         self._ledger = ledger
         self._life_content_store = life_content_store
         self._expression_payload_store = expression_payload_store
+        self._media_payload_store = media_payload_store
+        self.media_execution = media_execution
         self._occurrence_content = occurrence_content
 
     async def respond(self, inbound: InboundTurn) -> RuntimeOutcome:
@@ -172,6 +182,7 @@ class WorldV2TurnApplication:
     def close(self) -> None:
         self._life_content_store.close()
         self._expression_payload_store.close()
+        self._media_payload_store.close()
         self._ledger.close()
 
 
@@ -184,6 +195,7 @@ def build_sqlite_world_v2_turn_application(
     main_model: DeliberationModelAdapter,
     quick_recovery: QuickRecoveryAdapter,
     transport: PlatformTransport,
+    media_transport: MediaProviderTransport | None = None,
     advisory_compiler: AdvisoryCompiler | None = None,
     appraisal_model: DeliberationModelAdapter | None = None,
     affect_model: DeliberationModelAdapter | None = None,
@@ -204,6 +216,7 @@ def build_sqlite_world_v2_turn_application(
     ledger = SQLiteWorldLedger(path=path, world_id=config.world_id, accepted_batch_issuer=issuer)
     life_content_store = SQLiteImmutableLifeContentStore(path=str(path), world_id=config.world_id)
     expression_payload_store = SQLiteImmutableExpressionPayloadStore(path=str(path), world_id=config.world_id)
+    media_payload_store = SQLiteImmutableMediaPayloadStore(path=str(path), world_id=config.world_id)
     try:
         occurrence_content = OccurrenceContentCoordinator(
             ledger=ledger, store=life_content_store
@@ -329,6 +342,15 @@ def build_sqlite_world_v2_turn_application(
             if fact_model is not None
             else None
         )
+        platform_executor = build_platform_action_executor(ledger=ledger, transport=transport, expression_payload_store=expression_payload_store)
+        action_executor: ActionExecutor = platform_executor
+        if media_transport is not None:
+            action_executor = RoutedActionExecutor(
+                platform=platform_executor,
+                media=ProviderMediaActionExecutor(
+                    payloads=MediaSidecarPayloadReader(store=media_payload_store), transport=media_transport,
+                ),
+            )
         runtime = WorldRuntime(
             world_id=config.world_id,
             ledger=ledger,
@@ -396,7 +418,7 @@ def build_sqlite_world_v2_turn_application(
             affect_acceptance_actor=(
                 config.affect_worker_owner if affect_acceptance is not None else None
             ),
-            action_executor=build_platform_action_executor(ledger=ledger, transport=transport, expression_payload_store=expression_payload_store),
+            action_executor=action_executor,
             action_pump_owner=config.action_pump_owner,
             expression_reconsideration_owner=(
                 config.expression_reconsideration_owner
@@ -410,11 +432,14 @@ def build_sqlite_world_v2_turn_application(
             ledger=ledger,
             life_content_store=life_content_store,
             expression_payload_store=expression_payload_store,
+            media_payload_store=media_payload_store,
+            media_execution=MediaExecutionRuntime(ledger=ledger, sidecar=media_payload_store),
             occurrence_content=occurrence_content,
         )
     except Exception:
         life_content_store.close()
         expression_payload_store.close()
+        media_payload_store.close()
         ledger.close()
         raise
 

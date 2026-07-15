@@ -313,6 +313,27 @@ class ProviderMediaActionExecutor(ActionExecutor):
         )
 
 
+class RoutedActionExecutor(ActionExecutor):
+    """One ActionPump-facing executor without mixing platform and media seams."""
+
+    def __init__(self, *, platform: ActionExecutor, media: ActionExecutor) -> None:
+        self._platform, self._media = platform, media
+
+    def _delegate(self, action: Action) -> ActionExecutor:
+        return self._media if action.kind in {"media_planning", "media_render", "media_inspection"} else self._platform
+
+    async def assert_dispatch_authorized(self, *, action: Action, projection: LedgerProjection) -> None:
+        checker = getattr(self._delegate(action), "assert_dispatch_authorized", None)
+        if checker is not None:
+            await checker(action=action, projection=projection)
+
+    async def dispatch(self, action: Action) -> ProviderReceipt | DispatchPending | None:
+        return await self._delegate(action).dispatch(action)
+
+    async def lookup_result(self, action: Action) -> ProviderReceipt | DispatchPending | None:
+        return await self._delegate(action).lookup_result(action)
+
+
 __all__ = [
     "AuthorizedPayloadReader",
     "PlatformActionExecutor",
@@ -322,6 +343,7 @@ __all__ = [
     "ResolvedActionPayload",
     "SUPPORTED_PLATFORM_ACTION_KINDS",
     "ProviderMediaActionExecutor",
+    "RoutedActionExecutor",
     "MediaProviderDispatchRequest",
     "MediaProviderTransport",
 ]
