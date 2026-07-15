@@ -30,6 +30,12 @@ from .appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
 from .appraisal_proposal_compiler import AppraisalProposalCompiler
 from .appraisal_proposal_worker import AppraisalProposalWorker
 from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
+from .outcome_acceptance_runtime import OutcomeAcceptanceRuntime
+from .outcome_candidate_reader import OutcomeCandidateReader
+from .outcome_deliberation_turn import OutcomeDeliberationTurn
+from .outcome_proposal_compiler import OutcomeProposalCompiler
+from .outcome_proposal_worker import OutcomeProposalWorker
+from .outcome_trigger_runtime import OutcomeTriggerRunResult
 from .advisory_compiler import AdvisoryCompiler
 from .deliberation import (
     Deliberation,
@@ -73,6 +79,7 @@ class WorldV2TurnApplicationConfig:
     appraisal_worker_owner: str = "worker:world-v2:appraisal"
     affect_worker_owner: str = "worker:world-v2:affect"
     fact_worker_owner: str = "worker:world-v2:fact"
+    outcome_worker_owner: str = "worker:world-v2:outcome"
 
     def __post_init__(self) -> None:
         for name in (
@@ -83,6 +90,7 @@ class WorldV2TurnApplicationConfig:
             "appraisal_worker_owner",
             "affect_worker_owner",
             "fact_worker_owner",
+            "outcome_worker_owner",
         ):
             if not getattr(self, name):
                 raise ValueError(f"{name} must not be empty")
@@ -128,7 +136,7 @@ class WorldV2TurnApplication:
 
     async def drain_background_once(
         self,
-    ) -> AppraisalTriggerRunResult | AffectTriggerRunResult | FactTriggerRunResult | None:
+    ) -> AppraisalTriggerRunResult | OutcomeTriggerRunResult | AffectTriggerRunResult | FactTriggerRunResult | None:
         """Run one separately scheduled mental-state or memory work unit."""
 
         return await self._turns.drain_background_once()
@@ -150,6 +158,7 @@ def build_sqlite_world_v2_turn_application(
     advisory_compiler: AdvisoryCompiler | None = None,
     appraisal_model: DeliberationModelAdapter | None = None,
     affect_model: DeliberationModelAdapter | None = None,
+    outcome_model: DeliberationModelAdapter | None = None,
     fact_model: FactDraftChatModel | None = None,
     memory_model: FactMemoryDraftChatModel | None = None,
     now: datetime,
@@ -225,6 +234,34 @@ def build_sqlite_world_v2_turn_application(
             if appraisal_model is not None
             else None
         )
+        outcome_reader = OutcomeCandidateReader(store=life_content_store)
+        outcome_acceptance = (
+            OutcomeAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
+            if outcome_model is not None
+            else None
+        )
+        outcome_turn = (
+            OutcomeDeliberationTurn(
+                ledger=ledger,
+                capsule_compiler=capsules,
+                deliberation=Deliberation(
+                    router=router, main_model=outcome_model, quick_recovery=outcome_model
+                ),
+                candidate_reader=outcome_reader,
+                companion_actor_ref=config.companion_actor_ref,
+            )
+            if outcome_model is not None
+            else None
+        )
+        outcome_worker = (
+            OutcomeProposalWorker(
+                compiler=OutcomeProposalCompiler(ledger=ledger, candidate_reader=outcome_reader),
+                acceptance=outcome_acceptance,
+                actor=config.outcome_worker_owner,
+            )
+            if outcome_acceptance is not None
+            else None
+        )
         affect_acceptance = (
             AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
             if affect_model is not None
@@ -280,6 +317,11 @@ def build_sqlite_world_v2_turn_application(
             appraisal_worker=appraisal_worker,
             interaction_appraisal_turn=appraisal_turn,
             npc_world_appraisal_turn=npc_world_appraisal_turn,
+            outcome_deliberation_turn=outcome_turn,
+            outcome_worker=outcome_worker,
+            outcome_deliberation_owner=(
+                config.outcome_worker_owner if outcome_worker is not None else None
+            ),
             interaction_fact_owner=(
                 config.fact_worker_owner if fact_acceptance is not None else None
             ),

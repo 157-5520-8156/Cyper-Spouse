@@ -45,6 +45,9 @@ from .interaction_appraisal_trigger_runtime import (
     InteractionAppraisalTriggerRuntime,
 )
 from .npc_world_appraisal_trigger_runtime import NpcWorldAppraisalTriggerRuntime
+from .outcome_deliberation_turn import OutcomeDeliberationTurn
+from .outcome_proposal_worker import OutcomeProposalWorker
+from .outcome_trigger_runtime import OutcomeTriggerRunResult, OutcomeTriggerRuntime
 from .outcome_trigger import outcome_deliberation_trigger_event, outcome_deliberation_trigger_id
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .action_pump import ActionExecutor, ActionPump, ActionPumpResult
@@ -104,6 +107,9 @@ class WorldRuntime:
         appraisal_worker: AppraisalProposalWorker | None = None,
         interaction_appraisal_turn: PinnedTurnCompiler | None = None,
         npc_world_appraisal_turn: SettledWorldAppraisalTurn | None = None,
+        outcome_deliberation_turn: OutcomeDeliberationTurn | None = None,
+        outcome_worker: OutcomeProposalWorker | None = None,
+        outcome_deliberation_owner: str | None = None,
         interaction_fact_owner: str | None = None,
         fact_acceptance: FactV2AcceptanceRuntime | None = None,
         fact_adapter: FactObservationProposalAdapter | None = None,
@@ -151,6 +157,17 @@ class WorldRuntime:
         if npc_world_appraisal_turn is not None and interaction_appraisal_owner is None:
             raise ValueError("NPC world appraisal turn requires an appraisal worker owner")
         self._npc_world_appraisal_turn = npc_world_appraisal_turn
+        if outcome_deliberation_owner is not None and not outcome_deliberation_owner:
+            raise ValueError("outcome deliberation owner must not be empty")
+        if outcome_worker is not None and outcome_worker.ledger is not self._ledger:
+            raise ValueError("outcome worker must own this exact ledger")
+        if (outcome_deliberation_turn is None) != (outcome_worker is None):
+            raise ValueError("outcome deliberation turn and worker must be configured together")
+        if outcome_worker is not None and outcome_deliberation_owner is None:
+            raise ValueError("outcome worker requires an outcome deliberation owner")
+        self._outcome_deliberation_turn = outcome_deliberation_turn
+        self._outcome_worker = outcome_worker
+        self._outcome_deliberation_owner = outcome_deliberation_owner
         if interaction_fact_owner is not None and not interaction_fact_owner:
             raise ValueError("interaction fact owner must not be empty")
         if (fact_acceptance is None) != (fact_adapter is None):
@@ -196,7 +213,7 @@ class WorldRuntime:
 
     async def drain_background_once(
         self,
-    ) -> AppraisalTriggerRunResult | AffectTriggerRunResult | FactTriggerRunResult | None:
+    ) -> AppraisalTriggerRunResult | OutcomeTriggerRunResult | AffectTriggerRunResult | FactTriggerRunResult | None:
         """Run one low-priority mental-state job without delaying an interactive turn.
 
         Hosts call this from their durable worker loop.  It is intentionally
@@ -205,6 +222,17 @@ class WorldRuntime:
         """
 
         async with self._lock:
+            if self._outcome_deliberation_turn is not None:
+                assert self._outcome_worker is not None
+                assert self._outcome_deliberation_owner is not None
+                outcome = await OutcomeTriggerRuntime(
+                    ledger=self._ledger,
+                    turn=self._outcome_deliberation_turn,
+                    worker=self._outcome_worker,
+                    owner_id=self._outcome_deliberation_owner,
+                ).drain_one()
+                if outcome.status != "idle":
+                    return outcome
             appraisal_result: AppraisalTriggerRunResult | None = None
             if self._npc_world_appraisal_turn is not None:
                 assert self._appraisal_worker is not None

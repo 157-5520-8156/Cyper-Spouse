@@ -12,6 +12,7 @@ from .action_pump import ActionPumpResult
 from .affect_trigger_runtime import AffectTriggerRunResult
 from .interaction_fact_trigger_runtime import FactTriggerRunResult
 from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
+from .outcome_trigger_runtime import OutcomeTriggerRunResult
 from .schemas import ClockObservation, Observation, OutcomeObservation, RuntimeOutcome
 
 
@@ -101,7 +102,7 @@ class WorldTurnRuntime:
 
     async def drain_background_once(
         self,
-    ) -> AppraisalTriggerRunResult | AffectTriggerRunResult | FactTriggerRunResult | None:
+    ) -> AppraisalTriggerRunResult | OutcomeTriggerRunResult | AffectTriggerRunResult | FactTriggerRunResult | None:
         """Advance one durable low-priority affect job, if this host configured one.
 
         This remains explicitly separate from ``respond``: a host scheduler can
