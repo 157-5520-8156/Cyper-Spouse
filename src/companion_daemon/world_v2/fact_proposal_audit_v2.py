@@ -124,6 +124,43 @@ class FactCommitProposalAuditProjectionV2(FactCommitProposalRecordedPayloadV2):
     committed_cursor: ProjectionCursor
 
 
+class FactCommitProposalAuditRefV2(FactCommitProposalRecordedPayloadV2):
+    """Reducer-persistable Fact-v2 audit index without a ledger cursor.
+
+    Reducers deliberately receive no post-event ledger cursor. This ref keeps
+    the exact durable proposal bytes and event envelope identity needed for a
+    manifest-v3 reducer to rebind authority; callers needing the complete
+    cursor must still authenticate it through ``LedgerPort``.
+    """
+
+    event_ref: str = Field(min_length=1, max_length=512)
+    event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def event_identity_is_exact(self) -> FactCommitProposalAuditRefV2:
+        if self.event_ref != fact_commit_proposal_audit_event_id_v2(
+            world_id=self.proposal_world_id, proposal_id=self.proposal_id
+        ):
+            raise ValueError("Fact proposal audit ref event identity is not canonical")
+        return self
+
+    @classmethod
+    def from_event(cls, event: WorldEvent) -> FactCommitProposalAuditRefV2:
+        if type(event) is not WorldEvent:
+            raise FactCommitProposalAuditErrorV2("Fact proposal audit ref requires exact event")
+        if event.event_type != FACT_COMMIT_PROPOSAL_RECORDED_EVENT_V2:
+            raise FactCommitProposalAuditErrorV2("Fact proposal audit ref has the wrong event type")
+        try:
+            payload = FactCommitProposalRecordedPayloadV2.model_validate(event.payload(), strict=True)
+        except Exception as exc:
+            raise FactCommitProposalAuditErrorV2("Fact proposal audit ref payload is invalid") from exc
+        return cls(
+            **payload.model_dump(mode="python"),
+            event_ref=event.event_id,
+            event_payload_hash=event.payload_hash,
+        )
+
+
 class PinnedFactCommitProposalAuthorityHandleV2:
     """Opaque reader-issued capability for one Fact-v2 proposal at one cursor."""
 
@@ -327,6 +364,7 @@ __all__ = [
     "FACT_COMMIT_PROPOSAL_RECORDED_EVENT_V2",
     "FactCommitProposalAuditErrorV2",
     "FactCommitProposalAuditProjectionV2",
+    "FactCommitProposalAuditRefV2",
     "FactCommitProposalAuthorityReaderV2",
     "FactCommitProposalRecordedPayloadV2",
     "PinnedFactCommitProposalAuthorityHandleV2",

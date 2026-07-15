@@ -9,6 +9,7 @@ import pytest
 from companion_daemon.world_v2.fact_proposal_audit_v2 import (
     FACT_COMMIT_PROPOSAL_RECORDED_EVENT_V2,
     FactCommitProposalAuditErrorV2,
+    FactCommitProposalAuditRefV2,
     FactCommitProposalAuthorityReaderV2,
     FactCommitProposalRecordedPayloadV2,
     PinnedFactCommitProposalAuthorityHandleV2,
@@ -153,6 +154,21 @@ def test_fact_v2_proposal_audit_is_durable_and_pinned_to_its_complete_cursor(tmp
     assert event.event_id == fact_commit_proposal_audit_event_id_v2(
         world_id=WORLD_ID, proposal_id="proposal:fact-audit:1"
     )
+    ledger.close()
+
+
+def test_reducer_persistable_audit_ref_retains_exact_event_authority(tmp_path) -> None:
+    ledger, event = _record(tmp_path)
+
+    ref = FactCommitProposalAuditRefV2.from_event(event)
+
+    assert ref.proposal_id == "proposal:fact-audit:1"
+    assert ref.event_ref == event.event_id
+    assert ref.event_payload_hash == event.payload_hash
+    with pytest.raises(ValueError, match="identity"):
+        FactCommitProposalAuditRefV2.model_validate(
+            ref.model_dump(mode="python") | {"event_ref": "event:forged"}, strict=True
+        )
     ledger.close()
 
 
