@@ -1,4 +1,4 @@
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 
 from companion_daemon.world_v2.ledger import WorldLedger
@@ -7,11 +7,22 @@ from companion_daemon.world_v2.mechanical_evaluation_export import (
     VisibleActionLatencySample,
 )
 from companion_daemon.world_v2.mechanical_evaluation_scope import (
+    AffectRetentionAssertion,
     MechanicalEvaluationScope,
     PerformanceSampleExpectation,
     RandomDrawExpectation,
 )
 from companion_daemon.world_v2.schemas import Action, ClaimLease, WorldEvent
+
+
+@dataclass(frozen=True)
+class _EpisodeStub:
+    episode_id: str
+    status: str
+
+    def model_dump(self, *, mode: str) -> dict[str, str]:
+        assert mode == "json"
+        return {"episode_id": self.episode_id, "status": self.status}
 
 
 def test_exporter_binds_only_the_fixture_cursor_and_declared_performance_samples() -> None:
@@ -70,3 +81,26 @@ def test_exporter_reports_a_declared_action_that_is_still_nonterminal() -> None:
     )
 
     assert report.evaluation.nonterminal_action_leaks == 1
+
+
+def test_exporter_reports_an_affect_episode_cleared_before_fixture_allows_it() -> None:
+    ledger = WorldLedger.in_memory(world_id="world:mechanical-affect-clear")
+    evidence = ledger.export_replay_evidence()
+    projection = evidence.projection.model_copy(
+        update={"affect_episodes": (_EpisodeStub("episode:hurt", "resolved"),)}
+    )
+    scoped = replace(evidence, projection=projection, replay=projection)
+    scope = MechanicalEvaluationScope(
+        fixture_id="replay.hurt-residue", fixture_version="fixtures.1", world_id=ledger.world_id,
+        start_ledger_sequence=0, end_ledger_sequence=0, action_ids_expected_to_settle=(),
+        affect_assertions=(AffectRetentionAssertion("episode:hurt", "active"),),
+        random_draw_expectation=RandomDrawExpectation("not_applicable"),
+        performance_samples=(PerformanceSampleExpectation("hot.1", "hot"),),
+    )
+
+    report = MechanicalEvaluationExporter().export(
+        scope=scope, replay_evidence=scoped,
+        latency_samples=(VisibleActionLatencySample("hot.1", "hot", 450.0),),
+    )
+
+    assert report.evaluation.affect_episode_invalid_clears == 1
