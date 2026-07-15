@@ -20,6 +20,7 @@ from companion_daemon.event_media import (
     compile_media_prompt,
     _enforce_inspection_contract,
     _inspection_prompt,
+    _repair_prompt,
 )
 from companion_daemon.image_generation import GeneratedImage
 
@@ -398,6 +399,30 @@ async def test_v5_freezes_complete_expression_candidate_without_free_direction_t
     assert "nose/cheek" in prompt
     assert "action unit" not in prompt.lower()
     assert "facial micro performance v1" not in prompt.lower()
+
+
+def test_moment_capture_quality_gate_requires_a_match_and_repairs_only_that_contract() -> None:
+    mismatch = _enforce_inspection_contract(
+        replace(
+            _inspection(True),
+            rule_version="media-inspection-v7",
+            moment_capture_matches=False,
+        ),
+        automatic=True,
+        v5_required=True,
+        moment_capture_required=True,
+    )
+    missing = _enforce_inspection_contract(
+        replace(_inspection(True), rule_version="media-inspection-v7", moment_capture_matches=None),
+        automatic=True,
+        v5_required=True,
+        moment_capture_required=True,
+    )
+
+    assert mismatch.reason == "moment_capture_mismatch"
+    assert missing.reason == "inspection_v7_fields_missing"
+    assert "lived moment continuity" in _repair_prompt("frozen", mismatch)
+    assert "Moment Capture contract" in _repair_prompt("frozen", mismatch)
 
 
 @pytest.mark.asyncio

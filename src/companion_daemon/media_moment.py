@@ -22,7 +22,8 @@ from companion_daemon.media_camera import CAPTURE_MODES
 
 
 DEFAULT_MOMENT_CONFIG = Path("configs/media_moment_templates.yaml")
-MOMENT_CAPTURE_VERSION = "moment-capture-v1"
+MOMENT_CAPTURE_VERSION_V1 = "moment-capture-v1"
+MOMENT_CAPTURE_VERSION = "moment-capture-v2"
 
 MOMENT_MODES = {
     "uninterrupted_activity",
@@ -49,6 +50,7 @@ SCENE_ANCHORS = {
     "body_transition",
     "social_context",
     "memory_context",
+    "primary_evidence",
 }
 @dataclass(frozen=True)
 class MomentCapture:
@@ -97,17 +99,19 @@ class MomentCapture:
         payload["evidence_refs"] = list(self.evidence_refs)
         return payload
 
-    def bind_evidence(self, evidence_refs: Sequence[str]) -> "MomentCapture":
+    def bind_evidence(
+        self, *, primary_evidence_ref: str, supporting_evidence_refs: Sequence[str]
+    ) -> "MomentCapture":
         """Bind the already selected event evidence without reinterpreting the moment."""
 
         return self.create(
             strategy_id=self.strategy_id,
             moment_mode=self.moment_mode,
             camera_relation=self.camera_relation,
-            scene_anchor=_scene_anchor_from_evidence(evidence_refs, fallback=self.scene_anchor),
+            scene_anchor=_scene_anchor_from_evidence(primary_evidence_ref),
             continuity_cue=self.continuity_cue,
             anti_static_direction=self.anti_static_direction,
-            evidence_refs=tuple(evidence_refs),
+            evidence_refs=(primary_evidence_ref, *supporting_evidence_refs),
         )
 
     @classmethod
@@ -129,11 +133,19 @@ class MomentCapture:
             str(item) for item in value.get("evidence_refs", []) if str(item)
         )
         _validate(payload)
-        if str(value.get("version") or "") != MOMENT_CAPTURE_VERSION:
+        version = str(value.get("version") or "")
+        if version not in {MOMENT_CAPTURE_VERSION_V1, MOMENT_CAPTURE_VERSION}:
             raise ValueError("unsupported moment capture version")
-        if str(value.get("contract_signature") or "") != _signature(payload):
+        expected_signature = (
+            _signature_v1(payload) if version == MOMENT_CAPTURE_VERSION_V1 else _signature(payload)
+        )
+        if str(value.get("contract_signature") or "") != expected_signature:
             raise ValueError("invalid moment capture contract")
-        return cls(**payload, contract_signature=str(value["contract_signature"]))
+        return cls(
+            **payload,
+            contract_signature=str(value["contract_signature"]),
+            version=version,
+        )
 
 
 def choose_moment_capture(
@@ -228,21 +240,18 @@ def _scene_anchor(*, visual_form: str) -> str:
     return "memory_context"
 
 
-def _scene_anchor_from_evidence(
-    evidence_refs: Sequence[str], *, fallback: str
-) -> str:
-    refs = set(evidence_refs)
-    if any(ref.startswith("/participants/") for ref in refs):
+def _scene_anchor_from_evidence(primary_ref: str) -> str:
+    if primary_ref.startswith("/participants/"):
         return "social_context"
-    if any(ref.startswith("/character/visible_physical_state") for ref in refs):
+    if primary_ref.startswith("/character/visible_physical_state"):
         return "body_transition"
-    if any(ref.startswith("/objects/") for ref in refs):
+    if primary_ref.startswith("/objects/"):
         return "event_object"
-    if any(ref.startswith("/activity/") for ref in refs):
+    if primary_ref.startswith("/activity/"):
         return "task_surface"
-    if any(ref.startswith(("/location/", "/environment/")) for ref in refs):
+    if primary_ref.startswith(("/location/", "/environment/")):
         return "transient_environment"
-    return fallback
+    return "primary_evidence"
 
 
 def _validate(value: Mapping[str, object]) -> None:
@@ -265,6 +274,21 @@ def _signature(value: Mapping[str, object]) -> str:
     return sha256(
         json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _signature_v1(value: Mapping[str, object]) -> str:
+    legacy = {
+        name: value[name]
+        for name in (
+            "strategy_id",
+            "moment_mode",
+            "camera_relation",
+            "scene_anchor",
+            "continuity_cue",
+            "anti_static_direction",
+        )
+    }
+    return _signature(legacy)
 
 
 def _stable_index(seed: str, length: int) -> int:

@@ -2101,7 +2101,10 @@ def _freeze_proposal_v5(
         else None
     )
     if moment_capture is not None:
-        moment_capture = moment_capture.bind_evidence(tuple(frozen.plan.evidence_values))
+        moment_capture = moment_capture.bind_evidence(
+            primary_evidence_ref=frozen.plan.primary_evidence_ref,
+            supporting_evidence_refs=frozen.plan.supporting_evidence_refs,
+        )
     interaction_bid = frozen.plan.interaction_bid
     if intimate_life_share or legacy.get("interaction_bid_id") != original_bid_id:
         bid_values = _interaction_bid_values(
@@ -2701,7 +2704,10 @@ def _validate_frozen_plan_v5(plan: MediaPlan) -> str | None:
             MomentCapture.from_payload(plan.moment_capture.to_payload())
         except ValueError:
             return "invalid_moment_capture"
-        if set(plan.moment_capture.evidence_refs) != set(plan.evidence_values):
+        if (
+            plan.moment_capture.version == "moment-capture-v2"
+            and set(plan.moment_capture.evidence_refs) != set(plan.evidence_values)
+        ):
             return "moment_capture_evidence_conflict"
     geometry_error = plan.camera_geometry.compatibility_error(
         capture_mode=plan.capture_mode, visual_form=plan.visual_form

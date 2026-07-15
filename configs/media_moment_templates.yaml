@@ -1,4 +1,4 @@
-version: moment-capture-v1
+version: moment-capture-v2
 
 # This catalog classifies a frozen instant, not the event itself. It keeps
 # character-media from falling back to a completed, generic portrait while

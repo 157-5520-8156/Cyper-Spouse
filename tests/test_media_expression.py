@@ -9,7 +9,7 @@ from companion_daemon.media_expression import (
     build_complete_candidates,
     candidate_perceptual_signature,
 )
-from companion_daemon.media_moment import choose_moment_capture
+from companion_daemon.media_moment import choose_moment_capture, load_moment_catalog
 from companion_daemon.media_subject import build_subject_candidates
 
 
@@ -515,6 +515,29 @@ def test_moment_capture_uses_stable_but_varied_wording_without_reading_world_fac
     }
 
     assert choices == {"recipient-pause", "show-then-return"}
+
+
+def test_moment_capture_primary_evidence_remains_the_visual_anchor() -> None:
+    moment = choose_moment_capture(
+        temporal_beat="held_for_response",
+        capture_mode="character_front_camera",
+        visual_form="portrait_context",
+        stable_seed="moment:primary",
+    ).bind_evidence(
+        primary_evidence_ref="/objects/0/description",
+        supporting_evidence_refs=("/participants/0/role",),
+    )
+
+    assert moment.scene_anchor == "event_object"
+    assert moment.evidence_refs == ("/objects/0/description", "/participants/0/role")
+
+
+def test_moment_catalog_rejects_a_missing_temporal_beat(tmp_path) -> None:
+    catalog = tmp_path / "incomplete-moment.yaml"
+    catalog.write_text("version: moment-capture-v2\ntemporal_beats: {}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="incomplete moment temporal beat catalog"):
+        load_moment_catalog(catalog)
 
 
 def test_complete_candidates_use_versioned_perceptual_axes_and_varied_face_geometry() -> None:
