@@ -4023,6 +4023,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "interaction_appraisal",
         "interaction_fact",
         "affect_deliberation",
+        "outcome_deliberation",
     }:
         if (
             state.logical_time is None
@@ -4063,6 +4064,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "interaction_appraisal",
         "interaction_fact",
         "affect_deliberation",
+        "outcome_deliberation",
     }:
         raise ValueError("appraisal trigger must be opened before it is claimed")
     return state.model_copy(update={"trigger_processes": (*state.trigger_processes, process)})
@@ -4127,6 +4129,35 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             or process.trigger_ref != f"affect:{process.source_evidence_ref}"
         ):
             raise ValueError("affect trigger requires an accepted appraisal event")
+    if process.process_kind == "outcome_deliberation":
+        source = next(
+            (
+                item
+                for item in state.committed_world_event_refs
+                if item.event_id == process.source_evidence_ref
+            ),
+            None,
+        )
+        if source is None or source.event_type != "OutcomeObservationRecorded":
+            raise ValueError("outcome trigger requires a recorded outcome observation")
+        observation = next(
+            (item for item in state.outcome_observations if item.observation_id == source.event_id.removeprefix("event:outcome-observation:")),
+            None,
+        )
+        if observation is None:
+            raise ValueError("outcome trigger source observation is unavailable")
+        from .outcome_trigger import outcome_deliberation_trigger_id
+
+        if (
+            process.trigger_id
+            != outcome_deliberation_trigger_id(
+                world_id=event.world_id,
+                occurrence_id=observation.occurrence_id,
+                observation_id=observation.observation_id,
+            )
+            or process.trigger_ref != f"outcome:{observation.occurrence_id}:{observation.observation_id}"
+        ):
+            raise ValueError("outcome trigger identity is not deterministic")
     if any(item.trigger_id == process.trigger_id for item in state.trigger_processes):
         raise ValueError(f"trigger {process.trigger_id!r} already exists")
     return state.model_copy(update={"trigger_processes": (*state.trigger_processes, process)})

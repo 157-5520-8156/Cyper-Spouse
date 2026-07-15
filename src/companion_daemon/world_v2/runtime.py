@@ -45,6 +45,7 @@ from .interaction_appraisal_trigger_runtime import (
     InteractionAppraisalTriggerRuntime,
 )
 from .npc_world_appraisal_trigger_runtime import NpcWorldAppraisalTriggerRuntime
+from .outcome_trigger import outcome_deliberation_trigger_event, outcome_deliberation_trigger_id
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .action_pump import ActionExecutor, ActionPump, ActionPumpResult
 from .schemas import (
@@ -1183,9 +1184,11 @@ class WorldRuntime:
                     raise IdempotencyConflict(
                         "outcome observation identity was already committed with different content"
                     )
-                return self._runtime_outcome_for_commit(
-                    trigger_id=trigger_id,
-                    committed=commit,
+                return await self._ensure_outcome_deliberation_trigger(
+                    observation=observation,
+                    source_event=persisted,
+                    original_commit=commit,
+                    runtime_trigger_id=trigger_id,
                 )
             before = await self._project_for_write()
             event = build_outcome_observation_event(
@@ -1206,14 +1209,74 @@ class WorldRuntime:
                 persisted, commit = raced
                 if persisted != event:
                     raise
-                return self._runtime_outcome_for_commit(
-                    trigger_id=trigger_id,
-                    committed=commit,
+                return await self._ensure_outcome_deliberation_trigger(
+                    observation=observation,
+                    source_event=persisted,
+                    original_commit=commit,
+                    runtime_trigger_id=trigger_id,
                 )
-        return self._runtime_outcome_for_commit(
-            trigger_id=trigger_id,
-            committed=committed,
+        return await self._ensure_outcome_deliberation_trigger(
+            observation=observation,
+            source_event=event,
+            original_commit=committed,
+            runtime_trigger_id=trigger_id,
         )
+
+    async def _ensure_outcome_deliberation_trigger(
+        self,
+        *,
+        observation: OutcomeObservation,
+        source_event: WorldEvent,
+        original_commit: CommitResult,
+        runtime_trigger_id: str,
+    ) -> RuntimeOutcome:
+        """Open the background-work opportunity only after its source is durable."""
+
+        for _attempt in range(3):
+            projection = await self._project_for_write()
+            recorded = next(
+                (
+                    item
+                    for item in projection.outcome_observations
+                    if item.observation_id == observation.observation_id
+                ),
+                None,
+            )
+            if recorded is None:
+                raise RuntimeError("committed outcome observation is absent from the projection")
+            trigger_id = outcome_deliberation_trigger_id(
+                world_id=self._world_id,
+                occurrence_id=recorded.occurrence_id,
+                observation_id=recorded.observation_id,
+            )
+            if any(item.trigger_id == trigger_id for item in projection.trigger_processes):
+                existing_trigger = await self._lookup_event_commit(
+                    "event:outcome-deliberation-trigger-opened:" + trigger_id.removeprefix("trigger:")
+                )
+                return self._runtime_outcome_for_commit(
+                    trigger_id=runtime_trigger_id,
+                    committed=(existing_trigger[1] if existing_trigger is not None else original_commit),
+                )
+            trigger_event = outcome_deliberation_trigger_event(
+                world_id=self._world_id,
+                source_event=source_event,
+                observation=recorded,
+            )
+            try:
+                committed = await self._commit(
+                    [trigger_event],
+                    world_revision=projection.world_revision,
+                    deliberation_revision=projection.deliberation_revision,
+                )
+            except (ConcurrencyConflict, IdempotencyConflict):
+                existing = await self._lookup_event_commit(trigger_event.event_id)
+                if existing is None or existing[0] != trigger_event:
+                    continue
+                committed = existing[1]
+            return self._runtime_outcome_for_commit(
+                trigger_id=runtime_trigger_id, committed=committed
+            )
+        raise ConcurrencyConflict("outcome deliberation trigger recovery did not converge")
 
     async def _recover_goal_expiries(
         self,

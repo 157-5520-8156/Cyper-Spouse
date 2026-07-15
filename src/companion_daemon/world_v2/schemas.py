@@ -431,6 +431,7 @@ class TriggerProcess(FrozenModel):
         "interaction_appraisal",
         "interaction_fact",
         "affect_deliberation",
+        "outcome_deliberation",
     ]
     source_evidence_ref: str | None = None
     state: Literal["open", "claimed", "terminal"]
@@ -447,6 +448,7 @@ class TriggerProcess(FrozenModel):
                 "interaction_appraisal",
                 "interaction_fact",
                 "affect_deliberation",
+                "outcome_deliberation",
             }
             and self.source_evidence_ref is not None
         ):

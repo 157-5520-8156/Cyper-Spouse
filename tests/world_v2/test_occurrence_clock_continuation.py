@@ -250,6 +250,13 @@ async def test_runtime_records_a_source_bound_outcome_observation_for_an_active_
             "source_world_revision": None,
         }
     ]
+    outcome_trigger = next(
+        item
+        for item in projected.trigger_processes
+        if item.process_kind == "outcome_deliberation"
+    )
+    assert outcome_trigger.source_evidence_ref == recorded_ref.event_id
+    assert outcome_trigger.state == "open"
     assert await runtime.record_outcome_observation(observation) == first
     assert ledger.project() == projected
 
