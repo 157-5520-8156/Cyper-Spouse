@@ -11,7 +11,18 @@ from threading import RLock
 from .batch_invariants import validate_commit_batch
 from .errors import ConcurrencyConflict, IdempotencyConflict, LedgerIntegrityError
 from .event_identity import validate_event_identity
-from .ledger import canonical_event_json, commit_request_hash, derived_commit_id
+from .ledger import (
+    HistoricalLedgerEvent,
+    OBSERVATION_HISTORY_MAX_BYTES,
+    OBSERVATION_HISTORY_MAX_COMMIT_EVENTS,
+    ObservationEventLocator,
+    _observation_id,
+    _preflight_commit_events,
+    _validated_observation_locators,
+    canonical_event_json,
+    commit_request_hash,
+    derived_commit_id,
+)
 from .reducers import (
     REDUCER_BUNDLE_VERSION,
     ReducerState,
@@ -777,6 +788,7 @@ class SQLiteWorldLedger:
         expected_deliberation_revision: int,
         commit_id: str | None = None,
     ) -> CommitResult:
+        events = _preflight_commit_events(events)
         with self._thread_lock:
             return self._commit_locked(
                 events,
@@ -983,6 +995,173 @@ class SQLiteWorldLedger:
                 reducer_bundle_version=REDUCER_BUNDLE_VERSION,
             )
 
+    def observation_events_at(
+        self, locators: Sequence[ObservationEventLocator], *, cursor: ProjectionCursor
+    ) -> tuple[HistoricalLedgerEvent, ...]:
+        validated = _validated_observation_locators(locators)
+        with self._thread_lock:
+            connection = self._connection
+            try:
+                connection.execute("BEGIN")
+                result = self._observation_events_at_locked(validated, cursor=cursor)
+                connection.commit()
+                return result
+            except sqlite3.DatabaseError as exc:
+                try:
+                    connection.rollback()
+                except sqlite3.DatabaseError:
+                    pass
+                raise LedgerIntegrityError(
+                    "observation history snapshot read failed"
+                ) from exc
+            except Exception:
+                try:
+                    connection.rollback()
+                except sqlite3.DatabaseError:
+                    pass
+                raise
+
+    def _observation_events_at_locked(
+        self,
+        validated: tuple[ObservationEventLocator, ...],
+        *,
+        cursor: ProjectionCursor,
+    ) -> tuple[HistoricalLedgerEvent, ...]:
+        placeholders = ",".join("?" for _ in validated)
+        with self._thread_lock:
+            verified_commits: dict[str, tuple[tuple[WorldEvent, ...], CommitResult]] = {}
+            zero = ProjectionCursor(
+                world_revision=0, deliberation_revision=0, ledger_sequence=0
+            )
+            if cursor != zero:
+                boundary_row = self._connection.execute(
+                    """SELECT commit_id FROM world_v2_events
+                       WHERE world_id = ? AND ledger_sequence = ?""",
+                    (self._world_id, cursor.ledger_sequence),
+                ).fetchone()
+                if boundary_row is None:
+                    raise ValueError("requested cursor is not a committed batch boundary")
+                boundary_commit_id = str(boundary_row["commit_id"])
+                self._require_observation_commit_budget_locked((boundary_commit_id,))
+                boundary_events, boundary_result, _ = self._verified_commit_locked(
+                    boundary_commit_id
+                )
+                boundary_cursor = ProjectionCursor(
+                    world_revision=boundary_result.world_revision,
+                    deliberation_revision=boundary_result.deliberation_revision,
+                    ledger_sequence=boundary_result.ledger_sequence,
+                )
+                if boundary_cursor != cursor:
+                    raise ValueError("requested cursor is not a committed batch boundary")
+                verified_commits[boundary_commit_id] = (
+                    boundary_events,
+                    boundary_result,
+                )
+            rows = tuple(
+                self._connection.execute(
+                    f"""SELECT * FROM world_v2_events
+                        WHERE world_id = ? AND idempotency_key IN ({placeholders})
+                          AND ledger_sequence <= ?
+                        ORDER BY ledger_sequence""",
+                    (
+                        self._world_id,
+                        *(locator.idempotency_key for locator in validated),
+                        cursor.ledger_sequence,
+                    ),
+                )
+            )
+            if len(rows) > len(validated):
+                raise LedgerIntegrityError("locator query returned too many candidates")
+            candidate_commit_ids = tuple(sorted({str(row["commit_id"]) for row in rows}))
+            self._require_observation_commit_budget_locked(candidate_commit_ids)
+            by_idempotency = {locator.idempotency_key: locator for locator in validated}
+            candidates: list[tuple[str, HistoricalLedgerEvent]] = []
+            for row in rows:
+                locator = by_idempotency.get(str(row["idempotency_key"]))
+                if locator is None:
+                    raise LedgerIntegrityError("locator query returned an unknown identity")
+                commit_id = str(row["commit_id"])
+                verified = verified_commits.get(commit_id)
+                if verified is None:
+                    events, result, _ = self._verified_commit_locked(
+                        commit_id, verified_prefix_cursor=cursor
+                    )
+                    verified_commits[commit_id] = (events, result)
+                else:
+                    events, _ = verified
+                event = next(
+                    (item for item in events if item.event_id == str(row["event_id"])), None
+                )
+                if event is None:
+                    raise LedgerIntegrityError("candidate event is absent from its owning commit")
+                encoded = canonical_event_json(event)
+                envelope_hash = hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+                if encoded != row["event_json"] or not hmac.compare_digest(
+                    envelope_hash, str(row["event_hash"])
+                ):
+                    raise LedgerIntegrityError("candidate event envelope does not match its row")
+                if (
+                    event.world_id != self._world_id
+                    or event.event_id != row["event_id"]
+                    or event.idempotency_key != row["idempotency_key"]
+                ):
+                    raise LedgerIntegrityError("candidate event identity does not match its row")
+                observation_id = _observation_id(event)
+                if (
+                    observation_id != locator.observation_id
+                    or event.event_type != locator.event_type
+                    or event.idempotency_key != locator.idempotency_key
+                ):
+                    raise LedgerIntegrityError("observation locator does not match its event row")
+                event_cursor = ProjectionCursor(
+                    world_revision=int(row["world_revision"]),
+                    deliberation_revision=int(row["deliberation_revision"]),
+                    ledger_sequence=int(row["ledger_sequence"]),
+                )
+                if event_cursor.ledger_sequence > cursor.ledger_sequence:
+                    raise LedgerIntegrityError("candidate observation is newer than the cursor")
+                candidates.append(
+                    (
+                        locator.observation_id,
+                        HistoricalLedgerEvent(
+                            event=event,
+                            event_cursor=event_cursor,
+                            event_envelope_hash=envelope_hash,
+                        ),
+                    )
+                )
+            candidates.sort(
+                key=lambda item: (item[0], item[1].event.event_type, item[1].event.event_id)
+            )
+            return tuple(candidate for _, candidate in candidates)
+
+    def _require_observation_commit_budget_locked(
+        self, commit_ids: Sequence[str]
+    ) -> None:
+        identities = tuple(sorted(set(commit_ids)))
+        if not identities:
+            return
+        placeholders = ",".join("?" for _ in identities)
+        rows = tuple(
+            self._connection.execute(
+                f"""SELECT commit_id, COUNT(*) AS event_count,
+                       COALESCE(SUM(LENGTH(CAST(event_json AS BLOB))), 0) AS byte_count
+                FROM world_v2_events
+                WHERE world_id = ? AND commit_id IN ({placeholders})
+                GROUP BY commit_id""",
+                (self._world_id, *identities),
+            )
+        )
+        if {str(row["commit_id"]) for row in rows} != set(identities):
+            raise LedgerIntegrityError("observation history owning commit is unavailable")
+        for row in rows:
+            if int(row["event_count"]) > OBSERVATION_HISTORY_MAX_COMMIT_EVENTS:
+                raise LedgerIntegrityError(
+                    "observation history commit event budget exceeded"
+                )
+            if int(row["byte_count"]) > OBSERVATION_HISTORY_MAX_BYTES:
+                raise LedgerIntegrityError("observation history byte budget exceeded")
+
     def lookup_event_commit(self, event_id: str) -> tuple[WorldEvent, CommitResult] | None:
         """Return verified persisted bytes and the result of their original commit."""
 
@@ -1086,9 +1265,12 @@ class SQLiteWorldLedger:
         )
 
     def _verified_commit_locked(
-        self, commit_id: str
+        self,
+        commit_id: str,
+        *,
+        verified_prefix_cursor: ProjectionCursor | None = None,
     ) -> tuple[tuple[WorldEvent, ...], CommitResult, str]:
-        """Rebuild one commit result from verified immutable event rows."""
+        """Rebuild a commit, optionally trusting a caller-verified history prefix."""
 
         commit_row = self._connection.execute(
             """SELECT request_hash, result_json FROM world_v2_commits
@@ -1128,14 +1310,32 @@ class SQLiteWorldLedger:
                     world_revision=int(previous["world_revision"]),
                     deliberation_revision=int(previous["deliberation_revision"]),
                 )
-                verified_prefix = self._replay_locked(
-                    target_cursor=previous_cursor,
-                    target_schema_version=CURRENT_SCHEMA_VERSION,
-                    reducer_bundle_version=REDUCER_BUNDLE_VERSION,
-                )
-                expected_sequence = verified_prefix.ledger_sequence
-                expected_world_revision = verified_prefix.world_revision
-                expected_deliberation_revision = verified_prefix.deliberation_revision
+                if verified_prefix_cursor is not None:
+                    last_sequence = int(rows[-1]["ledger_sequence"])
+                    if (
+                        previous_cursor.ledger_sequence
+                        > verified_prefix_cursor.ledger_sequence
+                        or last_sequence > verified_prefix_cursor.ledger_sequence
+                    ):
+                        raise LedgerIntegrityError(
+                            "commit is outside the verified history prefix"
+                        )
+                    expected_sequence = previous_cursor.ledger_sequence
+                    expected_world_revision = previous_cursor.world_revision
+                    expected_deliberation_revision = (
+                        previous_cursor.deliberation_revision
+                    )
+                else:
+                    verified_prefix = self._replay_locked(
+                        target_cursor=previous_cursor,
+                        target_schema_version=CURRENT_SCHEMA_VERSION,
+                        reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+                    )
+                    expected_sequence = verified_prefix.ledger_sequence
+                    expected_world_revision = verified_prefix.world_revision
+                    expected_deliberation_revision = (
+                        verified_prefix.deliberation_revision
+                    )
             for row in rows:
                 event_json = row["event_json"]
                 if not isinstance(event_json, str):
@@ -1315,6 +1515,21 @@ class SQLiteWorldLedger:
                             },
                             target_schema_version=target_schema_version,
                         )
+                if event.event_type not in {
+                    "LegacyAcceptanceAuditRecorded",
+                    "LegacyExperienceCommitted",
+                }:
+                    validate_event_identity(event)
+                if (
+                    event.world_id != self._world_id
+                    or event.event_id != row["event_id"]
+                    or event.idempotency_key != row["idempotency_key"]
+                ):
+                    raise LedgerIntegrityError(
+                        "event envelope does not match its ledger row"
+                    )
+            except LedgerIntegrityError:
+                raise
             except Exception as exc:
                 raise LedgerIntegrityError("persisted event is invalid") from exc
             ledger_sequence += 1
