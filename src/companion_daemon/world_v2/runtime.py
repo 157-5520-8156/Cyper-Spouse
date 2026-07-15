@@ -101,6 +101,11 @@ class WorldRuntime:
             return await asyncio.to_thread(self._ledger.lookup_event_commit, event_id)
         return self._ledger.lookup_event_commit(event_id)
 
+    async def _commit_accepted(self, batch, *, cursor: ProjectionCursor):
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._ledger.commit_accepted, batch, expected_cursor=cursor)
+        return self._ledger.commit_accepted(batch, expected_cursor=cursor)
+
     async def evaluate_replay(self, *, evaluator: ReplayEvaluator | None = None) -> ReplayEvaluation:
         """Run deterministic diagnostics without model calls or side effects."""
 
@@ -203,7 +208,7 @@ class WorldRuntime:
                             acceptance_id=f"acceptance:minimal-reply:{audit.proposal_id}",
                             material=material, actor=self._reply_policy.actor, source="world-runtime:acceptance",
                         )
-                        committed = self._ledger.commit_accepted(batch, expected_cursor=material.cursor)
+                        committed = await self._commit_accepted(batch, cursor=material.cursor)
                         reply_authorized = True
         return RuntimeOutcome(
             outcome_id=f"outcome:{trigger_id}",
