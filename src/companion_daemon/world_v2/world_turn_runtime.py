@@ -124,6 +124,11 @@ class WorldTurnRuntime:
 
         return await self._runtime.drain_actions_once()
 
+    async def drain_action(self, action_id: str) -> ActionPumpResult | None:
+        """Advance only the Action that an ingress response is allowed to expose."""
+
+        return await self._runtime.drain_action(action_id)
+
     async def drain_background_once(
         self,
     ) -> (

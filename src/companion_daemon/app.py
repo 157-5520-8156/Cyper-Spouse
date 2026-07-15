@@ -1,4 +1,7 @@
 from contextlib import asynccontextmanager
+from datetime import datetime
+import hashlib
+import json
 from pathlib import Path
 import secrets
 from typing import Literal
@@ -11,9 +14,7 @@ from pydantic import BaseModel, Field
 from companion_daemon.config import get_settings
 from companion_daemon.companion_turn import (
     CompanionTurn,
-    DispatchAcceptance,
     ExternalObservation,
-    ResponseBudget,
     TurnEnvelope,
     TurnOptions,
 )
@@ -30,14 +31,20 @@ from companion_daemon.qq_official import (
 from companion_daemon.runtime import build_companion_engine
 from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel
 from companion_daemon.qq_delivery import QQDelivery
-from companion_daemon.qq_websocket import QQTurnPresenter
 from companion_daemon.turn_transports import CaptureTurnTransport
 from companion_daemon.time import utc_now
+from companion_daemon.world_v2.http_capture_host import (
+    HttpV2CaptureHost,
+    build_http_v2_capture_host,
+)
+from companion_daemon.world_v2.errors import IdempotencyConflict
 
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     yield
+    if http_v2_capture is not None:
+        await http_v2_capture.aclose()
     await engine.aclose()
 
 
@@ -49,6 +56,83 @@ app.mount(
     name="dashboard-static",
 )
 engine = build_companion_engine()
+# HTTP is the first real platform migration.  QQ and the legacy operator
+# archive routes remain on their existing adapter during the staged cutover,
+# but ``/messages`` never reaches this Engine.
+http_v2_capture: HttpV2CaptureHost | None = None
+
+
+def _http_v2_capture(*, bootstrap_at: datetime | None = None) -> HttpV2CaptureHost:
+    global http_v2_capture
+    if http_v2_capture is None:
+        http_v2_capture = build_http_v2_capture_host(
+            settings=get_settings(), bootstrap_at=bootstrap_at
+        )
+    return http_v2_capture
+
+
+def _http_v2_ingress_evidence(message: IncomingMessage) -> tuple[tuple[str, ...], dict[str, object]]:
+    """Freeze the complete HTTP attachment/source evidence into v2 ingress.
+
+    The Action/LLM path receives only stable opaque attachment references, but
+    their complete descriptors stay inside the immutable observation hash.
+    Retrying a provider message id with a changed attachment therefore fails
+    closed instead of silently joining the earlier observation.
+    """
+
+    if len(message.attachments) > 16:
+        raise ValueError("HTTP capture supports at most 16 attachments per message")
+    attachment_evidence = [
+        {
+            "message_id": message.message_id,
+            "index": index,
+            "attachment": attachment.model_dump(mode="json"),
+        }
+        for index, attachment in enumerate(message.attachments)
+    ]
+    attachment_refs = tuple(
+        "attachment:http:"
+        + hashlib.sha256(
+            json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        for item in attachment_evidence
+    )
+    metadata: dict[str, object] = {}
+    if attachment_evidence:
+        metadata["attachments"] = attachment_evidence
+    if message.channel_id:
+        metadata["channel_id"] = message.channel_id
+    if message.emoji:
+        metadata["emoji"] = list(message.emoji)
+    if message.sticker_kind:
+        metadata["sticker_kind"] = message.sticker_kind
+    if message.reply_target:
+        metadata["reply_target"] = message.reply_target
+    if message.source_message_ids:
+        metadata["source_message_ids"] = list(message.source_message_ids)
+    if message.source_messages:
+        metadata["source_messages"] = [
+            source.model_dump(mode="json") for source in message.source_messages
+        ]
+    return attachment_refs, metadata
+
+
+def _require_world_v2_internal_access(token: str | None) -> None:
+    """Gate scheduler/recovery controls behind the existing operator secret.
+
+    A dedicated scheduler credential can replace this at deployment time; the
+    v2 host deliberately starts disabled rather than exposing clock/action
+    control to arbitrary HTTP clients.
+    """
+
+    configured = (get_settings().delivery_reconciliation_token or "").strip()
+    if not configured:
+        raise HTTPException(
+            status_code=503,
+            detail="World v2 internal scheduler is disabled until an operator token is configured",
+        )
+    if not token or not secrets.compare_digest(token, configured):
+        raise HTTPException(status_code=403, detail="invalid World v2 internal scheduler token")
 
 
 class StatePatch(BaseModel):
@@ -70,6 +154,24 @@ class WorldCommandRequest(BaseModel):
 class WorldClockRequest(BaseModel):
     expected_revision: int
     target_logical_at: str
+
+
+class WorldV2ClockTickRequest(BaseModel):
+    tick_id: str = Field(min_length=1, max_length=256)
+    logical_time_from: datetime
+    logical_time_to: datetime
+    observed_at: datetime
+    trace_id: str = Field(min_length=1, max_length=256)
+    causation_id: str = Field(min_length=1, max_length=256)
+    correlation_id: str = Field(min_length=1, max_length=256)
+    reason: str = Field(min_length=1, max_length=256)
+    policy_version: str | None = Field(default=None, max_length=128)
+    policy_digest: str | None = Field(default=None, max_length=256)
+
+
+class WorldV2DrainRequest(BaseModel):
+    max_action_units: int = Field(default=8, ge=0, le=64)
+    max_background_units: int = Field(default=8, ge=0, le=64)
 
 
 class DeliveryReconciliationRequest(BaseModel):
@@ -119,69 +221,81 @@ async def post_message(message: IncomingMessage) -> CompanionReply | JSONRespons
         raise HTTPException(status_code=400, detail="text is required")
     if not message.message_id:
         raise HTTPException(status_code=400, detail="message_id is required for idempotent delivery")
-    # HTTP is a simulator/debug transport, not an Engine escape hatch.  Its
-    # in-process capture receipt makes the response observable without
-    # pretending a QQ/OneBot adapter sent it.  All World Action creation and
-    # settlement still pass through CompanionTurn.
-    transport = CaptureTurnTransport(receipt_namespace="http-capture")
-
-    async def capture_media(_incoming: IncomingMessage, reply: CompanionReply) -> dict[str, str]:
-        action_id = reply.sticker_action_id or reply.media_action_id or "untracked"
-        return {"id": f"http-capture:media:{action_id}"}
-
-    async def capture_reaction(
-        _incoming: IncomingMessage, reply: CompanionReply
-    ) -> DispatchAcceptance:
-        return DispatchAcceptance(
-            status="delivered",
-            external_receipt=f"http-capture:reaction:{reply.suggested_reaction or 'none'}",
+    attachment_refs, metadata = _http_v2_ingress_evidence(message)
+    try:
+        result = await _http_v2_capture(bootstrap_at=message.sent_at).respond(
+            platform=message.platform,
+            platform_user_id=message.platform_user_id,
+            platform_message_id=message.message_id,
+            text=message.text,
+            observed_at=message.sent_at,
+            attachment_refs=attachment_refs,
+            coalescing_metadata=metadata,
         )
-
-    presenter = QQTurnPresenter(
-        engine,
-        on_reply=None,
-        on_sticker=capture_media,
-        on_image=capture_media,
-        on_reaction=capture_reaction,
-        after_delivered=None,
-        after_terminal=lambda: None,
-    )
-    turn = CompanionTurn(engine, transport, presenter=presenter)
-    presenter.settle_external = turn.settle
-    turn_context = engine.freeze_turn_context(message)
-    outcome = await turn.respond(
-        TurnEnvelope.from_message(
-            message,
-            idempotency_key=f"{message.platform}:{message.platform_user_id}:{message.message_id}",
-            world_id=engine.world_id,
-            canonical_user_id=engine.store.resolve_user(
-                message.platform, message.platform_user_id
-            ),
-            frozen_cadence=turn_context.cadence.heat,
-        ),
-        budget=ResponseBudget(first_visible_by_ms=8_000, complete_by_ms=12_000),
-        options=TurnOptions(turn_context=turn_context),
-    )
-    await turn.wait_for_delivery_continuations()
-    if not transport.text:
+    except IdempotencyConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result.text is None:
         return JSONResponse(
             status_code=202,
-            content={"status": "no_immediate_reply", "message_id": message.message_id},
+            content={
+                "status": result.status,
+                "message_id": message.message_id,
+                "world_action_id": result.action_id,
+            },
         )
-    action_id = outcome.action_ids[0] if outcome.action_ids else None
-    action: dict[str, object] = {}
-    if action_id and engine.world_kernel and engine.world_id:
-        raw = engine.world_kernel.snapshot(engine.world_id).get("actions", {}).get(action_id)
-        if isinstance(raw, dict):
-            action = raw
     return CompanionReply(
-        canonical_user_id=engine.store.resolve_user(message.platform, message.platform_user_id),
+        canonical_user_id=result.canonical_user_id,
         mood="calm",
-        text=transport.text,
-        text_parts=[beat.text for beat in transport.beats],
-        delivery_id=(int(action["delivery_id"]) if action.get("delivery_id") else None),
-        world_action_id=action_id,
+        text=result.text,
+        text_parts=[result.text],
+        world_action_id=result.action_id,
     )
+
+
+@app.post("/internal/world-v2/tick")
+async def world_v2_tick(
+    request: WorldV2ClockTickRequest,
+    x_world_v2_internal_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Scheduler-only logical clock ingress for the migrated HTTP v2 lane."""
+
+    _require_world_v2_internal_access(x_world_v2_internal_token)
+    try:
+        status = await _http_v2_capture(bootstrap_at=request.logical_time_from).tick(
+            tick_id=request.tick_id,
+            logical_time_from=request.logical_time_from,
+            logical_time_to=request.logical_time_to,
+            observed_at=request.observed_at,
+            trace_id=request.trace_id,
+            causation_id=request.causation_id,
+            correlation_id=request.correlation_id,
+            reason=request.reason,
+            policy_version=request.policy_version,
+            policy_digest=request.policy_digest,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"status": status, "tick_id": request.tick_id}
+
+
+@app.post("/internal/world-v2/drain")
+async def world_v2_drain(
+    request: WorldV2DrainRequest,
+    x_world_v2_internal_token: str | None = Header(default=None),
+) -> dict[str, list[str]]:
+    """Run bounded capture Action/background recovery without an Engine call."""
+
+    _require_world_v2_internal_access(x_world_v2_internal_token)
+    result = await _http_v2_capture().drain(
+        max_action_units=request.max_action_units,
+        max_background_units=request.max_background_units,
+    )
+    return {
+        "action_statuses": list(result.action_statuses),
+        "background_statuses": list(result.background_statuses),
+    }
 
 
 @app.post("/proactive/{canonical_user_id}", response_model=ProactiveDecision)

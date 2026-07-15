@@ -264,6 +264,11 @@ class WorldV2PlatformHost:
 
         return await self._application.drain_actions_once()
 
+    async def drain_action(self, action_id: str):
+        """Advance a specific ingress-authorized Action only."""
+
+        return await self._application.drain_action(action_id)
+
     async def drain_background_once(self):
         """Advance one separately scheduled, non-visible World v2 work unit."""
 

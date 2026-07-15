@@ -96,12 +96,31 @@ class ActionPump:
                 continue
         raise ConcurrencyConflict("action pump did not converge after ledger contention")
 
-    async def _drain_once(self) -> ActionPumpResult:
+    async def drain_action(self, action_id: str) -> ActionPumpResult:
+        """Advance exactly one authorized Action, never an arbitrary sibling.
+
+        A synchronous platform response may only capture the Action authorized
+        by the ingress it is answering.  Generic scheduler workers continue to
+        use :meth:`drain_once`; they alone may choose the next eligible Action
+        across the world.
+        """
+
+        if not action_id:
+            raise ValueError("targeted Action drain requires an action id")
+        for _attempt in range(3):
+            try:
+                return await self._drain_once(target_action_id=action_id)
+            except (ConcurrencyConflict, IdempotencyConflict):
+                continue
+        raise ConcurrencyConflict("targeted action pump did not converge after ledger contention")
+
+    async def _drain_once(self, *, target_action_id: str | None = None) -> ActionPumpResult:
         projection = await self._project()
         expired = next(
             (
                 item
                 for item in projection.actions
+                if self._is_target(item, target_action_id)
                 if item.state in {"authorized", "scheduled", "claimed"}
                 and item.expires_at is not None
                 and (projection.logical_time or item.logical_time) >= item.expires_at
@@ -117,6 +136,7 @@ class ActionPump:
             (
                 item
                 for item in projection.actions
+                if self._is_target(item, target_action_id)
                 if item.state == "authorized" and self._expression_dispatch_allowed(item, projection)
             ),
             None,
@@ -128,6 +148,7 @@ class ActionPump:
             (
                 item
                 for item in projection.actions
+                if self._is_target(item, target_action_id)
                 if item.state == "scheduled"
                 and self._is_due(action=item, logical_time=projection.logical_time)
                 and self._dependencies_delivered(action=item, actions=projection.actions)
@@ -140,13 +161,21 @@ class ActionPump:
             if claimed is None:
                 return ActionPumpResult(action_id=action.action_id, status="owned_elsewhere")
             return await self._start_and_dispatch(claimed)
-        blocked = next((item for item in projection.actions if item.state == "scheduled"), None)
+        blocked = next(
+            (
+                item
+                for item in projection.actions
+                if self._is_target(item, target_action_id) and item.state == "scheduled"
+            ),
+            None,
+        )
         if blocked is not None:
             return ActionPumpResult(action_id=blocked.action_id, status="not_due")
         action = next(
             (
                 item
                 for item in projection.actions
+                if self._is_target(item, target_action_id)
                 if item.state == "claimed" and self._expression_dispatch_allowed(item, projection)
             ),
             None,
@@ -156,13 +185,31 @@ class ActionPump:
             if claimed is None:
                 return ActionPumpResult(action_id=action.action_id, status="owned_elsewhere")
             return await self._start_and_dispatch(claimed)
-        action = next((item for item in projection.actions if item.state == "dispatch_started"), None)
+        action = next(
+            (
+                item
+                for item in projection.actions
+                if self._is_target(item, target_action_id) and item.state == "dispatch_started"
+            ),
+            None,
+        )
         if action is not None:
             return await self._recover_dispatch(action)
-        action = next((item for item in projection.actions if item.state == "provider_accepted"), None)
+        action = next(
+            (
+                item
+                for item in projection.actions
+                if self._is_target(item, target_action_id) and item.state == "provider_accepted"
+            ),
+            None,
+        )
         if action is not None:
             return await self._recover_provider_accepted(action)
         return ActionPumpResult(status="idle")
+
+    @staticmethod
+    def _is_target(action: Action, target_action_id: str | None) -> bool:
+        return target_action_id is None or action.action_id == target_action_id
 
     async def _schedule(self, *, action: Action, projection) -> None:
         await self._commit_event(

@@ -347,6 +347,19 @@ class WorldRuntime:
             owner_id=self._action_pump_owner,
         ).drain_once()
 
+    async def drain_action(self, action_id: str) -> ActionPumpResult | None:
+        """Advance one ingress-bound Action without selecting a sibling."""
+
+        if self._action_executor is None:
+            return None
+        assert self._action_pump_owner is not None
+        return await ActionPump(
+            ledger=self._ledger,
+            executor=self._action_executor,
+            settle=self.settle,
+            owner_id=self._action_pump_owner,
+        ).drain_action(action_id)
+
     @classmethod
     def in_memory(
         cls,
