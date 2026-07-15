@@ -28,7 +28,6 @@ from companion_daemon.qq_official import (
     validation_response,
     verify_callback_signature,
 )
-from companion_daemon.runtime import build_companion_engine
 from companion_daemon.world import ConcurrencyConflict, WorldError, WorldKernel
 from companion_daemon.qq_delivery import QQDelivery
 from companion_daemon.turn_transports import CaptureTurnTransport
@@ -55,7 +54,41 @@ app.mount(
     StaticFiles(directory=Path(__file__).resolve().parent / "static"),
     name="dashboard-static",
 )
-engine = build_companion_engine()
+
+
+class _LazyArchiveEngine:
+    """Keep archive-only Engine construction out of the selected v2 ingress.
+
+    ``app`` still exposes explicit archive/debug routes while their migration
+    is incomplete.  Constructing their Engine when this ASGI module is merely
+    imported would nevertheless make every HTTP v2 request acquire a second
+    runtime authority.  The proxy creates that archived runtime only when an
+    archive route actually dereferences it.  Tests may continue to replace the
+    public ``engine`` binding with a concrete fixture.
+    """
+
+    def __init__(self) -> None:
+        self._instance: object | None = None
+
+    def _resolve(self) -> object:
+        if self._instance is None:
+            from companion_daemon.runtime import build_companion_engine
+
+            self._instance = build_companion_engine()
+        return self._instance
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._resolve(), name)
+
+    async def aclose(self) -> None:
+        if self._instance is None:
+            return
+        closer = getattr(self._instance, "aclose", None)
+        if closer is not None:
+            await closer()
+
+
+engine: object = _LazyArchiveEngine()
 # HTTP is the first real platform migration.  QQ and the legacy operator
 # archive routes remain on their existing adapter during the staged cutover,
 # but ``/messages`` never reaches this Engine.

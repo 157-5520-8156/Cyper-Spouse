@@ -1,8 +1,12 @@
 """NapCat (OneBot v11) adapter CLI.
 
-Receives NapCat HTTP events locally and routes them through the same
-CompanionEngine and QQ message coalescer as the official QQ bot adapter.
+The archive/compatibility lane below still uses the historical Engine and QQ
+coalescer.  When ``WORLD_V2_QQ_C2C_ENABLED`` (or ``--world-v2-c2c``) selects
+the dedicated C2C text lane, ``create_app`` returns before constructing either
+legacy authority.  The reverse-architecture guard enforces that boundary; it
+does not claim that the archive lane has itself migrated.
 """
+
 from __future__ import annotations
 
 import argparse
