@@ -3,6 +3,7 @@ from __future__ import annotations
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
 from companion_daemon.world_v2.appraisal_proposal_compiler import AppraisalProposalCompiler
+from companion_daemon.world_v2.appraisal_proposal_worker import AppraisalProposalWorker
 from companion_daemon.world_v2.deliberation import DeliberationResult
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.proposal_audit import ProposalAuditContext, ProposalAuditRecorder
@@ -99,31 +100,26 @@ def test_compiler_records_and_accepts_a_source_bound_appraisal() -> None:
         ),
     )
 
-    compilation = AppraisalProposalCompiler(ledger=ledger).record(
+    worker = AppraisalProposalWorker(
+        compiler=AppraisalProposalCompiler(ledger=ledger),
+        acceptance=AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer),
+        actor="worker:interaction-appraisal",
+    )
+    compilation = worker.process(
         world_id=WORLD_ID, cursor=recorded.cursor, proposal_id=proposal.proposal_id
     )
 
-    assert compilation.status == "candidate_recorded"
-    assert compilation.commit is not None
-    typed = ledger.project().appraisal_proposals[0]
-    assert typed.change_id == change.change_id
-    assert typed.trigger_id == trigger.trigger_id
-    runtime = AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-    accepted = runtime.accept_runtime_owned(
-        handle=runtime.pin_proposal(
-            cursor=ProjectionCursor(
-                world_revision=compilation.commit.world_revision,
-                deliberation_revision=compilation.commit.deliberation_revision,
-                ledger_sequence=compilation.commit.ledger_sequence,
-            ),
-            proposal_id=typed.proposal_id,
-        ),
-        actor="worker:interaction-appraisal",
-        source="test:appraisal-acceptance",
-    )
-
+    assert compilation.status == "accepted"
+    assert compilation.compile_commit is not None
+    assert compilation.acceptance_commit is not None
     projection = ledger.project()
-    assert accepted.world_revision == projection.world_revision
+    assert compilation.acceptance_commit.world_revision == projection.world_revision
     assert projection.appraisals[0].origin.change_id == change.change_id
     assert projection.appraisals[0].hypotheses[0].meaning == "disappointment"
     assert projection.trigger_processes[0].state == "terminal"
+    decision = next(
+        item
+        for item in projection.acceptance_decisions
+        if item.proposal_id == compilation.typed_proposal_id
+    )
+    assert decision.status == "accepted"

@@ -83,6 +83,12 @@ class AppraisalProposalCompiler:
         self._ledger = ledger
         self._reader = DecisionProposalAuthorityReader(ledger=ledger)
 
+    @property
+    def ledger(self) -> LedgerPort:
+        """The immutable composition dependency shared with Acceptance."""
+
+        return self._ledger
+
     def record(
         self, *, world_id: str, cursor: ProjectionCursor, proposal_id: str
     ) -> AppraisalProposalCompilation:

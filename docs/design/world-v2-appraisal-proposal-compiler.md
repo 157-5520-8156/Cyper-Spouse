@@ -20,6 +20,11 @@ ObservationRecorded + 已 claim interaction_appraisal Trigger
 
 此模块不调用模型、不调用分类器、不接受提案、不发送回复。它只把已审计的“解释候选”编译成可由既有 Acceptance lane 验证的候选。
 
+`AppraisalProposalWorker` 是该 compiler 的后台执行 Module。其唯一 Interface 是
+`process(world_id, cursor, proposal_id)`：先编译、再用 opaque acceptance handle
+原子接受。调度器可持久化并重试这三个输入，但不能替换中间 proposal、事件或时间戳；
+worker 也不拥有回复生成能力，因此不能延长用户可见的首 token 路径。
+
 ## 来源与身份
 
 1. `DecisionProposalAuthorityReader` 在精确 cursor 重读 Proposal audit、ModelResult audit 与 canonical proposal bytes。
