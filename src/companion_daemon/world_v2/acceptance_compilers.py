@@ -71,10 +71,11 @@ class DomainCompilerKey(FrozenModel):
 
 
 class AcceptanceCompilationContext(FrozenModel):
-    """Pinned, trusted envelope authority supplied after domain compilation."""
+    """Pinned inert envelope inputs; causation is not yet production authority."""
 
     acceptance_id: str = Field(min_length=1, max_length=256)
     acceptance_event_id: str = Field(min_length=1)
+    acceptance_causation_id: str = Field(min_length=1)
     cursor: ProjectionCursor
     world_id: str = Field(min_length=1)
     logical_time: datetime
@@ -353,6 +354,7 @@ class CompiledDomainAuthorityHandle:
 
     __slots__ = (
         "__authority",
+        "__authority_scope",
         "__change",
         "__context",
         "__payload",
@@ -366,15 +368,19 @@ class CompiledDomainAuthorityHandle:
         proposal_authority: PinnedProposalAuthorityHandle,
         change: TypedChange,
         context: AcceptanceCompilationContext,
+        authority_scope: Literal["production", "test_only"],
         _authority: object | None = None,
     ) -> None:
         if _authority is None:
             raise ValueError("compiled domain authority handles are registry-issued")
+        if authority_scope not in {"production", "test_only"}:
+            raise ValueError("compiled domain authority scope is invalid")
         self.__payload = _strict_payload(payload)
         self.__proposal_authority = proposal_authority
         self.__change = change
         self.__context = context
         self.__authority = _authority
+        self.__authority_scope = authority_scope
 
     @property
     def payload(self) -> CompiledDomainPayload:
@@ -382,6 +388,10 @@ class CompiledDomainAuthorityHandle:
 
     def issued_by(self, authority: object) -> bool:
         return self.__authority is authority
+
+    @property
+    def authority_scope(self) -> Literal["production", "test_only"]:
+        return self.__authority_scope
 
     def verification_inputs(
         self,
@@ -569,7 +579,7 @@ class DomainCompilerRegistry:
         "_manifest",
         "_manifest_digest",
         "_registrations",
-        "_registry_capability",
+        "__test_compiler_authority",
     )
 
     def __init__(
@@ -581,7 +591,7 @@ class DomainCompilerRegistry:
     ) -> None:
         self.__test_scope = _test_scope
         self._authority_reader = authority_reader
-        self._registry_capability = object()
+        self.__test_compiler_authority = object() if _test_scope else None
         by_key: dict[DomainCompilerKey, DomainCompilerRegistration] = {}
         event_owners: dict[str, DomainCompilerKey] = {}
         for raw in registrations:
@@ -754,8 +764,12 @@ class DomainCompilerRegistry:
             raise AcceptanceCompilerError(
                 "authority_mismatch", "production registry cannot mint test authority"
             )
+        if self.__test_compiler_authority is None:
+            raise AcceptanceCompilerError(
+                "authority_mismatch", "test compiler authority is unavailable"
+            )
         return PinnedProposalAuthorityHandle(
-            audit, cursor, world_id, _issuer=self._registry_capability
+            audit, cursor, world_id, _issuer=self.__test_compiler_authority
         )
 
     @property
@@ -765,6 +779,15 @@ class DomainCompilerRegistry:
     @property
     def is_test_scope(self) -> bool:
         return self.__test_scope
+
+    def _owns_compiled_handle(self, handle: CompiledDomainAuthorityHandle) -> bool:
+        return (
+            type(handle) is CompiledDomainAuthorityHandle
+            and self.__test_scope
+            and self.__test_compiler_authority is not None
+            and handle.authority_scope == "test_only"
+            and handle.issued_by(self.__test_compiler_authority)
+        )
 
     @property
     def manifest(self) -> tuple[DomainCompilerCoverage, ...]:
@@ -864,7 +887,8 @@ class DomainCompilerRegistry:
         context: AcceptanceCompilationContext,
     ) -> CompiledDomainAuthorityHandle:
         owned = isinstance(authority, PinnedProposalAuthorityHandle) and (
-            authority.issued_by(self._registry_capability)
+            self.__test_compiler_authority is not None
+            and authority.issued_by(self.__test_compiler_authority)
             if self.is_test_scope
             else self._authority_reader is not None
             and self._authority_reader.owns(authority)
@@ -955,12 +979,17 @@ class DomainCompilerRegistry:
             raise AcceptanceCompilerError(
                 "invalid_event_identity", "compiled payload has no machine domain identity"
             )
+        if not self.is_test_scope or self.__test_compiler_authority is None:
+            raise AcceptanceCompilerError(
+                "production_unavailable", "production compiler authority is unavailable"
+            )
         return CompiledDomainAuthorityHandle(
             compiled,
             proposal_authority=authority,
             change=strict_change,
             context=strict_context,
-            _authority=self._registry_capability,
+            authority_scope=("test_only" if self.is_test_scope else "production"),
+            _authority=self.__test_compiler_authority,
         )
 
     def reverse_verify(
@@ -971,8 +1000,11 @@ class DomainCompilerRegistry:
         change: TypedChange | None = None,
         context: AcceptanceCompilationContext | None = None,
     ) -> None:
-        if not isinstance(actual, CompiledDomainAuthorityHandle) or not actual.issued_by(
-            self._registry_capability
+        expected_scope = "test_only" if self.is_test_scope else "production"
+        if (
+            not isinstance(actual, CompiledDomainAuthorityHandle)
+            or not self._owns_compiled_handle(actual)
+            or actual.authority_scope != expected_scope
         ):
             raise AcceptanceCompilerError(
                 "authority_mismatch", "compiled handle belongs to another registry"
@@ -1218,14 +1250,15 @@ class AcceptedExecutionPlan(FrozenModel):
     cursor: ProjectionCursor
     acceptance_id: str = Field(min_length=1, max_length=256)
     acceptance_event_id: str = Field(min_length=1)
+    acceptance_causation_id: str = Field(min_length=1)
     world_id: str = Field(min_length=1)
     trace_id: str = Field(min_length=1)
     correlation_id: str = Field(min_length=1)
     registry_version: Literal["acceptance-domain-compilers.1"]
     registry_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
     authority_scope: Literal["production", "test_only"]
-    durable_metadata_contract: Literal["accepted-execution-plan.1"] = (
-        "accepted-execution-plan.1"
+    durable_metadata_contract: Literal["accepted-execution-plan.2"] = (
+        "accepted-execution-plan.2"
     )
     ordered_effects: tuple[PlannedEffect, ...] = Field(
         min_length=1, max_length=MAX_MANIFEST_EFFECTS
@@ -1244,6 +1277,7 @@ class AcceptedExecutionPlan(FrozenModel):
         context = AcceptanceCompilationContext(
             acceptance_id=self.acceptance_id,
             acceptance_event_id=self.acceptance_event_id,
+            acceptance_causation_id=self.acceptance_causation_id,
             cursor=self.cursor,
             world_id=self.world_id,
             logical_time=strict_effects[0].provenance.logical_time,
@@ -1338,13 +1372,91 @@ class AcceptedExecutionPlan(FrozenModel):
             raise ValueError("execution plan exceeds compiler metadata budget")
         return self
 
+
+class ProductionAcceptedExecutionPlanHandle:
+    """Reserved production capability type with no current construction path."""
+
+    __slots__ = ()
+
+    def __new__(cls, *args: object, **kwargs: object) -> ProductionAcceptedExecutionPlanHandle:
+        del cls, args, kwargs
+        raise TypeError("production execution plan handles are planner-issued")
+
+    @property
+    def plan(self) -> AcceptedExecutionPlan:
+        raise TypeError("production execution plan handles are not installed")
+
+    @property
+    def proposal_authorities(self) -> tuple[PinnedProposalAuthorityHandle, ...]:
+        raise TypeError("production execution plan handles are not installed")
+
+    @property
+    def compiled_authorities(self) -> tuple[CompiledDomainAuthorityHandle, ...]:
+        raise TypeError("production execution plan handles are not installed")
+
+    def __reduce__(self) -> object:
+        raise TypeError("production execution plan handles cannot be serialized")
+
+    def __copy__(self) -> object:
+        raise TypeError("production execution plan handles cannot be copied")
+
+    def __deepcopy__(self, memo: object) -> object:
+        del memo
+        raise TypeError("production execution plan handles cannot be copied")
+
+
 class AcceptedEffectPlanner:
     """The sole owner of deterministic effect identities and event provenance."""
+
+    __slots__ = ("_registry",)
 
     def __init__(self, *, registry: DomainCompilerRegistry) -> None:
         self._registry = registry
 
     def plan(
+        self,
+        *,
+        context: AcceptanceCompilationContext,
+        authorities: Sequence[CompiledDomainAuthorityHandle],
+    ) -> AcceptedExecutionPlan:
+        """Compatibility alias for inert test planning only."""
+
+        return self.plan_test(context=context, authorities=authorities)
+
+    def plan_test(
+        self,
+        *,
+        context: AcceptanceCompilationContext,
+        authorities: Sequence[CompiledDomainAuthorityHandle],
+    ) -> AcceptedExecutionPlan:
+        if not self._registry.is_test_scope:
+            raise AcceptanceCompilerError(
+                "test_scope_required", "inert test planning requires a test registry"
+            )
+        return self._build_inert_plan(context=context, authorities=authorities)
+
+    def plan_production(
+        self,
+        *,
+        context: AcceptanceCompilationContext,
+        authorities: Sequence[CompiledDomainAuthorityHandle],
+    ) -> ProductionAcceptedExecutionPlanHandle:
+        del context, authorities
+        if self._registry.is_test_scope:
+            raise AcceptanceCompilerError(
+                "production_capability_required",
+                "test registries cannot issue production execution plans",
+            )
+        raise AcceptanceCompilerError(
+            "production_unavailable",
+            "sealed production install and trusted Acceptance causation are unavailable",
+        )
+
+    def owns_production_plan(self, value: object) -> bool:
+        del value
+        return False
+
+    def _build_inert_plan(
         self,
         *,
         context: AcceptanceCompilationContext,
@@ -1357,9 +1469,12 @@ class AcceptedEffectPlanner:
             strict_context = AcceptanceCompilationContext.model_validate(
                 dict(object.__getattribute__(context, "__dict__")), strict=True
             )
+            expected_scope = "test_only" if self._registry.is_test_scope else "production"
             for handle in authorities:
-                if not isinstance(handle, CompiledDomainAuthorityHandle) or not handle.issued_by(
-                    self._registry._registry_capability
+                if (
+                    not isinstance(handle, CompiledDomainAuthorityHandle)
+                    or not self._registry._owns_compiled_handle(handle)
+                    or handle.authority_scope != expected_scope
                 ):
                     raise AcceptanceCompilerError(
                         "authority_mismatch", "planner received untrusted compiled authority"
@@ -1470,6 +1585,7 @@ class AcceptedEffectPlanner:
             cursor=strict_context.cursor,
             acceptance_id=strict_context.acceptance_id,
             acceptance_event_id=strict_context.acceptance_event_id,
+            acceptance_causation_id=strict_context.acceptance_causation_id,
             world_id=strict_context.world_id,
             trace_id=strict_context.trace_id,
             correlation_id=strict_context.correlation_id,
@@ -1495,5 +1611,6 @@ __all__ = [
     "ManifestDomainMutationAdapter",
     "PlannedEffect",
     "PlannedEventProvenance",
+    "ProductionAcceptedExecutionPlanHandle",
     "UnsupportedDomainMutationAdapter",
 ]

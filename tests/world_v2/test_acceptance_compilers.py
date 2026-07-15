@@ -25,6 +25,7 @@ from companion_daemon.world_v2.acceptance_compilers import (
     DomainCompilerRegistry,
     PlannedEffect,
     PlannedEventProvenance,
+    ProductionAcceptedExecutionPlanHandle,
     TrustedProposalAuthorityReader,
     UnsupportedDomainMutationAdapter,
 )
@@ -66,11 +67,13 @@ def _key(
 def _context(
     *,
     acceptance_event_id: str = "event:acceptance:1",
+    acceptance_causation_id: str = "event:trigger-process:1",
     cursor: ProjectionCursor | None = None,
 ) -> AcceptanceCompilationContext:
     return AcceptanceCompilationContext(
         acceptance_id="acceptance:1",
         acceptance_event_id=acceptance_event_id,
+        acceptance_causation_id=acceptance_causation_id,
         cursor=cursor
         or ProjectionCursor(world_revision=12, deliberation_revision=7, ledger_sequence=31),
         world_id="world:1",
@@ -702,6 +705,10 @@ def test_effect_planner_alone_derives_order_identity_and_causation_chain() -> No
     assert not hasattr(plan, "world_events")
     assert planner.plan(context=_context(), authorities=authorities) == plan
     assert plan.authority_scope == "test_only"
+    assert authorities[0].authority_scope == "test_only"
+    assert plan.acceptance_causation_id == "event:trigger-process:1"
+    assert plan.durable_metadata_contract == "accepted-execution-plan.2"
+    assert planner.plan_test(context=_context(), authorities=authorities) == plan
     with pytest.raises(AttributeError):
         registry._test_scope = False  # type: ignore[attr-defined]  # noqa: SLF001
 
@@ -731,6 +738,7 @@ def test_effect_planner_alone_derives_order_identity_and_causation_chain() -> No
                 cursor=_context().cursor,
                 acceptance_id="acceptance:1",
                 acceptance_event_id="event:acceptance:1",
+                acceptance_causation_id="event:trigger-process:1",
                 world_id="world:1",
                 trace_id="trace:1",
                 correlation_id="correlation:1",
@@ -755,6 +763,7 @@ def test_execution_plan_revalidates_hostile_constructed_effects() -> None:
             cursor=_context().cursor,
             acceptance_id="acceptance:1",
             acceptance_event_id="event:acceptance:1",
+            acceptance_causation_id="event:trigger-process:1",
             world_id="world:1",
             trace_id="trace:1",
             correlation_id="correlation:1",
@@ -776,6 +785,7 @@ def test_execution_plan_revalidates_hostile_constructed_effects() -> None:
             cursor=_context().cursor,
             acceptance_id="acceptance:1",
             acceptance_event_id="event:acceptance:1",
+            acceptance_causation_id="event:trigger-process:1",
             world_id="world:1",
             trace_id="trace:1",
             correlation_id="correlation:1",
@@ -842,3 +852,145 @@ def test_planner_rejects_compiler_metadata_amplification() -> None:
             context=_context(), authorities=authorities
         )
     assert captured.value.code == "acceptance_compiler.plan_limit_exceeded"
+
+
+def test_acceptance_causation_is_required_and_plan_bound_but_not_effect_identity() -> None:
+    raw = _context().model_dump()
+    del raw["acceptance_causation_id"]
+    with pytest.raises(ValidationError):
+        AcceptanceCompilationContext.model_validate(raw, strict=True)
+    with pytest.raises(ValidationError):
+        AcceptanceCompilationContext.model_validate(
+            {**_context().model_dump(), "acceptance_causation_id": ""}, strict=True
+        )
+
+    registry = _test_registry()
+    first_context = _context(acceptance_causation_id="event:trigger-process:1")
+    second_context = _context(acceptance_causation_id="event:trigger-process:2")
+    first = AcceptedEffectPlanner(registry=registry).plan_test(
+        context=first_context,
+        authorities=(_compiled_handle(registry=registry, context=first_context),),
+    )
+    second = AcceptedEffectPlanner(registry=registry).plan_test(
+        context=second_context,
+        authorities=(_compiled_handle(registry=registry, context=second_context),),
+    )
+
+    assert first.acceptance_causation_id != second.acceptance_causation_id
+    assert first.ordered_effects[0].event_id == second.ordered_effects[0].event_id
+    assert first.ordered_effects[0].provenance.causation_id == first.acceptance_event_id
+    assert second.ordered_effects[0].provenance.causation_id == second.acceptance_event_id
+
+    with pytest.raises(ValidationError):
+        AcceptedExecutionPlan.model_validate(
+            {**first.model_dump(), "durable_metadata_contract": "accepted-execution-plan.1"},
+            strict=True,
+        )
+
+
+def test_hostile_context_cannot_omit_acceptance_causation() -> None:
+    registry = _test_registry()
+    authority = _compiled_handle(registry=registry)
+    raw = _context().model_dump()
+    del raw["acceptance_causation_id"]
+    hostile = AcceptanceCompilationContext.model_construct(**raw)
+
+    with pytest.raises(AcceptanceCompilerError) as captured:
+        AcceptedEffectPlanner(registry=registry).plan_test(
+            context=hostile, authorities=(authority,)
+        )
+    assert captured.value.code == "acceptance_compiler.invalid_payload"
+
+
+def test_test_registry_cannot_issue_or_upgrade_a_production_plan() -> None:
+    registry = _test_registry()
+    planner = AcceptedEffectPlanner(registry=registry)
+    authority = _compiled_handle(registry=registry)
+    plan = planner.plan_test(context=_context(), authorities=(authority,))
+
+    with pytest.raises(AcceptanceCompilerError) as captured:
+        planner.plan_production(context=_context(), authorities=(authority,))
+    assert captured.value.code == "acceptance_compiler.production_capability_required"
+    assert not planner.owns_production_plan(plan)
+    with pytest.raises(TypeError):
+        planner.plan_production(plan=plan)  # type: ignore[call-arg]
+
+
+def test_default_registry_has_no_production_install_authority_or_compat_plan() -> None:
+    registry = DomainCompilerRegistry()
+    planner = AcceptedEffectPlanner(registry=registry)
+    assert not hasattr(registry, "install_production_authority")
+    assert not hasattr(registry, "production_factory")
+    assert not hasattr(registry, "_DomainCompilerRegistry__production_install_authority")
+
+    with pytest.raises(AcceptanceCompilerError) as unavailable:
+        planner.plan_production(context=_context(), authorities=())
+    assert unavailable.value.code == "acceptance_compiler.production_unavailable"
+
+    with pytest.raises(AcceptanceCompilerError) as alias_rejected:
+        planner.plan(context=_context(), authorities=())
+    assert alias_rejected.value.code == "acceptance_compiler.test_scope_required"
+
+    with pytest.raises(AcceptanceCompilerError) as test_rejected:
+        planner.plan_test(context=_context(), authorities=())
+    assert test_rejected.value.code == "acceptance_compiler.test_scope_required"
+
+
+def test_production_plan_handle_has_no_public_construction_or_counterfeit_upgrade() -> None:
+    assert not hasattr(ProductionAcceptedExecutionPlanHandle, "_issue")
+    with pytest.raises(TypeError):
+        ProductionAcceptedExecutionPlanHandle()
+
+    counterfeit = object.__new__(ProductionAcceptedExecutionPlanHandle)
+    planner = AcceptedEffectPlanner(registry=DomainCompilerRegistry())
+    assert not planner.owns_production_plan(counterfeit)
+
+    class FullCounterfeit(ProductionAcceptedExecutionPlanHandle):
+        @property
+        def plan(self) -> AcceptedExecutionPlan:
+            raise AssertionError("counterfeit plan must not be inspected")
+
+        @property
+        def proposal_authorities(self) -> tuple[PinnedProposalAuthorityHandle, ...]:
+            raise AssertionError("counterfeit proposals must not be inspected")
+
+        @property
+        def compiled_authorities(self) -> tuple[object, ...]:
+            raise AssertionError("counterfeit compiled handles must not be inspected")
+
+    full_counterfeit = object.__new__(FullCounterfeit)
+    assert not planner.owns_production_plan(full_counterfeit)
+    assert not hasattr(ProductionAcceptedExecutionPlanHandle, "to_world_event")
+    assert not hasattr(ProductionAcceptedExecutionPlanHandle, "commit")
+    for fake in (counterfeit, full_counterfeit):
+        for operation in (copy.copy, copy.deepcopy, pickle.dumps):
+            with pytest.raises(TypeError):
+                operation(fake)
+
+
+def test_reflecting_test_registry_scope_cannot_upgrade_existing_compiled_handle() -> None:
+    registry = _test_registry()
+    authority = _compiled_handle(registry=registry)
+    planner = AcceptedEffectPlanner(registry=registry)
+    assert authority.authority_scope == "test_only"
+
+    object.__setattr__(registry, "_DomainCompilerRegistry__test_scope", False)
+    assert not registry.is_test_scope
+    assert authority.authority_scope == "test_only"
+
+    with pytest.raises(AcceptanceCompilerError) as unavailable:
+        planner.plan_production(
+            context=object(),  # type: ignore[arg-type]
+            authorities=object(),  # type: ignore[arg-type]
+        )
+    assert unavailable.value.code == "acceptance_compiler.production_unavailable"
+
+    with pytest.raises(AcceptanceCompilerError) as reverse_rejected:
+        registry.reverse_verify(authority)
+    assert reverse_rejected.value.code == "acceptance_compiler.authority_mismatch"
+
+    with pytest.raises(AcceptanceCompilerError) as build_rejected:
+        planner._build_inert_plan(  # noqa: SLF001
+            context=_context(), authorities=(authority,)
+        )
+    assert build_rejected.value.code == "acceptance_compiler.authority_mismatch"
