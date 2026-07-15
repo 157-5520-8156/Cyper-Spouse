@@ -48,7 +48,10 @@ def _life_identity_components(
     if (
         event_type == "AcceptanceRecorded"
         and "manifest_version" in payload
-        and payload.get("manifest_version") != "acceptance-manifest.2"
+        and payload.get("manifest_version") not in {
+            "acceptance-manifest.2",
+            "acceptance-manifest.3",
+        }
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
     proposal_family = family_for_record(event_type, payload)
@@ -145,6 +148,24 @@ def _life_identity_components(
         and payload.get("manifest_version") == "acceptance-manifest.2"
     ):
         return world_id, payload.get("manifest_version"), payload.get("acceptance_id")
+    if (
+        event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version") == "acceptance-manifest.3"
+    ):
+        return (
+            world_id,
+            payload.get("manifest_version"),
+            payload.get("acceptance_id"),
+            payload.get("manifest_hash"),
+        )
+    if event_type == "FactCommittedV2":
+        return (
+            world_id,
+            payload.get("payload_contract"),
+            payload.get("fact_id"),
+            payload.get("transition_id"),
+            payload.get("materialized_change_hash"),
+        )
     if (
         event_type == "AcceptanceRecorded"
         and payload.get("proposal_id") is not None

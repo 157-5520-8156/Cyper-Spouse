@@ -398,6 +398,11 @@ def test_manifest_builder_derives_a_canonical_inert_production_bundle(tmp_path) 
     assert bundle.manifest.manifest_version == "acceptance-manifest.3"
     assert bundle.manifest.authorized_effects[0].event_type == FACT_V2_ACCEPTED_EVENT_TYPE
     assert bundle.plan.payload.acceptance_id == envelope_request.acceptance_id
+    assert bundle.effect_idempotency_key == domain_idempotency_key(
+        event_type=FACT_V2_ACCEPTED_EVENT_TYPE,
+        world_id=WORLD_ID,
+        payload=bundle.plan.payload.model_dump(mode="json"),
+    )
     assert not hasattr(bundle_handle, "to_world_event")
     with pytest.raises(FactV2AcceptedManifestBuilderError, match="another builder"):
         FactV2AcceptedManifestBuilder(plan_issuer=plan_issuer).inspect(handle=bundle_handle)

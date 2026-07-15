@@ -27,6 +27,7 @@ from .fact_accepted_contracts import (
     FactCommitMaterializedPayloadV2,
     fact_commit_event_payload_hash,
 )
+from .event_identity import domain_idempotency_key
 from .fact_v2_production_plan import (
     FactV2ProductionExecutionPlan,
     FactV2ProductionExecutionPlanHandle,
@@ -305,19 +306,14 @@ def _effect_event_id(
 
 def _effect_idempotency(*, plan: FactV2ProductionExecutionPlan) -> str:
     payload: FactCommitMaterializedPayloadV2 = plan.payload
-    digest = hashlib.sha256(
-        _canonical_json(
-            {
-                "contract": "fact-v2-accepted-effect-idempotency.1",
-                "world_id": plan.envelope.world_id,
-                "payload_contract": payload.payload_contract,
-                "fact_id": payload.fact_id,
-                "transition_id": payload.transition_id,
-                "materialized_change_hash": payload.materialized_change_hash,
-            }
-        ).encode("utf-8")
-    ).hexdigest()
-    return f"world-v2:FactCommittedV2:{digest}"
+    identity = domain_idempotency_key(
+        event_type=FACT_V2_ACCEPTED_EVENT_TYPE,
+        world_id=plan.envelope.world_id,
+        payload=payload.model_dump(mode="json"),
+    )
+    if identity is None:
+        raise FactV2AcceptedManifestBuilderError("Fact v2 event has no domain identity")
+    return identity
 
 
 def _ordered_effect_digest(manifest: AcceptanceManifestV3) -> str:
