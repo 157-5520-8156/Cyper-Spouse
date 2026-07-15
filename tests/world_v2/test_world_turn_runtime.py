@@ -14,6 +14,7 @@ from companion_daemon.world_v2.deliberation import (
 )
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.ledger_context_resolver import context_capsule_compiler_from_ledger
+from companion_daemon.world_v2.ledger_payload_reader import LedgerAuthorizedPayloadReader
 from companion_daemon.world_v2.minimal_reply_acceptance import ReplyBudgetPolicy
 from companion_daemon.world_v2.minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from companion_daemon.world_v2.pinned_turn import PinnedTurnCompiler
@@ -29,7 +30,6 @@ from companion_daemon.world_v2.platform_action_executor import (
     PlatformActionExecutor,
     PlatformDispatchReceipt,
     PlatformDispatchRequest,
-    ResolvedActionPayload,
 )
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn, WorldTurnRuntime
 
@@ -123,17 +123,6 @@ class _MinimalReplyModel:
         )
 
 
-class _Payloads:
-    async def resolve(self, action):  # type: ignore[no-untyped-def]
-        assert action.payload_ref == "payload:turn-runtime:reply:1"
-        return ResolvedActionPayload(
-            payload_ref=action.payload_ref,
-            payload_hash=action.payload_hash,
-            content_type="text/plain",
-            body="我听见你的失望了，刚刚确实没有接住。",
-        )
-
-
 class _Transport:
     provider = "platform:test"
 
@@ -212,7 +201,9 @@ def _configured_runtime() -> tuple[WorldRuntime, WorldLedger, _Transport]:
                 recovery_policy="effect_once",
             ),
             reply_recorder=MinimalReplyAtomicRecorder(batch_issuer=issuer),
-            action_executor=PlatformActionExecutor(payloads=_Payloads(), transport=transport),
+            action_executor=PlatformActionExecutor(
+                payloads=LedgerAuthorizedPayloadReader(ledger=ledger), transport=transport
+            ),
             action_pump_owner="pump:turn-runtime",
         ),
         ledger,
@@ -251,13 +242,39 @@ async def test_platform_neutral_turn_runs_authorize_dispatch_and_settle_without_
 
     first = await turn.respond(inbound)
     duplicate = await turn.respond(inbound)
+    authorized_action = ledger.project().pending_actions[0]
+    payloads = LedgerAuthorizedPayloadReader(ledger=ledger)
+    resolved = await payloads.resolve(authorized_action)
     delivery = await turn.drain_actions_once()
 
     assert first.status == "action_authorized"
     assert duplicate == first
+    assert resolved.body == "我听见你的失望了，刚刚确实没有接住。"
     assert delivery is not None and delivery.status == "settled"
     assert [request.body for request in transport.sent] == ["我听见你的失望了，刚刚确实没有接住。"]
     projection = ledger.project()
     assert len(projection.proposal_audits) == 1
     assert len(projection.stored_message_payloads) == 1
     assert projection.actions[0].state == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_authorized_payload_reader_rejects_an_action_with_substituted_payload_identity() -> None:
+    runtime, ledger, _transport = _configured_runtime()
+    turn = WorldTurnRuntime(runtime=runtime, identities=_Identities())
+    await turn.respond(
+        InboundTurn(
+            platform="test",
+            platform_user_id="user.1",
+            platform_message_id="message:forged-payload",
+            text="我有点失望，感觉你没接住。",
+            observed_at=datetime(2026, 7, 15, tzinfo=UTC),
+            trace_id="trace:forged-payload",
+        )
+    )
+    action = ledger.project().pending_actions[0].model_copy(
+        update={"payload_ref": "payload:substituted"}
+    )
+
+    with pytest.raises(ValueError, match="authorization manifest"):
+        await LedgerAuthorizedPayloadReader(ledger=ledger).resolve(action)
