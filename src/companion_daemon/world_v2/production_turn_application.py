@@ -18,6 +18,7 @@ from pathlib import Path
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .action_pump import ActionExecutor, ActionPumpResult
 from .affect_trigger_runtime import AffectTriggerRunResult
+from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
 from .advisory_compiler import AdvisoryCompiler
 from .deliberation import (
     Deliberation,
@@ -76,7 +77,9 @@ class WorldV2TurnApplication:
     async def drain_actions_once(self) -> ActionPumpResult | None:
         return await self._turns.drain_actions_once()
 
-    async def drain_background_once(self) -> AffectTriggerRunResult | None:
+    async def drain_background_once(
+        self,
+    ) -> AppraisalTriggerRunResult | AffectTriggerRunResult | None:
         """Run one separately scheduled background-affect unit, when configured."""
 
         return await self._turns.drain_background_once()

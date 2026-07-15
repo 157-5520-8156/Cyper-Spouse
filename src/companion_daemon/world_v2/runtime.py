@@ -32,6 +32,10 @@ from .affect_trigger import affect_deliberation_trigger_events
 from .affect_acceptance_runtime import AffectAcceptanceError, AffectAcceptanceRuntime
 from .affect_deliberation_worker import AffectDeliberationWorker
 from .affect_trigger_runtime import AffectTriggerRunResult, AffectTriggerRuntime
+from .interaction_appraisal_trigger_runtime import (
+    AppraisalTriggerRunResult,
+    InteractionAppraisalTriggerRuntime,
+)
 from .action_pump import ActionExecutor, ActionPump, ActionPumpResult
 from .schemas import (
     ClockObservation,
@@ -66,6 +70,7 @@ class WorldRuntime:
         appraisal_acceptance: AppraisalAcceptanceRuntime | None = None,
         appraisal_acceptance_actor: str | None = None,
         appraisal_worker: AppraisalProposalWorker | None = None,
+        interaction_appraisal_turn: PinnedTurnCompiler | None = None,
         affect_deliberation_owner: str | None = None,
         affect_worker: AffectDeliberationWorker | None = None,
         action_executor: ActionExecutor | None = None,
@@ -100,6 +105,9 @@ class WorldRuntime:
         if appraisal_worker is not None and interaction_appraisal_owner is None:
             raise ValueError("appraisal worker requires interaction appraisal triggers")
         self._appraisal_worker = appraisal_worker
+        if interaction_appraisal_turn is not None and appraisal_worker is None:
+            raise ValueError("interaction appraisal turn requires an appraisal worker")
+        self._interaction_appraisal_turn = interaction_appraisal_turn
         if affect_deliberation_owner is not None and not affect_deliberation_owner:
             raise ValueError("affect deliberation owner must not be empty")
         self._affect_deliberation_owner = affect_deliberation_owner
@@ -128,18 +136,34 @@ class WorldRuntime:
 
         return self._world_id
 
-    async def drain_background_once(self) -> AffectTriggerRunResult | None:
-        """Run one low-priority affect job without delaying an interactive turn.
+    async def drain_background_once(
+        self,
+    ) -> AppraisalTriggerRunResult | AffectTriggerRunResult | None:
+        """Run one low-priority mental-state job without delaying an interactive turn.
 
         Hosts call this from their durable worker loop.  It is intentionally
         separate from :meth:`ingest`: an affect reflection may use a thinking
         route, while the visible reply path must stay latency-bounded.
         """
 
-        if self._affect_worker is None:
-            return None
-        assert self._affect_deliberation_owner is not None
         async with self._lock:
+            appraisal_result: AppraisalTriggerRunResult | None = None
+            if self._interaction_appraisal_turn is not None:
+                assert self._appraisal_worker is not None
+                assert self._interaction_appraisal_owner is not None
+                appraisal = await InteractionAppraisalTriggerRuntime(
+                    ledger=self._ledger,
+                    pinned_turn=self._interaction_appraisal_turn,
+                    worker=self._appraisal_worker,
+                    owner_id=self._interaction_appraisal_owner,
+                    affect_owner_id=self._affect_deliberation_owner,
+                ).drain_one()
+                if appraisal.status != "idle":
+                    return appraisal
+                appraisal_result = appraisal
+            if self._affect_worker is None:
+                return appraisal_result
+            assert self._affect_deliberation_owner is not None
             return await AffectTriggerRuntime(
                 ledger=self._ledger,
                 worker=self._affect_worker,
@@ -626,7 +650,16 @@ class WorldRuntime:
                     world_revision=trigger_head.world_revision,
                     deliberation_revision=trigger_head.deliberation_revision,
                 )
-            if self._appraisal_worker is not None and audited is not None and audited.proposal_id:
+            # Compatibility for existing composition roots that provide only
+            # the old inline worker. New production composition provides a
+            # dedicated interaction turn, whose durable trigger is drained
+            # outside this latency-critical lock.
+            if (
+                self._appraisal_worker is not None
+                and self._interaction_appraisal_turn is None
+                and audited is not None
+                and audited.proposal_id
+            ):
                 after_audit = await self._project_for_write()
                 audit = next(
                     (
