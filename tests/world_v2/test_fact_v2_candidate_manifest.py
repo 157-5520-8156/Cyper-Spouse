@@ -20,6 +20,11 @@ from companion_daemon.world_v2.fact_v2_acceptance_envelope_authority import (
     FactV2AcceptanceEnvelopeAuthorityIssuer,
     FactV2AcceptanceEnvelopeRequestV2,
 )
+from companion_daemon.world_v2.fact_v2_production_plan import (
+    FactV2ProductionExecutionPlanHandle,
+    FactV2ProductionPlanError,
+    FactV2ProductionPlanIssuer,
+)
 from companion_daemon.world_v2.fact_v2_candidate_manifest import (
     FACT_V2_CANDIDATE_EVENT_TYPE,
     FactV2AcceptanceEnvelopeCandidate,
@@ -316,4 +321,42 @@ def test_production_envelope_is_pinned_to_the_fact_proposal_audit(tmp_path) -> N
             operation(handle)
     with pytest.raises(FactV2AcceptanceEnvelopeAuthorityError, match="another issuer"):
         issuer.envelope(handle=FactV2AcceptanceEnvelopeAuthorityHandle())
+    ledger.close()
+
+
+def test_production_plan_revalidates_opaque_fact_capabilities(tmp_path) -> None:
+    ledger, registry, reader, proposal_handle, prepared, sources, candidate, _ = _bound(tmp_path)
+    envelope_request = FactV2AcceptanceEnvelopeRequestV2.model_validate(
+        candidate.model_dump(mode="python")
+        | {"acceptance_causation_id": reader.audit(handle=proposal_handle).event_ref},
+        strict=True,
+    )
+    envelope_issuer = FactV2AcceptanceEnvelopeAuthorityIssuer()
+    envelope_handle = envelope_issuer.issue(
+        proposal_reader=reader, proposal_handle=proposal_handle, request=envelope_request
+    )
+    issuer = FactV2ProductionPlanIssuer(
+        registry=registry, proposal_reader=reader, envelope_issuer=envelope_issuer
+    )
+    plan_handle = issuer.issue(
+        envelope_handle=envelope_handle,
+        proposal_handle=proposal_handle,
+        prepared=prepared,
+        sources=sources,
+    )
+
+    plan = issuer.revalidate(handle=plan_handle)
+    assert plan.payload.acceptance_id == envelope_request.acceptance_id
+    assert plan.proposal_audit.event_ref == envelope_request.acceptance_causation_id
+    assert issuer.owns(plan_handle)
+    assert not hasattr(plan_handle, "to_world_event")
+    with pytest.raises(FactV2ProductionPlanError, match="another issuer"):
+        FactV2ProductionPlanIssuer(
+            registry=registry, proposal_reader=reader, envelope_issuer=envelope_issuer
+        ).inspect(handle=plan_handle)
+    for operation in (copy.copy, copy.deepcopy, pickle.dumps):
+        with pytest.raises(TypeError):
+            operation(plan_handle)
+    with pytest.raises(FactV2ProductionPlanError, match="another issuer"):
+        issuer.inspect(handle=FactV2ProductionExecutionPlanHandle())
     ledger.close()
