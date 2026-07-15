@@ -25,6 +25,7 @@ from .appraisal_acceptance_runtime import (
     AppraisalAcceptanceError,
     AppraisalAcceptanceRuntime,
 )
+from .affect_acceptance_runtime import AffectAcceptanceError, AffectAcceptanceRuntime
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -57,6 +58,8 @@ class WorldRuntime:
         interaction_appraisal_owner: str | None = None,
         appraisal_acceptance: AppraisalAcceptanceRuntime | None = None,
         appraisal_acceptance_actor: str | None = None,
+        affect_acceptance: AffectAcceptanceRuntime | None = None,
+        affect_acceptance_actor: str | None = None,
     ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
@@ -80,6 +83,12 @@ class WorldRuntime:
             raise ValueError("appraisal acceptance runtime must own this exact ledger")
         self._appraisal_acceptance = appraisal_acceptance
         self._appraisal_acceptance_actor = appraisal_acceptance_actor
+        if (affect_acceptance is None) != (affect_acceptance_actor is None):
+            raise ValueError("affect acceptance runtime and actor must be configured together")
+        if affect_acceptance is not None and affect_acceptance.ledger is not self._ledger:
+            raise ValueError("affect acceptance runtime must own this exact ledger")
+        self._affect_acceptance = affect_acceptance
+        self._affect_acceptance_actor = affect_acceptance_actor
         self._lock = asyncio.Lock()
 
     @classmethod
@@ -245,6 +254,119 @@ class WorldRuntime:
             outcome_id=f"outcome:appraisal:{proposal_id}",
             trigger_id=proposal.trigger_id,
             observation_ref=proposal.source_evidence_ref,
+            committed_world_revision=committed.world_revision,
+            ledger_sequence=committed.ledger_sequence,
+            status="observed_only",
+            projection_hint=f"world-revision:{committed.world_revision}",
+        )
+
+    async def accept_affect_proposal(self, proposal_id: str) -> RuntimeOutcome:
+        """Atomically consume one persisted Affect proposal at its exact cursor."""
+
+        if self._affect_acceptance is None or self._affect_acceptance_actor is None:
+            raise ValueError("affect acceptance is not configured")
+        if not proposal_id:
+            raise ValueError("affect proposal id must not be empty")
+        async with self._lock:
+            projection = await self._project_for_write()
+            existing = next(
+                (item for item in projection.acceptance_decisions if item.proposal_id == proposal_id),
+                None,
+            )
+            if existing is not None:
+                if existing.status != "accepted":
+                    return RuntimeOutcome(
+                        outcome_id=f"outcome:affect:{proposal_id}",
+                        trigger_id=f"affect:{proposal_id}",
+                        committed_world_revision=projection.world_revision,
+                        ledger_sequence=projection.ledger_sequence,
+                        status="observed_only",
+                        terminal_errors=(f"affect.proposal_{existing.status}",),
+                        projection_hint=f"world-revision:{projection.world_revision}",
+                    )
+                if existing.manifest_version != "affect-acceptance.1":
+                    return RuntimeOutcome(
+                        outcome_id=f"outcome:affect:{proposal_id}",
+                        trigger_id=f"affect:{proposal_id}",
+                        committed_world_revision=projection.world_revision,
+                        ledger_sequence=projection.ledger_sequence,
+                        status="failed_safe",
+                        terminal_errors=("affect.acceptance_not_runtime_owned",),
+                        projection_hint=f"world-revision:{projection.world_revision}",
+                    )
+                located = await self._lookup_event_commit(existing.acceptance_event_ref or "")
+                if located is None:
+                    raise RuntimeError("accepted affect decision has no durable manifest")
+                manifest = located[0].payload()
+                proposal_event_ref = manifest.get("proposal_event_ref")
+                proposal_payload_hash = manifest.get("proposal_event_payload_hash")
+                if not isinstance(proposal_event_ref, str) or not isinstance(proposal_payload_hash, str):
+                    raise RuntimeError("accepted affect manifest has no proposal provenance")
+                proposal_located = await self._lookup_event_commit(proposal_event_ref)
+                if proposal_located is None or proposal_located[0].payload_hash != proposal_payload_hash:
+                    raise RuntimeError("accepted affect proposal provenance is not durable")
+                proposal_payload = proposal_located[0].payload()
+                if (
+                    proposal_payload.get("proposal_id") != proposal_id
+                    or proposal_payload.get("proposal_kind") != "affect_transition"
+                ):
+                    raise RuntimeError("accepted affect proposal provenance has the wrong identity")
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:affect:{proposal_id}",
+                    trigger_id=f"affect:{proposal_id}",
+                    committed_world_revision=projection.world_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                    status="observed_only",
+                    projection_hint=f"world-revision:{projection.world_revision}",
+                )
+            proposal = next(
+                (item for item in projection.affect_proposals if item.proposal_id == proposal_id),
+                None,
+            )
+            if proposal is None:
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:affect:{proposal_id}",
+                    trigger_id=f"affect:{proposal_id}",
+                    committed_world_revision=projection.world_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                    status="deferred",
+                    deferred_refs=("affect.proposal_unavailable",),
+                    projection_hint=f"world-revision:{projection.world_revision}",
+                )
+            cursor = ProjectionCursor(
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                ledger_sequence=projection.ledger_sequence,
+            )
+            try:
+                handle = self._affect_acceptance.pin_proposal(cursor=cursor, proposal_id=proposal_id)
+                if self._ledger.blocks_event_loop:
+                    committed = await asyncio.to_thread(
+                        self._affect_acceptance.accept_runtime_owned,
+                        handle=handle,
+                        actor=self._affect_acceptance_actor,
+                        source="world-runtime:affect-acceptance",
+                    )
+                else:
+                    committed = self._affect_acceptance.accept_runtime_owned(
+                        handle=handle,
+                        actor=self._affect_acceptance_actor,
+                        source="world-runtime:affect-acceptance",
+                    )
+            except (AffectAcceptanceError, ConcurrencyConflict) as exc:
+                code = exc.code if isinstance(exc, AffectAcceptanceError) else "affect.stale_cursor"
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:affect:{proposal_id}",
+                    trigger_id=f"affect:{proposal_id}",
+                    committed_world_revision=projection.world_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                    status="deferred",
+                    deferred_refs=(code,),
+                    projection_hint=f"world-revision:{projection.world_revision}",
+                )
+        return RuntimeOutcome(
+            outcome_id=f"outcome:affect:{proposal_id}",
+            trigger_id=f"affect:{proposal_id}",
             committed_world_revision=committed.world_revision,
             ledger_sequence=committed.ledger_sequence,
             status="observed_only",

@@ -805,6 +805,24 @@ class WorldLedger:
             raise LedgerIntegrityError("Appraisal proposal identity has multiple envelopes")
         return candidates[0] if candidates else None
 
+    def _find_affect_proposal_event(
+        self, *, proposal_id: str, cursor: ProjectionCursor
+    ) -> WorldEvent | None:
+        """Internal exact lookup used by the Affect acceptance reader."""
+
+        with self._thread_lock:
+            candidates = tuple(
+                stored.event
+                for stored in self._events
+                if stored.ledger_sequence <= cursor.ledger_sequence
+                and stored.event.event_type == "ProposalRecorded"
+                and stored.event.payload().get("proposal_id") == proposal_id
+                and stored.event.payload().get("proposal_kind") == "affect_transition"
+            )
+        if len(candidates) > 1:
+            raise LedgerIntegrityError("Affect proposal identity has multiple envelopes")
+        return candidates[0] if candidates else None
+
     def resolve_committed_event_refs(
         self, event_ids: Sequence[str], *, at_world_revision: int
     ) -> dict[str, CommittedWorldEventRef]:

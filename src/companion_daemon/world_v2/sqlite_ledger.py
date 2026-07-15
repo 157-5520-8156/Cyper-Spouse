@@ -2921,6 +2921,32 @@ class SQLiteWorldLedger:
                 raise LedgerIntegrityError("Appraisal proposal event disappeared")
             return located[0]
 
+    def _find_affect_proposal_event(
+        self, *, proposal_id: str, cursor: ProjectionCursor
+    ) -> WorldEvent | None:
+        """Internal exact lookup used by the Affect acceptance reader."""
+
+        with self._thread_lock:
+            rows = tuple(
+                self._connection.execute(
+                    """SELECT event_id FROM world_v2_events
+                       WHERE world_id = ?
+                         AND ledger_sequence <= ?
+                         AND json_extract(event_json, '$.event_type') = 'ProposalRecorded'
+                         AND json_extract(json_extract(event_json, '$.payload_json'), '$.proposal_id') = ?
+                         AND json_extract(json_extract(event_json, '$.payload_json'), '$.proposal_kind') = 'affect_transition'""",
+                    (self._world_id, cursor.ledger_sequence, proposal_id),
+                )
+            )
+            if len(rows) > 1:
+                raise LedgerIntegrityError("Affect proposal identity has multiple envelopes")
+            if not rows:
+                return None
+            located = self.lookup_event_commit(str(rows[0]["event_id"]))
+            if located is None:
+                raise LedgerIntegrityError("Affect proposal event disappeared")
+            return located[0]
+
     def resolve_committed_event_refs(
         self, event_ids: Sequence[str], *, at_world_revision: int
     ) -> dict[str, CommittedWorldEventRef]:

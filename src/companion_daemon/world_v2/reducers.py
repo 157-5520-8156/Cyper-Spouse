@@ -41,6 +41,11 @@ from .appraisal_acceptance_manifest import (
     AppraisalAcceptanceManifest,
     canonical_appraisal_acceptance_value_hash,
 )
+from .affect_acceptance_manifest import (
+    AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+    AffectAcceptanceManifest,
+    canonical_affect_acceptance_value_hash,
+)
 from .appraisal_reducers import (
     accept_appraisal,
     contradict_appraisal,
@@ -2702,6 +2707,12 @@ def _affect_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reducer
             proposed_payload,
             logical_time=state.logical_time,
         )
+    proposal = proposal.model_copy(
+        update={
+            "recorded_event_ref": event.event_id,
+            "recorded_event_payload_hash": event.payload_hash,
+        }
+    )
     return state.model_copy(
         update={
             "affect_proposals": (*state.affect_proposals, proposal),
@@ -2731,6 +2742,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
                 "acceptance-manifest.3",
                 MINIMAL_REPLY_MANIFEST_VERSION,
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
+                AFFECT_ACCEPTANCE_MANIFEST_VERSION,
         }
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -2742,6 +2754,8 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         return _minimal_reply_manifest_recorded(state, event)
     if raw.get("manifest_version") == APPRAISAL_ACCEPTANCE_MANIFEST_VERSION:
         return _appraisal_acceptance_manifest_recorded(state, event)
+    if raw.get("manifest_version") == AFFECT_ACCEPTANCE_MANIFEST_VERSION:
+        return _affect_acceptance_manifest_recorded(state, event)
     proposal_id = raw.get("proposal_id")
     evaluated_world_revision = raw.get("evaluated_world_revision")
     if not isinstance(proposal_id, str) or not isinstance(evaluated_world_revision, int):
@@ -3192,6 +3206,59 @@ def _appraisal_acceptance_manifest_recorded(
     proposed = json.loads(proposal.proposed_mutation.payload_json)
     if canonical_appraisal_acceptance_value_hash(proposed) != manifest.mutation_payload_hash:
         raise ValueError("appraisal acceptance manifest mutation hash is invalid")
+    return state.model_copy(
+        update={
+            "acceptance_decisions": (
+                *state.acceptance_decisions,
+                AcceptanceDecisionRef(
+                    proposal_id=manifest.proposal_id,
+                    evaluated_world_revision=manifest.evaluated_world_revision,
+                    acceptance_id=manifest.acceptance_id,
+                    status="accepted",
+                    accepted_change_id=manifest.accepted_change_id,
+                    accepted_change_hash=manifest.accepted_change_hash,
+                    manifest_version=manifest.manifest_version,
+                    manifest_hash=manifest.manifest_hash,
+                    acceptance_event_ref=event.event_id,
+                    acceptance_event_payload_hash=event.payload_hash,
+                ),
+            )
+        }
+    )
+
+
+def _affect_acceptance_manifest_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    """Record the decision half of the isolated Affect accepted batch."""
+
+    manifest = AffectAcceptanceManifest.model_validate_json(event.payload_json)
+    current_world_revision = len(state.committed_world_event_refs)
+    if manifest.evaluated_world_revision != current_world_revision:
+        raise ValueError("affect acceptance manifest must evaluate the current world")
+    if event.causation_id != manifest.proposal_event_ref:
+        raise ValueError("affect acceptance manifest causation does not bind proposal")
+    if any(
+        item.acceptance_id == manifest.acceptance_id or item.proposal_id == manifest.proposal_id
+        for item in state.acceptance_decisions
+    ):
+        raise ValueError("affect proposal or acceptance is already decided")
+    proposal = next(
+        (item for item in state.affect_proposals if item.proposal_id == manifest.proposal_id),
+        None,
+    )
+    if proposal is None or (
+        proposal.change_id != manifest.accepted_change_id
+        or proposal.evaluated_world_revision != manifest.evaluated_world_revision
+        or proposal.proposed_change_hash != manifest.accepted_change_hash
+        or proposal.proposed_mutation.event_type != manifest.mutation_event_type
+        or proposal.recorded_event_ref != manifest.proposal_event_ref
+        or proposal.recorded_event_payload_hash != manifest.proposal_event_payload_hash
+    ):
+        raise ValueError("affect acceptance manifest does not bind persisted proposal")
+    proposed = json.loads(proposal.proposed_mutation.payload_json)
+    if canonical_affect_acceptance_value_hash(proposed) != manifest.mutation_payload_hash:
+        raise ValueError("affect acceptance manifest mutation hash is invalid")
     return state.model_copy(
         update={
             "acceptance_decisions": (

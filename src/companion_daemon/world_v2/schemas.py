@@ -681,7 +681,10 @@ class AcceptanceDecisionRef(FrozenModel):
     accepted_change_id: str | None = None
     accepted_change_hash: str | None = Field(default=None, min_length=64, max_length=64)
     manifest_version: Literal[
-        "acceptance-manifest.2", "acceptance-manifest.3", "appraisal-acceptance.1"
+        "acceptance-manifest.2",
+        "acceptance-manifest.3",
+        "appraisal-acceptance.1",
+        "affect-acceptance.1",
     ] | None = None
     manifest_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     acceptance_event_ref: str | None = None
@@ -2496,6 +2499,8 @@ class AffectProposalProjection(FrozenModel):
     appraisal_refs: tuple[AppraisalMeaningRef, ...] = ()
     policy_refs: tuple[str, ...] = Field(min_length=1)
     proposed_mutation: AffectProposedMutation
+    recorded_event_ref: str | None = Field(default=None, min_length=1)
+    recorded_event_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def mutation_type_matches_transition(self) -> AffectProposalProjection:
@@ -2510,6 +2515,8 @@ class AffectProposalProjection(FrozenModel):
             raise ValueError("proposed affect mutation type does not match transition")
         if len(self.policy_refs) != len(set(self.policy_refs)):
             raise ValueError("affect proposal policy refs must be unique")
+        if (self.recorded_event_ref is None) != (self.recorded_event_payload_hash is None):
+            raise ValueError("affect proposal event provenance must be complete or absent")
         return self
 
 

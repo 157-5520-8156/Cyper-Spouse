@@ -453,7 +453,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             scoped_affect = None
         else:
             scoped_affect = tuple(
-                item
+                _normalize_observation_evidence(item, observation_aliases=observation_aliases)
                 for item in active_affect
                 if all(
                     appraisal_by_id[ref.appraisal_id].subject_ref in subject_refs

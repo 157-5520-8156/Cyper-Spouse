@@ -12,6 +12,11 @@ from .appraisal_acceptance_manifest import (
     AppraisalAcceptanceManifest,
     canonical_appraisal_acceptance_value_hash,
 )
+from .affect_acceptance_manifest import (
+    AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+    AffectAcceptanceManifest,
+    canonical_affect_acceptance_value_hash,
+)
 from .event_identity import domain_idempotency_key
 from .experience_events import ExperienceCommittedPayload
 from .fact_accepted_contracts import (
@@ -41,6 +46,7 @@ from .appraisal_events import (
     AppraisalContradictedPayload,
     AppraisalSupersededPayload,
 )
+from .affect_events import AFFECT_PAYLOAD_MODELS, AffectAuthorizedMutationPayload
 from .schemas import Action, BudgetReservation, ExperienceOccurrenceSettlementBinding, WorldEvent
 from .typed_proposal_families import (
     family_for_mutation,
@@ -62,6 +68,7 @@ def validate_commit_batch(
         reject_accepted_manifest_v3_without_recorder(events)
         reject_minimal_reply_manifest_without_recorder(events)
         reject_appraisal_acceptance_manifest_without_recorder(events)
+        reject_affect_acceptance_manifest_without_recorder(events)
     _validate_deliberation_audit_transaction(events)
     _validate_acceptance_manifest_v2_batch(events)
     _validate_authorized_fact_manifest_v3_batch(
@@ -75,6 +82,11 @@ def validate_commit_batch(
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_authorized_appraisal_acceptance_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_affect_acceptance_manifest_batch(
         events,
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
@@ -357,6 +369,7 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
                 "acceptance-manifest.3",
                 MINIMAL_REPLY_MANIFEST_VERSION,
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
+                AFFECT_ACCEPTANCE_MANIFEST_VERSION,
         }
     ]
     if unknown:
@@ -756,6 +769,85 @@ def reject_appraisal_acceptance_manifest_without_recorder(events: Sequence[World
         for event in events
     ):
         raise ValueError("appraisal_acceptance.recorder_capability_required")
+
+
+def _validate_authorized_affect_acceptance_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == AFFECT_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("affect_acceptance.recorder_capability_required")
+    if len(manifests) != 1 or len(events) != 2:
+        raise ValueError("affect_acceptance.accepted_batch_must_be_exact")
+    acceptance, mutation = events
+    try:
+        manifest = AffectAcceptanceManifest.model_validate_json(acceptance.payload_json)
+        payload = AFFECT_PAYLOAD_MODELS[manifest.mutation_event_type].model_validate_json(
+            mutation.payload_json
+        )
+    except Exception as exc:
+        raise ValueError("affect_acceptance.accepted_batch_payload_is_invalid") from exc
+    if not isinstance(payload, AffectAuthorizedMutationPayload):
+        raise ValueError("affect_acceptance.mechanical_mutation_is_not_acceptable")
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or tuple(event.event_type for event in events)
+        != ("AcceptanceRecorded", manifest.mutation_event_type)
+        or acceptance.causation_id != manifest.proposal_event_ref
+        or mutation.causation_id != acceptance.event_id
+        or mutation.event_id != manifest.mutation_event_id
+        or mutation.payload_hash != manifest.mutation_payload_hash
+    ):
+        raise ValueError("affect_acceptance.batch_does_not_match_manifest")
+    if any(
+        (
+            mutation.world_id != acceptance.world_id,
+            mutation.logical_time != acceptance.logical_time,
+            mutation.created_at != acceptance.created_at,
+            mutation.actor != acceptance.actor,
+            mutation.source != acceptance.source,
+            mutation.trace_id != acceptance.trace_id,
+            mutation.correlation_id != acceptance.correlation_id,
+        )
+    ):
+        raise ValueError("affect_acceptance.envelope_metadata_mismatch")
+    if (
+        payload.acceptance_id != manifest.acceptance_id
+        or payload.proposal_id != manifest.proposal_id
+        or payload.change_id != manifest.accepted_change_id
+        or payload.accepted_change_hash != manifest.accepted_change_hash
+        or payload.evaluated_world_revision != manifest.evaluated_world_revision
+        or canonical_affect_acceptance_value_hash(payload.model_dump(mode="json"))
+        != manifest.mutation_payload_hash
+    ):
+        raise ValueError("affect_acceptance.mutation_does_not_match_manifest")
+    origin = getattr(getattr(payload, "episode", None), "origin", None)
+    if origin is None:
+        origin = getattr(getattr(payload, "successor", None), "origin", None)
+    if origin is not None and origin.accepted_event_ref != mutation.event_id:
+        raise ValueError("affect_acceptance.mutation_event_identity_not_bound")
+    for event in (acceptance, mutation):
+        expected = domain_idempotency_key(
+            event_type=event.event_type, world_id=event.world_id, payload=event.payload()
+        )
+        if expected is None or event.idempotency_key != expected:
+            raise ValueError("affect_acceptance.event_identity_is_not_deterministic")
+
+
+def reject_affect_acceptance_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == AFFECT_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("affect_acceptance.recorder_capability_required")
 
 
 def appraisal_trigger_identity(occurrence_id: str, result_id: str) -> str:
