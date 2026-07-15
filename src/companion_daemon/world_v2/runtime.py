@@ -51,6 +51,12 @@ from .outcome_trigger_runtime import OutcomeTriggerRunResult, OutcomeTriggerRunt
 from .outcome_trigger import outcome_deliberation_trigger_event, outcome_deliberation_trigger_id
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .action_pump import ActionExecutor, ActionPump, ActionPumpResult
+from .expression_reconsideration import expression_reconsideration_events_for_observation
+from .expression_reconsideration_runtime import (
+    ExpressionReconsiderationReviewer,
+    ExpressionReconsiderationRunResult,
+    ExpressionReconsiderationRuntime,
+)
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -121,6 +127,8 @@ class WorldRuntime:
         action_pump_owner: str | None = None,
         affect_acceptance: AffectAcceptanceRuntime | None = None,
         affect_acceptance_actor: str | None = None,
+        expression_reconsideration_owner: str | None = None,
+        expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
     ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
@@ -203,6 +211,12 @@ class WorldRuntime:
             raise ValueError("affect acceptance runtime must own this exact ledger")
         self._affect_acceptance = affect_acceptance
         self._affect_acceptance_actor = affect_acceptance_actor
+        if expression_reconsideration_owner is not None and not expression_reconsideration_owner:
+            raise ValueError("expression reconsideration owner must not be empty")
+        if expression_reconsideration_reviewer is not None and expression_reconsideration_owner is None:
+            raise ValueError("expression reconsideration reviewer requires a worker owner")
+        self._expression_reconsideration_owner = expression_reconsideration_owner
+        self._expression_reconsideration_reviewer = expression_reconsideration_reviewer
         self._lock = asyncio.Lock()
 
     @property
@@ -213,7 +227,14 @@ class WorldRuntime:
 
     async def drain_background_once(
         self,
-    ) -> AppraisalTriggerRunResult | OutcomeTriggerRunResult | AffectTriggerRunResult | FactTriggerRunResult | None:
+    ) -> (
+        AppraisalTriggerRunResult
+        | OutcomeTriggerRunResult
+        | AffectTriggerRunResult
+        | FactTriggerRunResult
+        | ExpressionReconsiderationRunResult
+        | None
+    ):
         """Run one low-priority mental-state job without delaying an interactive turn.
 
         Hosts call this from their durable worker loop.  It is intentionally
@@ -222,6 +243,14 @@ class WorldRuntime:
         """
 
         async with self._lock:
+            if self._expression_reconsideration_owner is not None:
+                reconsideration = await ExpressionReconsiderationRuntime(
+                    ledger=self._ledger,
+                    owner_id=self._expression_reconsideration_owner,
+                    reviewer=self._expression_reconsideration_reviewer,
+                ).drain_one()
+                if reconsideration.status != "idle":
+                    return reconsideration
             if self._outcome_deliberation_turn is not None:
                 assert self._outcome_worker is not None
                 assert self._outcome_deliberation_owner is not None
@@ -736,7 +765,14 @@ class WorldRuntime:
                 )
             before = await self._project_for_write()
             committed = await self._commit(
-                [event],
+                [
+                    event,
+                    *expression_reconsideration_events_for_observation(
+                        projection=before,
+                        observation=observation,
+                        source_event=event,
+                    ),
+                ],
                 world_revision=before.world_revision,
                 deliberation_revision=before.deliberation_revision,
             )

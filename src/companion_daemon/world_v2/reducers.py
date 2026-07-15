@@ -306,7 +306,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.22"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.23"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -377,7 +377,7 @@ def _actor_authority_transition_semantic_dump(
 
 def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dict[str, Any]:
     dumped = action.model_dump(mode="json")
-    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+    if reducer_bundle_version not in {"world-v2-reducers.22", REDUCER_BUNDLE_VERSION}:
         dumped.pop("expression_plan_id", None)
         dumped.pop("expression_beat_id", None)
     return dumped
@@ -387,7 +387,7 @@ def _expression_plan_semantic_dump(
     plan: ExpressionPlanProjection, *, reducer_bundle_version: str
 ) -> dict[str, Any]:
     dumped = plan.model_dump(mode="json")
-    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+    if reducer_bundle_version not in {"world-v2-reducers.22", REDUCER_BUNDLE_VERSION}:
         dumped.pop("state", None)
         dumped.pop("history", None)
     return dumped
@@ -397,7 +397,7 @@ def _expression_beat_semantic_dump(
     beat: ExpressionBeatProjection, *, reducer_bundle_version: str
 ) -> dict[str, Any]:
     dumped = beat.model_dump(mode="json")
-    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+    if reducer_bundle_version not in {"world-v2-reducers.22", REDUCER_BUNDLE_VERSION}:
         dumped.pop("action_id", None)
         dumped.pop("state", None)
         dumped.pop("history", None)
@@ -1041,8 +1041,15 @@ class ReducerState(FrozenModel):
         world_revision: int,
         reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
     ) -> dict[str, Any]:
+        # .23 adds an accepted trigger *kind*, not a new serialized projection
+        # field.  A verified .22 head therefore retains the .22 declaration
+        # while using the identical feature layout when its old hash is
+        # reconstructed during SQLite migration.
+        declared_reducer_bundle_version = reducer_bundle_version
+        if reducer_bundle_version == "world-v2-reducers.22":
+            reducer_bundle_version = REDUCER_BUNDLE_VERSION
         payload = {
-            "reducer_bundle_version": reducer_bundle_version,
+            "reducer_bundle_version": declared_reducer_bundle_version,
             "schema_version": "world-v2.1",
             "world_id": world_id,
             "world_revision": world_revision,
@@ -1093,6 +1100,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.19",
                         "world-v2-reducers.20",
                         "world-v2-reducers.21",
+                        "world-v2-reducers.22",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else item.model_dump(
@@ -4347,6 +4355,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "interaction_fact",
         "affect_deliberation",
         "outcome_deliberation",
+        "expression_reconsideration",
     }:
         if (
             state.logical_time is None
@@ -4388,6 +4397,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "interaction_fact",
         "affect_deliberation",
         "outcome_deliberation",
+        "expression_reconsideration",
     }:
         raise ValueError("appraisal trigger must be opened before it is claimed")
     return state.model_copy(update={"trigger_processes": (*state.trigger_processes, process)})
@@ -4481,6 +4491,64 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             or process.trigger_ref != f"outcome:{observation.occurrence_id}:{observation.observation_id}"
         ):
             raise ValueError("outcome trigger identity is not deterministic")
+    if process.process_kind == "expression_reconsideration":
+        source = next(
+            (
+                item
+                for item in state.committed_world_event_refs
+                if item.event_id == process.source_evidence_ref
+            ),
+            None,
+        )
+        if (
+            source is None
+            or source.event_type != "ObservationRecorded"
+            or event.causation_id != source.event_id
+        ):
+            raise ValueError("expression reconsideration requires its recorded observation")
+        prefix = "expression-reconsideration:"
+        if not process.trigger_ref.startswith(prefix):
+            raise ValueError("expression reconsideration trigger ref is invalid")
+        try:
+            lineage = json.loads(process.trigger_ref.removeprefix(prefix))
+        except json.JSONDecodeError as exc:
+            raise ValueError("expression reconsideration trigger ref is invalid") from exc
+        if not isinstance(lineage, dict):
+            raise ValueError("expression reconsideration trigger ref is invalid")
+        plan_id = lineage.get("plan_id")
+        beat_id = lineage.get("beat_id")
+        observation_id = lineage.get("observation_id")
+        if not all(isinstance(value, str) and value for value in (plan_id, beat_id, observation_id)):
+            raise ValueError("expression reconsideration trigger ref is invalid")
+        from .expression_reconsideration import expression_reconsideration_trigger_id
+
+        plan = next((item for item in state.expression_plans if item.plan_id == plan_id), None)
+        beat = next((item for item in state.expression_beats if item.beat_id == beat_id), None)
+        action = next(
+            (item for item in state.actions if beat is not None and item.action_id == beat.action_id),
+            None,
+        )
+        observed = any(item.observation_id == observation_id for item in state.message_observations)
+        if (
+            not observed
+            or plan is None
+            or plan.state != "authorized"
+            or beat is None
+            or beat.plan_id != plan_id
+            or beat.state != "authorized"
+            or action is None
+            or action.expression_plan_id != plan_id
+            or action.expression_beat_id != beat_id
+            or action.state not in {"authorized", "scheduled", "claimed"}
+            or process.trigger_id
+            != expression_reconsideration_trigger_id(
+                world_id=event.world_id,
+                plan_id=plan_id,
+                beat_id=beat_id,
+                observation_id=observation_id,
+            )
+        ):
+            raise ValueError("expression reconsideration trigger is not eligible")
     if any(item.trigger_id == process.trigger_id for item in state.trigger_processes):
         raise ValueError(f"trigger {process.trigger_id!r} already exists")
     return state.model_copy(update={"trigger_processes": (*state.trigger_processes, process)})

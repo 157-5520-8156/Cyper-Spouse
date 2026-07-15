@@ -1,0 +1,402 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import pytest
+
+from companion_daemon.world_v2.action_pump import ActionPump
+from companion_daemon.world_v2.expression_reconsideration import (
+    expression_reconsideration_events_for_observation,
+    expression_reconsideration_trigger_event,
+    expression_reconsideration_trigger_id,
+)
+from companion_daemon.world_v2.expression_reconsideration_runtime import (
+    ExpressionReconsiderationRuntime,
+)
+from companion_daemon.world_v2.reducers import ReducerState, make_projection, reduce_event
+from companion_daemon.world_v2.runtime import WorldRuntime
+from companion_daemon.world_v2.schemas import (
+    Action,
+    CommitResult,
+    ExpressionBeatLifecycleEntry,
+    ExpressionBeatProjection,
+    ExpressionPlanLifecycleEntry,
+    ExpressionPlanProjection,
+    Observation,
+    WorldEvent,
+)
+
+
+NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
+WORLD_ID = "world:expression-reconsideration"
+
+
+def _observation() -> tuple[Observation, WorldEvent]:
+    observation = Observation(
+        schema_version="world-v2.1",
+        observation_id="observation:user-interjection:1",
+        world_id=WORLD_ID,
+        logical_time=NOW,
+        created_at=NOW,
+        trace_id="trace:interjection:1",
+        causation_id="platform:message:1",
+        correlation_id="conversation:1",
+        source="platform:test",
+        source_event_id="message:1",
+        actor="user:test",
+        channel="test",
+        payload_ref="ingress:message:1",
+        payload_hash="sha256:" + "1" * 64,
+        text="等等，我刚刚还有话想说。",
+        received_at=NOW,
+    )
+    return observation, WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:trigger:observation:1",
+        world_id=WORLD_ID,
+        event_type="ObservationRecorded",
+        logical_time=NOW,
+        created_at=NOW,
+        actor=observation.actor,
+        source=observation.source,
+        trace_id=observation.trace_id,
+        causation_id=observation.causation_id,
+        correlation_id=observation.correlation_id,
+        idempotency_key="observation:message:1",
+        payload=observation.model_dump(mode="json"),
+    )
+
+
+def _action() -> Action:
+    return Action(
+        schema_version="world-v2.1",
+        action_id="action:expression:two",
+        world_id=WORLD_ID,
+        logical_time=NOW,
+        created_at=NOW,
+        trace_id="trace:expression:1",
+        causation_id="event:acceptance:1",
+        correlation_id="conversation:1",
+        kind="reply",
+        layer="external_action",
+        intent_ref="proposal:1:intent:two",
+        actor="companion:test",
+        target="user:test",
+        payload_ref="payload:expression:two",
+        payload_hash="sha256:" + "2" * 64,
+        expression_plan_id="plan:expression:1",
+        expression_beat_id="beat:expression:2",
+        idempotency_key="action:expression:two",
+        budget_reservation_id="reservation:expression:two",
+        state="authorized",
+        recovery_policy="effect_once",
+    )
+
+
+def _state() -> ReducerState:
+    action = _action()
+    return ReducerState(
+        message_observations=(),
+        expression_plans=(
+            ExpressionPlanProjection(
+                acceptance_id="acceptance:1",
+                proposal_id="proposal:1",
+                expression_change_id="change:expression:1",
+                plan_id="plan:expression:1",
+                event_ref="event:plan:1",
+                event_payload_hash="a" * 64,
+                history=(
+                    ExpressionPlanLifecycleEntry(
+                        state="authorized",
+                        event_ref="event:plan:1",
+                        event_payload_hash="a" * 64,
+                    ),
+                ),
+            ),
+        ),
+        expression_beats=(
+            ExpressionBeatProjection(
+                acceptance_id="acceptance:1",
+                proposal_id="proposal:1",
+                expression_change_id="change:expression:1",
+                plan_id="plan:expression:1",
+                beat_id="beat:expression:2",
+                payload_ref=action.payload_ref,
+                payload_hash=action.payload_hash,
+                action_id=action.action_id,
+                cancel_policy="cancel-before-dispatch",
+                reconsider_policy="reconsider-on-new-observation",
+                merge_policy="merge-with-new-observation",
+                event_ref="event:beat:2",
+                event_payload_hash="b" * 64,
+                history=(
+                    ExpressionBeatLifecycleEntry(
+                        state="authorized",
+                        event_ref="event:beat:2",
+                        event_payload_hash="b" * 64,
+                    ),
+                ),
+            ),
+        ),
+        actions=(action,),
+        pending_actions=(action,),
+    )
+
+
+def test_user_interjection_opens_one_deterministic_reconsideration_trigger_for_undispatched_beat() -> None:
+    observation, event = _observation()
+
+    trigger = expression_reconsideration_trigger_event(
+        world_id=WORLD_ID,
+        source_event=event,
+        observation=observation,
+        plan_id="plan:expression:1",
+        beat_id="beat:expression:2",
+    )
+    state = reduce_event(reduce_event(_state(), event), trigger)
+
+    assert trigger.payload()["process"]["trigger_id"] == expression_reconsideration_trigger_id(
+        world_id=WORLD_ID,
+        plan_id="plan:expression:1",
+        beat_id="beat:expression:2",
+        observation_id=observation.observation_id,
+    )
+    assert len(state.trigger_processes) == 1
+    assert state.trigger_processes[0].process_kind == "expression_reconsideration"
+    assert state.trigger_processes[0].state == "open"
+
+
+def test_interjection_gates_every_remaining_beat_of_a_multi_beat_plan_in_stable_order() -> None:
+    observation, source_event = _observation()
+    first = _action()
+    second = first.model_copy(
+        update={
+            "action_id": "action:expression:three",
+            "expression_beat_id": "beat:expression:3",
+            "intent_ref": "proposal:1:intent:three",
+            "payload_ref": "payload:expression:three",
+            "payload_hash": "sha256:" + "3" * 64,
+            "idempotency_key": "action:expression:three",
+            "budget_reservation_id": "reservation:expression:three",
+        }
+    )
+    third = first.model_copy(
+        update={
+            "action_id": "action:expression:four",
+            "expression_beat_id": "beat:expression:4",
+            "intent_ref": "proposal:1:intent:four",
+            "payload_ref": "payload:expression:four",
+            "payload_hash": "sha256:" + "4" * 64,
+            "idempotency_key": "action:expression:four",
+            "budget_reservation_id": "reservation:expression:four",
+        }
+    )
+    existing = _state().expression_beats[0]
+    state = _state().model_copy(
+        update={
+            "actions": (first, second, third),
+            "pending_actions": (first, second, third),
+            "expression_beats": (
+                existing,
+                existing.model_copy(
+                    update={
+                        "beat_id": second.expression_beat_id,
+                        "action_id": second.action_id,
+                        "payload_ref": second.payload_ref,
+                        "payload_hash": second.payload_hash,
+                        "dependency_beat_ids": (existing.beat_id,),
+                        "event_ref": "event:beat:3",
+                    }
+                ),
+                existing.model_copy(
+                    update={
+                        "beat_id": third.expression_beat_id,
+                        "action_id": third.action_id,
+                        "payload_ref": third.payload_ref,
+                        "payload_hash": third.payload_hash,
+                        "dependency_beat_ids": (second.expression_beat_id,),
+                        "event_ref": "event:beat:4",
+                    }
+                ),
+            ),
+        }
+    )
+    projection = make_projection(
+        world_id=WORLD_ID,
+        world_revision=1,
+        deliberation_revision=0,
+        ledger_sequence=1,
+        state=state,
+    )
+
+    triggers = expression_reconsideration_events_for_observation(
+        projection=projection, observation=observation, source_event=source_event
+    )
+
+    assert len(triggers) == 3
+    assert [item.payload()["process"]["trigger_ref"] for item in triggers] == sorted(
+        item.payload()["process"]["trigger_ref"] for item in triggers
+    )
+
+
+class _BlockedLedger:
+    blocks_event_loop = False
+    world_id = WORLD_ID
+
+    def __init__(self, projection) -> None:
+        self._projection = projection
+
+    def project(self):
+        return self._projection
+
+
+class _Executor:
+    def __init__(self) -> None:
+        self.dispatch_calls = 0
+
+    async def dispatch(self, _action):
+        self.dispatch_calls += 1
+        raise AssertionError("a reconsideration-gated beat must not dispatch")
+
+    async def lookup_result(self, _action):
+        raise AssertionError("a reconsideration-gated beat must not recover-dispatch")
+
+
+@pytest.mark.asyncio
+async def test_open_interjection_gate_prevents_old_beat_from_reaching_executor() -> None:
+    observation, source_event = _observation()
+    state = reduce_event(_state(), source_event)
+    trigger_event = expression_reconsideration_trigger_event(
+        world_id=WORLD_ID,
+        source_event=source_event,
+        observation=observation,
+        plan_id="plan:expression:1",
+        beat_id="beat:expression:2",
+    )
+    state = reduce_event(state, trigger_event)
+    projection = make_projection(
+        world_id=WORLD_ID,
+        world_revision=1,
+        deliberation_revision=1,
+        ledger_sequence=2,
+        state=state,
+    )
+    executor = _Executor()
+    pump = ActionPump(
+        ledger=_BlockedLedger(projection),
+        executor=executor,
+        settle=lambda _result: None,
+        owner_id="pump:test",
+    )
+
+    result = await pump.drain_once()
+
+    assert result.status == "idle"
+    assert executor.dispatch_calls == 0
+
+
+class _TriggerLedger:
+    blocks_event_loop = False
+    world_id = WORLD_ID
+
+    def __init__(self, state: ReducerState) -> None:
+        self._state = state
+        self._events: dict[str, WorldEvent] = {}
+        self._world_revision = 0
+        self._deliberation_revision = 0
+        self._sequence = 0
+
+    def project(self):
+        return make_projection(
+            world_id=self.world_id,
+            world_revision=self._world_revision,
+            deliberation_revision=self._deliberation_revision,
+            ledger_sequence=self._sequence,
+            state=self._state,
+        )
+
+    def lookup_event_commit(self, event_id: str):
+        event = self._events.get(event_id)
+        return None if event is None else (event, None)
+
+    def commit(self, events, **_kwargs):
+        for event in events:
+            self._state = reduce_event(self._state, event)
+            self._events[event.event_id] = event
+            self._sequence += 1
+            if event.event_type in {"ObservationRecorded"}:
+                self._world_revision += 1
+            else:
+                self._deliberation_revision += 1
+        return CommitResult(
+            world_revision=self._world_revision,
+            deliberation_revision=self._deliberation_revision,
+            ledger_sequence=self._sequence,
+            event_ids=tuple(event.event_id for event in events),
+        )
+
+    def commit_at_cursor(self, events, **kwargs):
+        return self.commit(events, **kwargs)
+
+
+@pytest.mark.asyncio
+async def test_missing_reviewer_keeps_claimed_gate_and_never_implicitly_continues_old_beat() -> None:
+    observation, source_event = _observation()
+    trigger_event = expression_reconsideration_trigger_event(
+        world_id=WORLD_ID,
+        source_event=source_event,
+        observation=observation,
+        plan_id="plan:expression:1",
+        beat_id="beat:expression:2",
+    )
+    ledger = _TriggerLedger(_state())
+    ledger.commit((source_event, trigger_event))
+
+    result = await ExpressionReconsiderationRuntime(
+        ledger=ledger, owner_id="worker:reconsideration"
+    ).drain_one()
+
+    assert result.status == "awaiting_review"
+    assert ledger.project().trigger_processes[0].state == "claimed"
+    assert ledger.project().actions[0].state == "authorized"
+
+
+class _ContinueReviewer:
+    async def review(self, **_kwargs):
+        return "continue"
+
+
+@pytest.mark.asyncio
+async def test_only_explicit_reviewer_continuation_releases_expression_gate() -> None:
+    observation, source_event = _observation()
+    trigger_event = expression_reconsideration_trigger_event(
+        world_id=WORLD_ID,
+        source_event=source_event,
+        observation=observation,
+        plan_id="plan:expression:1",
+        beat_id="beat:expression:2",
+    )
+    ledger = _TriggerLedger(_state())
+    ledger.commit((source_event, trigger_event))
+
+    result = await ExpressionReconsiderationRuntime(
+        ledger=ledger,
+        owner_id="worker:reconsideration",
+        reviewer=_ContinueReviewer(),
+    ).drain_one()
+
+    assert result.status == "continued"
+    assert ledger.project().trigger_processes[0].state == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_ingress_atomically_opens_reconsideration_gate_before_any_new_turn_work() -> None:
+    observation, _source_event = _observation()
+    ledger = _TriggerLedger(_state())
+    runtime = WorldRuntime(world_id=WORLD_ID, ledger=ledger)
+
+    outcome = await runtime.ingest(observation)
+
+    assert outcome.status == "observed_only"
+    assert len(ledger.project().trigger_processes) == 1
+    assert ledger.project().trigger_processes[0].state == "open"

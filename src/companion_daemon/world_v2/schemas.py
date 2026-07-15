@@ -440,6 +440,7 @@ class TriggerProcess(FrozenModel):
         "interaction_fact",
         "affect_deliberation",
         "outcome_deliberation",
+        "expression_reconsideration",
     ]
     source_evidence_ref: str | None = None
     state: Literal["open", "claimed", "terminal"]
@@ -457,6 +458,7 @@ class TriggerProcess(FrozenModel):
                 "interaction_fact",
                 "affect_deliberation",
                 "outcome_deliberation",
+                "expression_reconsideration",
             }
             and self.source_evidence_ref is not None
         ):
@@ -4091,7 +4093,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.22"
+    reducer_bundle_version: str = "world-v2-reducers.23"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)

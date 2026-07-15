@@ -15,6 +15,7 @@ from typing import Literal, Protocol
 
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .event_identity import domain_idempotency_key
+from .expression_reconsideration import expression_beat_is_gated
 from .ledger import LedgerPort
 from .schema_core import FrozenModel
 from .schemas import (
@@ -111,7 +112,14 @@ class ActionPump:
                 action=expired, result=await self._expired_observation(expired)
             )
             return ActionPumpResult(action_id=expired.action_id, status="expired")
-        action = next((item for item in projection.actions if item.state == "authorized"), None)
+        action = next(
+            (
+                item
+                for item in projection.actions
+                if item.state == "authorized" and self._expression_dispatch_allowed(item, projection)
+            ),
+            None,
+        )
         if action is not None:
             await self._schedule(action=action, projection=projection)
             projection = await self._project()
@@ -122,6 +130,7 @@ class ActionPump:
                 if item.state == "scheduled"
                 and self._is_due(action=item, logical_time=projection.logical_time)
                 and self._dependencies_delivered(action=item, actions=projection.actions)
+                and self._expression_dispatch_allowed(item, projection)
             ),
             None,
         )
@@ -133,7 +142,14 @@ class ActionPump:
         blocked = next((item for item in projection.actions if item.state == "scheduled"), None)
         if blocked is not None:
             return ActionPumpResult(action_id=blocked.action_id, status="not_due")
-        action = next((item for item in projection.actions if item.state == "claimed"), None)
+        action = next(
+            (
+                item
+                for item in projection.actions
+                if item.state == "claimed" and self._expression_dispatch_allowed(item, projection)
+            ),
+            None,
+        )
         if action is not None:
             claimed = await self._claim_or_reclaim(action=action, projection=projection)
             if claimed is None:
@@ -186,6 +202,17 @@ class ActionPump:
     async def _start_and_dispatch(self, action: Action) -> ActionPumpResult:
         assert action.claim_lease is not None
         projection = await self._project()
+        current = next(
+            (item for item in projection.actions if item.action_id == action.action_id), None
+        )
+        if current is None or current.state != "claimed":
+            return ActionPumpResult(action_id=action.action_id, status="owned_elsewhere")
+        if not self._expression_dispatch_allowed(current, projection):
+            # A new Observation may have committed between claim and the
+            # executor call.  Never hand the frozen old payload to a provider
+            # while its reconsideration gate is unresolved.
+            return ActionPumpResult(action_id=action.action_id, status="not_due")
+        action = current
         at = projection.logical_time or action.logical_time
         if at >= action.claim_lease.expires_at:
             return ActionPumpResult(action_id=action.action_id, status="owned_elsewhere")
@@ -204,6 +231,32 @@ class ActionPump:
         )
         result = await self._executor.dispatch(action)
         return await self._settle_or_pending(action=action, result=result, dispatched=True)
+
+    @staticmethod
+    def _expression_dispatch_allowed(action: Action, projection) -> bool:
+        if action.expression_plan_id is None:
+            return True
+        beat_id = action.expression_beat_id
+        assert beat_id is not None
+        beat = next((item for item in projection.expression_beats if item.beat_id == beat_id), None)
+        plan = next(
+            (item for item in projection.expression_plans if item.plan_id == action.expression_plan_id),
+            None,
+        )
+        if (
+            beat is None
+            or plan is None
+            or beat.state != "authorized"
+            or plan.state != "authorized"
+            or beat.plan_id != action.expression_plan_id
+            or beat.action_id != action.action_id
+        ):
+            return False
+        return not expression_beat_is_gated(
+            projection=projection,
+            plan_id=action.expression_plan_id,
+            beat_id=beat_id,
+        )
 
     async def _recover_dispatch(self, action: Action) -> ActionPumpResult:
         current_time = (await self._project()).logical_time or action.logical_time
