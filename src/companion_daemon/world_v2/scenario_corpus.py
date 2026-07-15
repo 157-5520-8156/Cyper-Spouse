@@ -16,14 +16,21 @@ from typing import Literal
 from .evaluation_artifacts import ScenarioCorpusEntry, corpus_digest
 
 
-SCENARIO_CORPUS_VERSION = "world-v2-scenario-corpus.2"
+SCENARIO_CORPUS_VERSION = "world-v2-scenario-corpus.3"
 TEST_ECONOMY_PROFILE_VERSION = "test-economy-v1"
 SCENARIO_CORPUS_SIZE = 120
 MINIMUM_EMOTION_GOLD_SIZE = 40
 ScenarioFault = Literal[
     "none", "provider_failed", "provider_unknown", "duplicate_ingress", "restart_before_dispatch"
 ]
-ScenarioExecution = Literal["chat", "interruption", "seeded_world_outcome"]
+ScenarioExecution = Literal[
+    "chat",
+    "interruption",
+    "seeded_world_outcome",
+    "seeded_world_outcome_affect",
+    "seeded_activity_plan",
+    "seeded_expression_delay",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,8 +90,10 @@ class ScenarioCase:
             raise ValueError("scenario turn step ids must be unique")
         if self.execution == "interruption" and len(turns) < 2:
             raise ValueError("interruption fixture requires at least two turns")
-        if self.execution == "seeded_world_outcome" and len(turns) < 2:
+        if self.execution in {"seeded_world_outcome", "seeded_world_outcome_affect"} and len(turns) < 2:
             raise ValueError("seeded outcome fixture requires a follow-up turn")
+        if self.execution == "seeded_expression_delay" and len(turns) < 2:
+            raise ValueError("seeded delayed expression fixture requires an interruption turn")
         if set(self.required_event_types).intersection(self.forbidden_event_types):
             raise ValueError("scenario cannot require and forbid the same event")
         if any(not value for value in self.forbidden_room_view_values):
@@ -137,10 +146,17 @@ def _script_for(
                 ScenarioTurnStep("turn.01", prompt),
                 ScenarioTurnStep("turn.02", "那件事后来有变化吗？你还会在意吗？"),
             ),
-            "seeded_world_outcome",
-            ("WorldOccurrenceCommitted", "OutcomeObservationRecorded", "ActionAuthorized"),
+            "seeded_world_outcome_affect",
+            (
+                "WorldOccurrenceCommitted",
+                "OutcomeObservationRecorded",
+                "WorldOccurrenceSettled",
+                "AppraisalAccepted",
+                "AffectEpisodeOpened",
+                "ActionAuthorized",
+            ),
             (),
-            ("outcome_deliberation",),
+            ("outcome_deliberation", "npc_world_appraisal", "affect_deliberation"),
         )
     if family == "plan_change":
         return (
@@ -148,8 +164,8 @@ def _script_for(
                 ScenarioTurnStep("turn.01", "我们原本说好明天一起去看展。"),
                 ScenarioTurnStep("turn.02", prompt),
             ),
-            "chat",
-            ("ExpressionPlanAccepted", "ExpressionBeatAuthorized"),
+            "seeded_activity_plan",
+            ("ActivityPlanned", "ExpressionPlanAccepted", "ExpressionBeatAuthorized"),
             (),
             (),
         )
@@ -159,10 +175,17 @@ def _script_for(
                 ScenarioTurnStep("turn.01", prompt),
                 ScenarioTurnStep("turn.02", "我回来啦，刚才那件事你还记得吗？"),
             ),
-            "chat",
-            ("ExpressionPlanAccepted", "ExpressionPlanCompleted"),
+            "seeded_expression_delay",
+            (
+                "ExpressionPlanAccepted",
+                "ExpressionBeatAuthorized",
+                "ActionScheduled",
+                "ClockAdvanced",
+                "ExpressionBeatSettled",
+                "ExpressionPlanCompleted",
+            ),
             (),
-            (),
+            ("expression_reconsideration",),
         )
     if family == "interruption":
         return (
@@ -245,7 +268,12 @@ def _build_cases() -> tuple[ScenarioCase, ...]:
                 text = turns[0].text
             effective_turns = turns or (ScenarioTurnStep(step_id="turn.01", text=text),)
             facts: tuple[tuple[str, str], ...] = (
-                ("preconditions", "seeded" if execution == "seeded_world_outcome" else "none"),
+                (
+                    "preconditions",
+                    "seeded"
+                    if execution in {"seeded_world_outcome", "seeded_world_outcome_affect"}
+                    else "none",
+                ),
                 ("execution", execution),
                 # Bind the exact script that the runner will execute, including
                 # a one-turn control's otherwise implicit default step.
@@ -290,8 +318,8 @@ SCENARIO_CASES = _build_cases()
 SCENARIO_CORPUS = tuple(case.entry for case in SCENARIO_CASES)
 # This is intentionally checked by ``verify_frozen_scenario_corpus``.  Update
 # it only with an explicit corpus-version bump and new evaluation baseline.
-FROZEN_SCENARIO_CORPUS_HASH = "1bae561555e134708ac6572eb82062d3f63f46e3d22c64bd274419a3793ae65f"
-FROZEN_SCENARIO_CASES_HASH = "d5618a2c82deb2b3f9b327d9d5f849e79216927ae47568a7203ebd1bfd76e4b5"
+FROZEN_SCENARIO_CORPUS_HASH = "c2f5e671e211d26a4854928ec165a5c58e0d5908e60979df669ed9d32fa9b9dc"
+FROZEN_SCENARIO_CASES_HASH = "9dd942e3e585275a044c8abdd5872ae1ea9d003152f3096e48915a4eebaa0192"
 
 
 def scenario_cases_digest(cases: tuple[ScenarioCase, ...]) -> str:

@@ -70,15 +70,34 @@ async def test_seeded_multiturn_mechanism_cases_use_the_public_app_and_assert_pr
     by_family = {item.entry.scenario_family: item for item in SCENARIO_CASES if item.entry.scenario_turn_id.endswith(".01")}
 
     outcome = await runner.run_case(by_family["npc_world_impact"])
+    plan_change = await runner.run_case(by_family["plan_change"])
     reply_later = await runner.run_case(by_family["reply_later"])
     interruption = await runner.run_case(by_family["interruption"])
     media = await runner.run_case(by_family["media_opportunity"])
     projection = await runner.run_case(by_family["projection_gap"])
 
-    assert all(item.passed for item in (outcome, reply_later, interruption, media, projection))
+    assert all(
+        item.passed
+        for item in (outcome, plan_change, reply_later, interruption, media, projection)
+    )
     assert "OutcomeObservationRecorded" in outcome.event_types
-    assert "outcome_deliberation" in outcome.trigger_kinds
+    assert {
+        "WorldOccurrenceSettled",
+        "AppraisalAccepted",
+        "AffectEpisodeOpened",
+    }.issubset(outcome.event_types)
+    assert {"outcome_deliberation", "npc_world_appraisal", "affect_deliberation"}.issubset(
+        outcome.trigger_kinds
+    )
+    assert outcome.restarted_after_seed
+    assert outcome.background_work_statuses == ("accepted", "accepted", "accepted")
+    assert outcome.background_model_calls == 3
+    assert "ActivityPlanned" in plan_change.event_types
     assert reply_later.observation_count == 2
+    assert "ActionScheduled" in reply_later.event_types
+    assert "ClockAdvanced" in reply_later.event_types
+    assert "expression_reconsideration" in reply_later.trigger_kinds
+    assert reply_later.terminal_action_states == ("delivered", "delivered", "delivered")
     assert "expression_reconsideration" in interruption.trigger_kinds
     assert "MediaPreviewGenerated" not in media.event_types
     assert "MediaPreviewGenerated" not in projection.event_types
