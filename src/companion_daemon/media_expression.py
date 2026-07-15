@@ -28,6 +28,7 @@ from companion_daemon.media_subject import (
     upgrade_subject_presentation_v3,
 )
 from companion_daemon.media_facial import choose_facial_contract
+from companion_daemon.media_moment import MomentCapture, choose_moment_capture
 
 
 COMPLETE_CANDIDATE_VERSION = "complete-media-expression-candidate-v1"
@@ -97,6 +98,7 @@ class CompleteMediaExpressionCandidate:
     embodied_presentation: dict[str, object] | None = None
     identity_reference_selection: IdentityReferenceSelection | None = None
     photographic_authenticity: PhotographicAuthenticityProfile | None = None
+    moment_capture: MomentCapture | None = None
     source_presentation_candidate_id: str | None = None
     version: str = COMPLETE_CANDIDATE_VERSION
 
@@ -123,6 +125,9 @@ class CompleteMediaExpressionCandidate:
             "photographic_authenticity": (
                 self.photographic_authenticity.to_payload()
                 if self.photographic_authenticity else None
+            ),
+            "moment_capture": (
+                self.moment_capture.to_payload() if self.moment_capture else None
             ),
             "source_presentation_candidate_id": self.source_presentation_candidate_id,
         }
@@ -409,6 +414,16 @@ def build_complete_candidates(
                         visual_form=visual_form,
                         event_snapshot=event_snapshot,
                     )
+                    moment_capture = (
+                        choose_moment_capture(
+                            temporal_beat=address.temporal_beat,
+                            capture_mode=capture_mode,
+                            visual_form=visual_form,
+                            event_snapshot=event_snapshot,
+                        )
+                        if family == "character_media" and capture_mode != "existing_artifact"
+                        else None
+                    )
                     candidate_id = (
                         f"expr:{index}:{subject_index}:{capture_mode}:{visual_form}:"
                         f"{charge}:{address.attraction_mechanism or 'none'}"
@@ -452,6 +467,7 @@ def build_complete_candidates(
                                 else None
                             ),
                             photographic_authenticity=authenticity,
+                            moment_capture=moment_capture,
                             source_presentation_candidate_id=(
                                 str(presentation["presentation_candidate_id"])
                                 if presentation and capture_mode != "existing_artifact"

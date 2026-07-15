@@ -371,6 +371,7 @@ async def test_v5_freezes_complete_expression_candidate_without_free_direction_t
     assert result.plan.camera_geometry is not None
     assert result.plan.identity_reference_selection is not None
     assert result.plan.photographic_authenticity is not None
+    assert result.plan.moment_capture is not None
     assert result.plan.subject_presentation.version == "subject-presentation-v4"
     assert result.plan.subject_presentation.facial_display_strategy is not None
     assert result.plan.subject_presentation.facial_micro_performance is not None
@@ -385,6 +386,7 @@ async def test_v5_freezes_complete_expression_candidate_without_free_direction_t
     assert prompt.index("Selected event evidence") < prompt.index("Interaction Bid")
     assert prompt.index("Interaction Bid") < prompt.index("Media Address Strategy")
     assert prompt.index("Media Address Strategy") < prompt.index("Camera Geometry")
+    assert prompt.index("Camera Geometry") < prompt.index("Moment Capture")
     assert prompt.index("Camera Geometry") < prompt.index("Photographic Authenticity")
     assert "Facial Display Strategy" in prompt
     assert "Facial Micro-Performance" in prompt
@@ -1612,6 +1614,7 @@ def _inspection(
         commercial_render_dilution=False,
         regional_grounding_matches=True,
         observed_authenticity={"aesthetic_intent": "pleasant_share"},
+        moment_capture_matches=True,
     )
 
 

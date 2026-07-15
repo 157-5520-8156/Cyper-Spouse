@@ -438,6 +438,70 @@ def test_complete_candidates_freeze_authenticity_and_varied_visible_face_actions
     assert len({item.photographic_authenticity.aesthetic_intent for item in candidates}) >= 2
 
 
+def test_character_media_candidates_freeze_lived_moment_contracts() -> None:
+    """Every character photo has a believable moment, not only a pose shell."""
+    snapshot = {
+        "event": {"event_id": "event:tea-break", "status": "committed"},
+        "activity": {"kind": "study", "description": "写作业时泡了一杯热茶"},
+        "location": {"kind": "home", "name": "书桌边"},
+        "objects": [{"kind": "tea", "description": "刚泡好的热茶"}],
+        "character": {"emotion": "calm"},
+    }
+    subject = next(
+        item
+        for item in build_subject_candidates(
+            snapshot=snapshot,
+            opportunity_id="op:lived-moment-source",
+            capture_mode="character_front_camera",
+            character_visibility="identifiable",
+            privacy_ceiling="personal",
+            relationship_stage="close_friend",
+            limit=64,
+        )
+        if item.presentation.display_strategy is not None
+    )
+    embodiment = next(
+        item
+        for item in build_embodied_candidates(
+            snapshot=snapshot,
+            opportunity_id="op:lived-moment-source",
+            relationship_stage="close_friend",
+            sensual_charge_ceiling="none",
+            limit=256,
+        )
+        if "character_front_camera" in item.legal_capture_modes
+    )
+    source = {
+        "presentation_candidate_id": "source:lived-moment",
+        "legal_capture_modes": ["character_front_camera"],
+        "legal_share_intents": ["record", "show_and_tell", "complain"],
+        "character_visibility": "identifiable",
+        "subject_presentation": subject.presentation.to_payload(),
+        "embodied_presentation": embodiment.presentation.to_payload(),
+    }
+
+    candidates = build_complete_candidates(
+        opportunity_id="op:lived-moment",
+        family="character_media",
+        expression_charge_ceiling="none",
+        presentation_candidates=(source,),
+        event_snapshot=snapshot,
+        limit=24,
+    )
+
+    assert candidates
+    assert all(item.moment_capture is not None for item in candidates)
+    assert {item.moment_capture.moment_mode for item in candidates} >= {
+        "uninterrupted_activity",
+        "brief_pause",
+        "responsive_reaction",
+    }
+    assert all(
+        item.moment_capture.anti_static_direction
+        for item in candidates
+    )
+
+
 def test_complete_candidates_use_versioned_perceptual_axes_and_varied_face_geometry() -> None:
     snapshot = {
         "event": {"event_id": "event:selfie", "status": "committed"},

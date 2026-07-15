@@ -1,0 +1,56 @@
+version: moment-capture-v1
+
+# This catalog classifies a frozen instant, not the event itself. It keeps
+# character-media from falling back to a completed, generic portrait while
+# retaining deliberately posed images when the social purpose calls for them.
+temporal_beats:
+  anticipation:
+    strategy_id: transition-not-finished
+    moment_mode: interrupted_transition
+    continuity_cue: the action has just been interrupted, with the next small movement still implied
+    anti_static_direction: retain the transition and its practical reason; do not turn it into a finished front-facing pose
+    camera_relations: &relations
+      character_front_camera: self_interruption
+      character_rear_camera: self_interruption
+      mirror: reflection_pause
+      timer_fixed: fixed_observation
+      requested_helper: helper_check_in
+      known_companion: companion_catch
+      external_sender: external_shared_frame
+      existing_artifact: artifact_inherited
+  mid_action:
+    strategy_id: activity-still-moving
+    moment_mode: uninterrupted_activity
+    continuity_cue: the visible action is genuinely underway rather than demonstrated after completion
+    anti_static_direction: preserve an active hand, attention target, or weight shift; do not replace it with a neutral standing portrait
+    camera_relations: *relations
+  just_after:
+    strategy_id: brief-after-pause
+    moment_mode: brief_pause
+    continuity_cue: the main action has just ended and the person has not yet reset for the camera
+    anti_static_direction: keep one believable residual cue of the preceding activity; avoid a polished finished pose
+    camera_relations: *relations
+  reaction:
+    strategy_id: response-arriving
+    moment_mode: responsive_reaction
+    continuity_cue: the frame catches a response that is still arriving, not a preselected expression
+    anti_static_direction: let gaze, hands, or posture show the response sequence; avoid a symmetrical catalogue smile
+    camera_relations: *relations
+  held_for_response:
+    strategy_id: recipient-pause
+    moment_mode: recipient_pause
+    continuity_cue: the person has made a brief intentional pause for this recipient while remaining situated in the event
+    anti_static_direction: allow light posing, but retain a grounded prop, surface, or task trace so it is not an isolated portrait
+    camera_relations: *relations
+  aftermath:
+    strategy_id: lived-aftermath
+    moment_mode: settled_aftermath
+    continuity_cue: the moment has settled but still visibly belongs to what just happened
+    anti_static_direction: preserve the unreset environment and relaxed body logic; avoid editorial cleanliness or rigid display
+    camera_relations: *relations
+  retrospective:
+    strategy_id: memory-held
+    moment_mode: composed_recall
+    continuity_cue: this is a deliberately retained memory rather than a live interruption
+    anti_static_direction: keep the remembered context legible; do not invent an active gesture just to make it candid
+    camera_relations: *relations

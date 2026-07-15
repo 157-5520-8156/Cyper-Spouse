@@ -50,6 +50,7 @@ from companion_daemon.media_interaction import (
     MediaInteractionBid,
     load_interaction_catalog,
 )
+from companion_daemon.media_moment import MomentCapture
 from companion_daemon.media_shot import MediaShotPlan
 from companion_daemon.media_subject import (
     DEFAULT_SUBJECT_CONFIG,
@@ -464,6 +465,7 @@ class MediaPlan:
     expression_charge_ceiling: str | None = None
     relationship_stage_basis: str | None = None
     photographic_authenticity: PhotographicAuthenticityProfile | None = None
+    moment_capture: MomentCapture | None = None
 
     def to_payload(self) -> dict[str, object]:
         payload = asdict(self)
@@ -496,6 +498,10 @@ class MediaPlan:
                 )
             else:
                 payload.pop("photographic_authenticity", None)
+            if self.moment_capture:
+                payload["moment_capture"] = self.moment_capture.to_payload()
+            else:
+                payload.pop("moment_capture", None)
             for key in ("composition", "action", "camera_direction", "sharing_motive"):
                 payload.pop(key, None)
         else:
@@ -508,6 +514,7 @@ class MediaPlan:
                 "expression_charge_ceiling",
                 "relationship_stage_basis",
                 "photographic_authenticity",
+                "moment_capture",
             ):
                 payload.pop(key, None)
         return payload
@@ -638,6 +645,11 @@ class MediaPlan:
                     if payload.get("photographic_authenticity") is not None
                     else None
                 ),
+                moment_capture=(
+                    MomentCapture.from_payload(payload["moment_capture"])
+                    if payload.get("moment_capture") is not None
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("invalid media plan payload") from exc
@@ -712,6 +724,7 @@ class MediaInspection:
     commercial_render_dilution: bool | None = None
     regional_grounding_matches: bool | None = None
     observed_authenticity: dict[str, object] | None = None
+    moment_capture_matches: bool | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -1029,6 +1042,7 @@ class MediaRenderer:
                         and plan.subject_presentation.version == SUBJECT_PRESENTATION_V4
                     )
                 ),
+                moment_capture_required=plan.moment_capture is not None,
             )
             last_inspection = inspection
             if inspection.passed:
@@ -1106,6 +1120,7 @@ class MediaRenderer:
                     and plan.subject_presentation.version == SUBJECT_PRESENTATION_V4
                 )
             ),
+            moment_capture_required=plan.moment_capture is not None,
         )
         if not inspection.passed:
             return MediaRenderFailure(plan.plan_id, inspection.reason, 0, inspection)
@@ -1368,6 +1383,7 @@ class OpenAIMediaInspector:
                 if isinstance(payload.get("observed_authenticity"), dict)
                 else None
             ),
+            moment_capture_matches=_optional_bool(payload, "moment_capture_matches"),
         )
 
 
@@ -1631,6 +1647,16 @@ def _compile_media_prompt_v5(
         if address.attraction_mechanism
         else ""
     )
+    moment = (
+        "Moment Capture: "
+        f"mode={plan.moment_capture.moment_mode}; "
+        f"camera_relation={plan.moment_capture.camera_relation}; "
+        f"scene_anchor={plan.moment_capture.scene_anchor}; "
+        f"continuity={plan.moment_capture.continuity_cue}; "
+        f"anti_static={plan.moment_capture.anti_static_direction}.\n"
+        if plan.moment_capture
+        else ""
+    )
     return (
         "Create one believable fictional personal-media photograph. No text or watermark.\n"
         f"Frozen MediaPlan v5={plan.plan_id}; event={plan.event_id}; family={plan.family}.\n"
@@ -1653,6 +1679,7 @@ def _compile_media_prompt_v5(
         f"subject_occupancy={camera.subject_occupancy}; placement={camera.subject_placement}; "
         f"environment_share={camera.environment_share}; focus={camera.focus_behavior}; "
         f"imperfection={camera.imperfection_profile}; device={camera.device_visibility}.\n"
+        f"{moment}"
         f"{authenticity + chr(10) if authenticity else ''}"
         f"{identity}{identity_anchor}\n"
         f"{subject}\n{embodiment}\n"
@@ -2068,6 +2095,11 @@ def _freeze_proposal_v5(
         if selected.get("photographic_authenticity") is not None
         else None
     )
+    moment_capture = (
+        MomentCapture.from_payload(selected["moment_capture"])
+        if selected.get("moment_capture") is not None
+        else None
+    )
     interaction_bid = frozen.plan.interaction_bid
     if intimate_life_share or legacy.get("interaction_bid_id") != original_bid_id:
         bid_values = _interaction_bid_values(
@@ -2111,6 +2143,7 @@ def _freeze_proposal_v5(
             else ""
         ),
         photographic_authenticity=authenticity,
+        moment_capture=moment_capture,
     )
     plan = replace(plan, diversity_fingerprint=_v5_fingerprint(plan))
     if plan.diversity_fingerprint in recent[-12:]:
@@ -2176,6 +2209,14 @@ def _v5_fingerprint(plan: MediaPlan) -> str:
             plan.photographic_authenticity.scene_orderliness,
             plan.photographic_authenticity.capture_imperfection,
         ))
+    if plan.moment_capture:
+        parts.extend(
+            (
+                plan.moment_capture.moment_mode,
+                plan.moment_capture.camera_relation,
+                plan.moment_capture.scene_anchor,
+            )
+        )
     return "|".join(parts)
 
 
@@ -2653,6 +2694,11 @@ def _validate_frozen_plan_v5(plan: MediaPlan) -> str | None:
             )
         except ValueError:
             return "invalid_photographic_authenticity"
+    if plan.moment_capture is not None:
+        try:
+            MomentCapture.from_payload(plan.moment_capture.to_payload())
+        except ValueError:
+            return "invalid_moment_capture"
     geometry_error = plan.camera_geometry.compatibility_error(
         capture_mode=plan.capture_mode, visual_form=plan.visual_form
     )
@@ -2724,6 +2770,8 @@ def _validate_frozen_plan_v5(plan: MediaPlan) -> str | None:
             return "expression_embodiment_charge_conflict"
     elif plan.subject_presentation is not None or plan.embodied_presentation is not None:
         return "artifact_presentation_reinterpretation"
+    if plan.family != "character_media" and plan.moment_capture is not None:
+        return "unexpected_moment_capture"
     if plan.photographic_authenticity is not None:
         if (
             plan.photographic_authenticity.regional_grounding == "explicit"
@@ -3014,6 +3062,7 @@ def _inspection_prompt(plan: MediaPlan) -> str:
             "facial_micro_performance_matches, generic_smile_fallback, "
             "reference_expression_copy_detected, authenticity_profile_matches, "
             "commercial_render_dilution, regional_grounding_matches, and observed_authenticity. "
+            "For a frozen Moment Capture contract, also return moment_capture_matches. "
             "Also return every v6 quality, subject, social, embodied and capture "
             "field applicable to the frozen plan. Reject a third-party image that reads as paparazzi or "
             "an authorless AI editorial; a front-camera image that contradicts its frozen distance, "
@@ -3137,6 +3186,9 @@ def _inspection_contract_payload(plan: MediaPlan) -> dict[str, object]:
             if plan.photographic_authenticity
             else None
         ),
+        "moment_capture": (
+            plan.moment_capture.to_payload() if plan.moment_capture else None
+        ),
         "identity_reference_selection": (
             plan.identity_reference_selection.to_payload()
             if plan.identity_reference_selection
@@ -3186,6 +3238,7 @@ def _enforce_inspection_contract(
     v5_required: bool = False,
     enhanced_v5_required: bool = False,
     facial_contract_required: bool = False,
+    moment_capture_required: bool = False,
 ) -> MediaInspection:
     quality_defects = tuple(
         name
@@ -3263,6 +3316,10 @@ def _enforce_inspection_contract(
             ("generic_portrait_dilution", inspection.generic_portrait_dilution is True),
             ("photographic_authenticity_failed", inspection.photographic_authenticity_ok is False),
             ("identity_consistency_failed", inspection.identity_consistency_ok is False),
+            (
+                "moment_capture_mismatch",
+                moment_capture_required and inspection.moment_capture_matches is False,
+            ),
         )
         if failed
     )
@@ -3378,6 +3435,7 @@ def _enforce_inspection_contract(
                     inspection.generic_portrait_dilution,
                     inspection.photographic_authenticity_ok,
                     inspection.identity_consistency_ok,
+                    inspection.moment_capture_matches if moment_capture_required else True,
                 )
             )
         )
