@@ -20,6 +20,14 @@ from companion_daemon.world_v2.ledger_context_resolver import (
 from companion_daemon.world_v2.schemas import WorldEvent
 from companion_daemon.world_v2.situation_compiler import SituationCompiler
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
+from test_appraisal_authority import (
+    accepted_payload,
+    authorized_batch,
+    commit as commit_appraisal,
+    event as appraisal_event,
+    prepare_claimed_interaction,
+    record_proposal,
+)
 from test_character_core_authority import initialized_character_ledger
 
 
@@ -145,6 +153,38 @@ def test_real_ledger_resolves_situation_core_and_authoritative_empty_domains(
     # Situation and CharacterCore request only their consumed refs; no full replay API exists.
     assert all(len(batch) <= 1 for batch in counted.resolved_batches)
     assert set(counted.lookups) == {core.origin.accepted_event_ref}
+
+
+def test_active_appraisal_hypotheses_are_source_bound_into_the_next_capsule() -> None:
+    from companion_daemon.world_v2.appraisal_events import appraisal_mutation_hash
+
+    ledger = WorldLedger.in_memory(world_id="world-v2-appraisal-authority")
+    ledger.commit(
+        [appraisal_event("event:appraisal-world-started", "WorldStarted", {})],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    ledger, trigger, evidence = prepare_claimed_interaction(ledger)
+    payload = accepted_payload(ledger, trigger, evidence)
+    appraisal = payload["appraisal"]
+    assert isinstance(appraisal, dict)
+    appraisal["subject_ref"] = "actor:companion"
+    payload["accepted_change_hash"] = appraisal_mutation_hash(payload)
+    record_proposal(ledger, trigger, evidence, payload)
+    commit_appraisal(ledger, authorized_batch(trigger, payload))
+
+    capsule = _compiler(ledger).compile(
+        query_from_projection(
+            ledger.project(), actor_ref="actor:companion", trigger_ref="event:next-turn"
+        )
+    )
+
+    assert capsule.appraisals.availability == "available"
+    assert len(capsule.appraisals.items) == 1
+    assert '"meaning":"disappointment"' in capsule.appraisals.items[0].payload_json
+    assert "message-event:1" in {
+        binding.ref for binding in capsule.appraisals.items[0].source_bindings
+    }
 
 
 def test_query_snapshot_or_cursor_swap_is_rejected_before_resolution() -> None:

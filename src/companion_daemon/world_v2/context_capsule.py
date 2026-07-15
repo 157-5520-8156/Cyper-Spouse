@@ -23,6 +23,7 @@ from .context_resolver import (
 from .schema_core import PrivacyClass
 from .schemas import (
     AffectEpisodeProjection,
+    AppraisalProjection,
     BudgetAccount,
     CapabilityStateProjection,
     CharacterCoreProjection,
@@ -41,6 +42,7 @@ SliceName = Literal[
     "character_core",
     "current_situation",
     "relationship_slice",
+    "appraisals",
     "affect_episodes",
     "open_threads",
     "relevant_facts",
@@ -91,6 +93,7 @@ RANK_DOMAIN_IMPORTANCE_BP: dict[SliceName, int] = {
     "character_core": 10_000,
     "current_situation": 10_000,
     "relationship_slice": 8_500,
+    "appraisals": 8_500,
     "affect_episodes": 8_500,
     "open_threads": 8_000,
     "relevant_facts": 7_500,
@@ -338,6 +341,7 @@ class ContextCapsuleBudgetPolicy(_FrozenModel):
     relationship_slice: SliceBudget = Field(
         default_factory=lambda: SliceBudget(max_items=1, max_fields=48, max_characters=2_000)
     )
+    appraisals: SliceBudget = Field(default_factory=SliceBudget)
     affect_episodes: SliceBudget = Field(default_factory=SliceBudget)
     open_threads: SliceBudget = Field(
         default_factory=lambda: SliceBudget(max_items=12, max_fields=144, max_characters=4_000)
@@ -373,6 +377,7 @@ class ContextCapsuleRequest(_FrozenModel):
     situation: ResolvedSlice[SituationProjection]
     character_core: ResolvedSlice[CharacterCoreProjection] | None = None
     relationship_slice: ResolvedSlice[RelationshipStateProjection] | None = None
+    appraisals: ResolvedSlice[tuple[AppraisalProjection, ...]] | None = None
     affect_episodes: ResolvedSlice[tuple[AffectEpisodeProjection, ...]] | None = None
     open_threads: ResolvedSlice[tuple[ThreadProjection, ...]] | None = None
     relevant_facts: ResolvedSlice[tuple[FactProjection, ...]] | None = None
@@ -539,6 +544,7 @@ class ContextCapsule(_FrozenModel):
     character_core: CapsuleSlice
     current_situation: CapsuleSlice
     relationship_slice: CapsuleSlice
+    appraisals: CapsuleSlice
     affect_episodes: CapsuleSlice
     open_threads: CapsuleSlice
     relevant_facts: CapsuleSlice
@@ -570,6 +576,7 @@ class ContextCapsule(_FrozenModel):
             "character_core": self.character_core.model_dump(mode="json"),
             "current_situation": self.current_situation.model_dump(mode="json"),
             "relationship_slice": self.relationship_slice.model_dump(mode="json"),
+            "appraisals": self.appraisals.model_dump(mode="json"),
             "affect_episodes": self.affect_episodes.model_dump(mode="json"),
             "open_threads": self.open_threads.model_dump(mode="json"),
             "relevant_facts": self.relevant_facts.model_dump(mode="json"),
@@ -606,6 +613,7 @@ _ITEM_IDS: dict[SliceName, str] = {
     "character_core": "core_id",
     "current_situation": "actor_ref",
     "relationship_slice": "relationship_id",
+    "appraisals": "appraisal_id",
     "affect_episodes": "episode_id",
     "open_threads": "thread_id",
     "relevant_facts": "fact_id",
@@ -674,6 +682,7 @@ def _derived_privacy_floor(slice_name: SliceName, item: BaseModel) -> PrivacyCla
         "character_core": "withhold",
         "current_situation": "private",
         "relationship_slice": "private",
+        "appraisals": "private",
         "affect_episodes": "private",
         "open_threads": "private",
         "relevant_facts": "personal",
@@ -1026,6 +1035,7 @@ def _validate_input_contract(request: ContextCapsuleRequest) -> None:
         ("current_situation", request.situation),
         ("character_core", request.character_core),
         ("relationship_slice", request.relationship_slice),
+        ("appraisals", request.appraisals),
         ("affect_episodes", request.affect_episodes),
         ("open_threads", request.open_threads),
         ("relevant_facts", request.relevant_facts),
@@ -1184,6 +1194,10 @@ def _validate_input_contract(request: ContextCapsuleRequest) -> None:
         item.status != "active" for item in request.affect_episodes.value
     ):
         raise ValueError("Context Capsule accepts only active affect episodes")
+    if request.appraisals is not None and any(
+        item.status != "active" for item in request.appraisals.value
+    ):
+        raise ValueError("Context Capsule accepts only active appraisals")
     if request.open_threads is not None and any(
         item.values.status != "open" for item in request.open_threads.value
     ):
@@ -1288,6 +1302,7 @@ def _compile_resolved_context(
         ("character_core", request.character_core),
         ("current_situation", request.situation),
         ("relationship_slice", request.relationship_slice),
+        ("appraisals", request.appraisals),
         ("affect_episodes", request.affect_episodes),
         ("open_threads", request.open_threads),
         ("relevant_facts", request.relevant_facts),

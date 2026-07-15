@@ -56,6 +56,7 @@ _PRIVACY_FLOOR: dict[SliceName, PrivacyClass] = {
     "character_core": "withhold",
     "current_situation": "private",
     "relationship_slice": "private",
+    "appraisals": "private",
     "affect_episodes": "private",
     "open_threads": "private",
     "relevant_facts": "personal",
@@ -72,6 +73,7 @@ _ITEM_ID: dict[SliceName, str] = {
     "character_core": "core_id",
     "current_situation": "actor_ref",
     "relationship_slice": "relationship_id",
+    "appraisals": "appraisal_id",
     "affect_episodes": "episode_id",
     "open_threads": "thread_id",
     "relevant_facts": "fact_id",
@@ -142,7 +144,31 @@ def _item_ref(slice_name: SliceName, item: BaseModel) -> str:
     return identity
 
 
-def _typed_refs(item: BaseModel) -> tuple[str, ...] | None:
+def _observation_event_aliases(projection: LedgerProjection) -> dict[str, str]:
+    """Resolve legacy observation IDs only when their committed envelope is exact.
+
+    Early typed psychological records cited an ``observation_id`` while the
+    ledger authority is the corresponding ``ObservationRecorded`` event.  The
+    projection retains an exact revision and envelope hash, so this is a
+    deterministic normalization, not a text lookup or a permissive alias.
+    An ambiguous or absent match deliberately remains unresolved.
+    """
+
+    by_identity: dict[tuple[int, str], list[CommittedWorldEventRef]] = {}
+    for event in projection.committed_world_event_refs:
+        if event.event_type == "ObservationRecorded":
+            by_identity.setdefault((event.world_revision, event.payload_hash), []).append(event)
+    aliases: dict[str, str] = {}
+    for observation in projection.message_observations:
+        candidates = by_identity.get(
+            (observation.world_revision, observation.event_payload_hash), []
+        )
+        if len(candidates) == 1:
+            aliases[observation.observation_id] = candidates[0].event_id
+    return aliases
+
+
+def _typed_refs(item: BaseModel, *, observation_aliases: dict[str, str]) -> tuple[str, ...] | None:
     refs: set[str] = set()
     origin = getattr(item, "origin", None)
     for field in ("accepted_event_ref", "event_ref"):
@@ -159,12 +185,37 @@ def _typed_refs(item: BaseModel) -> tuple[str, ...] | None:
         if value := getattr(binding, "authority_event_ref", None):
             refs.add(value)
     for evidence in getattr(item, "evidence_refs", ()):
-        refs.add(evidence.ref_id)
+        refs.add(observation_aliases.get(evidence.ref_id, evidence.ref_id))
     return tuple(sorted(refs)) or None
 
 
+def _normalize_observation_evidence(
+    item: BaseModel, *, observation_aliases: dict[str, str]
+) -> BaseModel:
+    """Return a Context-only view whose evidence refs use ledger event IDs.
+
+    Psychological projections written before the ledger Context boundary used
+    durable observation IDs as their evidence locators.  The resolver proves
+    the one-to-one event mapping from the retained revision and envelope hash,
+    then normalizes the *read model* as well as its metadata.  The underlying
+    projection remains untouched; a partial or ambiguous mapping is left
+    unchanged and consequently fails closed in ``_domain_slice``.
+    """
+
+    evidence_refs = getattr(item, "evidence_refs", None)
+    if not evidence_refs:
+        return item
+    normalized = tuple(
+        evidence.model_copy(
+            update={"ref_id": observation_aliases.get(evidence.ref_id, evidence.ref_id)}
+        )
+        for evidence in evidence_refs
+    )
+    return item.model_copy(update={"evidence_refs": normalized})
+
+
 def _typed_authority_claims(
-    item: BaseModel,
+    item: BaseModel, *, observation_aliases: dict[str, str]
 ) -> tuple[tuple[str, int, str], ...] | None:
     """Return exact embedded event claims, or None for an incomplete claim."""
 
@@ -177,7 +228,13 @@ def _typed_authority_claims(
     for evidence in evidence_values:
         if evidence.source_world_revision is None or not evidence.immutable_hash:
             return None
-        claims.add((evidence.ref_id, evidence.source_world_revision, evidence.immutable_hash))
+        claims.add(
+            (
+                observation_aliases.get(evidence.ref_id, evidence.ref_id),
+                evidence.source_world_revision,
+                evidence.immutable_hash,
+            )
+        )
     for binding in getattr(values, "source_bindings", ()):
         ref = getattr(binding, "authority_event_ref", None)
         if ref is None:
@@ -306,6 +363,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             raise ValueError("historical Context resolution requires an indexed projection reader")
         projection = self._ledger.project_at(query.cursor)
         self._validate_projection(query, projection)
+        observation_aliases = _observation_event_aliases(projection)
 
         situation_result = self._situation_compiler.compile(
             request_from_ledger_projection(
@@ -368,6 +426,11 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     for ref in component.appraisal_refs
                 )
             )
+        scoped_appraisals: tuple[BaseModel, ...] = tuple(
+            _normalize_observation_evidence(item, observation_aliases=observation_aliases)
+            for item in projection.appraisals
+            if item.status == "active" and item.subject_ref in subject_refs
+        )
 
         domains: dict[SliceName, tuple[BaseModel, ...] | None] = {
             "character_core": (
@@ -378,6 +441,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             ),
             # Relationship heads have no origin/evidence binding in LedgerProjection.
             "relationship_slice": None,
+            "appraisals": scoped_appraisals,
             "affect_episodes": scoped_affect,
             "open_threads": tuple(item for item in scoped_threads if item.values.status == "open"),
             "relevant_facts": scoped_facts,
@@ -409,7 +473,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             if items is None:
                 continue
             for item in items:
-                refs = _typed_refs(item)
+                refs = _typed_refs(item, observation_aliases=observation_aliases)
                 refs_by_item[(slice_name, _item_ref(slice_name, item))] = refs
                 if refs is not None:
                     required_refs.update(refs)
@@ -421,6 +485,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         request_fields = {
             "character_core": "character_core",
             "relationship_slice": "relationship_slice",
+            "appraisals": "appraisals",
             "affect_episodes": "affect_episodes",
             "open_threads": "open_threads",
             "relevant_facts": "relevant_facts",
@@ -437,7 +502,13 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 resolved[field] = None
                 continue
             built = self._domain_slice(
-                query, slice_name, items, refs_by_item, resolved_events, scope
+                query,
+                slice_name,
+                items,
+                refs_by_item,
+                resolved_events,
+                scope,
+                observation_aliases,
             )
             resolved[field] = built
 
@@ -669,6 +740,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         refs_by_item: dict[tuple[SliceName, str], tuple[str, ...] | None],
         events: dict[str, CommittedWorldEventRef],
         scope: ContextRelevanceScope,
+        observation_aliases: dict[str, str],
     ) -> ResolvedSlice | None:
         metadata: list[ResolvedItemMetadata] = []
         for item in items:
@@ -676,7 +748,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             refs = refs_by_item[(slice_name, item_ref)]
             if refs is None or any(ref not in events for ref in refs):
                 return None
-            claims = _typed_authority_claims(item)
+            claims = _typed_authority_claims(item, observation_aliases=observation_aliases)
             if claims is None or any(
                 events[ref].world_revision != revision or events[ref].payload_hash != immutable_hash
                 for ref, revision, immutable_hash in claims
