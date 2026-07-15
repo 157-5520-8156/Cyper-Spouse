@@ -36,6 +36,11 @@ from .appraisal_events import (
     AppraisalExpiredPayload,
     AppraisalSupersededPayload,
 )
+from .appraisal_acceptance_manifest import (
+    APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
+    AppraisalAcceptanceManifest,
+    canonical_appraisal_acceptance_value_hash,
+)
 from .appraisal_reducers import (
     accept_appraisal,
     contradict_appraisal,
@@ -2734,6 +2739,8 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         return _acceptance_manifest_v3_recorded(state, event)
     if raw.get("manifest_version") == MINIMAL_REPLY_MANIFEST_VERSION:
         return _minimal_reply_manifest_recorded(state, event)
+    if raw.get("manifest_version") == APPRAISAL_ACCEPTANCE_MANIFEST_VERSION:
+        return _appraisal_acceptance_manifest_recorded(state, event)
     proposal_id = raw.get("proposal_id")
     evaluated_world_revision = raw.get("evaluated_world_revision")
     if not isinstance(proposal_id, str) or not isinstance(evaluated_world_revision, int):
@@ -3150,6 +3157,58 @@ def _minimal_reply_manifest_recorded(state: ReducerState, event: WorldEvent) -> 
     )
     return state.model_copy(
         update={"minimal_reply_manifests": (*state.minimal_reply_manifests, ref)}
+    )
+
+
+def _appraisal_acceptance_manifest_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    """Record the decision half of the isolated Appraisal accepted batch."""
+
+    manifest = AppraisalAcceptanceManifest.model_validate_json(event.payload_json)
+    current_world_revision = len(state.committed_world_event_refs)
+    if manifest.evaluated_world_revision != current_world_revision:
+        raise ValueError("appraisal acceptance manifest must evaluate the current world")
+    if event.causation_id != manifest.proposal_event_ref:
+        raise ValueError("appraisal acceptance manifest causation does not bind proposal")
+    if any(
+        item.acceptance_id == manifest.acceptance_id or item.proposal_id == manifest.proposal_id
+        for item in state.acceptance_decisions
+    ):
+        raise ValueError("appraisal proposal or acceptance is already decided")
+    proposal = next(
+        (item for item in state.appraisal_proposals if item.proposal_id == manifest.proposal_id),
+        None,
+    )
+    if proposal is None or (
+        proposal.change_id != manifest.accepted_change_id
+        or proposal.evaluated_world_revision != manifest.evaluated_world_revision
+        or proposal.proposed_change_hash != manifest.accepted_change_hash
+        or proposal.trigger_id != manifest.trigger_id
+        or proposal.proposed_mutation.event_type != manifest.mutation_event_type
+    ):
+        raise ValueError("appraisal acceptance manifest does not bind persisted proposal")
+    proposed = json.loads(proposal.proposed_mutation.payload_json)
+    if canonical_appraisal_acceptance_value_hash(proposed) != manifest.mutation_payload_hash:
+        raise ValueError("appraisal acceptance manifest mutation hash is invalid")
+    return state.model_copy(
+        update={
+            "acceptance_decisions": (
+                *state.acceptance_decisions,
+                AcceptanceDecisionRef(
+                    proposal_id=manifest.proposal_id,
+                    evaluated_world_revision=manifest.evaluated_world_revision,
+                    acceptance_id=manifest.acceptance_id,
+                    status="accepted",
+                    accepted_change_id=manifest.accepted_change_id,
+                    accepted_change_hash=manifest.accepted_change_hash,
+                    manifest_version=manifest.manifest_version,
+                    manifest_hash=manifest.manifest_hash,
+                    acceptance_event_ref=event.event_id,
+                    acceptance_event_payload_hash=event.payload_hash,
+                ),
+            )
+        }
     )
 
 
@@ -4789,6 +4848,7 @@ def _relationship_slow_variable_adjusted(
         state.relationship_signals,
         payload,
         logical_time=logical_time,
+        accepted_event_ref=event.event_id,
     )
     return state.model_copy(
         update={

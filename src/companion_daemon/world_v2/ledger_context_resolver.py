@@ -350,10 +350,44 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         self._situation_compiler = situation_compiler
         self._relevance_scope = relevance_scope
 
+    def _scope_for_query(
+        self, query: ContextCompileQuery, projection: LedgerProjection
+    ) -> ContextRelevanceScope:
+        """Derive the current interlocutor only for the default local scope.
+
+        A composition root can still install a fixed, narrower scope.  Without
+        one, an incoming Observation's committed actor is the only additional
+        subject whose relationship, appraisal, facts, and memories may enter
+        that turn.  This prevents the previous actor-only default from making
+        all user-specific psychological state invisible to a companion.
+        """
+
+        if self._relevance_scope is not None:
+            if self._relevance_scope.actor_ref != query.actor_ref:
+                raise ValueError("Context relevance scope belongs to another actor")
+            return self._relevance_scope
+        if query.trigger_ref not in {
+            item.event_id for item in projection.committed_world_event_refs
+        }:
+            return ContextRelevanceScope(actor_ref=query.actor_ref)
+        located = self._ledger.lookup_event_commit(query.trigger_ref)
+        if located is None:
+            return ContextRelevanceScope(actor_ref=query.actor_ref)
+        event, commit = located
+        if (
+            event.world_id != query.world_id
+            or event.event_type != "ObservationRecorded"
+            or commit.world_revision > projection.world_revision
+            or commit.deliberation_revision > projection.deliberation_revision
+            or commit.ledger_sequence > projection.ledger_sequence
+            or event.actor == query.actor_ref
+        ):
+            return ContextRelevanceScope(actor_ref=query.actor_ref)
+        return ContextRelevanceScope(
+            actor_ref=query.actor_ref, related_subject_refs=(event.actor,)
+        )
+
     def resolve(self, query: ContextCompileQuery) -> ResolvedContextResult:
-        scope = self._relevance_scope or ContextRelevanceScope(actor_ref=query.actor_ref)
-        if scope.actor_ref != query.actor_ref:
-            raise ValueError("Context relevance scope belongs to another actor")
         head = self._ledger.project()
         if (
             head.world_revision != query.world_revision
@@ -363,6 +397,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             raise ValueError("historical Context resolution requires an indexed projection reader")
         projection = self._ledger.project_at(query.cursor)
         self._validate_projection(query, projection)
+        scope = self._scope_for_query(query, projection)
         observation_aliases = _observation_event_aliases(projection)
 
         situation_result = self._situation_compiler.compile(
@@ -431,6 +466,11 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             for item in projection.appraisals
             if item.status == "active" and item.subject_ref in subject_refs
         )
+        scoped_relationships = tuple(
+            item
+            for item in projection.relationship_states
+            if item.subject_ref in subject_refs and item.origin is not None
+        )
 
         domains: dict[SliceName, tuple[BaseModel, ...] | None] = {
             "character_core": (
@@ -439,8 +479,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 and projection.character_core.actor_ref == query.actor_ref
                 else None
             ),
-            # Relationship heads have no origin/evidence binding in LedgerProjection.
-            "relationship_slice": None,
+            "relationship_slice": scoped_relationships,
             "appraisals": scoped_appraisals,
             "affect_episodes": scoped_affect,
             "open_threads": tuple(item for item in scoped_threads if item.values.status == "open"),

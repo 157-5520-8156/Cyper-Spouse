@@ -488,6 +488,10 @@ def exercise_relationship_authority(ledger) -> object:
     )
     record_proposal(ledger, proposal(adjustment, transition_kind="adjust"))
     decide_and_mutate(ledger, adjustment, "RelationshipSlowVariableAdjusted")
+    state = ledger.project().relationship_states[0]
+    assert state.origin is not None
+    assert state.origin.accepted_event_ref == "event:adjustment:1"
+    assert state.origin.change_id == adjustment.change_id
 
     boundary = BoundaryProjection(
         boundary_id="boundary:privacy",

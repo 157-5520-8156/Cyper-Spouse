@@ -15,6 +15,7 @@ from .schemas import (
     BoundaryProjection,
     RelationshipAdjustmentProjection,
     RelationshipHysteresisProjection,
+    RelationshipStateOrigin,
     RelationshipSignalProjection,
     RelationshipStateProjection,
     RelationshipVariableDeltas,
@@ -76,6 +77,7 @@ def adjust_relationship_slow_variables(
     payload: RelationshipSlowVariableAdjustedPayload,
     *,
     logical_time: datetime,
+    accepted_event_ref: str | None = None,
 ) -> tuple[
     tuple[RelationshipStateProjection, ...],
     tuple[RelationshipAdjustmentProjection, ...],
@@ -214,6 +216,16 @@ def adjust_relationship_slow_variables(
         hysteresis=next_hysteresis,
         commitment_refs=payload.commitment_refs,
         last_adjusted_at=logical_time,
+        origin=(
+            RelationshipStateOrigin(
+                change_id=payload.change_id,
+                transition_id=payload.transition_id,
+                policy_refs=payload.policy_refs,
+                accepted_event_ref=accepted_event_ref,
+            )
+            if accepted_event_ref is not None
+            else None
+        ),
     )
     adjustment = RelationshipAdjustmentProjection(
         adjustment_id=payload.adjustment_id,

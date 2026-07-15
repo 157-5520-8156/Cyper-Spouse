@@ -680,7 +680,9 @@ class AcceptanceDecisionRef(FrozenModel):
     status: Literal["accepted", "rejected", "stale"]
     accepted_change_id: str | None = None
     accepted_change_hash: str | None = Field(default=None, min_length=64, max_length=64)
-    manifest_version: Literal["acceptance-manifest.2", "acceptance-manifest.3"] | None = None
+    manifest_version: Literal[
+        "acceptance-manifest.2", "acceptance-manifest.3", "appraisal-acceptance.1"
+    ] | None = None
     manifest_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     acceptance_event_ref: str | None = None
     acceptance_event_payload_hash: str | None = Field(
@@ -2570,6 +2572,23 @@ class RelationshipHysteresisProjection(FrozenModel):
         return self
 
 
+class RelationshipStateOrigin(FrozenModel):
+    """Exact accepted mutation that materialized the current relationship head.
+
+    A relationship head is a reducer-derived aggregate, but its latest values
+    are wholly asserted by one accepted ``RelationshipSlowVariableAdjusted``
+    event.  Keeping that event identity on the head lets the Context resolver
+    expose the state without treating a projection snapshot as authority.
+    ``None`` is reserved for legacy decoded heads and therefore fails closed
+    at the Context boundary.
+    """
+
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+
+
 class RelationshipSignalOrigin(FrozenModel):
     change_id: str = Field(min_length=1)
     transition_id: str = Field(min_length=1)
@@ -2761,6 +2780,7 @@ class RelationshipStateProjection(FrozenModel):
     )
     commitment_refs: tuple[str, ...] = ()
     last_adjusted_at: datetime | None = None
+    origin: RelationshipStateOrigin | None = None
 
 
 class ConversationThreadProjection(FrozenModel):
