@@ -12,8 +12,13 @@ from .pinned_turn import PinnedTurnCompiler
 from .projection import ProjectionAuthority, ProjectionCompiler
 from .settlement import SettlementPlanner
 from .replay_evaluator import ReplayEvaluation, ReplayEvaluator
-from .minimal_reply_acceptance import ReplyBudgetPolicy, derive_minimal_reply_material
+from .minimal_reply_acceptance import (
+    MinimalReplyAcceptanceError,
+    ReplyBudgetPolicy,
+    derive_minimal_reply_material,
+)
 from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
+from .minimal_reply_events import minimal_reply_event_id
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -148,6 +153,9 @@ class WorldRuntime:
             payload=observation.model_dump(mode="json"),
         )
         reply_authorized = False
+        authorized_action_ids: tuple[str, ...] = ()
+        reply_deferred_refs: tuple[str, ...] = ()
+        reply_terminal_errors: tuple[str, ...] = ()
         async with self._lock:
             existing = await self._lookup_event_commit(event.event_id)
             if existing is not None:
@@ -156,14 +164,11 @@ class WorldRuntime:
                     raise IdempotencyConflict(
                         "observation trigger was already committed with different content"
                     )
-                return RuntimeOutcome(
-                    outcome_id=f"outcome:{trigger_id}",
+                return await self._existing_observation_outcome(
+                    observation=observation,
+                    observation_event=persisted,
+                    original_commit=original_commit,
                     trigger_id=trigger_id,
-                    observation_ref=observation.observation_id,
-                    committed_world_revision=original_commit.world_revision,
-                    ledger_sequence=original_commit.ledger_sequence,
-                    status="observed_only",
-                    projection_hint=f"world-revision:{original_commit.world_revision}",
                 )
             before = await self._project_for_write()
             committed = await self._commit(
@@ -191,32 +196,127 @@ class WorldRuntime:
                         (item for item in after_audit.budget_accounts if item.account_id == self._reply_policy.account_id),
                         None,
                     )
-                    if audit is not None and audit.proposal_kind == "minimal" and account is not None:
-                        material = derive_minimal_reply_material(
-                            audit=audit,
-                            cursor=ProjectionCursor(
-                                world_revision=after_audit.world_revision,
-                                deliberation_revision=after_audit.deliberation_revision,
-                                ledger_sequence=after_audit.ledger_sequence,
-                            ),
-                            world_id=self._world_id, policy=self._reply_policy, account=account,
-                            logical_time=after_audit.logical_time or observation.logical_time,
-                            created_at=observation.created_at, trace_id=observation.trace_id,
-                            correlation_id=observation.correlation_id,
-                        )
-                        batch = self._reply_recorder.prepare_batch(
-                            acceptance_id=f"acceptance:minimal-reply:{audit.proposal_id}",
-                            material=material, actor=self._reply_policy.actor, source="world-runtime:acceptance",
-                        )
-                        committed = await self._commit_accepted(batch, cursor=material.cursor)
-                        reply_authorized = True
+                    if audit is not None and audit.proposal_kind == "minimal":
+                        if account is None:
+                            reply_deferred_refs = (
+                                f"reply-budget-account:{self._reply_policy.account_id}",
+                            )
+                        else:
+                            try:
+                                material = derive_minimal_reply_material(
+                                    audit=audit,
+                                    cursor=ProjectionCursor(
+                                        world_revision=after_audit.world_revision,
+                                        deliberation_revision=after_audit.deliberation_revision,
+                                        ledger_sequence=after_audit.ledger_sequence,
+                                    ),
+                                    world_id=self._world_id,
+                                    policy=self._reply_policy,
+                                    account=account,
+                                    logical_time=after_audit.logical_time or observation.logical_time,
+                                    created_at=observation.created_at,
+                                    trace_id=observation.trace_id,
+                                    correlation_id=observation.correlation_id,
+                                )
+                            except MinimalReplyAcceptanceError as exc:
+                                if exc.code in {
+                                    "minimal_reply_acceptance.budget_unavailable",
+                                    "minimal_reply_acceptance.budget_account_unavailable",
+                                }:
+                                    reply_deferred_refs = (exc.code,)
+                                else:
+                                    reply_terminal_errors = (exc.code,)
+                            else:
+                                assert self._reply_recorder is not None
+                                batch = self._reply_recorder.prepare_batch(
+                                    acceptance_id=f"acceptance:minimal-reply:{audit.proposal_id}",
+                                    material=material,
+                                    actor=self._reply_policy.actor,
+                                    source="world-runtime:acceptance",
+                                )
+                                committed = await self._commit_accepted(batch, cursor=material.cursor)
+                                reply_authorized = True
+                                authorized_action_ids = (material.action.action_id,)
+        if reply_authorized:
+            status = "action_authorized"
+        elif reply_terminal_errors:
+            status = "failed_safe"
+        elif reply_deferred_refs:
+            status = "deferred"
+        else:
+            status = "observed_only"
         return RuntimeOutcome(
             outcome_id=f"outcome:{trigger_id}",
             trigger_id=trigger_id,
             observation_ref=observation.observation_id,
             committed_world_revision=committed.world_revision,
             ledger_sequence=committed.ledger_sequence,
-            status="action_authorized" if reply_authorized else "observed_only",
+            status=status,
+            authorized_action_ids=authorized_action_ids if reply_authorized else (),
+            deferred_refs=reply_deferred_refs,
+            terminal_errors=reply_terminal_errors,
+            projection_hint=f"world-revision:{committed.world_revision}",
+        )
+
+    async def _existing_observation_outcome(
+        self,
+        *,
+        observation: Observation,
+        observation_event: WorldEvent,
+        original_commit: CommitResult,
+        trigger_id: str,
+    ) -> RuntimeOutcome:
+        """Join a completed minimal-reply acceptance without repeating model work.
+
+        The Observation itself commits before its deliberation and acceptance
+        follow-ups.  On ingress retry, the durable minimal manifest is the
+        authority for the final visible outcome; returning the Observation's
+        old cursor would incorrectly erase an already-authorized reply.
+        """
+
+        projection = await self._project_for_write()
+        manifest = next(
+            (
+                item
+                for item in projection.minimal_reply_manifests
+                if any(
+                    audit.proposal_id == item.proposal_id
+                    and audit.event_ref == item.proposal_event_ref
+                    and audit.trigger_ref == observation_event.event_id
+                    for audit in projection.proposal_audits
+                )
+            ),
+            None,
+        )
+        if manifest is None:
+            return RuntimeOutcome(
+                outcome_id=f"outcome:{trigger_id}",
+                trigger_id=trigger_id,
+                observation_ref=observation.observation_id,
+                committed_world_revision=original_commit.world_revision,
+                ledger_sequence=original_commit.ledger_sequence,
+                status="observed_only",
+                projection_hint=f"world-revision:{original_commit.world_revision}",
+            )
+        action_event_id = minimal_reply_event_id(
+            manifest_hash=manifest.manifest_hash,
+            role="action",
+            stable_id=manifest.action_id,
+        )
+        persisted = await self._lookup_event_commit(action_event_id)
+        if persisted is None:
+            raise RuntimeError("minimal reply manifest has no durable action event")
+        action_event, committed = persisted
+        if action_event.event_type != "ActionAuthorized":
+            raise RuntimeError("minimal reply action identity resolves to another event type")
+        return RuntimeOutcome(
+            outcome_id=f"outcome:{trigger_id}",
+            trigger_id=trigger_id,
+            observation_ref=observation.observation_id,
+            committed_world_revision=committed.world_revision,
+            ledger_sequence=committed.ledger_sequence,
+            status="action_authorized",
+            authorized_action_ids=(manifest.action_id,),
             projection_hint=f"world-revision:{committed.world_revision}",
         )
 

@@ -203,6 +203,28 @@ def test_manifest_binds_every_reply_side_effect_to_its_audited_material() -> Non
         )
 
 
+def test_rejects_a_model_selected_target_that_conflicts_with_composition_policy() -> None:
+    proposal = _proposal().model_copy(
+        update={
+            "action_intents": (
+                _proposal().action_intents[0].model_copy(update={"target": "user:other"}),
+            )
+        }
+    )
+    with pytest.raises(MinimalReplyAcceptanceError, match="policy_target_mismatch"):
+        derive_minimal_reply_material(
+            audit=_audit(proposal),
+            cursor=ProjectionCursor(world_revision=4, deliberation_revision=2, ledger_sequence=7),
+            world_id=WORLD,
+            policy=_policy(),
+            account=_account(),
+            logical_time=NOW,
+            created_at=NOW,
+            trace_id="trace:1",
+            correlation_id="correlation:1",
+        )
+
+
 def test_recorder_materializes_a_closed_reply_batch_that_reduces_to_dispatchable_state() -> None:
     material = derive_minimal_reply_material(
         audit=_audit(),

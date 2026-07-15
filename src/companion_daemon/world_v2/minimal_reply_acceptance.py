@@ -174,6 +174,8 @@ def derive_minimal_reply_material(
         raise MinimalReplyAcceptanceError("beat_binding_invalid")
     if account.account_id != policy.account_id or account.category != "chat":
         raise MinimalReplyAcceptanceError("budget_account_unavailable")
+    if intent.target != policy.target:
+        raise MinimalReplyAcceptanceError("policy_target_mismatch")
     if account.limit - account.reserved - account.spent < policy.amount_limit:
         raise MinimalReplyAcceptanceError("budget_unavailable")
     intent_hash = _digest(intent.model_dump(mode="json"))

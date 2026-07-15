@@ -1264,8 +1264,26 @@ def validate_proposal_envelope(value: Any) -> ProposalInput:
     _preflight_untrusted_envelope(value)
     if isinstance(value, ProposalEnvelope):
         value = value.model_dump(mode="python", round_trip=True, warnings=False)
+    # Model adapters carry decoded JSON.  JSON arrays are necessarily Python
+    # lists, whereas our immutable contracts intentionally expose tuples.  A
+    # strict ``validate_python`` would therefore reject every ordinary wire
+    # proposal before the envelope validators get a chance to evaluate it.
+    # Re-enter through Pydantic's strict JSON path after bounded serialization:
+    # JSON keeps tuple/list wire equivalence while still rejecting Python-side
+    # coercions at the authority seam.
     _validate_serialized_envelope_size(value)
-    return _PROPOSAL_INPUT_ADAPTER.validate_python(value, strict=True)
+    try:
+        wire_json = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+            default=lambda item: item.isoformat() if isinstance(item, datetime) else None,
+        )
+    except (TypeError, ValueError, RecursionError) as exc:
+        raise ValueError("proposal envelope must be JSON-compatible") from exc
+    return _PROPOSAL_INPUT_ADAPTER.validate_json(wire_json, strict=True)
 
 
 __all__ = [
