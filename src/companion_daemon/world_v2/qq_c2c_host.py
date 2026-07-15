@@ -181,6 +181,13 @@ class QQC2CHost:
                     break
                 actions.append(result.status)
             background: list[str] = []
+            for _ in range(max_action_units):
+                result = await self._host.drain_media_planning_once()
+                if result.status in {"idle", "unavailable", "in_progress"}:
+                    if result.status != "idle":
+                        background.append("media-plan:" + result.status)
+                    break
+                background.append("media-plan:" + result.status)
             logical_time = await self._host.current_logical_time()
             if logical_time is not None:
                 for _ in range(max_action_units):
@@ -241,6 +248,13 @@ class QQC2CHost:
                     break
                 actions.append(result.status)
             background: list[str] = []
+            for _ in range(max_action_units):
+                result = await self._host.drain_media_planning_once()
+                if result.status in {"idle", "unavailable", "in_progress"}:
+                    if result.status != "idle":
+                        background.append("media-plan:" + result.status)
+                    break
+                background.append("media-plan:" + result.status)
             logical_time = await self._host.current_logical_time()
             if logical_time is not None:
                 for _ in range(max_action_units):

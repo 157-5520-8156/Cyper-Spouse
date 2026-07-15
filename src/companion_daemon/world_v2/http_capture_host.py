@@ -305,12 +305,22 @@ class HttpV2CaptureHost:
             raise ValueError("HTTP capture drain limits must be between 0 and 64")
         async with self._lock:
             actions: list[str] = []
+            background: list[str] = []
             for _ in range(max_action_units):
                 result = await self._host.drain_actions_once()
                 if result is None or result.status == "idle":
                     break
                 actions.append(result.status)
-            background: list[str] = []
+            # Planning is a separate source-bound phase: it only advances an
+            # already-authorized media_planning Action.  No scheduler pass can
+            # turn a chat message or mutable projection into an opportunity.
+            for _ in range(max_action_units):
+                result = await self._host.drain_media_planning_once()
+                if result.status in {"idle", "unavailable", "in_progress"}:
+                    if result.status != "idle":
+                        background.append("media-plan:" + result.status)
+                    break
+                background.append("media-plan:" + result.status)
             # Provider result materialization deliberately follows ActionPump
             # settlement.  It is bounded with the same operator-requested
             # work budget and only ever records receipt-bound preview state.

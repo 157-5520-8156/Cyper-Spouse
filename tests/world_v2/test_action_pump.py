@@ -188,6 +188,25 @@ async def test_action_pump_persists_start_before_dispatch_and_settles_receipt() 
     assert event_types.index("ActionDispatchStarted") < event_types.index("ExternalObservationRecorded")
 
 
+@pytest.mark.asyncio
+async def test_action_pump_can_exclude_a_dedicated_scheduler_lane() -> None:
+    ledger = _ready_ledger()
+    executor = _DeliveredExecutor()
+    runtime = WorldRuntime(
+        world_id=WORLD,
+        ledger=ledger,
+        action_executor=executor,
+        action_pump_owner="pump:primary",
+        action_pump_excluded_kinds=frozenset({"reply"}),
+    )
+
+    result = await runtime.drain_actions_once()
+
+    assert result is not None and result.status == "idle"
+    assert executor.dispatch_calls == 0
+    assert ledger.project().actions[0].state == "authorized"
+
+
 def _mark_dispatch_started(ledger: WorldLedger) -> None:
     action = ledger.project().actions[0]
     claim = {

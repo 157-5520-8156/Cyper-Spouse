@@ -280,6 +280,15 @@ class WorldV2PlatformHost:
 
         return await self._application.drain_media_results_once(logical_time=logical_time)
 
+    async def drain_media_planning_once(self):
+        """Advance one frozen media-planning Action through the v2 scheduler.
+
+        The host cannot supply a candidate, snapshot, or provider request;
+        composition only drains a prior source-bound Action.
+        """
+
+        return await self._application.drain_media_planning_once()
+
     async def drain_background_once(self):
         """Advance one separately scheduled, non-visible World v2 work unit."""
 

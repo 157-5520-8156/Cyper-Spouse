@@ -62,9 +62,11 @@ from .ledger_context_resolver import ContextRelevanceScope, context_capsule_comp
 from .ledger_payload_reader import LedgerAuthorizedPayloadReader
 from .life_content_store import SQLiteImmutableLifeContentStore
 from .expression_payload_store import SQLiteImmutableExpressionPayloadStore
-from .media_v2 import SQLiteImmutableMediaPayloadStore
+from .media_v2 import MediaPlanner, SQLiteImmutableMediaPayloadStore
 from .test_economy import CostProfile
 from .media_execution_runtime import MediaExecutionRuntime, MediaExecutionWorker
+from .media_planning_runtime import MediaPlanningRuntime
+from .media_planning_worker import MediaPlanningRunResult, MediaPlanningWorker
 from .media_payload_reader import MediaSidecarPayloadReader, PlatformAndMediaPayloadReader
 from .media_delivery_runtime import MediaDeliveryRuntime
 from .media_v2 import MediaAutomaticDeliveryApproval
@@ -124,6 +126,7 @@ class WorldV2TurnApplicationConfig:
     outcome_worker_owner: str = "worker:world-v2:outcome"
     interaction_bid_worker_owner: str = "worker:world-v2:interaction-bid"
     expression_reconsideration_owner: str = "worker:world-v2:expression-reconsideration"
+    media_planning_worker_owner: str = "worker:world-v2:media-planning"
     media_cost_profile: CostProfile | None = None
 
     def __post_init__(self) -> None:
@@ -138,6 +141,7 @@ class WorldV2TurnApplicationConfig:
             "outcome_worker_owner",
             "interaction_bid_worker_owner",
             "expression_reconsideration_owner",
+            "media_planning_worker_owner",
         ):
             if not getattr(self, name):
                 raise ValueError(f"{name} must not be empty")
@@ -162,6 +166,8 @@ class WorldV2TurnApplication:
         media_payload_store: SQLiteImmutableMediaPayloadStore,
         media_execution: MediaExecutionRuntime,
         media_execution_worker: MediaExecutionWorker | None,
+        media_planning: MediaPlanningRuntime,
+        media_planning_worker: MediaPlanningWorker,
         media_delivery: MediaDeliveryRuntime,
         occurrence_content: OccurrenceContentCoordinator,
         activity_plans: ActivityPlanRuntime,
@@ -174,6 +180,8 @@ class WorldV2TurnApplication:
         self._media_payload_store = media_payload_store
         self.media_execution = media_execution
         self._media_execution_worker = media_execution_worker
+        self._media_planning = media_planning
+        self._media_planning_worker = media_planning_worker
         self._media_delivery = media_delivery
         self._occurrence_content = occurrence_content
         self._activity_plans = activity_plans
@@ -485,6 +493,16 @@ class WorldV2TurnApplication:
             return None
         return await self._media_execution_worker.drain_once(logical_time=logical_time)
 
+    async def drain_media_planning_once(self) -> MediaPlanningRunResult:
+        """Advance one already-frozen Media v2 planning Action.
+
+        This is scheduler-only: it does not select a candidate or construct a
+        snapshot.  A missing composition-owned planner is visible as an
+        ``unavailable`` result and cannot fall back to the legacy image path.
+        """
+
+        return await self._media_planning_worker.drain_once()
+
     async def approve_media_automatic_delivery(
         self, *, approval: MediaAutomaticDeliveryApproval, trace_id: str,
         correlation_id: str, causation_id: str,
@@ -567,6 +585,7 @@ def build_sqlite_world_v2_turn_application(
     quick_recovery: QuickRecoveryAdapter,
     transport: PlatformTransport,
     media_transport: MediaProviderTransport | None = None,
+    media_planner: MediaPlanner | None = None,
     advisory_compiler: AdvisoryCompiler | None = None,
     appraisal_model: DeliberationModelAdapter | None = None,
     affect_model: DeliberationModelAdapter | None = None,
@@ -855,6 +874,11 @@ def build_sqlite_world_v2_turn_application(
             ),
             action_executor=action_executor,
             action_pump_owner=config.action_pump_owner,
+            # Planning settles a MediaPlan/NotRenderable domain result in one
+            # receipt-bound batch.  Its dedicated scheduler is the only
+            # executor permitted to take these Actions; generic delivery must
+            # not hand their snapshot bytes to a render/provider transport.
+            action_pump_excluded_kinds=frozenset({"media_planning"}),
             expression_reconsideration_owner=(
                 config.expression_reconsideration_owner
                 if expression_reconsideration_reviewer is not None
@@ -876,6 +900,7 @@ def build_sqlite_world_v2_turn_application(
             if media_transport is not None and hasattr(media_transport, "lookup_execution_result")
             else None
         )
+        media_planning = MediaPlanningRuntime(ledger=ledger, sidecar=media_payload_store)
         return WorldV2TurnApplication(
             turns=WorldTurnRuntime(runtime=runtime, identities=identities),
             ledger=ledger,
@@ -884,6 +909,13 @@ def build_sqlite_world_v2_turn_application(
             media_payload_store=media_payload_store,
             media_execution=media_execution,
             media_execution_worker=media_execution_worker,
+            media_planning=media_planning,
+            media_planning_worker=MediaPlanningWorker(
+                ledger=ledger,
+                runtime=media_planning,
+                planner=media_planner,
+                owner_id=config.media_planning_worker_owner,
+            ),
             media_delivery=MediaDeliveryRuntime(ledger=ledger),
             occurrence_content=occurrence_content,
             activity_plans=ActivityPlanRuntime(

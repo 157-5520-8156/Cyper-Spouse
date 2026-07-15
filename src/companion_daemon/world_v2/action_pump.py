@@ -68,6 +68,7 @@ class ActionPump:
         owner_id: str,
         lease_seconds: int = 120,
         source: str = "world-v2:action-pump",
+        excluded_action_kinds: frozenset[str] = frozenset(),
     ) -> None:
         if not owner_id or lease_seconds <= 0:
             raise ValueError("action pump needs owner and positive lease")
@@ -77,6 +78,7 @@ class ActionPump:
         self._owner_id = owner_id
         self._lease_seconds = lease_seconds
         self._source = source
+        self._excluded_action_kinds = excluded_action_kinds
 
     async def drain_once(self) -> ActionPumpResult:
         """Advance one eligible Action or recover one started dispatch.
@@ -120,7 +122,7 @@ class ActionPump:
             (
                 item
                 for item in projection.actions
-                if self._is_target(item, target_action_id)
+                if self._is_eligible(item, target_action_id)
                 if item.state in {"authorized", "scheduled", "claimed"}
                 and item.expires_at is not None
                 and (projection.logical_time or item.logical_time) >= item.expires_at
@@ -136,7 +138,7 @@ class ActionPump:
             (
                 item
                 for item in projection.actions
-                if self._is_target(item, target_action_id)
+                if self._is_eligible(item, target_action_id)
                 if item.state == "authorized" and self._expression_dispatch_allowed(item, projection)
             ),
             None,
@@ -148,7 +150,7 @@ class ActionPump:
             (
                 item
                 for item in projection.actions
-                if self._is_target(item, target_action_id)
+                if self._is_eligible(item, target_action_id)
                 if item.state == "scheduled"
                 and self._is_due(action=item, logical_time=projection.logical_time)
                 and self._dependencies_delivered(action=item, actions=projection.actions)
@@ -165,7 +167,7 @@ class ActionPump:
             (
                 item
                 for item in projection.actions
-                if self._is_target(item, target_action_id) and item.state == "scheduled"
+                if self._is_eligible(item, target_action_id) and item.state == "scheduled"
             ),
             None,
         )
@@ -175,7 +177,7 @@ class ActionPump:
             (
                 item
                 for item in projection.actions
-                if self._is_target(item, target_action_id)
+                if self._is_eligible(item, target_action_id)
                 if item.state == "claimed" and self._expression_dispatch_allowed(item, projection)
             ),
             None,
@@ -189,7 +191,7 @@ class ActionPump:
             (
                 item
                 for item in projection.actions
-                if self._is_target(item, target_action_id) and item.state == "dispatch_started"
+                if self._is_eligible(item, target_action_id) and item.state == "dispatch_started"
             ),
             None,
         )
@@ -199,7 +201,7 @@ class ActionPump:
             (
                 item
                 for item in projection.actions
-                if self._is_target(item, target_action_id) and item.state == "provider_accepted"
+                if self._is_eligible(item, target_action_id) and item.state == "provider_accepted"
             ),
             None,
         )
@@ -207,9 +209,11 @@ class ActionPump:
             return await self._recover_provider_accepted(action)
         return ActionPumpResult(status="idle")
 
-    @staticmethod
-    def _is_target(action: Action, target_action_id: str | None) -> bool:
-        return target_action_id is None or action.action_id == target_action_id
+    def _is_eligible(self, action: Action, target_action_id: str | None) -> bool:
+        return (
+            action.kind not in self._excluded_action_kinds
+            and (target_action_id is None or action.action_id == target_action_id)
+        )
 
     async def _schedule(self, *, action: Action, projection) -> None:
         await self._commit_event(

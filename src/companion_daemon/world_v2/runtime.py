@@ -144,6 +144,7 @@ class WorldRuntime:
         affect_worker: AffectDeliberationWorker | None = None,
         action_executor: ActionExecutor | None = None,
         action_pump_owner: str | None = None,
+        action_pump_excluded_kinds: frozenset[str] = frozenset(),
         affect_acceptance: AffectAcceptanceRuntime | None = None,
         affect_acceptance_actor: str | None = None,
         expression_reconsideration_owner: str | None = None,
@@ -242,6 +243,7 @@ class WorldRuntime:
             raise ValueError("action pump owner must not be empty")
         self._action_executor = action_executor
         self._action_pump_owner = action_pump_owner
+        self._action_pump_excluded_kinds = action_pump_excluded_kinds
         if (affect_acceptance is None) != (affect_acceptance_actor is None):
             raise ValueError("affect acceptance runtime and actor must be configured together")
         if affect_acceptance is not None and affect_acceptance.ledger is not self._ledger:
@@ -377,6 +379,7 @@ class WorldRuntime:
             executor=self._action_executor,
             settle=self.settle,
             owner_id=self._action_pump_owner,
+            excluded_action_kinds=self._action_pump_excluded_kinds,
         ).drain_once()
 
     async def drain_action(self, action_id: str) -> ActionPumpResult | None:
@@ -390,6 +393,7 @@ class WorldRuntime:
             executor=self._action_executor,
             settle=self.settle,
             owner_id=self._action_pump_owner,
+            excluded_action_kinds=self._action_pump_excluded_kinds,
         ).drain_action(action_id)
 
     @classmethod

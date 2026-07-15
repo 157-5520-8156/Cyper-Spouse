@@ -9,7 +9,6 @@ same Action/result; it never creates a replacement opportunity or re-plans.
 from __future__ import annotations
 
 from datetime import datetime
-import json
 
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
@@ -35,9 +34,16 @@ def _event_id(*, role: str, stable: str) -> str:
 
 def _idempotency(*, event_type: str, world_id: str, payload: dict[str, object]) -> str:
     value = domain_idempotency_key(event_type=event_type, world_id=world_id, payload=payload)
-    if value is None:
-        raise MediaPlanningError(f"missing installed media event identity for {event_type}")
-    return value
+    if value is not None:
+        return value
+    # Generic lifecycle events (BudgetReserved, ActionDelivered, and their
+    # receipt/settlement siblings) intentionally have no public domain-id
+    # function.  They are nevertheless part of this immutable media batch,
+    # so bind them to the exact payload rather than making an otherwise valid
+    # frozen opportunity impossible to schedule.
+    return "world-v2:media-planning:" + media_digest(
+        {"event_type": event_type, "world_id": world_id, "payload": payload}
+    )
 
 
 class MediaPlanningRuntime:
@@ -65,7 +71,11 @@ class MediaPlanningRuntime:
         if opportunity.event_snapshot_hash != media_payload_hash(snapshot_body):
             raise MediaPlanningError("frozen snapshot hash does not bind supplied sidecar bytes")
         try:
-            snapshot = FrozenMediaEvidenceSnapshot.model_validate(json.loads(snapshot_body))
+            # The immutable sidecar is canonical JSON.  Validate it through
+            # Pydantic's JSON path so JSON arrays can hydrate the frozen tuple
+            # fields; decoding first would make strict tuple validation reject
+            # the exact bytes we wrote ourselves.
+            snapshot = FrozenMediaEvidenceSnapshot.model_validate_json(snapshot_body)
         except Exception as exc:
             raise MediaPlanningError("frozen snapshot bytes do not satisfy the evidence contract") from exc
         projection = self._ledger.project()
@@ -216,7 +226,8 @@ class MediaPlanningRuntime:
             logical_time=logical_time, created_at=logical_time, trace_id=action.trace_id, causation_id=action_id,
             correlation_id=action.correlation_id, kind="media_result", source="provider:media-planner", source_event_id=source_event_id,
             action_id=action_id, idempotency_key=action.idempotency_key, status="delivered", provider_ref=action.idempotency_key,
-            artifact_refs=(), cost_actual=0, error_class=None, raw_payload_hash="sha256:" + media_digest(domain_payload))
+            artifact_refs=(), cost_actual=0, observed_at=logical_time, error_class=None,
+            raw_payload_hash="sha256:" + media_digest(domain_payload))
         receipt = ExecutionReceipt(receipt_id=receipt_id, result_id=result_id, action_id=action_id, provider="provider:media-planner",
             provider_ref=action.idempotency_key, source_event_id=source_event_id, receipt_kind="terminal", observed_state="delivered",
             is_terminal=True, cost_actual=0, received_at=logical_time, raw_payload_hash=external.raw_payload_hash)

@@ -233,6 +233,7 @@ async def test_production_application_bootstraps_sqlite_once_and_exposes_only_tu
     )
     try:
         assert await app.drain_background_once() is None
+        assert (await app.drain_media_planning_once()).status == "idle"
         outcome = await app.respond(
             InboundTurn(
                 platform="test",
