@@ -992,6 +992,11 @@ retention rationale 使用分类矩阵而非行为规则：`identity_relevance|r
 
 Memory retrieval 输出 source-bound excerpt、source authority refs、candidate status/strength 与截断原因；不得输出脱离来源的“记忆事实”。Memory candidate reducer 零级联，不改 Fact/Experience/Relationship/CharacterCore，也不直接写 Context；SituationCompiler/Memory selector 只消费 active head。
 
+实现补充：`summary_ref`、`value_ref` 和 hash 不是可供模型猜测的正文。Context
+必须经 `MemoryRetrievalCompiler` 从已绑定、已授权的 source payload 构造 excerpt；
+不能解析正文时显式输出 `content_unavailable`，不得退回引用命名。详见
+`docs/design/world-v2-memory-retrieval-content.md`。
+
 ### 4B.12 ExpressionPlan / Beat：表达是可打断、可结算的行动计划
 
 ExpressionPlan 是一轮可见表达的冻结意图；Beat 是其中可独立调度和结算的最小表达单元。它们不是字符串切片工具，也不是 Action 的别名。
