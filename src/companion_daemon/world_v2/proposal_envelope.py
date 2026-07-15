@@ -200,6 +200,7 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
     "outcome_settlement": _PayloadContract(
         {
             "outcome_proposal_id": str,
+            "candidate_result_ref": str,
             "result_id": str,
             "entity_id": str,
             "entity_revision": int,
@@ -608,6 +609,7 @@ class SocialEncounterPayload(FrozenModel):
 
 class OutcomeSettlementPayload(FrozenModel):
     outcome_proposal_id: BoundedRef
+    candidate_result_ref: BoundedRef
     result_id: BoundedRef
     entity_id: BoundedRef
     entity_revision: int = Field(ge=0)

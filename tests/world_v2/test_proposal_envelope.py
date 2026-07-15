@@ -390,6 +390,40 @@ def test_goal_payload_rejects_untyped_blockers_and_empty_contract(
         )
 
 
+def test_outcome_settlement_binds_a_committed_candidate_not_just_a_result_label() -> None:
+    payload = {
+        "outcome_proposal_id": "outcome-proposal:1",
+        "candidate_result_ref": "candidate:tea-brewed",
+        "result_id": "result:tea-brewed",
+        "entity_id": "occurrence:tea",
+        "entity_revision": 2,
+        "observations": [_source("observation:tea")],
+        "result_payload": _binding("payload:tea-brewed"),
+    }
+    change = TypedChange(
+        change_id="change:outcome:1",
+        kind="outcome_settlement",
+        target_id="occurrence:tea",
+        expected_entity_revision=2,
+        transition="settle",
+        evidence_refs=("observation:tea",),
+        payload=_payload("outcome_settlement.v1", payload),
+    )
+    assert change.payload.value()["candidate_result_ref"] == "candidate:tea-brewed"
+
+    payload.pop("candidate_result_ref")
+    with pytest.raises(ValidationError, match="outcome_settlement payload violates"):
+        TypedChange(
+            change_id="change:outcome:missing-candidate",
+            kind="outcome_settlement",
+            target_id="occurrence:tea",
+            expected_entity_revision=2,
+            transition="settle",
+            evidence_refs=("observation:tea",),
+            payload=_payload("outcome_settlement.v1", payload),
+        )
+
+
 def test_proposal_rejects_duplicate_ids_refs_and_unbound_summaries() -> None:
     change = _expression_change()
     with pytest.raises(ValidationError, match="duplicate change_id"):
