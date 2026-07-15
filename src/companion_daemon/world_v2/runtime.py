@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 
 from .affect_math import DecayAnchor, DecayProfile, decay_intensity_bp
 from .errors import ConcurrencyConflict, IdempotencyConflict
@@ -370,6 +372,111 @@ class WorldRuntime:
             committed_world_revision=committed.world_revision,
             ledger_sequence=committed.ledger_sequence,
             status="observed_only",
+            projection_hint=f"world-revision:{committed.world_revision}",
+        )
+
+    async def reject_affect_proposal(self, proposal_id: str) -> RuntimeOutcome:
+        """Record a no-Affect decision without granting a mutation write path.
+
+        A current proposal is rejected; a proposal pinned before a later world
+        change is recorded as stale.  Both decisions are durable and discard
+        the proposal through the existing typed-proposal reducer registry.
+        """
+
+        if not proposal_id:
+            raise ValueError("affect proposal id must not be empty")
+        async with self._lock:
+            projection = await self._project_for_write()
+            existing = next(
+                (item for item in projection.acceptance_decisions if item.proposal_id == proposal_id),
+                None,
+            )
+            if existing is not None:
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:affect:{proposal_id}",
+                    trigger_id=f"affect:{proposal_id}",
+                    committed_world_revision=projection.world_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                    status="observed_only" if existing.status != "accepted" else "failed_safe",
+                    terminal_errors=(f"affect.proposal_{existing.status}",),
+                    projection_hint=f"world-revision:{projection.world_revision}",
+                )
+            proposal = next(
+                (item for item in projection.affect_proposals if item.proposal_id == proposal_id),
+                None,
+            )
+            if proposal is None:
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:affect:{proposal_id}",
+                    trigger_id=f"affect:{proposal_id}",
+                    committed_world_revision=projection.world_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                    status="deferred",
+                    deferred_refs=("affect.proposal_unavailable",),
+                    projection_hint=f"world-revision:{projection.world_revision}",
+                )
+            decision_status = (
+                "rejected"
+                if proposal.evaluated_world_revision == projection.world_revision
+                else "stale"
+            )
+            proposal_located = await self._lookup_event_commit(proposal.recorded_event_ref or "")
+            if (
+                proposal_located is None
+                or proposal.recorded_event_payload_hash != proposal_located[0].payload_hash
+            ):
+                raise RuntimeError("affect proposal provenance is not durable")
+            proposal_event = proposal_located[0]
+            material = {
+                "world_id": self._world_id,
+                "proposal_id": proposal_id,
+                "evaluated_world_revision": proposal.evaluated_world_revision,
+                "status": decision_status,
+            }
+            digest = hashlib.sha256(
+                json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+            payload = {
+                "acceptance_id": f"acceptance:affect-decision:{digest}",
+                "status": decision_status,
+                "proposal_id": proposal_id,
+                "evaluated_world_revision": proposal.evaluated_world_revision,
+                "accepted_change_id": None,
+                "accepted_change_hash": None,
+            }
+            idempotency_key = domain_idempotency_key(
+                event_type="AcceptanceRecorded", world_id=self._world_id, payload=payload
+            )
+            if idempotency_key is None:
+                raise RuntimeError("affect decision has no installed event identity")
+            event = WorldEvent.from_payload(
+                schema_version="world-v2.1",
+                event_id=f"event:affect-decision:{digest}",
+                world_id=self._world_id,
+                event_type="AcceptanceRecorded",
+                logical_time=proposal_event.logical_time,
+                created_at=proposal_event.created_at,
+                actor="world-runtime:affect-decision",
+                source="world-runtime:affect-decision",
+                trace_id=proposal_event.trace_id,
+                causation_id=proposal_event.event_id,
+                correlation_id=proposal_event.correlation_id,
+                idempotency_key=idempotency_key,
+                payload=payload,
+            )
+            committed = await self._commit(
+                [event],
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                commit_id=f"commit:affect-decision:{digest}",
+            )
+        return RuntimeOutcome(
+            outcome_id=f"outcome:affect:{proposal_id}",
+            trigger_id=f"affect:{proposal_id}",
+            committed_world_revision=committed.world_revision,
+            ledger_sequence=committed.ledger_sequence,
+            status="observed_only",
+            terminal_errors=(f"affect.proposal_{decision_status}",),
             projection_hint=f"world-revision:{committed.world_revision}",
         )
 

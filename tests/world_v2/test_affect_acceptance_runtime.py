@@ -40,6 +40,7 @@ from test_appraisal_authority import (
     WORLD_ID,
     accepted_payload,
     event,
+    message_payload,
     prepare_claimed_interaction,
     record_proposal,
 )
@@ -303,3 +304,45 @@ async def test_world_runtime_consumes_an_affect_proposal_idempotently() -> None:
     assert projection.affect_proposals == ()
     assert len(projection.affect_episodes) == 1
     assert len(projection.acceptance_decisions) == 2
+
+
+@pytest.mark.asyncio
+async def test_world_runtime_records_a_rejected_affect_proposal_idempotently() -> None:
+    acceptance, payload = _runtime()
+    runtime = WorldRuntime(world_id=WORLD_ID, ledger=acceptance.ledger)
+
+    first = await runtime.reject_affect_proposal(str(payload["proposal_id"]))
+    second = await runtime.reject_affect_proposal(str(payload["proposal_id"]))
+
+    projection = acceptance.ledger.project()
+    decision = next(
+        item for item in projection.acceptance_decisions if item.proposal_id == payload["proposal_id"]
+    )
+    assert first == second
+    assert first.status == "observed_only"
+    assert first.terminal_errors == ("affect.proposal_rejected",)
+    assert decision.status == "rejected"
+    assert projection.affect_proposals == ()
+    assert projection.affect_episodes == ()
+
+
+@pytest.mark.asyncio
+async def test_world_runtime_records_an_outdated_affect_proposal_as_stale() -> None:
+    acceptance, payload = _runtime()
+    head = acceptance.ledger.project()
+    acceptance.ledger.commit(
+        [event("event:later-observation", "ObservationRecorded", message_payload("message:later"))],
+        expected_world_revision=head.world_revision,
+        expected_deliberation_revision=head.deliberation_revision,
+    )
+    runtime = WorldRuntime(world_id=WORLD_ID, ledger=acceptance.ledger)
+
+    outcome = await runtime.reject_affect_proposal(str(payload["proposal_id"]))
+
+    projection = acceptance.ledger.project()
+    decision = next(
+        item for item in projection.acceptance_decisions if item.proposal_id == payload["proposal_id"]
+    )
+    assert outcome.terminal_errors == ("affect.proposal_stale",)
+    assert decision.status == "stale"
+    assert projection.affect_proposals == ()
