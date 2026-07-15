@@ -90,6 +90,12 @@ class AffectProposalCompiler:
         self._ledger = ledger
         self._reader = DecisionProposalAuthorityReader(ledger=ledger)
 
+    @property
+    def ledger(self) -> LedgerPort:
+        """The immutable composition dependency shared with Acceptance."""
+
+        return self._ledger
+
     def record(
         self, *, world_id: str, cursor: ProjectionCursor, proposal_id: str
     ) -> AffectProposalCompilation:
@@ -145,7 +151,11 @@ class AffectProposalCompiler:
         cluster = appraisals[0].source_cluster_ref
         if any(item.source_cluster_ref != cluster for item in appraisals):
             raise AffectProposalCompilerError("appraisal_clusters_mixed")
-        evidence = self._evidence(proposal=authority.proposal, refs=change.evidence_refs)
+        evidence = self._evidence(
+            proposal=authority.proposal,
+            refs=change.evidence_refs,
+            projection=projection,
+        )
         meanings = tuple(
             AppraisalMeaningRef(
                 appraisal_id=appraisal.appraisal_id,
@@ -252,22 +262,41 @@ class AffectProposalCompiler:
             raise AffectProposalCompilerError("appraisal_not_active")
         return result
 
-    def _evidence(self, *, proposal, refs: tuple[str, ...]) -> tuple[EvidenceRef, ...]:
+    def _evidence(self, *, proposal, refs: tuple[str, ...], projection) -> tuple[EvidenceRef, ...]:
         if not refs:
             raise AffectProposalCompilerError("evidence_missing")
         by_id = {item.ref_id: item for item in proposal.evidence_refs}
         if len(set(refs)) != len(refs) or any(ref not in by_id for ref in refs):
             raise AffectProposalCompilerError("evidence_not_authoritative")
-        return tuple(
-            EvidenceRef(
-                ref_id=by_id[ref].ref_id,
-                evidence_type=by_id[ref].evidence_kind,
-                claim_purpose="private_hypothesis",
-                source_world_revision=by_id[ref].source_world_revision,
-                immutable_hash=by_id[ref].immutable_hash.removeprefix("sha256:"),
+        result: list[EvidenceRef] = []
+        for ref in refs:
+            source = by_id[ref]
+            ref_id = source.ref_id
+            if source.evidence_kind == "observed_message":
+                # Context exposes committed event ids so generic Deliberation
+                # can prove provenance.  Affect reducers, however, index an
+                # observed-message EvidenceRef by its observation id.  Reverse
+                # only an exact revision/hash alias from this pinned projection.
+                aliases = tuple(
+                    item.observation_id
+                    for item in projection.message_observations
+                    if item.world_revision == source.source_world_revision
+                    and item.event_payload_hash == source.immutable_hash.removeprefix("sha256:")
+                )
+                if ref_id not in {item.observation_id for item in projection.message_observations}:
+                    if len(aliases) != 1:
+                        raise AffectProposalCompilerError("observation_evidence_alias_invalid")
+                    ref_id = aliases[0]
+            result.append(
+                EvidenceRef(
+                    ref_id=ref_id,
+                    evidence_type=source.evidence_kind,
+                    claim_purpose="private_hypothesis",
+                    source_world_revision=source.source_world_revision,
+                    immutable_hash=source.immutable_hash.removeprefix("sha256:"),
+                )
             )
-            for ref in refs
-        )
+        return tuple(result)
 
     def _components(self, *, raw, cluster, meanings, at, proposal_id, change_id):
         if at is None:

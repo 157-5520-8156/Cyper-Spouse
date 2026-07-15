@@ -154,6 +154,75 @@ class PinnedTurnCompiler:
             await self._raise_if_stale(cursor, exc)
             raise
 
+    async def audit_appraisal_accepted(
+        self,
+        *,
+        appraisal_event: WorldEvent,
+        cursor: ProjectionCursor,
+    ) -> ProposalAuditCommit:
+        """Audit one fresh affect deliberation after an accepted Appraisal.
+
+        This deliberately has no classifier side path: Appraisal is already a
+        source-bound interpretation.  The subsequent model is asked only
+        whether that fresh state warrants an Affect proposal; it cannot reuse
+        the stale user-message turn or fabricate a new appraisal source.
+        """
+
+        if appraisal_event.world_id != self._ledger.world_id:
+            raise ValueError("Pinned turn appraisal belongs to another world")
+        if appraisal_event.event_type != "AppraisalAccepted":
+            raise ValueError("Pinned turn affect trigger requires AppraisalAccepted")
+        stored = await self._lookup_event_commit(appraisal_event.event_id)
+        if (
+            stored is None
+            or stored[0] != appraisal_event
+            or stored[1].world_revision != cursor.world_revision
+            or stored[1].ledger_sequence != cursor.ledger_sequence
+        ):
+            raise ValueError("Pinned turn appraisal event is not the committed authority")
+        projection = await self._project_at(cursor)
+        query = query_from_projection(
+            projection,
+            actor_ref=self._companion_actor_ref,
+            trigger_ref=appraisal_event.event_id,
+        )
+        try:
+            capsule = await self._compile_capsule(query)
+        except ValueError as exc:
+            await self._raise_if_stale(cursor, exc)
+            raise
+        result = await self._deliberation.deliberate(
+            capsule,
+            attempt_id=_attempt_id(trigger_ref=appraisal_event.event_id, cursor=cursor),
+            trigger_evidence=(
+                ProposalEvidenceRef(
+                    ref_id=appraisal_event.event_id,
+                    evidence_kind="committed_world_event",
+                    source_world_revision=stored[1].world_revision,
+                    immutable_hash="sha256:" + appraisal_event.payload_hash,
+                ),
+            ),
+        )
+        context = ProposalAuditContext(
+            world_id=appraisal_event.world_id,
+            trigger_ref=appraisal_event.event_id,
+            logical_time=projection.logical_time or appraisal_event.logical_time,
+            created_at=appraisal_event.created_at,
+            actor=self._companion_actor_ref,
+            source="world-runtime:pinned-affect-turn",
+            trace_id=appraisal_event.trace_id,
+            causation_id=appraisal_event.event_id,
+            correlation_id=appraisal_event.correlation_id,
+            evaluated_world_revision=cursor.world_revision,
+            expected_commit_world_revision=cursor.world_revision,
+            expected_deliberation_revision=cursor.deliberation_revision,
+        )
+        try:
+            return await self._record(result, context)
+        except (ConcurrencyConflict, IdempotencyConflict) as exc:
+            await self._raise_if_stale(cursor, exc)
+            raise
+
     async def _raise_if_stale(self, cursor: ProjectionCursor, cause: Exception) -> None:
         current = await self._project()
         if (

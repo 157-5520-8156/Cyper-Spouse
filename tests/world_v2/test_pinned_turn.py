@@ -9,6 +9,9 @@ from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchI
 from companion_daemon.world_v2.appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
 from companion_daemon.world_v2.appraisal_proposal_compiler import AppraisalProposalCompiler
 from companion_daemon.world_v2.appraisal_proposal_worker import AppraisalProposalWorker
+from companion_daemon.world_v2.affect_acceptance_runtime import AffectAcceptanceRuntime
+from companion_daemon.world_v2.affect_deliberation_worker import AffectDeliberationWorker
+from companion_daemon.world_v2.affect_proposal_compiler import AffectProposalCompiler
 from companion_daemon.world_v2.context_capsule import ContextCapsuleCompiler
 from companion_daemon.world_v2.advisory_compiler import AdvisoryAdapterInput, AdvisoryCompiler
 from companion_daemon.world_v2.deliberation import (
@@ -21,6 +24,7 @@ from companion_daemon.world_v2.deliberation import (
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.batch_invariants import interaction_appraisal_trigger_identity
 from companion_daemon.world_v2.ledger_context_resolver import (
+    ContextRelevanceScope,
     context_capsule_compiler_from_ledger,
 )
 from companion_daemon.world_v2.pinned_turn import PinnedTurnCompiler
@@ -197,6 +201,80 @@ class _DecisionAppraisalModel:
         )
         return ModelOutput(
             model_id="test-decision-main",
+            model_version="test.1",
+            raw_proposal=proposal.model_dump(mode="json"),
+            input_tokens=1,
+            output_tokens=1,
+        )
+
+
+class _AffectDecisionModel:
+    def __init__(
+        self,
+        *,
+        appraisal_change_id: str,
+        evidence_ref: str,
+        evidence_hash: str,
+        evidence_revision: int,
+    ) -> None:
+        self._appraisal_change_id = appraisal_change_id
+        self._evidence_ref = evidence_ref
+        self._evidence_hash = evidence_hash
+        self._evidence_revision = evidence_revision
+        self.request: ModelInput | None = None
+
+    async def propose(self, request: ModelInput) -> ModelOutput:
+        self.request = request
+        proposal = DecisionProposal(
+            proposal_id="proposal:pinned-turn:affect:1",
+            trigger_ref=request.trigger_ref,
+            evaluated_world_revision=request.evaluated_world_revision,
+            evidence_refs=(
+                ProposalEvidenceRef(
+                    ref_id=self._evidence_ref,
+                    evidence_kind="committed_world_event",
+                    source_world_revision=self._evidence_revision,
+                    immutable_hash="sha256:" + self._evidence_hash,
+                ),
+            ),
+            proposed_changes=(
+                TypedChange(
+                    change_id="change:pinned-turn:affect:1",
+                    kind="affect_transition",
+                    target_id="affect:model-hint",
+                    transition="open",
+                    expected_entity_revision=0,
+                    evidence_refs=(self._evidence_ref,),
+                    payload=CanonicalTypedPayload.from_value(
+                        payload_schema="affect_transition.v1",
+                        value={
+                            "episode_id": "affect:model-hint",
+                            "appraisal_change_refs": [self._appraisal_change_id],
+                            "component_deltas": [{"name": "hurt", "value": 4200}],
+                            "decay_config": {
+                                "object_ref": "policy:decay:standard",
+                                "schema_version": "affect-decay.1",
+                                "payload_hash": "sha256:" + "a" * 64,
+                            },
+                            "residue_config": {
+                                "object_ref": "policy:residue:standard",
+                                "schema_version": "affect-residue.1",
+                                "payload_hash": "sha256:" + "b" * 64,
+                            },
+                        },
+                    ),
+                ),
+            ),
+            action_intents=(),
+            confidence=7300,
+            brief_rationale="The appraisal may leave a bounded residual hurt episode.",
+            affect_decision="propose",
+            behavior_tendency="hold_space",
+            stance="care_despite_hurt",
+            display_strategy="partial_disclosure",
+        )
+        return ModelOutput(
+            model_id="test-affect-main",
             model_version="test.1",
             raw_proposal=proposal.model_dump(mode="json"),
             input_tokens=1,
@@ -493,6 +571,54 @@ async def test_runtime_materializes_audited_appraisal_without_a_second_model_cal
     projection = ledger.project()
     assert projection.appraisals[0].hypotheses[0].meaning == "disappointment"
     assert projection.trigger_processes[0].state == "terminal"
+
+    appraisal_event_ref = next(
+        ref.event_id
+        for ref in projection.committed_world_event_refs
+        if ref.event_type == "AppraisalAccepted"
+    )
+    stored = ledger.lookup_event_commit(appraisal_event_ref)
+    assert stored is not None
+    appraisal_event, appraisal_commit = stored
+    affect_model = _AffectDecisionModel(
+        appraisal_change_id=projection.appraisals[0].origin.change_id,
+        evidence_ref=appraisal_event.event_id,
+        evidence_hash=appraisal_event.payload_hash,
+        evidence_revision=appraisal_commit.world_revision,
+    )
+    affect_turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(
+            ledger=ledger,
+            relevance_scope=ContextRelevanceScope(
+                actor_ref="agent:companion", related_subject_refs=("user:primary",)
+            ),
+        ),
+        deliberation=Deliberation(
+            router=_Router(),
+            main_model=affect_model,
+            quick_recovery=_InvalidQuick(),
+        ),
+        companion_actor_ref="agent:companion",
+    )
+    affect_acceptance = AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
+    affect_result = await AffectDeliberationWorker(
+        ledger=ledger,
+        pinned_turn=affect_turn,
+        compiler=AffectProposalCompiler(ledger=ledger),
+        acceptance=affect_acceptance,
+        actor="worker:affect",
+    ).process(
+        world_id=WORLD,
+        cursor=ProjectionCursor(
+            world_revision=appraisal_commit.world_revision,
+            deliberation_revision=appraisal_commit.deliberation_revision,
+            ledger_sequence=appraisal_commit.ledger_sequence,
+        ),
+        appraisal_event=appraisal_event,
+    )
+    assert affect_result.status == "accepted"
+    assert ledger.project().affect_episodes[0].components[0].dimension == "hurt"
 
 
 @pytest.mark.asyncio
