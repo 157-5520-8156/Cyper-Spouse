@@ -343,6 +343,22 @@ class IncrementalMmrV1:
         self.nodes: dict[tuple[int, int], bytes] = {}
         self.peaks: dict[int, bytes] = {}
 
+    @classmethod
+    def restore(cls, *, leaf_count: int, nodes: dict[tuple[int, int], bytes]) -> IncrementalMmrV1:
+        _require_nonnegative(leaf_count, label="MMR leaf_count")
+        instance = cls()
+        instance.leaf_count = leaf_count
+        instance.nodes = dict(nodes)
+        offset = 0
+        for size in _peak_sizes(leaf_count):
+            height = size.bit_length() - 1
+            node = instance.nodes.get((height, offset >> height))
+            if node is None:
+                raise ValueError("persisted MMR peak is missing")
+            instance.peaks[height] = _require_hash_bytes(node, label="persisted MMR node")
+            offset += size
+        return instance
+
     @property
     def root(self) -> bytes:
         return _mmr_root(tuple(self.peaks[height] for height in sorted(self.peaks, reverse=True)), self.leaf_count)
@@ -558,6 +574,19 @@ class IncrementalSparseMerkleMapV1:
     def __init__(self) -> None:
         self.nodes: dict[tuple[int, int], bytes] = {}
         self.values: dict[bytes, bytes] = {}
+
+    @classmethod
+    def restore(
+        cls, *, nodes: dict[tuple[int, int], bytes], values: dict[bytes, bytes]
+    ) -> IncrementalSparseMerkleMapV1:
+        instance = cls()
+        for (depth, prefix), node in nodes.items():
+            if type(depth) is not int or not 0 <= depth <= _SMT_DEPTH or type(prefix) is not int or prefix < 0:
+                raise ValueError("persisted SMT node address is invalid")
+            instance.nodes[(depth, prefix)] = _require_hash_bytes(node, label="persisted SMT node")
+        for key, value in values.items():
+            instance.values[_require_hash_bytes(key, label="persisted SMT key")] = _require_hash_bytes(value, label="persisted SMT value")
+        return instance
 
     @property
     def root(self) -> bytes:

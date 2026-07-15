@@ -161,6 +161,7 @@ def test_incremental_builders_match_reference_proofs() -> None:
     for leaf in leaves:
         incremental.append(leaf)
     assert incremental.root == reference.root
+    assert IncrementalMmrV1.restore(leaf_count=incremental.leaf_count, nodes=incremental.nodes).root == incremental.root
     for index, leaf in enumerate(leaves):
         incremental.prove(index).verify(leaf_hash=leaf, expected_root=incremental.root)
 
@@ -172,6 +173,7 @@ def test_incremental_builders_match_reference_proofs() -> None:
         reference_map = reference_map.put(key=key, value_hash=value)
         incremental_map.put(key=key, value_hash=value)
     assert incremental_map.root == reference_map.root
+    assert IncrementalSparseMerkleMapV1.restore(nodes=incremental_map.nodes, values=incremental_map.values).root == incremental_map.root
     for index, key in enumerate(keys):
         incremental_map.prove(key).verify_membership(
             expected_root=incremental_map.root, expected_key=key, expected_value_hash=_hash(f"value:{index}")
