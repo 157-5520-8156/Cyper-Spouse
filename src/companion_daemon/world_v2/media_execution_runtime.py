@@ -17,6 +17,7 @@ from typing import Protocol
 
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
+from .test_economy import CostProfile, require_paid_action_profile
 from .media_provider_results import (
     MediaProviderArtifactResult, MediaProviderResultTransport,
     media_provider_result_hash,
@@ -148,8 +149,28 @@ class MediaExecutionRuntime:
     ids and sidecar refs, never a second semantic planning decision.
     """
 
-    def __init__(self, *, ledger: LedgerPort, sidecar: ImmutableMediaPayloadStore) -> None:
-        self._ledger, self._sidecar = ledger, sidecar
+    def __init__(
+        self,
+        *,
+        ledger: LedgerPort,
+        sidecar: ImmutableMediaPayloadStore,
+        cost_profile: CostProfile | None = None,
+    ) -> None:
+        self._ledger, self._sidecar, self._cost_profile = ledger, sidecar, cost_profile
+
+    def _require_paid_media_profile(self, *, amount_limit: int) -> None:
+        """Reject a new paid provider Action before a reservation is emitted.
+
+        A zero amount is an explicitly free/test provider operation.  Positive
+        media reservations are paid-capable and therefore require a
+        deployment-owned profile; the fixed offline profile is intentionally
+        rejected by ``require_paid_action_profile``.
+        """
+
+        if amount_limit > 0:
+            require_paid_action_profile(
+                profile=self._cost_profile, category="image", estimated_cost=amount_limit
+            )
 
     @staticmethod
     def _cursor(projection) -> ProjectionCursor:
@@ -168,6 +189,7 @@ class MediaExecutionRuntime:
         existing = next((item for item in projection.actions if item.intent_ref == plan_id and item.kind == "media_render"), None)
         if existing is not None:
             return existing
+        self._require_paid_media_profile(amount_limit=amount_limit)
         continuation = "media-continuation:" + media_digest({"plan_id": plan.plan_id, "step": "plan_to_render"})
         if not any(item.trigger_id == continuation and item.state in {"open", "claimed"} for item in projection.trigger_processes):
             raise MediaExecutionError("render requires the exact open continuation of its frozen plan")
@@ -232,6 +254,7 @@ class MediaExecutionRuntime:
         existing = next((item for item in projection.actions if item.intent_ref == artifact_id and item.kind == "media_inspection"), None)
         if existing is not None:
             return existing
+        self._require_paid_media_profile(amount_limit=amount_limit)
         self._require_payload(artifact.artifact_ref, artifact.artifact_hash)
         action_id = "action:media-inspection:" + media_digest({"world": self._ledger.world_id, "artifact": artifact_id})
         reservation = BudgetReservation(reservation_id="reservation:media-inspection:" + media_digest({"world": self._ledger.world_id, "artifact": artifact_id}), account_id=account_id, action_id=action_id, category="image", amount_limit=amount_limit)
@@ -288,6 +311,7 @@ class MediaExecutionRuntime:
         existing = next((item for item in projection.actions if item.action_id == action_id), None)
         if existing is not None:
             return existing
+        self._require_paid_media_profile(amount_limit=amount_limit)
         if trigger is None or trigger.state != "open":
             raise MediaExecutionError("repair requires its exact open inspection trigger")
         if any(item.kind == "media_repair" and item.intent_ref == plan.plan_id for item in projection.actions):

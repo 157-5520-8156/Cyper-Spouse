@@ -51,6 +51,7 @@ from .ledger_payload_reader import LedgerAuthorizedPayloadReader
 from .life_content_store import SQLiteImmutableLifeContentStore
 from .expression_payload_store import SQLiteImmutableExpressionPayloadStore
 from .media_v2 import SQLiteImmutableMediaPayloadStore
+from .test_economy import CostProfile
 from .media_execution_runtime import MediaExecutionRuntime, MediaExecutionWorker
 from .media_payload_reader import MediaSidecarPayloadReader
 from .occurrence_content_coordinator import (
@@ -104,6 +105,7 @@ class WorldV2TurnApplicationConfig:
     fact_worker_owner: str = "worker:world-v2:fact"
     outcome_worker_owner: str = "worker:world-v2:outcome"
     expression_reconsideration_owner: str = "worker:world-v2:expression-reconsideration"
+    media_cost_profile: CostProfile | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -619,7 +621,11 @@ def build_sqlite_world_v2_turn_application(
             ),
             expression_reconsideration_reviewer=expression_reconsideration_reviewer,
         )
-        media_execution = MediaExecutionRuntime(ledger=ledger, sidecar=media_payload_store)
+        media_execution = MediaExecutionRuntime(
+            ledger=ledger,
+            sidecar=media_payload_store,
+            cost_profile=config.media_cost_profile,
+        )
         media_execution_worker = (
             MediaExecutionWorker(
                 runtime=media_execution,
