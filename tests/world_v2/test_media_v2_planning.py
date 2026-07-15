@@ -17,6 +17,8 @@ from companion_daemon.world_v2.media_v2 import (
     MediaInspectionRecordedPayload,
     MediaPreviewGeneratedPayload,
     MediaPreviewFailedPayload,
+    MediaRepairAuthorization,
+    MediaRepairAuthorizedPayload,
     PhotoCandidate,
     FrozenMediaEvidenceSnapshot,
     MediaEvidenceSource,
@@ -25,6 +27,10 @@ from companion_daemon.world_v2.media_v2 import (
     continuation_trigger_id,
     media_payload_hash,
     planning_request_id,
+    media_repair_attempt_id,
+    media_repair_action_id,
+    media_repair_reservation_id,
+    media_repair_trigger_id,
     SQLiteImmutableMediaPayloadStore,
     StoredMediaPayload,
 )
@@ -199,3 +205,35 @@ def test_render_inspection_preview_are_receipt_bound_and_preview_can_never_be_de
     assert state.media_previews == (preview,)
     with pytest.raises(ValueError, match="preview"):
         reduce_event(state, _event("MediaPreviewGenerated", {"preview": preview.model_dump(mode="json") | {"delivery_mode": "automatic"}}, "delivery"))
+
+
+def test_repairable_inspection_has_one_source_bound_repair_then_second_failure_is_terminal() -> None:
+    """W2-MED-002: repair is accepted once, on the same frozen plan only."""
+    opportunity = _opportunity()
+    plan = MediaPlan(plan_id="plan:repair", planning_request_id=planning_request_id(opportunity.opportunity_id), opportunity_id=opportunity.opportunity_id, event_snapshot_hash=opportunity.event_snapshot_hash, family="life_share", planner_version="planner.1", schema_version="media-plan.1", plan_payload_ref="sidecar:plan:repair", plan_payload_hash=media_payload_hash('{"plan":"repair"}'), frozen_at=NOW)
+    original = MediaArtifact(artifact_id="artifact:repair:1", plan_id=plan.plan_id, render_action_id="action:render:repair", artifact_ref="sidecar:artifact:repair:1", artifact_hash="sha256:" + "a" * 64, attempts=1)
+    failed = MediaInspectionRecord(inspection_id="inspection:repair:1", plan_id=plan.plan_id, artifact_id=original.artifact_id, inspection_action_id="action:inspection:repair:1", passed=False, reason_code="subject_pose_mismatch", observed_summary="pose mismatch", inspection_payload_ref="sidecar:inspection:repair:1", inspection_payload_hash="sha256:" + "b" * 64, repairable=True, repair_scope=("subject_pose",))
+    trigger_id = media_repair_trigger_id(world_id=WORLD, inspection_id=failed.inspection_id)
+    lease = ClaimLease(owner_id="worker:media", attempt_id="attempt:repair:1", acquired_at=NOW, expires_at=NOW + timedelta(minutes=1))
+    trigger = TriggerProcess(trigger_id=trigger_id, trigger_ref=f"media-repair:{failed.inspection_id}", process_kind="media_repair", source_evidence_ref=f"inspection:{failed.inspection_id}", state="claimed", claim_lease=lease, attempt_ids=(lease.attempt_id,))
+    state = _state().model_copy(update={"media_opportunities": (opportunity,), "media_plans": (plan,), "media_artifacts": (original,), "media_inspections": (failed,), "trigger_processes": (trigger,)})
+    repair_id = media_repair_attempt_id(plan_id=plan.plan_id, failed_artifact_hash=original.artifact_hash)
+    repair_action_id = media_repair_action_id(world_id=WORLD, repair_attempt_id=repair_id)
+    repair_reservation_id = media_repair_reservation_id(world_id=WORLD, repair_attempt_id=repair_id)
+    repair = MediaRepairAuthorization(repair_attempt_id=repair_id, trigger_id=trigger_id, plan_id=plan.plan_id, opportunity_id=opportunity.opportunity_id, event_snapshot_hash=opportunity.event_snapshot_hash, failed_artifact_id=original.artifact_id, failed_artifact_hash=original.artifact_hash, inspection_id=failed.inspection_id, inspection_payload_hash=failed.inspection_payload_hash, defect_scope=failed.repair_scope, action_id=repair_action_id, reservation_id=repair_reservation_id)
+    state = reduce_event(state, _event("MediaRepairAuthorized", MediaRepairAuthorizedPayload(repair=repair).model_dump(mode="json"), "repair-authorized"))
+
+    repair_action = Action.model_construct(schema_version="world-v2.1", action_id=repair_action_id, world_id=WORLD, logical_time=NOW, created_at=NOW, trace_id="trace:repair", causation_id="cause:repair", correlation_id="correlation:repair", kind="media_repair", layer="media_action", intent_ref=plan.plan_id, actor="companion:girl", target="provider:media-renderer", payload_ref=failed.inspection_payload_ref, payload_hash=failed.inspection_payload_hash, provider_media_grant=None, idempotency_key=repair_id, budget_reservation_id=repair.reservation_id, state="delivered", recovery_policy="effect_once")
+    receipt = ExecutionReceipt(receipt_id="receipt:repair:1", result_id="result:repair:1", action_id=repair_action_id, provider="provider", provider_ref=repair_id, source_event_id="repair", receipt_kind="terminal", observed_state="delivered", is_terminal=True, cost_actual=0, received_at=NOW, raw_payload_hash="sha256:" + "c" * 64)
+    state = state.model_copy(update={"actions": (repair_action,), "execution_receipts": (receipt,)})
+    repaired_artifact = MediaArtifact(artifact_id="artifact:repair:2", plan_id=plan.plan_id, render_action_id=repair_action_id, artifact_ref="sidecar:artifact:repair:2", artifact_hash="sha256:" + "d" * 64, attempts=2)
+    state = reduce_event(state, _event("MediaRenderArtifactRecorded", MediaRenderArtifactRecordedPayload(action_id=repair_action_id, receipt_id=receipt.receipt_id, artifact=repaired_artifact).model_dump(mode="json"), "repair-artifact"))
+    second_action = Action.model_construct(schema_version="world-v2.1", action_id="action:inspection:repair:2", world_id=WORLD, logical_time=NOW, created_at=NOW, trace_id="trace:repair", causation_id="cause:repair", correlation_id="correlation:repair", kind="media_inspection", layer="media_action", intent_ref=repaired_artifact.artifact_id, actor="companion:girl", target="provider:media-inspector", payload_ref=repaired_artifact.artifact_ref, payload_hash=repaired_artifact.artifact_hash, provider_media_grant=None, idempotency_key="inspect:repair:2", budget_reservation_id="reservation:inspect:repair:2", state="delivered", recovery_policy="effect_once")
+    second_receipt = ExecutionReceipt(receipt_id="receipt:inspection:repair:2", result_id="result:inspection:repair:2", action_id=second_action.action_id, provider="provider", provider_ref="inspect:repair:2", source_event_id="inspection:repair:2", receipt_kind="terminal", observed_state="delivered", is_terminal=True, cost_actual=0, received_at=NOW, raw_payload_hash="sha256:" + "e" * 64)
+    second = MediaInspectionRecord(inspection_id="inspection:repair:2", plan_id=plan.plan_id, artifact_id=repaired_artifact.artifact_id, inspection_action_id=second_action.action_id, passed=False, reason_code="still_wrong", inspection_payload_ref="sidecar:inspection:repair:2", inspection_payload_hash="sha256:" + "f" * 64)
+    state = state.model_copy(update={"actions": (*state.actions, second_action), "execution_receipts": (*state.execution_receipts, second_receipt)})
+    state = reduce_event(state, _event("MediaInspectionRecorded", MediaInspectionRecordedPayload(action_id=second_action.action_id, receipt_id=second_receipt.receipt_id, inspection=second).model_dump(mode="json"), "repair-inspection-2"))
+    state = reduce_event(state, _event("MediaPreviewFailed", MediaPreviewFailedPayload(plan_id=plan.plan_id, artifact_id=repaired_artifact.artifact_id, inspection_id=second.inspection_id, reason_code=second.reason_code).model_dump(mode="json"), "repair-terminal"))
+    assert state.media_failed_plan_ids == (plan.plan_id,)
+    assert len(state.media_artifacts) == 2
+    assert not any(item.process_kind == "media_repair" and item.source_evidence_ref == f"inspection:{second.inspection_id}" for item in state.trigger_processes)

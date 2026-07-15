@@ -29,7 +29,7 @@ from .schemas import (
 CAPABILITY_KINDS = frozenset(
     {
         "message_send", "media_send", "reaction_send", "read_only_tool",
-        "media_planning", "media_render", "media_inspection",
+        "media_planning", "media_render", "media_inspection", "media_repair",
     }
 )
 TARGET_SCOPES = frozenset(
@@ -439,7 +439,7 @@ def _validate_mutation(
         if values.capability_kind == "read_only_tool":
             if not all(item.startswith("tool:") for item in targets):
                 raise ValueError("tool capability requires tool target scopes")
-        elif values.capability_kind in {"media_planning", "media_render", "media_inspection"}:
+        elif values.capability_kind in {"media_planning", "media_render", "media_inspection", "media_repair"}:
             if targets != {"provider:media"}:
                 raise ValueError("provider media capability requires provider:media target scope")
         elif not all(item.startswith("channel:") for item in targets):

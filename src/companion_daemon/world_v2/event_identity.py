@@ -92,6 +92,8 @@ def _life_identity_components(
         return world_id, _nested(payload, "artifact", "artifact_id")
     if event_type == "MediaInspectionRecorded":
         return world_id, _nested(payload, "inspection", "inspection_id")
+    if event_type == "MediaRepairAuthorized":
+        return world_id, _nested(payload, "repair", "repair_attempt_id")
     if event_type == "MediaPreviewGenerated":
         return world_id, _nested(payload, "preview", "preview_id")
     if event_type == "MediaPreviewFailed":

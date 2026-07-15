@@ -108,6 +108,20 @@ class MediaInspectionRecord(FrozenModel):
     observed_summary: str | None = Field(default=None, max_length=4_000)
     inspection_payload_ref: str = Field(min_length=1, max_length=1024)
     inspection_payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    repairable: bool = False
+    repair_scope: tuple[str, ...] = Field(default=(), max_length=32)
+
+    @model_validator(mode="after")
+    def repair_contract_is_closed(self) -> "MediaInspectionRecord":
+        if self.repair_scope != tuple(sorted(set(self.repair_scope))):
+            raise ValueError("media inspection repair scope must be sorted and unique")
+        if self.passed and (self.repairable or self.repair_scope):
+            raise ValueError("passed inspection cannot authorize repair")
+        if self.repairable and not self.repair_scope:
+            raise ValueError("repairable inspection requires a visible defect scope")
+        if not self.repairable and self.repair_scope:
+            raise ValueError("non-repairable inspection cannot carry repair scope")
+        return self
 
 
 class MediaPreview(FrozenModel):
@@ -142,6 +156,38 @@ class MediaPreviewFailedPayload(FrozenModel):
     artifact_id: str | None = Field(default=None, min_length=1)
     inspection_id: str | None = Field(default=None, min_length=1)
     reason_code: str = Field(min_length=1, max_length=256)
+
+
+class MediaRepairAuthorization(FrozenModel):
+    """One accepted, source-bound repair of a failed visual inspection.
+
+    The object deliberately holds references and hashes only.  The image
+    module resolves the frozen plan, failed artifact, and inspection sidecars
+    itself; no repaired prompt or new world evidence can enter this contract.
+    """
+
+    repair_attempt_id: str = Field(min_length=1, max_length=256)
+    trigger_id: str = Field(min_length=1, max_length=256)
+    plan_id: str = Field(min_length=1, max_length=256)
+    opportunity_id: str = Field(min_length=1, max_length=256)
+    event_snapshot_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    failed_artifact_id: str = Field(min_length=1, max_length=256)
+    failed_artifact_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    inspection_id: str = Field(min_length=1, max_length=256)
+    inspection_payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    defect_scope: tuple[str, ...] = Field(min_length=1, max_length=32)
+    action_id: str = Field(min_length=1, max_length=256)
+    reservation_id: str = Field(min_length=1, max_length=256)
+
+    @model_validator(mode="after")
+    def repair_scope_is_canonical(self) -> "MediaRepairAuthorization":
+        if self.defect_scope != tuple(sorted(set(self.defect_scope))):
+            raise ValueError("media repair defect scope must be sorted and unique")
+        return self
+
+
+class MediaRepairAuthorizedPayload(FrozenModel):
+    repair: MediaRepairAuthorization
 
 
 class MediaOpportunity(FrozenModel):
@@ -233,6 +279,7 @@ MEDIA_V2_PAYLOAD_MODELS = {
     "MediaInspectionRecorded": MediaInspectionRecordedPayload,
     "MediaPreviewGenerated": MediaPreviewGeneratedPayload,
     "MediaPreviewFailed": MediaPreviewFailedPayload,
+    "MediaRepairAuthorized": MediaRepairAuthorizedPayload,
 }
 
 
@@ -337,9 +384,28 @@ def continuation_trigger_id(plan: MediaPlan) -> str:
     return "media-continuation:" + media_digest({"plan_id": plan.plan_id, "step": "plan_to_render"})
 
 
+def media_repair_trigger_id(*, world_id: str, inspection_id: str) -> str:
+    return "media-repair:" + media_digest({"world_id": world_id, "inspection_id": inspection_id})
+
+
+def media_repair_attempt_id(*, plan_id: str, failed_artifact_hash: str) -> str:
+    return "media-repair-attempt:" + media_digest({
+        "contract": "media-v2-repair.1", "plan_id": plan_id,
+        "failed_artifact_hash": failed_artifact_hash, "attempt": 1,
+    })
+
+
+def media_repair_action_id(*, world_id: str, repair_attempt_id: str) -> str:
+    return "action:media-repair:" + media_digest({"world": world_id, "repair": repair_attempt_id})
+
+
+def media_repair_reservation_id(*, world_id: str, repair_attempt_id: str) -> str:
+    return "reservation:media-repair:" + media_digest({"world": world_id, "repair": repair_attempt_id})
+
+
 __all__ = [
-    "MEDIA_V2_PAYLOAD_MODELS", "PhotoCandidate", "MediaEvidenceSource", "FrozenMediaEvidenceSnapshot", "MediaOpportunity", "MediaPlan", "MediaNotRenderable", "MediaArtifact", "MediaInspectionRecord", "MediaPreview",
-    "PhotoCandidateOpenedPayload", "MediaOpportunityFrozenPayload", "MediaPlanRecordedPayload", "MediaNotRenderableRecordedPayload", "MediaRenderArtifactRecordedPayload", "MediaInspectionRecordedPayload", "MediaPreviewGeneratedPayload", "MediaPreviewFailedPayload",
+    "MEDIA_V2_PAYLOAD_MODELS", "PhotoCandidate", "MediaEvidenceSource", "FrozenMediaEvidenceSnapshot", "MediaOpportunity", "MediaPlan", "MediaNotRenderable", "MediaArtifact", "MediaInspectionRecord", "MediaPreview", "MediaRepairAuthorization",
+    "PhotoCandidateOpenedPayload", "MediaOpportunityFrozenPayload", "MediaPlanRecordedPayload", "MediaNotRenderableRecordedPayload", "MediaRenderArtifactRecordedPayload", "MediaInspectionRecordedPayload", "MediaPreviewGeneratedPayload", "MediaPreviewFailedPayload", "MediaRepairAuthorizedPayload",
     "StoredMediaPayload", "ImmutableMediaPayloadStore", "InMemoryImmutableMediaPayloadStore", "SQLiteImmutableMediaPayloadStore",
-    "MediaPlanner", "MediaPlanningResult", "media_digest", "media_payload_hash", "planning_request_id", "continuation_trigger_id",
+    "MediaPlanner", "MediaPlanningResult", "media_digest", "media_payload_hash", "planning_request_id", "continuation_trigger_id", "media_repair_trigger_id", "media_repair_attempt_id", "media_repair_action_id", "media_repair_reservation_id",
 ]

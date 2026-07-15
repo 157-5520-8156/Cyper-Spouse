@@ -99,7 +99,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.27"
+    reducer_bundle: str = "world-v2-reducers.28"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -418,6 +418,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "MediaNotRenderableRecorded": "world_id+planning_request_id+not_renderable",
         "MediaRenderArtifactRecorded": "world_id+artifact_id",
         "MediaInspectionRecorded": "world_id+inspection_id",
+        "MediaRepairAuthorized": "world_id+repair_attempt_id",
         "MediaPreviewGenerated": "world_id+preview_id",
         "MediaPreviewFailed": "world_id+plan_id+preview_failed",
         "BudgetReserved": "reservation_id",
@@ -789,6 +790,7 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
             _contract("MediaNotRenderableRecorded", "media_planning_settlement", "world", "MediaNotRenderableRecordedPayload", allowed_predecessors=("ExecutionReceiptRecorded",), evidence_types=("planning_receipt", "frozen_media_opportunity")),
             _contract("MediaRenderArtifactRecorded", "media_render_settlement", "world", "MediaRenderArtifactRecordedPayload", allowed_predecessors=("ExecutionReceiptRecorded",), evidence_types=("render_receipt", "frozen_media_plan")),
             _contract("MediaInspectionRecorded", "media_inspection_settlement", "world", "MediaInspectionRecordedPayload", allowed_predecessors=("ExecutionReceiptRecorded",), evidence_types=("inspection_receipt", "media_artifact")),
+            _contract("MediaRepairAuthorized", "media_repair_acceptance", "world", "MediaRepairAuthorizedPayload", allowed_predecessors=("TriggerProcessClaimed",), evidence_types=("failed_repairable_media_inspection", "frozen_media_plan", "media_repair_deliberation"), successors=("BudgetReserved", "ActionAuthorized", "TriggerProcessCompleted")),
             _contract("MediaPreviewGenerated", "media_preview_materializer", "world", "MediaPreviewGeneratedPayload", allowed_predecessors=("MediaInspectionRecorded",), evidence_types=("passed_media_inspection",)),
             _contract("MediaPreviewFailed", "media_preview_materializer", "world", "MediaPreviewFailedPayload", allowed_predecessors=("MediaInspectionRecorded",), evidence_types=("failed_media_inspection",)),
             _contract(

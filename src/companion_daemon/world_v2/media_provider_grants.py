@@ -16,7 +16,7 @@ from .schemas import Action, LedgerProjection, ProviderMediaGrant, ProviderMedia
 
 
 PROVIDER_MEDIA_ACTION_KINDS = frozenset(
-    {"media_planning", "media_render", "media_inspection"}
+    {"media_planning", "media_render", "media_inspection", "media_repair"}
 )
 
 

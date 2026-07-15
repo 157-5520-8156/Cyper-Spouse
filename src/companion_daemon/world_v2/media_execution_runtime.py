@@ -10,7 +10,7 @@ this lane.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 import base64
 import json
 from typing import Protocol
@@ -21,9 +21,11 @@ from .media_v2 import (
     ImmutableMediaPayloadStore, MediaArtifact, MediaInspectionRecord,
     MediaInspectionRecordedPayload, MediaPreview, MediaPreviewFailedPayload,
     MediaPreviewGeneratedPayload, MediaRenderArtifactRecordedPayload,
-    MediaPlan, StoredMediaPayload, media_digest,
+    MediaPlan, MediaRepairAuthorization, MediaRepairAuthorizedPayload,
+    StoredMediaPayload, media_digest, media_repair_action_id, media_repair_attempt_id,
+    media_repair_reservation_id, media_repair_trigger_id,
 )
-from .schemas import Action, BudgetReservation, ProjectionCursor, ProviderMediaGrantBinding, WorldEvent
+from .schemas import Action, BudgetReservation, ClaimLease, ProjectionCursor, ProviderMediaGrantBinding, TriggerProcess, WorldEvent
 
 
 class MediaExecutionError(ValueError):
@@ -44,6 +46,11 @@ class MediaExecutionAdapter(Protocol):
         self, *, plan_payload: StoredMediaPayload, artifact_payload: StoredMediaPayload,
         request_id: str,
     ) -> tuple[bool, str, str | None, StoredMediaPayload]: ...
+
+    async def repair_once(
+        self, *, plan_payload: StoredMediaPayload, failed_artifact_payload: StoredMediaPayload,
+        inspection_payload: StoredMediaPayload, request_id: str,
+    ) -> StoredMediaPayload: ...
 
 
 class EventMediaExecutionAdapter:
@@ -100,6 +107,21 @@ class EventMediaExecutionAdapter:
             content_type="application/vnd.world-v2.media-inspection+json", body=body,
         )
         return bool(inspection.passed), str(inspection.reason), inspection.observed_summary, record
+
+    async def repair_once(
+        self, *, plan_payload: StoredMediaPayload, failed_artifact_payload: StoredMediaPayload,
+        inspection_payload: StoredMediaPayload, request_id: str,
+    ) -> StoredMediaPayload:
+        repair = getattr(self._renderer, "repair_once", None)
+        if repair is None:
+            raise MediaExecutionError("legacy renderer has no bounded repair_once seam")
+        # The legacy seam receives only independently verified immutable
+        # payloads.  It remains free to use its private visual contract but
+        # cannot substitute world evidence or a new plan.
+        result = await repair(plan_payload, failed_artifact_payload, inspection_payload, request_id=request_id)
+        if not isinstance(result, StoredMediaPayload):
+            raise MediaExecutionError("repair_once must return an immutable media artifact payload")
+        return result
 
 
 def _event_id(role: str, stable: str) -> str:
@@ -166,16 +188,17 @@ class MediaExecutionRuntime:
 
     def record_rendered_artifact(self, *, action_id: str, receipt_id: str, artifact_payload: StoredMediaPayload, logical_time: datetime) -> MediaArtifact:
         projection = self._ledger.project()
-        action, plan = self._action_and_plan(projection, action_id, "media_render")
-        existing = next((item for item in projection.media_artifacts if item.plan_id == plan.plan_id), None)
+        action, plan = self._action_and_plan(projection, action_id, {"media_render", "media_repair"})
+        existing = next((item for item in projection.media_artifacts if item.render_action_id == action_id), None)
         if existing is not None:
             return existing
         if action.state != "delivered" or not any(item.receipt_id == receipt_id and item.action_id == action_id for item in projection.execution_receipts):
             raise MediaExecutionError("render artifact requires delivered Action and exact receipt")
         self._sidecar.put_if_absent(artifact_payload)
-        artifact = MediaArtifact(artifact_id="artifact:media:" + media_digest({"plan": plan.plan_id, "ref": artifact_payload.payload_ref}),
+        attempt = 2 if action.kind == "media_repair" else 1
+        artifact = MediaArtifact(artifact_id="artifact:media:" + media_digest({"action": action_id, "ref": artifact_payload.payload_ref}),
             plan_id=plan.plan_id, render_action_id=action_id, artifact_ref=artifact_payload.payload_ref,
-            artifact_hash=artifact_payload.payload_hash, media_type=artifact_payload.content_type, attempts=1)
+            artifact_hash=artifact_payload.payload_hash, media_type=artifact_payload.content_type, attempts=attempt)
         payload = MediaRenderArtifactRecordedPayload(action_id=action_id, receipt_id=receipt_id, artifact=artifact).model_dump(mode="json")
         self._commit_one("MediaRenderArtifactRecorded", payload, artifact.artifact_id, logical_time, action.trace_id, action.correlation_id, action_id)
         return artifact
@@ -213,7 +236,7 @@ class MediaExecutionRuntime:
         self._ledger.commit_at_cursor(events, expected_cursor=self._cursor(projection), commit_id="commit:media-inspection-authorize:" + media_digest([event.event_id for event in events]))
         return action
 
-    def record_inspection(self, *, action_id: str, receipt_id: str, passed: bool, reason_code: str, observed_summary: str | None, inspection_payload: StoredMediaPayload, logical_time: datetime) -> MediaInspectionRecord:
+    def record_inspection(self, *, action_id: str, receipt_id: str, passed: bool, reason_code: str, observed_summary: str | None, inspection_payload: StoredMediaPayload, logical_time: datetime, repairable: bool = False, repair_scope: tuple[str, ...] = ()) -> MediaInspectionRecord:
         projection = self._ledger.project()
         action = next((item for item in projection.actions if item.action_id == action_id), None)
         artifact = next((item for item in projection.media_artifacts if item.artifact_id == (action.intent_ref if action else None)), None)
@@ -225,10 +248,67 @@ class MediaExecutionRuntime:
         if action.state != "delivered" or not any(item.receipt_id == receipt_id and item.action_id == action_id for item in projection.execution_receipts):
             raise MediaExecutionError("inspection record requires delivered Action and exact receipt")
         self._sidecar.put_if_absent(inspection_payload)
-        record = MediaInspectionRecord(inspection_id="inspection:media:" + media_digest({"artifact": artifact.artifact_id}), plan_id=artifact.plan_id, artifact_id=artifact.artifact_id, inspection_action_id=action_id, passed=passed, reason_code=reason_code, observed_summary=observed_summary, inspection_payload_ref=inspection_payload.payload_ref, inspection_payload_hash=inspection_payload.payload_hash)
+        record = MediaInspectionRecord(inspection_id="inspection:media:" + media_digest({"artifact": artifact.artifact_id}), plan_id=artifact.plan_id, artifact_id=artifact.artifact_id, inspection_action_id=action_id, passed=passed, reason_code=reason_code, observed_summary=observed_summary, inspection_payload_ref=inspection_payload.payload_ref, inspection_payload_hash=inspection_payload.payload_hash, repairable=repairable, repair_scope=repair_scope)
         payload = MediaInspectionRecordedPayload(action_id=action_id, receipt_id=receipt_id, inspection=record).model_dump(mode="json")
-        self._commit_one("MediaInspectionRecorded", payload, record.inspection_id, logical_time, action.trace_id, action.correlation_id, action_id)
+        items: list[tuple[str, dict[str, object], str]] = [("MediaInspectionRecorded", payload, record.inspection_id)]
+        if not passed and repairable and not any(item.kind == "media_repair" and item.intent_ref == artifact.plan_id for item in projection.actions):
+            trigger_id = media_repair_trigger_id(world_id=self._ledger.world_id, inspection_id=record.inspection_id)
+            process = TriggerProcess(trigger_id=trigger_id, trigger_ref=f"media-repair:{record.inspection_id}", process_kind="media_repair", source_evidence_ref=f"inspection:{record.inspection_id}", state="open")
+            items.append(("TriggerProcessOpened", {"process": process.model_dump(mode="json")}, trigger_id))
+        events = self._events(items=tuple(items), actor="system:media-execution", logical_time=logical_time, trace_id=action.trace_id, correlation_id=action.correlation_id, causation_id=action_id)
+        self._ledger.commit_at_cursor(events, expected_cursor=self._cursor(projection), commit_id="commit:media-inspection:" + media_digest([event.event_id for event in events]))
         return record
+
+    def accept_repair(
+        self, *, inspection_id: str, actor: str, grant: ProviderMediaGrantBinding, account_id: str,
+        amount_limit: int, owner_id: str, logical_time: datetime, trace_id: str, correlation_id: str,
+    ) -> Action:
+        """Atomically accept one repair and create its effect-once provider Action.
+
+        This is deliberately the acceptance seam: callers may decide to
+        abandon the open trigger, but they cannot create a repair Action by
+        directly invoking a renderer or by mutating the original plan.
+        """
+        projection = self._ledger.project()
+        inspection = next((item for item in projection.media_inspections if item.inspection_id == inspection_id), None)
+        if inspection is None or inspection.passed or not inspection.repairable:
+            raise MediaExecutionError("repair requires one failed repairable inspection")
+        artifact = next((item for item in projection.media_artifacts if item.artifact_id == inspection.artifact_id), None)
+        plan = next((item for item in projection.media_plans if item.plan_id == inspection.plan_id), None)
+        if artifact is None or plan is None or artifact.plan_id != plan.plan_id:
+            raise MediaExecutionError("repair evidence is unavailable")
+        trigger_id = media_repair_trigger_id(world_id=self._ledger.world_id, inspection_id=inspection_id)
+        trigger = next((item for item in projection.trigger_processes if item.trigger_id == trigger_id), None)
+        repair_id = media_repair_attempt_id(plan_id=plan.plan_id, failed_artifact_hash=artifact.artifact_hash)
+        action_id = media_repair_action_id(world_id=self._ledger.world_id, repair_attempt_id=repair_id)
+        existing = next((item for item in projection.actions if item.action_id == action_id), None)
+        if existing is not None:
+            return existing
+        if trigger is None or trigger.state != "open":
+            raise MediaExecutionError("repair requires its exact open inspection trigger")
+        if any(item.kind == "media_repair" and item.intent_ref == plan.plan_id for item in projection.actions):
+            raise MediaExecutionError("a MediaPlan may be repaired at most once")
+        # Resolving all three sidecars before accepting prevents a crash/retry
+        # from silently changing visual evidence.
+        self._require_plan_payload(plan)
+        self._require_payload(artifact.artifact_ref, artifact.artifact_hash)
+        self._require_payload(inspection.inspection_payload_ref, inspection.inspection_payload_hash)
+        reservation = BudgetReservation(reservation_id=media_repair_reservation_id(world_id=self._ledger.world_id, repair_attempt_id=repair_id), account_id=account_id, action_id=action_id, category="repair", amount_limit=amount_limit)
+        action = Action(schema_version="world-v2.1", action_id=action_id, world_id=self._ledger.world_id, logical_time=logical_time, created_at=logical_time, trace_id=trace_id, causation_id=_event_id("MediaInspectionRecorded", inspection_id), correlation_id=correlation_id, kind="media_repair", layer="media_action", intent_ref=plan.plan_id, actor=actor, target="provider:media-renderer", payload_ref=inspection.inspection_payload_ref, payload_hash=inspection.inspection_payload_hash, provider_media_grant=grant, idempotency_key=repair_id, budget_reservation_id=reservation.reservation_id, state="authorized", recovery_policy="effect_once")
+        repair = MediaRepairAuthorization(repair_attempt_id=repair_id, trigger_id=trigger_id, plan_id=plan.plan_id, opportunity_id=plan.opportunity_id, event_snapshot_hash=plan.event_snapshot_hash, failed_artifact_id=artifact.artifact_id, failed_artifact_hash=artifact.artifact_hash, inspection_id=inspection_id, inspection_payload_hash=inspection.inspection_payload_hash, defect_scope=inspection.repair_scope, action_id=action_id, reservation_id=reservation.reservation_id)
+        lease = ClaimLease(owner_id=owner_id, attempt_id="attempt:media-repair:" + media_digest({"trigger": trigger_id, "repair": repair_id}), acquired_at=logical_time, expires_at=logical_time + timedelta(minutes=5))
+        claimed = trigger.model_copy(update={"state": "claimed", "claim_lease": lease, "attempt_ids": (lease.attempt_id,)})
+        completed = {"trigger_id": trigger_id, "owner_id": owner_id, "attempt_id": lease.attempt_id, "completed_at": logical_time.isoformat(), "runtime_outcome_ref": repair_id}
+        items = (
+            ("TriggerProcessClaimed", {"process": claimed.model_dump(mode="json")}, lease.attempt_id),
+            ("MediaRepairAuthorized", MediaRepairAuthorizedPayload(repair=repair).model_dump(mode="json"), repair_id),
+            ("BudgetReserved", {"reservation": reservation.model_dump(mode="json")}, reservation.reservation_id),
+            ("ActionAuthorized", {"action": action.model_dump(mode="json")}, action_id),
+            ("TriggerProcessCompleted", completed, repair_id),
+        )
+        events = self._events(items=items, actor=actor, logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id, causation_id=action.causation_id)
+        self._ledger.commit_at_cursor(events, expected_cursor=self._cursor(projection), commit_id="commit:media-repair-accept:" + media_digest([event.event_id for event in events]))
+        return action
 
     def materialize_preview(self, *, inspection_id: str, logical_time: datetime, trace_id: str, correlation_id: str):
         projection = self._ledger.project()
@@ -241,6 +321,11 @@ class MediaExecutionRuntime:
         if inspection.plan_id in projection.media_failed_plan_ids:
             return None
         if not inspection.passed:
+            # A repairable first failure leaves the preview lane open for the
+            # distinct accepted repair Action.  A second failure (or a choice
+            # not to repair) is terminal and never retries again.
+            if inspection.repairable and not any(item.kind == "media_repair" and item.intent_ref == inspection.plan_id for item in projection.actions):
+                return None
             payload = MediaPreviewFailedPayload(plan_id=inspection.plan_id, artifact_id=inspection.artifact_id, inspection_id=inspection_id, reason_code=inspection.reason_code).model_dump(mode="json")
             self._commit_one("MediaPreviewFailed", payload, inspection.plan_id, logical_time, trace_id, correlation_id, inspection_id)
             return None
@@ -264,10 +349,11 @@ class MediaExecutionRuntime:
         return record
 
     @staticmethod
-    def _action_and_plan(projection, action_id: str, kind: str) -> tuple[Action, MediaPlan]:
+    def _action_and_plan(projection, action_id: str, kind: str | set[str]) -> tuple[Action, MediaPlan]:
         action = next((item for item in projection.actions if item.action_id == action_id), None)
         plan = next((item for item in projection.media_plans if item.plan_id == (action.intent_ref if action else None)), None)
-        if action is None or action.kind != kind or plan is None:
+        kinds = {kind} if isinstance(kind, str) else kind
+        if action is None or action.kind not in kinds or plan is None:
             raise MediaExecutionError("media Action or plan is unavailable")
         return action, plan
 

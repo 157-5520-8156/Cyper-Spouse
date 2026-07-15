@@ -63,6 +63,7 @@ from .appraisal_events import (
 from .affect_events import AFFECT_PAYLOAD_MODELS, AffectAuthorizedMutationPayload
 from .media_v2 import (
     MediaPlanRecordedPayload,
+    MediaRepairAuthorizedPayload,
     continuation_trigger_id,
 )
 from .schemas import (
@@ -129,6 +130,7 @@ def validate_commit_batch(
     )
     _validate_expression_receipt_lifecycle_batch(events)
     _validate_media_planning_settlement_batch(events)
+    _validate_media_repair_acceptance_batch(events)
 
     appraisal_triggers: dict[str, list[tuple[str, str, str | None]]] = {}
     experiences: list[ExperienceCommittedPayload] = []
@@ -1211,6 +1213,36 @@ def _validate_media_planning_settlement_batch(events: Sequence[WorldEvent]) -> N
             or process.source_evidence_ref != result_event.event_id
         ):
             raise ValueError("media planning continuation is not bound to frozen plan")
+
+
+def _validate_media_repair_acceptance_batch(events: Sequence[WorldEvent]) -> None:
+    """A repair decision has no half-accepted state or unbudgeted Action."""
+    for index, event in enumerate(events):
+        if event.event_type != "MediaRepairAuthorized":
+            continue
+        if index < 1 or index + 3 >= len(events):
+            raise ValueError("media repair acceptance must be one atomic trigger/budget/action batch")
+        claimed, authorized, reserved, action_event, completed = events[index - 1 : index + 4]
+        if tuple(item.event_type for item in (claimed, authorized, reserved, action_event, completed)) != (
+            "TriggerProcessClaimed", "MediaRepairAuthorized", "BudgetReserved", "ActionAuthorized", "TriggerProcessCompleted",
+        ):
+            raise ValueError("media repair acceptance event order is invalid")
+        repair = MediaRepairAuthorizedPayload.model_validate_json(authorized.payload_json).repair
+        process = TriggerProcess.model_validate(claimed.payload().get("process"))
+        reservation = BudgetReservation.model_validate(reserved.payload().get("reservation"))
+        action = Action.model_validate(action_event.payload().get("action"))
+        completed_payload = completed.payload()
+        if (
+            process.trigger_id != repair.trigger_id or process.state != "claimed"
+            or action.action_id != repair.action_id or action.idempotency_key != repair.repair_attempt_id
+            or reservation.reservation_id != repair.reservation_id or reservation.action_id != action.action_id
+            or action.budget_reservation_id != repair.reservation_id or reservation.category != "repair"
+            or completed_payload.get("trigger_id") != repair.trigger_id
+            or completed_payload.get("attempt_id") != process.claim_lease.attempt_id
+            or completed_payload.get("owner_id") != process.claim_lease.owner_id
+            or completed_payload.get("runtime_outcome_ref") != repair.repair_attempt_id
+        ):
+            raise ValueError("media repair acceptance binding is invalid")
 
 
 def appraisal_trigger_identity(occurrence_id: str, result_id: str) -> str:

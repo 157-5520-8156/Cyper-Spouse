@@ -58,6 +58,7 @@ from .media_v2 import (
     MediaInspectionRecordedPayload,
     MediaPreviewGeneratedPayload,
     MediaPreviewFailedPayload,
+    MediaRepairAuthorizedPayload,
     MediaNotRenderableRecordedPayload,
     MediaOpportunityFrozenPayload,
     MediaPlanRecordedPayload,
@@ -66,6 +67,11 @@ from .media_v2 import (
     PhotoCandidate,
     PhotoCandidateOpenedPayload,
     continuation_trigger_id,
+    media_repair_attempt_id,
+    media_repair_action_id,
+    media_repair_reservation_id,
+    media_repair_trigger_id,
+    media_digest,
     planning_request_id,
 )
 from .appraisal_reducers import (
@@ -340,7 +346,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.27"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.28"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -412,10 +418,10 @@ def _actor_authority_transition_semantic_dump(
 
 def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dict[str, Any]:
     dumped = action.model_dump(mode="json")
-    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", REDUCER_BUNDLE_VERSION}:
+    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", "world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", REDUCER_BUNDLE_VERSION}:
         dumped.pop("expression_plan_id", None)
         dumped.pop("expression_beat_id", None)
-    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+    if reducer_bundle_version not in {"world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", REDUCER_BUNDLE_VERSION}:
         dumped.pop("provider_media_grant", None)
     return dumped
 
@@ -424,7 +430,7 @@ def _expression_plan_semantic_dump(
     plan: ExpressionPlanProjection, *, reducer_bundle_version: str
 ) -> dict[str, Any]:
     dumped = plan.model_dump(mode="json")
-    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", REDUCER_BUNDLE_VERSION}:
+    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", "world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", REDUCER_BUNDLE_VERSION}:
         dumped.pop("state", None)
         dumped.pop("history", None)
     return dumped
@@ -434,7 +440,7 @@ def _expression_beat_semantic_dump(
     beat: ExpressionBeatProjection, *, reducer_bundle_version: str
 ) -> dict[str, Any]:
     dumped = beat.model_dump(mode="json")
-    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", REDUCER_BUNDLE_VERSION}:
+    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", "world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", REDUCER_BUNDLE_VERSION}:
         dumped.pop("action_id", None)
         dumped.pop("state", None)
         dumped.pop("history", None)
@@ -1288,7 +1294,7 @@ class ReducerState(FrozenModel):
             ),
             "boundaries": tuple(item.model_dump(mode="json") for item in self.boundaries),
         }
-        if declared_reducer_bundle_version in {"world-v2-reducers.26", REDUCER_BUNDLE_VERSION}:
+        if declared_reducer_bundle_version in {"world-v2-reducers.26", "world-v2-reducers.27", REDUCER_BUNDLE_VERSION}:
             payload["provider_media_grants"] = tuple(
                 item.model_dump(mode="json") for item in self.provider_media_grants
             )
@@ -1300,9 +1306,14 @@ class ReducerState(FrozenModel):
             )
             payload["media_plans"] = tuple(item.model_dump(mode="json") for item in self.media_plans)
             payload["media_unrenderable_opportunity_ids"] = self.media_unrenderable_opportunity_ids
-        if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+        if declared_reducer_bundle_version in {"world-v2-reducers.27", REDUCER_BUNDLE_VERSION}:
             payload["media_artifacts"] = tuple(item.model_dump(mode="json") for item in self.media_artifacts)
-            payload["media_inspections"] = tuple(item.model_dump(mode="json") for item in self.media_inspections)
+            payload["media_inspections"] = tuple(
+                item.model_dump(mode="json")
+                if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                else item.model_dump(mode="json", exclude={"repairable", "repair_scope"})
+                for item in self.media_inspections
+            )
             payload["media_previews"] = tuple(item.model_dump(mode="json") for item in self.media_previews)
             payload["media_failed_plan_ids"] = self.media_failed_plan_ids
         if reducer_bundle_version in {
@@ -4307,6 +4318,31 @@ def _action_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
             or action.target != "provider:media-planner"
         ):
             raise ValueError("media planning Action is not exactly bound to its frozen opportunity")
+    if action.kind == "media_repair":
+        plan = next((item for item in state.media_plans if item.plan_id == action.intent_ref), None)
+        repair_event_id = "event:media-v2:MediaRepairAuthorized:" + media_digest({"role": "MediaRepairAuthorized", "stable": _media_repair_stable_from_action(action)})
+        # Repair authorization is an accepted, prior event in the same UoW;
+        # the action never constitutes acceptance by itself.
+        if plan is None or not any(item.event_id == repair_event_id for item in state.committed_world_event_refs):
+            raise ValueError("media repair Action requires its accepted repair authorization")
+        inspection = next(
+            (
+                item for item in state.media_inspections
+                if item.plan_id == plan.plan_id and not item.passed and item.repairable
+                and action.idempotency_key == media_repair_attempt_id(plan_id=plan.plan_id, failed_artifact_hash=next((artifact.artifact_hash for artifact in state.media_artifacts if artifact.artifact_id == item.artifact_id), ""))
+            ),
+            None,
+        )
+        if (
+            inspection is None or action.layer != "media_action"
+            or action.action_id != media_repair_action_id(world_id=event.world_id, repair_attempt_id=action.idempotency_key)
+            or action.budget_reservation_id != media_repair_reservation_id(world_id=event.world_id, repair_attempt_id=action.idempotency_key)
+            or action.payload_ref != inspection.inspection_payload_ref
+            or action.payload_hash != inspection.inspection_payload_hash
+            or action.target != "provider:media-renderer"
+            or any(existing.kind == "media_repair" and existing.intent_ref == plan.plan_id for existing in state.actions)
+        ):
+            raise ValueError("media repair Action is not exactly bound to its accepted failed inspection")
     generic_manifest = next(
         (
             manifest
@@ -4438,12 +4474,23 @@ def _media_render_artifact_recorded(state: ReducerState, event: WorldEvent) -> R
     receipt = next((item for item in state.execution_receipts if item.receipt_id == payload.receipt_id), None)
     plan = next((item for item in state.media_plans if item.plan_id == artifact.plan_id), None)
     if (
-        action is None or action.kind != "media_render" or action.intent_ref != artifact.plan_id
+        action is None or action.kind not in {"media_render", "media_repair"} or action.intent_ref != artifact.plan_id
         or action.state != "delivered" or receipt is None or receipt.action_id != action.action_id
         or receipt.observed_state != "delivered" or not receipt.is_terminal or plan is None
-        or any(item.artifact_id == artifact.artifact_id or item.plan_id == artifact.plan_id for item in state.media_artifacts)
+        or any(item.artifact_id == artifact.artifact_id for item in state.media_artifacts)
+        or artifact.attempts != (2 if action.kind == "media_repair" else 1)
     ):
         raise ValueError("MediaRenderArtifactRecorded is not bound to one delivered render Action")
+    prior_artifacts = tuple(item for item in state.media_artifacts if item.plan_id == artifact.plan_id)
+    if action.kind == "media_render" and prior_artifacts:
+        raise ValueError("MediaPlan may have only one original render artifact")
+    if action.kind == "media_repair":
+        if len(prior_artifacts) != 1:
+            raise ValueError("media repair may create exactly one second artifact")
+        prior = prior_artifacts[0]
+        failed = next((item for item in state.media_inspections if item.artifact_id == prior.artifact_id), None)
+        if failed is None or failed.passed or not failed.repairable:
+            raise ValueError("media repair artifact requires the first repairable inspection failure")
     return state.model_copy(update={"media_artifacts": (*state.media_artifacts, artifact)})
 
 
@@ -4462,6 +4509,35 @@ def _media_inspection_recorded(state: ReducerState, event: WorldEvent) -> Reduce
     ):
         raise ValueError("MediaInspectionRecorded is not bound to one delivered inspection Action")
     return state.model_copy(update={"media_inspections": (*state.media_inspections, inspection)})
+
+
+def _media_repair_stable_from_action(action: Action) -> str:
+    """The authorizer event id has the repair id as its stable component."""
+    return action.idempotency_key
+
+
+def _media_repair_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
+    repair = MediaRepairAuthorizedPayload.model_validate_json(event.payload_json).repair
+    plan = next((item for item in state.media_plans if item.plan_id == repair.plan_id), None)
+    artifact = next((item for item in state.media_artifacts if item.artifact_id == repair.failed_artifact_id), None)
+    inspection = next((item for item in state.media_inspections if item.inspection_id == repair.inspection_id), None)
+    trigger = next((item for item in state.trigger_processes if item.trigger_id == repair.trigger_id), None)
+    if (
+        plan is None or artifact is None or inspection is None or trigger is None
+        or trigger.process_kind != "media_repair" or trigger.state != "claimed"
+        or plan.opportunity_id != repair.opportunity_id or plan.event_snapshot_hash != repair.event_snapshot_hash
+        or artifact.plan_id != plan.plan_id or artifact.artifact_hash != repair.failed_artifact_hash
+        or inspection.plan_id != plan.plan_id or inspection.artifact_id != artifact.artifact_id
+        or inspection.passed or not inspection.repairable or inspection.inspection_payload_hash != repair.inspection_payload_hash
+        or repair.defect_scope != inspection.repair_scope
+        or repair.trigger_id != media_repair_trigger_id(world_id=event.world_id, inspection_id=inspection.inspection_id)
+        or repair.repair_attempt_id != media_repair_attempt_id(plan_id=plan.plan_id, failed_artifact_hash=artifact.artifact_hash)
+        or repair.action_id != media_repair_action_id(world_id=event.world_id, repair_attempt_id=repair.repair_attempt_id)
+        or repair.reservation_id != media_repair_reservation_id(world_id=event.world_id, repair_attempt_id=repair.repair_attempt_id)
+        or any(item.kind == "media_repair" and item.intent_ref == plan.plan_id for item in state.actions)
+    ):
+        raise ValueError("MediaRepairAuthorized is not one bounded accepted repair of a failed inspection")
+    return state
 
 
 def _media_preview_generated(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -5073,6 +5149,18 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             or process.trigger_ref != process.trigger_id
         ):
             raise ValueError("media continuation trigger is not bound to a frozen MediaPlan")
+    if process.process_kind == "media_repair":
+        if process.source_evidence_ref is None or not process.source_evidence_ref.startswith("inspection:"):
+            raise ValueError("media repair trigger requires a failed inspection source")
+        inspection_id = process.source_evidence_ref.removeprefix("inspection:")
+        inspection = next((item for item in state.media_inspections if item.inspection_id == inspection_id), None)
+        if (
+            inspection is None or inspection.passed or not inspection.repairable
+            or process.trigger_id != media_repair_trigger_id(world_id=event.world_id, inspection_id=inspection_id)
+            or process.trigger_ref != f"media-repair:{inspection_id}"
+            or any(item.kind == "media_repair" and item.intent_ref == inspection.plan_id for item in state.actions)
+        ):
+            raise ValueError("media repair trigger is not bound to the first repairable inspection failure")
     if process.process_kind == "expression_reconsideration":
         source = next(
             (
@@ -7038,6 +7126,7 @@ _EVENTS = {
         EventDefinition("MediaNotRenderableRecorded", RevisionClass.WORLD, _media_not_renderable_recorded),
         EventDefinition("MediaRenderArtifactRecorded", RevisionClass.WORLD, _media_render_artifact_recorded),
         EventDefinition("MediaInspectionRecorded", RevisionClass.WORLD, _media_inspection_recorded),
+        EventDefinition("MediaRepairAuthorized", RevisionClass.WORLD, _media_repair_authorized),
         EventDefinition("MediaPreviewGenerated", RevisionClass.WORLD, _media_preview_generated),
         EventDefinition("MediaPreviewFailed", RevisionClass.WORLD, _media_preview_failed),
         EventDefinition("ObservationRecorded", RevisionClass.WORLD, _observation_recorded),

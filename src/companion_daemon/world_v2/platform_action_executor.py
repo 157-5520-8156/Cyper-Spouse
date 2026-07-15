@@ -179,7 +179,7 @@ class MediaProviderDispatchRequest(FrozenModel):
     """A request which may only be built after provider-media enforcement."""
 
     action_id: str
-    kind: Literal["media_planning", "media_render", "media_inspection"]
+    kind: Literal["media_planning", "media_render", "media_inspection", "media_repair"]
     provider_ref: str
     payload_ref: str
     payload_hash: str
@@ -245,7 +245,7 @@ class ProviderMediaActionExecutor(ActionExecutor):
         return self._bind_result(action=action, result=result, request=request)
 
     async def _request_for(self, action: Action) -> MediaProviderDispatchRequest:
-        if action.kind not in {"media_planning", "media_render", "media_inspection"}:
+        if action.kind not in {"media_planning", "media_render", "media_inspection", "media_repair"}:
             raise ValueError("media provider executor does not support this Action kind")
         if action.layer != "media_action" or action.provider_media_grant is None:
             raise ValueError("media provider Action lacks enforcement grant binding")
@@ -320,7 +320,7 @@ class RoutedActionExecutor(ActionExecutor):
         self._platform, self._media = platform, media
 
     def _delegate(self, action: Action) -> ActionExecutor:
-        return self._media if action.kind in {"media_planning", "media_render", "media_inspection"} else self._platform
+        return self._media if action.kind in {"media_planning", "media_render", "media_inspection", "media_repair"} else self._platform
 
     async def assert_dispatch_authorized(self, *, action: Action, projection: LedgerProjection) -> None:
         checker = getattr(self._delegate(action), "assert_dispatch_authorized", None)

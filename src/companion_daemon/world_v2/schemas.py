@@ -417,7 +417,7 @@ class Action(FrozenModel):
     def claimed_action_has_a_lease(self) -> Action:
         if (self.expression_plan_id is None) != (self.expression_beat_id is None):
             raise ValueError("expression Action must bind both plan and beat")
-        provider_media_kinds = {"media_planning", "media_render", "media_inspection"}
+        provider_media_kinds = {"media_planning", "media_render", "media_inspection", "media_repair"}
         if self.kind in provider_media_kinds:
             if self.layer != "media_action" or self.provider_media_grant is None:
                 raise ValueError("provider media Action requires an exact provider media grant")
@@ -463,6 +463,7 @@ class TriggerProcess(FrozenModel):
         "outcome_deliberation",
         "expression_reconsideration",
         "media_continuation",
+        "media_repair",
     ]
     source_evidence_ref: str | None = None
     state: Literal["open", "claimed", "terminal"]
@@ -482,6 +483,7 @@ class TriggerProcess(FrozenModel):
                 "outcome_deliberation",
                 "expression_reconsideration",
                 "media_continuation",
+                "media_repair",
             }
             and self.source_evidence_ref is not None
         ):
@@ -3759,7 +3761,7 @@ class AuthorizationOrigin(FrozenModel):
 class CapabilityGrantValues(FrozenModel):
     capability_kind: Literal[
         "message_send", "media_send", "reaction_send", "read_only_tool",
-        "media_planning", "media_render", "media_inspection",
+        "media_planning", "media_render", "media_inspection", "media_repair",
     ]
     actor_ref: str = Field(min_length=1)
     target_scope_refs: tuple[
@@ -3967,7 +3969,7 @@ class ConsentGrantValues(FrozenModel):
     action_scope_refs: tuple[
         Literal[
             "message_send", "media_send", "reaction_send", "read_only_tool",
-            "media_planning", "media_render", "media_inspection",
+            "media_planning", "media_render", "media_inspection", "media_repair",
         ], ...
     ] = Field(min_length=1)
     data_scope_refs: tuple[
@@ -4070,7 +4072,7 @@ class ProviderMediaGrant(FrozenModel):
     grant_id: str = Field(min_length=1)
     entity_revision: Literal[1] = 1
     provider_ref: str = Field(min_length=1)
-    capability_kind: Literal["media_planning", "media_render", "media_inspection"]
+    capability_kind: Literal["media_planning", "media_render", "media_inspection", "media_repair"]
     actor_ref: str = Field(min_length=1)
     subject_ref: str = Field(min_length=1)
     capability_grant_id: str = Field(min_length=1)
@@ -4248,7 +4250,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.27"
+    reducer_bundle_version: str = "world-v2-reducers.28"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
