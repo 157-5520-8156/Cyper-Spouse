@@ -7,6 +7,7 @@ import hashlib
 from itertools import islice
 import json
 import math
+from threading import RLock
 from typing import Protocol
 
 from .batch_invariants import validate_commit_batch
@@ -65,6 +66,21 @@ class LedgerPort(Protocol):
         expected_deliberation_revision: int,
         commit_id: str | None = None,
     ) -> CommitResult: ...
+
+    def commit_at_cursor(
+        self,
+        events: Sequence[WorldEvent],
+        *,
+        expected_cursor: ProjectionCursor,
+        commit_id: str | None = None,
+    ) -> CommitResult:
+        """Append only when the complete projection cursor is still current.
+
+        Unlike ``commit``, this is suitable for an audited manifest recorder:
+        the ledger sequence is part of the compare-and-swap precondition rather
+        than merely an informational result field.
+        """
+        ...
 
     def project(self) -> LedgerProjection: ...
 
@@ -385,6 +401,7 @@ class WorldLedger:
     def __init__(self, *, world_id: str) -> None:
         self._world_id = world_id
         self._events: list[_StoredEvent] = []
+        self._thread_lock = RLock()
         self._by_idempotency: dict[str, _StoredEvent] = {}
         self._by_event_id: dict[str, _StoredEvent] = {}
         self._commits: dict[str, _StoredCommit] = {}
@@ -419,6 +436,40 @@ class WorldLedger:
         expected_deliberation_revision: int,
     ) -> CommitResult:
         events = _preflight_commit_events(events)
+        with self._thread_lock:
+            return self._commit_locked(
+                events,
+                expected_world_revision=expected_world_revision,
+                expected_deliberation_revision=expected_deliberation_revision,
+                commit_id=commit_id,
+            )
+
+    def commit_at_cursor(
+        self,
+        events: Sequence[WorldEvent],
+        *,
+        expected_cursor: ProjectionCursor,
+        commit_id: str | None = None,
+    ) -> CommitResult:
+        events = _preflight_commit_events(events)
+        with self._thread_lock:
+            return self._commit_locked(
+                events,
+                expected_world_revision=expected_cursor.world_revision,
+                expected_deliberation_revision=expected_cursor.deliberation_revision,
+                expected_ledger_sequence=expected_cursor.ledger_sequence,
+                commit_id=commit_id,
+            )
+
+    def _commit_locked(
+        self,
+        events: Sequence[WorldEvent],
+        *,
+        commit_id: str | None = None,
+        expected_world_revision: int,
+        expected_deliberation_revision: int,
+        expected_ledger_sequence: int | None = None,
+    ) -> CommitResult:
         commit_id = commit_id or derived_commit_id(events)
         if not commit_id:
             raise ValueError("commit_id must not be empty")
@@ -465,6 +516,12 @@ class WorldLedger:
             and expected_deliberation_revision != self._deliberation_revision
         ):
             raise ConcurrencyConflict("stale deliberation revision")
+        if expected_ledger_sequence is not None and (
+            expected_world_revision != self._world_revision
+            or expected_deliberation_revision != self._deliberation_revision
+            or expected_ledger_sequence != len(self._events)
+        ):
+            raise ConcurrencyConflict("stale projection cursor")
 
         next_world_revision = self._world_revision
         next_deliberation_revision = self._deliberation_revision

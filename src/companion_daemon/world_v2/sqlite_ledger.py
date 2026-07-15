@@ -1760,12 +1760,30 @@ class SQLiteWorldLedger:
                 commit_id=commit_id,
             )
 
+    def commit_at_cursor(
+        self,
+        events: Sequence[WorldEvent],
+        *,
+        expected_cursor: ProjectionCursor,
+        commit_id: str | None = None,
+    ) -> CommitResult:
+        events = _preflight_commit_events(events)
+        with self._thread_lock:
+            return self._commit_locked(
+                events,
+                expected_world_revision=expected_cursor.world_revision,
+                expected_deliberation_revision=expected_cursor.deliberation_revision,
+                expected_ledger_sequence=expected_cursor.ledger_sequence,
+                commit_id=commit_id,
+            )
+
     def _commit_locked(
         self,
         events: Sequence[WorldEvent],
         *,
         expected_world_revision: int,
         expected_deliberation_revision: int,
+        expected_ledger_sequence: int | None = None,
         commit_id: str | None = None,
     ) -> CommitResult:
         if not events:
@@ -1830,6 +1848,12 @@ class SQLiteWorldLedger:
                 and expected_deliberation_revision != head["deliberation_revision"]
             ):
                 raise ConcurrencyConflict("stale deliberation revision")
+            if expected_ledger_sequence is not None and (
+                expected_world_revision != head["world_revision"]
+                or expected_deliberation_revision != head["deliberation_revision"]
+                or expected_ledger_sequence != head["ledger_sequence"]
+            ):
+                raise ConcurrencyConflict("stale projection cursor")
 
             world_revision = int(head["world_revision"])
             deliberation_revision = int(head["deliberation_revision"])
