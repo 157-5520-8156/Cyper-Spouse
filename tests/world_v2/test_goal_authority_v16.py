@@ -1654,6 +1654,74 @@ def test_abandon_persists_structured_terminal_reason() -> None:
     assert heads[0].values.terminal_reason == terminal
 
 
+def test_settled_occurrence_can_complete_a_goal_with_exact_completion_evidence() -> None:
+    source, occurrence, cause = settled_occurrence(index=12)
+    contract = completion_contract()
+    before = goal_projection(
+        revision=1,
+        values=V2GoalValues(
+            outcome_ref="outcome:publish-story",
+            importance_bp=8_000,
+            progress_bp=9_000,
+            privacy_class="private",
+            completion_contract=contract,
+            status="active",
+        ),
+        event_ref="event:goal:before-settled-complete",
+        updated_at=NOW - timedelta(hours=1),
+    )
+    evidence = V2GoalOccurrenceCompletionEvidence(
+        evidence_ref=source.event_id,
+        evidence_world_revision=source.world_revision,
+        evidence_payload_hash=source.payload_hash,
+        evidence_schema_ref="world-occurrence-settlement.1",
+        occurrence_id=occurrence.occurrence_id,
+        occurrence_entity_revision=occurrence.entity_revision,
+        resolved_actor_ref="actor:companion",
+        resolved_outcome_ref="outcome:publish-story",
+        privacy_class="private",
+    )
+    terminal = V2GoalCompletedTerminalReason(
+        contract_id=contract.contract_id,
+        contract_digest=contract.contract_digest,
+        completion_evidence_ref=evidence.evidence_ref,
+        privacy_class="private",
+    )
+    after = goal_projection(
+        revision=2,
+        values=before.values.model_copy(
+            update={"status": "completed", "terminal_reason": terminal}
+        ),
+        event_ref="event:goal:settled-completed",
+    )
+    payload = goal_payload(
+        after,
+        operation="complete",
+        lane="settlement",
+        cause=cause,
+        before=before,
+        completion_evidence=evidence,
+        terminal_reason=terminal,
+    )
+
+    heads, history = reduce_v2_goal(
+        (before,),
+        (),
+        payload,
+        event_type="V2GoalCompleted",
+        event_id=after.origin.accepted_event_ref,
+        logical_time=NOW,
+        actor_authorities=(),
+        committed_events=(source,),
+        random_draws=(),
+        world_occurrences=(occurrence,),
+    )
+
+    assert heads == (after,)
+    assert history[-1].authority_lane == "settlement"
+    assert history[-1].completion_evidence == evidence
+
+
 def test_complete_resolves_exact_post_cutoff_occurrence_outcome() -> None:
     source, occurrence, _ = settled_occurrence(index=13)
     occurrence = occurrence.model_copy(
