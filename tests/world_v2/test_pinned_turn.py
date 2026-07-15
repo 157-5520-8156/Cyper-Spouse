@@ -5,6 +5,7 @@ from datetime import UTC, datetime
 import pytest
 
 from companion_daemon.world_v2.context_capsule import ContextCapsuleCompiler
+from companion_daemon.world_v2.advisory_compiler import AdvisoryAdapterInput, AdvisoryCompiler
 from companion_daemon.world_v2.deliberation import (
     Deliberation,
     ModelInput,
@@ -19,6 +20,11 @@ from companion_daemon.world_v2.ledger_context_resolver import (
 from companion_daemon.world_v2.pinned_turn import PinnedTurnCompiler
 from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import Observation, WorldEvent
+from companion_daemon.world_v2.matrix_catalog import (
+    CandidateDistribution,
+    ClassificationCandidate,
+    default_matrix_catalog,
+)
 
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
@@ -31,7 +37,11 @@ class _Router:
 
 
 class _InvalidModel:
+    def __init__(self) -> None:
+        self.request: ModelInput | None = None
+
     async def propose(self, _request: ModelInput) -> ModelOutput:
+        self.request = _request
         return ModelOutput(
             model_id="test-main",
             model_version="test.1",
@@ -50,6 +60,36 @@ class _InvalidQuick:
             input_tokens=1,
             output_tokens=1,
         )
+
+
+class _EmotionAdvice:
+    adapter_id = "emotion"
+    version = "test.1"
+
+    async def classify(self, request: AdvisoryAdapterInput) -> tuple[CandidateDistribution, ...]:
+        return (
+            CandidateDistribution(
+                catalog_version="world-v2-matrix-1",
+                field_id="appraisal.negative",
+                candidates=(
+                    ClassificationCandidate(
+                        value="disappointment",
+                        weight=7100,
+                        confidence=7800,
+                        producer="emotion@test.1",
+                        source_refs=(request.trigger_ref,),
+                        expires_at=request.expires_at,
+                    ),
+                ),
+                produced_at=request.logical_time,
+            ),
+        )
+
+
+class _InvalidAdvice(_EmotionAdvice):
+    async def classify(self, request: AdvisoryAdapterInput) -> tuple[CandidateDistribution, ...]:
+        output = (await super().classify(request))[0]
+        return (output.model_copy(update={"field_id": "unknown.advisory.field"}),)
 
 
 def _observation() -> Observation:
@@ -114,3 +154,61 @@ async def test_runtime_audits_one_cursor_pinned_turn_without_authorizing_effects
     assert projection.deliberation_revision == 2
     assert len(projection.model_result_audits) == 2
     assert projection.proposal_audits == ()
+
+
+@pytest.mark.asyncio
+async def test_pinned_turn_passes_source_bound_advisory_candidates_to_deliberation() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
+    model = _InvalidModel()
+    turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+        deliberation=Deliberation(
+            router=_Router(), main_model=model, quick_recovery=_InvalidQuick()
+        ),
+        companion_actor_ref="agent:companion",
+        advisory_compiler=AdvisoryCompiler(
+            catalog=default_matrix_catalog(),
+            adapters=(_EmotionAdvice(),),
+            authority_key=b"pinned-turn-advisory-test-authority-key",
+        ),
+    )
+    runtime = WorldRuntime(world_id=WORLD, ledger=ledger, pinned_turn=turn)
+
+    await runtime.ingest(_observation())
+
+    assert model.request is not None
+    content = model.request.model_content_json
+    assert '"kind":"appraisal.negative"' in content
+    assert '"value":"disappointment"' in content
+    assert '"source_refs":["event:trigger:observation:test:message:pinned-turn:1"]' in content
+    projection = ledger.project()
+    assert projection.world_revision == 2
+    assert projection.deliberation_revision == 2
+
+
+@pytest.mark.asyncio
+async def test_invalid_advisory_fails_open_without_blocking_deliberation() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
+    model = _InvalidModel()
+    turn = PinnedTurnCompiler(
+        ledger=ledger,
+        capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+        deliberation=Deliberation(
+            router=_Router(), main_model=model, quick_recovery=_InvalidQuick()
+        ),
+        companion_actor_ref="agent:companion",
+        advisory_compiler=AdvisoryCompiler(
+            catalog=default_matrix_catalog(),
+            adapters=(_InvalidAdvice(),),
+            authority_key=b"pinned-turn-advisory-test-authority-key",
+        ),
+    )
+
+    await WorldRuntime(world_id=WORLD, ledger=ledger, pinned_turn=turn).ingest(_observation())
+
+    assert model.request is not None
+    assert '"advisories":{"availability":"available"' in model.request.model_content_json
+    assert '"items":[]' in model.request.model_content_json

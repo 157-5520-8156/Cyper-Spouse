@@ -277,6 +277,15 @@ class ResolvedSlice(_FrozenModel, Generic[T]):
         return self
 
 
+class InnerAdvisoryCandidate(_FrozenModel):
+    """One explicitly non-authoritative candidate retained for Deliberation."""
+
+    candidate_ref: str = Field(min_length=1)
+    value: str = Field(min_length=1, max_length=256)
+    weight_bp: int = Field(ge=0, le=10_000)
+    confidence_bp: int = Field(ge=0, le=10_000)
+
+
 class InnerAdvisoryProjection(_FrozenModel):
     """Non-authoritative, source-bound candidate coordinates for one deliberation."""
 
@@ -284,6 +293,10 @@ class InnerAdvisoryProjection(_FrozenModel):
     kind: str = Field(min_length=1)
     source_refs: tuple[str, ...] = Field(min_length=1)
     candidate_refs: tuple[str, ...] = Field(min_length=1)
+    # ``candidate_refs`` alone made an advisory impossible for a model to use:
+    # it conveyed opaque identities but none of the classifier's candidate
+    # meaning.  The compact summaries remain read-only hints, never state.
+    candidates: tuple[InnerAdvisoryCandidate, ...] = Field(default=(), max_length=8)
     confidence_bp: int = Field(ge=0, le=10_000)
     expiry: datetime
     producer_version: str = Field(min_length=1)
@@ -301,6 +314,8 @@ class InnerAdvisoryProjection(_FrozenModel):
             raise ValueError("advisory source refs must be unique")
         if len(self.candidate_refs) != len(set(self.candidate_refs)):
             raise ValueError("advisory candidate refs must be unique")
+        if self.candidates and tuple(item.candidate_ref for item in self.candidates) != self.candidate_refs:
+            raise ValueError("advisory candidate summaries must match candidate refs")
         return self
 
 
@@ -1429,7 +1444,7 @@ class ContextCapsuleCompiler:
         )
         self._resolver = resolver
 
-    def compile(self, query: ContextCompileQuery) -> ContextCapsule:
+    def _resolve(self, query: ContextCompileQuery) -> tuple[ContextCompileQuery, ContextCapsuleRequest]:
         pinned_query = ContextCompileQuery.model_validate(
             query.model_dump(mode="python", warnings="error")
         )
@@ -1459,9 +1474,38 @@ class ContextCapsuleCompiler:
             getattr(resolved, field) != getattr(pinned_query, field) for field in query_material
         ):
             raise ValueError("trusted resolver result does not match the compile query")
+        return pinned_query, resolved
+
+    def compile(self, query: ContextCompileQuery) -> ContextCapsule:
+        _, resolved = self._resolve(query)
         return _compile_resolved_context(
             resolved, policy=self._policy, _authority=_COMPILER_AUTHORITY
         )
 
     def compile_for_deliberation(self, query: ContextCompileQuery) -> TrustedContextCapsuleHandle:
         return TrustedContextCapsuleHandle(self.compile(query), _authority=_COMPILER_AUTHORITY)
+
+    def compile_for_deliberation_with_advisories(
+        self,
+        query: ContextCompileQuery,
+        advisories: tuple[InnerAdvisoryProjection, ...],
+    ) -> TrustedContextCapsuleHandle:
+        """Compile one trusted capsule with resolver-verified advisory candidates.
+
+        Advisory outputs are intentionally supplied as ordinary data.  The ledger
+        resolver must re-resolve every source reference at the same cursor before
+        they can enter a Context Capsule; this method is not a mutation path.
+        """
+
+        pinned_query, resolved = self._resolve(query)
+        build_slice = getattr(self._resolver, "resolve_advisory_slice", None)
+        if not callable(build_slice):
+            raise ValueError("Context resolver does not support advisory overlays")
+        advisory_slice = build_slice(pinned_query, advisories)
+        if not isinstance(advisory_slice, ResolvedSlice):
+            raise TypeError("Context resolver returned an unsupported advisory slice")
+        enriched = resolved.model_copy(update={"advisories": advisory_slice})
+        capsule = _compile_resolved_context(
+            enriched, policy=self._policy, _authority=_COMPILER_AUTHORITY
+        )
+        return TrustedContextCapsuleHandle(capsule, _authority=_COMPILER_AUTHORITY)

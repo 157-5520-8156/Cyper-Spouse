@@ -9,10 +9,26 @@ separate modules; this module never materializes an accepted world effect.
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 import hashlib
 import json
 
-from .context_capsule import ContextCapsuleCompiler
+from .advisory_compiler import (
+    AdvisoryCompilation,
+    AdvisoryCompileRequest,
+    AdvisoryCompiler,
+    ResolverProof as AdvisoryResolverProof,
+    SnapshotMaterial,
+    SourceAuthorityBinding,
+    canonical_snapshot_hash,
+    canonical_trigger_hash,
+    source_authority_bindings_hash,
+)
+from .context_capsule import (
+    ContextCapsuleCompiler,
+    InnerAdvisoryCandidate,
+    InnerAdvisoryProjection,
+)
 from .context_resolver import query_from_projection
 from .deliberation import Deliberation
 from .errors import ConcurrencyConflict, IdempotencyConflict
@@ -45,6 +61,7 @@ class PinnedTurnCompiler:
         capsule_compiler: ContextCapsuleCompiler,
         deliberation: Deliberation,
         companion_actor_ref: str,
+        advisory_compiler: AdvisoryCompiler | None = None,
     ) -> None:
         if not companion_actor_ref:
             raise ValueError("Pinned turn companion actor is required")
@@ -53,6 +70,7 @@ class PinnedTurnCompiler:
         self._deliberation = deliberation
         self._recorder = ProposalAuditRecorder(ledger=ledger)
         self._companion_actor_ref = companion_actor_ref
+        self._advisories = advisory_compiler
 
     async def audit_observation(
         self,
@@ -76,16 +94,24 @@ class PinnedTurnCompiler:
         query = query_from_projection(
             projection,
             actor_ref=self._companion_actor_ref,
-            trigger_ref=observation.observation_id,
+            trigger_ref=observation_event.event_id,
         )
-        capsule = await self._compile_capsule(query)
+        try:
+            capsule = await self._compile_capsule_with_advisories(
+                query=query,
+                observation=observation,
+                observation_event=observation_event,
+            )
+        except ValueError as exc:
+            await self._raise_if_stale(cursor, exc)
+            raise
         result = await self._deliberation.deliberate(
             capsule,
-            attempt_id=_attempt_id(trigger_ref=observation.observation_id, cursor=cursor),
+            attempt_id=_attempt_id(trigger_ref=observation_event.event_id, cursor=cursor),
         )
         context = ProposalAuditContext(
             world_id=observation.world_id,
-            trigger_ref=observation.observation_id,
+            trigger_ref=observation_event.event_id,
             logical_time=projection.logical_time or observation.logical_time,
             created_at=observation.created_at,
             actor=self._companion_actor_ref,
@@ -100,13 +126,17 @@ class PinnedTurnCompiler:
         try:
             return await self._record(result, context)
         except (ConcurrencyConflict, IdempotencyConflict) as exc:
-            current = await self._project()
-            if (
-                current.world_revision != cursor.world_revision
-                or current.ledger_sequence != cursor.ledger_sequence
-            ):
-                raise ConcurrencyConflict("Pinned turn cursor became stale") from exc
+            await self._raise_if_stale(cursor, exc)
             raise
+
+    async def _raise_if_stale(self, cursor: ProjectionCursor, cause: Exception) -> None:
+        current = await self._project()
+        if (
+            current.world_revision != cursor.world_revision
+            or current.deliberation_revision != cursor.deliberation_revision
+            or current.ledger_sequence != cursor.ledger_sequence
+        ):
+            raise ConcurrencyConflict("Pinned turn cursor became stale") from cause
 
     async def _project(self):
         if self._ledger.blocks_event_loop:
@@ -120,6 +150,130 @@ class PinnedTurnCompiler:
 
     async def _compile_capsule(self, query):
         return await asyncio.to_thread(self._capsules.compile_for_deliberation, query)
+
+    async def _compile_capsule_with_advisories(
+        self,
+        *,
+        query,
+        observation: Observation,
+        observation_event: WorldEvent,
+    ):
+        base = await self._compile_capsule(query)
+        if self._advisories is None:
+            return base
+        request = self._advisory_request(
+            query=query,
+            observation=observation,
+            observation_event=observation_event,
+            context_json=base.capsule.model_content_json,
+        )
+        compilation = await self._advisories.compile(
+            self._advisories.issue_authenticated_request(request)
+        )
+        inner = self._inner_advisories(compilation)
+        return await asyncio.to_thread(
+            self._capsules.compile_for_deliberation_with_advisories,
+            query,
+            inner,
+        )
+
+    @staticmethod
+    def _advisory_request(
+        *,
+        query,
+        observation: Observation,
+        observation_event: WorldEvent,
+        context_json: str,
+    ) -> AdvisoryCompileRequest:
+        """Build the classifier input from only the current cursor's authority."""
+
+        logical_time = query.logical_time or observation.logical_time
+        trigger = {
+            "kind": observation.observation_kind,
+            "observation_id": observation.observation_id,
+            "actor": observation.actor,
+            "channel": observation.channel,
+            "payload_ref": observation.payload_ref,
+            "payload_hash": observation.payload_hash,
+            "reply_context": observation.reply_context,
+            "attachment_refs": observation.attachment_refs,
+        }
+        source_authorities = (
+            SourceAuthorityBinding(
+                ref=observation_event.event_id,
+                world_revision=query.world_revision,
+                hash_kind="payload",
+                authority_hash=observation_event.payload_hash,
+                content_hash=canonical_trigger_hash(trigger),
+            ),
+        )
+        snapshot_values = {"context_capsule": json.loads(context_json)}
+        snapshot = SnapshotMaterial(
+            world_revision=query.world_revision,
+            values=snapshot_values,
+            canonical_hash=canonical_snapshot_hash(snapshot_values),
+        )
+        return AdvisoryCompileRequest(
+            world_id=query.world_id,
+            snapshot_id=f"advisory-input:{query.snapshot_id}",
+            snapshot_hash=snapshot.canonical_hash,
+            world_revision=query.world_revision,
+            logical_time=logical_time,
+            trigger_ref=observation_event.event_id,
+            expires_at=logical_time + timedelta(seconds=45),
+            source_authorities=source_authorities,
+            resolver_proof=AdvisoryResolverProof(
+                snapshot_id=f"advisory-input:{query.snapshot_id}",
+                snapshot_hash=snapshot.canonical_hash,
+                world_revision=query.world_revision,
+                completeness="full",
+                policy_version="pinned-turn-advisory-input.1",
+                source_bindings_hash=source_authority_bindings_hash(source_authorities),
+                authentication_tag="0" * 64,
+            ),
+            trigger=trigger,
+            recent_context=PinnedTurnCompiler._recent_context(observation),
+            snapshot=snapshot,
+        )
+
+    @staticmethod
+    def _recent_context(observation: Observation) -> tuple[dict[str, object], ...]:
+        reply_context = observation.reply_context
+        if not isinstance(reply_context, dict):
+            return ()
+        recent = reply_context.get("recent_messages")
+        if isinstance(recent, list) and all(isinstance(item, dict) for item in recent):
+            return tuple(recent)
+        return (reply_context,)
+
+    @staticmethod
+    def _inner_advisories(compilation: AdvisoryCompilation) -> tuple[InnerAdvisoryProjection, ...]:
+        """Reduce classifier distributions to model-readable, non-authoritative hints."""
+
+        return tuple(
+            InnerAdvisoryProjection(
+                advisory_id=item.advisory_id,
+                kind=item.field_id,
+                source_refs=item.source_refs,
+                candidate_refs=tuple(
+                    f"{item.advisory_id}:candidate:{index}"
+                    for index, _ in enumerate(item.candidates, start=1)
+                ),
+                candidates=tuple(
+                    InnerAdvisoryCandidate(
+                        candidate_ref=f"{item.advisory_id}:candidate:{index}",
+                        value=candidate.value,
+                        weight_bp=candidate.weight,
+                        confidence_bp=candidate.confidence,
+                    )
+                    for index, candidate in enumerate(item.candidates, start=1)
+                ),
+                confidence_bp=max(candidate.confidence for candidate in item.candidates),
+                expiry=item.expires_at,
+                producer_version=f"{item.producer}:{item.catalog_version}",
+            )
+            for item in compilation.advisories
+        )
 
     async def _record(
         self, result, context: ProposalAuditContext

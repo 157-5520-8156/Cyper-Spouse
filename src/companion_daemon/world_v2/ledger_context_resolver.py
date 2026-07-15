@@ -19,6 +19,7 @@ from .context_capsule import (
     ContextCapsuleBudgetPolicy,
     ContextCapsuleCompiler,
     ContextCapsuleRequest,
+    InnerAdvisoryProjection,
     MAX_INPUT_ITEMS_PER_SLICE,
     MAX_RESOLVER_DOMAIN_SCAN_ITEMS,
     RANK_DOMAIN_IMPORTANCE_BP,
@@ -457,6 +458,78 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             query_hash=context_query_hash(query),
             capability=self.capability,
             resolved_context=request,
+        )
+
+    def resolve_advisory_slice(
+        self,
+        query: ContextCompileQuery,
+        advisories: tuple[InnerAdvisoryProjection, ...],
+    ) -> ResolvedSlice[tuple[InnerAdvisoryProjection, ...]]:
+        """Bind ephemeral advisory candidates to exact committed event sources.
+
+        Classifiers may propose these values, but cannot supply their own
+        authority.  This resolver verifies the event ids against the same
+        projection cursor used for the rest of the capsule and issues the
+        regular Context proof only after that verification succeeds.
+        """
+
+        if len(advisories) > MAX_INPUT_ITEMS_PER_SLICE:
+            raise ValueError("advisory overlay exceeds the Context input limit")
+        projection = self._ledger.project()
+        self._validate_projection(query, projection)
+        scope = self._relevance_scope or ContextRelevanceScope(actor_ref=query.actor_ref)
+        if scope.actor_ref != query.actor_ref:
+            raise ValueError("Context relevance scope belongs to another actor")
+        frozen = tuple(
+            InnerAdvisoryProjection.model_validate(
+                item.model_dump(mode="python", warnings="error")
+            )
+            for item in advisories
+        )
+        if len({item.advisory_id for item in frozen}) != len(frozen):
+            raise ValueError("advisory overlay contains duplicate identities")
+        refs = tuple(sorted({ref for item in frozen for ref in item.source_refs}))
+        events = self._resolve_exact(refs, query.world_revision)
+        metadata: list[ResolvedItemMetadata] = []
+        for item in frozen:
+            bindings = tuple(
+                sorted(
+                    (_binding(events[ref]) for ref in item.source_refs),
+                    key=lambda value: (
+                        value.source_kind,
+                        value.authority_type,
+                        value.ref,
+                        value.source_world_revision,
+                        value.immutable_hash,
+                    ),
+                )
+            )
+            metadata.append(
+                ResolvedItemMetadata(
+                    item_ref=item.advisory_id,
+                    rank_score_bp=item.confidence_bp,
+                    privacy_class="private",
+                    source_bindings=bindings,
+                    source_hash=source_bindings_hash(bindings),
+                    value_hash=canonical_value_hash(item),
+                )
+            )
+        ordered = tuple(
+            sorted(
+                zip(frozen, metadata, strict=True),
+                key=lambda pair: (-pair[1].rank_score_bp, pair[1].item_ref),
+            )
+        )
+        values = tuple(pair[0] for pair in ordered)
+        ordered_metadata = tuple(pair[1] for pair in ordered)
+        return ResolvedSlice(
+            world_id=query.world_id,
+            snapshot_id=query.snapshot_id,
+            snapshot_hash=query.snapshot_hash,
+            pinned_world_revision=query.world_revision,
+            value=values,
+            resolver_proof=self._proof(query, "advisories", ordered_metadata, scope),
+            item_metadata=ordered_metadata,
         )
 
     @staticmethod

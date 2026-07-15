@@ -539,6 +539,15 @@ class AdvisoryCompiler:
             trace=trace_tuple,
         )
 
+    def issue_authenticated_request(self, request: AdvisoryCompileRequest) -> AdvisoryCompileRequest:
+        """Composition-root seam for a cursor resolver to bind its advisory input.
+
+        The key remains private to the compiler.  This grants no mutation
+        capability and does not make classifier output authoritative.
+        """
+
+        return authenticate_advisory_request(request, authority_key=self._authority_key)
+
     async def _call(
         self,
         adapter: AdvisoryClassifierAdapter,
