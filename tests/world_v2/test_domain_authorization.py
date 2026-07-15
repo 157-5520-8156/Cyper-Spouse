@@ -23,6 +23,7 @@ from companion_daemon.world_v2.authorization_events import (
     CAPABILITY_POLICY_DIGEST,
     CONSENT_POLICY_DIGEST,
     EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST,
+    ENFORCEMENT_EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST,
     PRIVACY_POLICY_DIGEST,
     authorization_mutation_hash,
     authorization_intent_hash,
@@ -37,7 +38,20 @@ from companion_daemon.world_v2.errors import LedgerIntegrityError
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.projection import ProjectionGrant
 from companion_daemon.world_v2.reducers import ReducerState
-from companion_daemon.world_v2.schemas import WorldEvent
+from companion_daemon.world_v2.media_provider_grants import require_provider_media_grant
+from companion_daemon.world_v2.platform_action_executor import (
+    PlatformDispatchReceipt,
+    ProviderMediaActionExecutor,
+    ResolvedActionPayload,
+)
+from companion_daemon.world_v2.runtime import WorldRuntime
+from companion_daemon.world_v2.schemas import (
+    Action,
+    BudgetAccount,
+    BudgetReservation,
+    ProviderMediaGrant,
+    WorldEvent,
+)
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
 
@@ -197,6 +211,7 @@ def _mutation(
     evidence_payload_hash: str = "a" * 64,
     challenge_ref: str | None = None,
     evidence_expires_at: datetime | None = None,
+    attestation_environment: str = "shadow",
 ) -> dict[str, object]:
     policy = {
         "capability": ("capability-policy.1", CAPABILITY_POLICY_DIGEST),
@@ -222,7 +237,7 @@ def _mutation(
         "expected_authority_revision": authority_revision,
         "attested_principal_ref": attested_principal,
         "attestation_mode": "root_attested_external_principal_action.1",
-        "attestation_environment": "shadow",
+        "attestation_environment": attestation_environment,
         "principal_action_evidence": {
             "source_event_ref": evidence_source_event_ref
             or f"external-authentication:{transition_id}",
@@ -234,8 +249,16 @@ def _mutation(
             "challenge_ref": challenge_ref or f"challenge:{transition_id}:123456",
             "observed_at": NOW.isoformat(),
             "expires_at": (evidence_expires_at or NOW + timedelta(minutes=5)).isoformat(),
-            "authentication_policy_version": "external-principal-auth.1",
-            "authentication_policy_digest": EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST,
+            "authentication_policy_version": (
+                "external-principal-auth.1"
+                if attestation_environment == "shadow"
+                else "external-principal-auth.enforcement.1"
+            ),
+            "authentication_policy_digest": (
+                EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST
+                if attestation_environment == "shadow"
+                else ENFORCEMENT_EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST
+            ),
         },
         "policy_version": policy[0],
         "policy_digest": policy[1],
@@ -1267,7 +1290,7 @@ def test_sqlite_roundtrip_and_verified_v8_to_v9_migration(monkeypatch, tmp_path)
             (legacy_state_json(raw_state), legacy_hash, "world-v2-reducers.8", WORLD),
         )
     migrated = SQLiteWorldLedger(path=migration_path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.24"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.25"
     assert migrated.project() == old_expected
     assert migrated.rebuild() == old_expected
     migrated.close()
@@ -1287,3 +1310,195 @@ def test_sqlite_rejects_tampered_v8_authorization_migration_head(tmp_path) -> No
         )
     with pytest.raises(LedgerIntegrityError, match="legacy head semantic hash is invalid"):
         SQLiteWorldLedger(path=path, world_id=WORLD)
+
+
+def _media_values(kind: str) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    return (
+        {
+            "capability_kind": kind,
+            "actor_ref": ACTION_ACTOR,
+            "target_scope_refs": ["provider:media"],
+            "constraint_refs": [],
+            "valid_from": NOW.isoformat(),
+            "expires_at": (NOW + timedelta(days=1)).isoformat(),
+            "state": "active",
+        },
+        {
+            "grantor_ref": PRINCIPAL,
+            "grantee_ref": ACTION_ACTOR,
+            "action_scope_refs": [kind],
+            "data_scope_refs": ["data:attachment"],
+            "channel_scope_refs": [],
+            "valid_from": NOW.isoformat(),
+            "expires_at": (NOW + timedelta(days=1)).isoformat(),
+            "revocable": True,
+            "status": "active",
+        },
+        {
+            "subject_ref": PRINCIPAL,
+            "data_class_refs": ["data:attachment"],
+            "viewer_rule_refs": ["viewer:media_provider"],
+            "media_rule_refs": ["media:private_only"],
+            "retention_rule_refs": ["retention:session"],
+            "effective_at": NOW.isoformat(),
+            "expires_at": (NOW + timedelta(days=1)).isoformat(),
+            "status": "active",
+        },
+    )
+
+
+def _grant_event(grant: ProviderMediaGrant) -> WorldEvent:
+    return WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id=f"event:provider-media-grant:{grant.grant_id}",
+        world_id=WORLD,
+        event_type="ProviderMediaGrantRecorded",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="runtime:enforcement",
+        source="test:provider-media",
+        trace_id="trace:provider-media",
+        causation_id="cause:provider-media",
+        correlation_id="correlation:provider-media",
+        idempotency_key=f"provider-media-grant:{grant.grant_id}:1",
+        payload={"grant": grant.model_dump(mode="json")},
+    )
+
+
+def _prepare_provider_media_grant(
+    monkeypatch, *, environment: str = "enforcement"
+) -> tuple[WorldLedger, ProviderMediaGrant]:
+    ledger = _ledger(monkeypatch)
+    capability, consent, privacy = _media_values("media_render")
+    for event_id, event_type, payload in (
+        (
+            "event:media-capability",
+            "CapabilityGranted",
+            _mutation(
+                domain="capability", operation="grant", transition_id="transition:media-capability",
+                entity_id="capability:media-render", expected_revision=0, before=None, after=capability,
+                attestation_environment=environment,
+            ),
+        ),
+        (
+            "event:media-consent",
+            "ConsentGranted",
+            _mutation(
+                domain="consent", operation="grant", transition_id="transition:media-consent",
+                entity_id="consent:media-render", expected_revision=0, before=None, after=consent,
+                attestation_environment=environment,
+            ),
+        ),
+        (
+            "event:media-privacy",
+            "PrivacyPolicyRevised",
+            _mutation(
+                domain="privacy", operation="revise", transition_id="transition:media-privacy",
+                entity_id="privacy:media-render", expected_revision=0, before=None, after=privacy,
+                attestation_environment=environment,
+            ),
+        ),
+    ):
+        _commit(ledger, event_id, event_type, payload)
+    grant = ProviderMediaGrant(
+        grant_id="grant:provider-media-render", provider_ref="provider:media:test",
+        capability_kind="media_render", actor_ref=ACTION_ACTOR, subject_ref=PRINCIPAL,
+        capability_grant_id="capability:media-render", capability_grant_revision=1,
+        consent_id="consent:media-render", consent_revision=1,
+        privacy_policy_id="privacy:media-render", privacy_policy_revision=1,
+        issued_at=NOW, expires_at=NOW + timedelta(hours=1),
+    )
+    projection = ledger.project()
+    ledger.commit(
+        (_grant_event(grant),),
+        expected_world_revision=projection.world_revision,
+        expected_deliberation_revision=projection.deliberation_revision,
+    )
+    return ledger, grant
+
+
+def test_provider_media_grant_is_replayable_and_shadow_sources_fail_closed(monkeypatch, tmp_path) -> None:
+    ledger, grant = _prepare_provider_media_grant(monkeypatch)
+    action = Action(
+        schema_version="world-v2.1", action_id="action:media-render:1", world_id=WORLD,
+        logical_time=NOW, created_at=NOW, trace_id="trace:media", causation_id="acceptance:media",
+        correlation_id="media:1", kind="media_render", layer="media_action", intent_ref="intent:media",
+        actor=ACTION_ACTOR, target=grant.provider_ref, payload_ref="payload:media:1",
+        payload_hash="sha256:" + hashlib.sha256(b"render").hexdigest(),
+        provider_media_grant={"grant_id": grant.grant_id, "grant_revision": 1},
+        idempotency_key="media:render:1", budget_reservation_id="reservation:media:1",
+        state="authorized", recovery_policy="effect_once",
+    )
+    assert require_provider_media_grant(
+        action=action, projection=ledger.project(), logical_time=NOW
+    ) == grant
+    assert ledger.rebuild() == ledger.project()
+
+    # Recording itself is rejected: a diagnostic grant cannot be upgraded by
+    # attaching its revision numbers to a provider-media grant.
+    with pytest.raises(ValueError, match="not enforcement eligible"):
+        _prepare_provider_media_grant(monkeypatch, environment="shadow")
+
+
+@pytest.mark.asyncio
+async def test_action_pump_enforces_provider_media_grant_before_provider_call(monkeypatch) -> None:
+    ledger, grant = _prepare_provider_media_grant(monkeypatch)
+    text = "render"
+    action = Action(
+        schema_version="world-v2.1", action_id="action:media-render:pump", world_id=WORLD,
+        logical_time=NOW, created_at=NOW, trace_id="trace:media", causation_id="acceptance:media",
+        correlation_id="media:1", kind="media_render", layer="media_action", intent_ref="intent:media",
+        actor=ACTION_ACTOR, target=grant.provider_ref, payload_ref="payload:media:pump",
+        payload_hash="sha256:" + hashlib.sha256(text.encode()).hexdigest(),
+        provider_media_grant={"grant_id": grant.grant_id, "grant_revision": 1},
+        idempotency_key="media:render:pump", budget_reservation_id="reservation:media:pump",
+        state="authorized", recovery_policy="effect_once",
+    )
+    account = BudgetAccount(account_id="account:image", category="image", window_id="test", limit=10)
+    reservation = BudgetReservation(
+        reservation_id=action.budget_reservation_id, account_id=account.account_id,
+        action_id=action.action_id, category="image", amount_limit=5,
+    )
+    projection = ledger.project()
+    def event(kind: str, payload: dict[str, object]) -> WorldEvent:
+        return WorldEvent.from_payload(
+            schema_version="world-v2.1", event_id=f"event:media-pump:{kind}", world_id=WORLD,
+            event_type=kind, logical_time=NOW, created_at=NOW, actor="test", source="test",
+            trace_id="trace:media", causation_id="cause:media", correlation_id="media:1",
+            idempotency_key=f"media-pump:{kind}", payload=payload,
+        )
+    ledger.commit(
+        (
+            event("BudgetAccountConfigured", {"account": account.model_dump(mode="json")}),
+            event("BudgetReserved", {"reservation": reservation.model_dump(mode="json")}),
+            event("ActionAuthorized", {"action": action.model_dump(mode="json")}),
+        ), expected_world_revision=projection.world_revision, expected_deliberation_revision=projection.deliberation_revision,
+    )
+
+    class Payloads:
+        async def resolve(self, _action: Action) -> ResolvedActionPayload:
+            return ResolvedActionPayload(payload_ref=action.payload_ref, payload_hash=action.payload_hash, content_type="application/json", body=text)
+    class Transport:
+        provider = "provider:media:test"
+        sent: list[object] = []
+        async def send(self, request):
+            self.sent.append(request)
+            return PlatformDispatchReceipt(
+                provider_receipt_id="receipt:media", provider_ref="provider-result:media", status="delivered",
+                cost_actual=1, received_at=NOW, raw_payload_hash="sha256:receipt", idempotency_key=request.idempotency_key,
+                request_fingerprint=request.fingerprint,
+            )
+        async def lookup(self, **_kwargs):
+            return None
+    transport = Transport()
+    bypass_executor = ProviderMediaActionExecutor(payloads=Payloads(), transport=transport)
+    with pytest.raises(ValueError, match="not authorized by ActionPump"):
+        await bypass_executor.dispatch(action)
+    runtime = WorldRuntime(
+        world_id=WORLD, ledger=ledger,
+        action_executor=ProviderMediaActionExecutor(payloads=Payloads(), transport=transport),
+        action_pump_owner="pump:media",
+    )
+    result = await runtime.drain_actions_once()
+    assert result is not None and result.status == "settled"
+    assert len(transport.sent) == 1

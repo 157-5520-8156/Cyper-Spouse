@@ -1,4 +1,9 @@
-"""Root-attested, shadow-only capability, consent, and privacy contracts."""
+"""Root-attested capability, consent, and privacy contracts.
+
+``shadow`` remains strictly diagnostic.  ``enforcement`` is a separate
+attestation contract and is the only origin which can be bound into a real
+provider media grant.
+"""
 
 from __future__ import annotations
 
@@ -22,7 +27,10 @@ from .schemas import (
 
 
 CAPABILITY_KINDS = frozenset(
-    {"message_send", "media_send", "reaction_send", "read_only_tool"}
+    {
+        "message_send", "media_send", "reaction_send", "read_only_tool",
+        "media_planning", "media_render", "media_inspection",
+    }
 )
 TARGET_SCOPES = frozenset(
     {
@@ -32,6 +40,7 @@ TARGET_SCOPES = frozenset(
         "tool:weather",
         "tool:web_search",
         "tool:calendar_read",
+        "provider:media",
     }
 )
 ACTION_SCOPES = CAPABILITY_KINDS
@@ -40,7 +49,10 @@ DATA_SCOPES = frozenset(
 )
 CHANNEL_SCOPES = frozenset({"channel:qq", "channel:wechat", "channel:http"})
 VIEWER_RULES = frozenset(
-    {"viewer:companion", "viewer:operator", "viewer:room_renderer", "viewer:platform_adapter"}
+    {
+        "viewer:companion", "viewer:operator", "viewer:room_renderer",
+        "viewer:platform_adapter", "viewer:media_provider",
+    }
 )
 MEDIA_RULES = frozenset(
     {"media:private_only", "media:share_allowed", "media:auto_delivery_allowed"}
@@ -61,6 +73,10 @@ def _policy_digest(name: str, matrix: Mapping[str, object]) -> str:
 EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST = _policy_digest(
     "external-principal-auth.1",
     {"maximum_ttl_seconds": 600, "environment": "shadow"},
+)
+ENFORCEMENT_EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST = _policy_digest(
+    "external-principal-auth.enforcement.1",
+    {"maximum_ttl_seconds": 600, "environment": "enforcement", "principal_possession": "verified"},
 )
 
 
@@ -96,7 +112,7 @@ class _AuthorizationMutationBase(FrozenModel):
     expected_authority_revision: int = Field(ge=1)
     attested_principal_ref: str = Field(min_length=1)
     attestation_mode: Literal["root_attested_external_principal_action.1"]
-    attestation_environment: Literal["shadow"]
+    attestation_environment: Literal["shadow", "enforcement"]
     principal_action_evidence: PrincipalActionEvidence
     changed_at: datetime
     compensates_transition_id: str | None = None
@@ -387,12 +403,18 @@ def _validate_mutation(
         domain, payload.values_after
     ):
         raise ValueError("authorization evidence scope hash does not match mutation")
+    expected_auth_policy = (
+        ("external-principal-auth.1", EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST)
+        if payload.attestation_environment == "shadow"
+        else (
+            "external-principal-auth.enforcement.1",
+            ENFORCEMENT_EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST,
+        )
+    )
     if (
-        payload.principal_action_evidence.authentication_policy_version
-        != "external-principal-auth.1"
-        or payload.principal_action_evidence.authentication_policy_digest
-        != EXTERNAL_PRINCIPAL_AUTH_POLICY_DIGEST
-    ):
+        payload.principal_action_evidence.authentication_policy_version,
+        payload.principal_action_evidence.authentication_policy_digest,
+    ) != expected_auth_policy:
         raise ValueError("external principal authentication policy is not installed")
     if payload.principal_action_evidence.intent_hash != authorization_intent_hash(
         domain, payload.model_dump(mode="json")
@@ -410,13 +432,16 @@ def _validate_mutation(
     ).total_seconds() > 600:
         raise ValueError("authorization evidence validity exceeds maximum ttl")
     if domain == "consent" and not payload.values_after.revocable:
-        raise ValueError("shadow consent must remain revocable")
+        raise ValueError("consent must remain revocable")
     if domain == "capability":
         values = payload.values_after
         targets = set(values.target_scope_refs)
         if values.capability_kind == "read_only_tool":
             if not all(item.startswith("tool:") for item in targets):
                 raise ValueError("tool capability requires tool target scopes")
+        elif values.capability_kind in {"media_planning", "media_render", "media_inspection"}:
+            if targets != {"provider:media"}:
+                raise ValueError("provider media capability requires provider:media target scope")
         elif not all(item.startswith("channel:") for item in targets):
             raise ValueError("communication capability requires channel target scopes")
         constraints = set(values.constraint_refs)

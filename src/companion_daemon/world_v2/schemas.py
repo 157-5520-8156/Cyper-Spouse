@@ -366,6 +366,19 @@ class ActionDispatchClaim(FrozenModel):
     started_at: datetime
 
 
+class ProviderMediaGrantBinding(FrozenModel):
+    """Exact, ledger-backed authority consumed by one provider media Action.
+
+    This is deliberately a reference to a *revision*, rather than a mutable
+    provider configuration name.  The Action remains immutable while the
+    pump re-checks that the referenced grant and all of its source authority
+    are still active immediately before a provider call.
+    """
+
+    grant_id: str = Field(min_length=1)
+    grant_revision: int = Field(ge=1)
+
+
 class Action(FrozenModel):
     schema_version: SchemaVersion
     action_id: str = Field(min_length=1)
@@ -388,6 +401,7 @@ class Action(FrozenModel):
     # new expression work.
     expression_plan_id: str | None = Field(default=None, min_length=1)
     expression_beat_id: str | None = Field(default=None, min_length=1)
+    provider_media_grant: ProviderMediaGrantBinding | None = None
     idempotency_key: str = Field(min_length=1)
     not_before: datetime | None = None
     expires_at: datetime | None = None
@@ -402,6 +416,12 @@ class Action(FrozenModel):
     def claimed_action_has_a_lease(self) -> Action:
         if (self.expression_plan_id is None) != (self.expression_beat_id is None):
             raise ValueError("expression Action must bind both plan and beat")
+        provider_media_kinds = {"media_planning", "media_render", "media_inspection"}
+        if self.kind in provider_media_kinds:
+            if self.layer != "media_action" or self.provider_media_grant is None:
+                raise ValueError("provider media Action requires an exact provider media grant")
+        elif self.provider_media_grant is not None:
+            raise ValueError("only provider media Actions may carry a provider media grant")
         lease_required_states: frozenset[ActionState] = frozenset(
             {
                 "claimed",
@@ -3710,20 +3730,34 @@ class AuthorizationOrigin(FrozenModel):
     authority_revision: int = Field(ge=1)
     attested_principal_ref: str = Field(min_length=1)
     attestation_mode: Literal["root_attested_external_principal_action.1"]
-    attestation_environment: Literal["shadow"]
+    attestation_environment: Literal["shadow", "enforcement"]
     root_attestation_verified: Literal[True] = True
     external_action_asserted: Literal[True] = True
-    principal_possession_status: Literal["not_evaluated"] = "not_evaluated"
-    enforcement_eligible: Literal[False] = False
+    principal_possession_status: Literal["not_evaluated", "verified"] = "not_evaluated"
+    enforcement_eligible: bool = False
     evidence_hash: str = Field(min_length=64, max_length=64)
     root_key_id: str = Field(min_length=1)
     root_keyset_digest: str = Field(min_length=64, max_length=64)
     root_nonce_hash: str = Field(min_length=64, max_length=64)
     root_proof_hash: str = Field(min_length=64, max_length=64)
 
+    @model_validator(mode="after")
+    def enforcement_origin_is_closed(self) -> AuthorizationOrigin:
+        is_enforcement = self.attestation_environment == "enforcement"
+        if is_enforcement != self.enforcement_eligible:
+            raise ValueError("authorization enforcement eligibility must match attestation environment")
+        if is_enforcement and self.principal_possession_status != "verified":
+            raise ValueError("enforcement authorization requires verified principal possession")
+        if not is_enforcement and self.principal_possession_status != "not_evaluated":
+            raise ValueError("shadow authorization cannot claim principal possession verification")
+        return self
+
 
 class CapabilityGrantValues(FrozenModel):
-    capability_kind: Literal["message_send", "media_send", "reaction_send", "read_only_tool"]
+    capability_kind: Literal[
+        "message_send", "media_send", "reaction_send", "read_only_tool",
+        "media_planning", "media_render", "media_inspection",
+    ]
     actor_ref: str = Field(min_length=1)
     target_scope_refs: tuple[
         Literal[
@@ -3733,6 +3767,7 @@ class CapabilityGrantValues(FrozenModel):
             "tool:weather",
             "tool:web_search",
             "tool:calendar_read",
+            "provider:media",
         ],
         ...,
     ] = Field(min_length=1)
@@ -3927,7 +3962,10 @@ class ConsentGrantValues(FrozenModel):
     grantor_ref: str = Field(min_length=1)
     grantee_ref: str = Field(min_length=1)
     action_scope_refs: tuple[
-        Literal["message_send", "media_send", "reaction_send", "read_only_tool"], ...
+        Literal[
+            "message_send", "media_send", "reaction_send", "read_only_tool",
+            "media_planning", "media_render", "media_inspection",
+        ], ...
     ] = Field(min_length=1)
     data_scope_refs: tuple[
         Literal["data:message_content", "data:user_profile", "data:attachment", "data:location"],
@@ -3976,7 +4014,10 @@ class PrivacyPolicyValues(FrozenModel):
         ...,
     ] = ()
     viewer_rule_refs: tuple[
-        Literal["viewer:companion", "viewer:operator", "viewer:room_renderer", "viewer:platform_adapter"],
+        Literal[
+            "viewer:companion", "viewer:operator", "viewer:room_renderer",
+            "viewer:platform_adapter", "viewer:media_provider",
+        ],
         ...,
     ] = ()
     media_rule_refs: tuple[
@@ -4011,6 +4052,44 @@ class PrivacyTransitionProjection(FrozenModel):
     origin: AuthorizationOrigin
     changed_at: datetime
     compensates_transition_id: str | None = None
+
+
+class ProviderMediaGrant(FrozenModel):
+    """Enforcement authority for an internal media-provider operation.
+
+    The grant is a frozen, first-class ledger record.  It cannot be inferred
+    from a generic capability: it pins the exact capability, consent and
+    privacy revisions that were approved for a particular provider and media
+    stage.  A later revocation/revision is observed by the ActionPump before
+    it makes a side effect.
+    """
+
+    grant_id: str = Field(min_length=1)
+    entity_revision: Literal[1] = 1
+    provider_ref: str = Field(min_length=1)
+    capability_kind: Literal["media_planning", "media_render", "media_inspection"]
+    actor_ref: str = Field(min_length=1)
+    subject_ref: str = Field(min_length=1)
+    capability_grant_id: str = Field(min_length=1)
+    capability_grant_revision: int = Field(ge=1)
+    consent_id: str = Field(min_length=1)
+    consent_revision: int = Field(ge=1)
+    privacy_policy_id: str = Field(min_length=1)
+    privacy_policy_revision: int = Field(ge=1)
+    issued_at: datetime
+    expires_at: datetime | None = None
+    enforcement_contract_version: Literal["provider-media-grant.1"] = "provider-media-grant.1"
+
+    @model_validator(mode="after")
+    def expiry_follows_issue(self) -> ProviderMediaGrant:
+        if self.issued_at.tzinfo is None or self.issued_at.utcoffset() is None:
+            raise ValueError("provider media grant issue time must be timezone-aware")
+        if self.expires_at is not None:
+            if self.expires_at.tzinfo is None or self.expires_at.utcoffset() is None:
+                raise ValueError("provider media grant expiry must be timezone-aware")
+            if self.expires_at <= self.issued_at:
+                raise ValueError("provider media grant expiry must follow issue")
+        return self
 
 
 class MediaCandidateProjection(FrozenModel):
@@ -4158,7 +4237,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.24"
+    reducer_bundle_version: str = "world-v2-reducers.25"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -4173,6 +4252,7 @@ class LedgerProjection(FrozenModel):
     consent_transitions: tuple[ConsentTransitionProjection, ...] = ()
     privacy_policies: tuple[PrivacyPolicyProjection, ...] = ()
     privacy_transitions: tuple[PrivacyTransitionProjection, ...] = ()
+    provider_media_grants: tuple[ProviderMediaGrant, ...] = ()
     consumed_authorization_root_nonces: tuple[str, ...] = ()
     consumed_authorization_challenge_ids: tuple[str, ...] = ()
     consumed_authorization_source_ids: tuple[str, ...] = ()

@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable
 from datetime import timedelta
 import hashlib
+import inspect
 import json
 from typing import Literal, Protocol
 
@@ -212,6 +213,7 @@ class ActionPump:
             # executor call.  Never hand the frozen old payload to a provider
             # while its reconsideration gate is unresolved.
             return ActionPumpResult(action_id=action.action_id, status="not_due")
+        await self._enforce_executor_authority(action=current, projection=projection)
         action = current
         at = projection.logical_time or action.logical_time
         if at >= action.claim_lease.expires_at:
@@ -231,6 +233,23 @@ class ActionPump:
         )
         result = await self._executor.dispatch(action)
         return await self._settle_or_pending(action=action, result=result, dispatched=True)
+
+    async def _enforce_executor_authority(self, *, action: Action, projection) -> None:
+        """Call an executor's optional, narrow pre-dispatch authority seam.
+
+        The legacy platform executor intentionally has no such method, so
+        ordinary message/reaction Actions retain their existing contract.  A
+        provider-media executor implements it; the check happens after the
+        final CAS re-read and before ``ActionDispatchStarted``, making a stale
+        consent/privacy revision incapable of reaching the provider.
+        """
+
+        checker = getattr(self._executor, "assert_dispatch_authorized", None)
+        if checker is None:
+            return
+        result = checker(action=action, projection=projection)
+        if inspect.isawaitable(result):
+            await result
 
     @staticmethod
     def _expression_dispatch_allowed(action: Action, projection) -> bool:
@@ -273,10 +292,12 @@ class ActionPump:
                     result=self._external_observation(action=action, receipt=receipt),
                 )
                 return ActionPumpResult(action_id=action.action_id, status="marked_unknown")
+            await self._enforce_executor_authority(action=action, projection=await self._project())
             result = await self._executor.lookup_result(action)
             if result is None:
                 if action.recovery_policy == "none":
                     return ActionPumpResult(action_id=action.action_id, status="pending")
+                await self._enforce_executor_authority(action=action, projection=await self._project())
                 result = await self._executor.dispatch(action)
             return await self._settle_or_pending(action=action, result=result, dispatched=False)
         if action.claim_lease is not None and current_time < action.claim_lease.expires_at:
@@ -292,12 +313,15 @@ class ActionPump:
             return ActionPumpResult(action_id=action.action_id, status="marked_unknown")
         if action.recovery_policy not in {"effect_once", "result_lookup"}:
             raise ValueError(f"unsupported Action recovery policy {action.recovery_policy!r}")
+        await self._enforce_executor_authority(action=action, projection=await self._project())
         result = await self._executor.lookup_result(action)
         if result is None:
+            await self._enforce_executor_authority(action=action, projection=await self._project())
             result = await self._executor.dispatch(action)
         return await self._settle_or_pending(action=action, result=result, dispatched=False)
 
     async def _recover_provider_accepted(self, action: Action) -> ActionPumpResult:
+        await self._enforce_executor_authority(action=action, projection=await self._project())
         current_time = (await self._project()).logical_time or action.logical_time
         if action.claim_lease is not None and current_time < action.claim_lease.expires_at:
             return ActionPumpResult(action_id=action.action_id, status="owned_elsewhere")

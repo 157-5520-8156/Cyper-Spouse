@@ -106,6 +106,7 @@ _V20_ONLY_STATE_KEYS = frozenset(
     }
 )
 _V24_ONLY_STATE_KEYS = frozenset({"expression_plan_manifests"})
+_V25_ONLY_STATE_KEYS = frozenset({"provider_media_grants"})
 _PREFIX_PROOF_VERSION = "world-v2-prefix-proof.2"
 _PREVIOUS_PREFIX_PROOF_VERSION = "world-v2-prefix-proof.1"
 _PREFIX_BITS_BYTES = 32
@@ -1363,6 +1364,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.21",
                 "world-v2-reducers.22",
                 "world-v2-reducers.23",
+                "world-v2-reducers.24",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -1471,6 +1473,17 @@ class SQLiteWorldLedger:
             if not isinstance(raw_state, dict):
                 raise ValueError("legacy state is not an object")
             raw_state = dict(raw_state)
+            injected_v25_keys = tuple(
+                sorted(
+                    key
+                    for key in _V25_ONLY_STATE_KEYS.intersection(raw_state)
+                    if raw_state.get(key) not in (None, [], {})
+                )
+            )
+            if injected_v25_keys and reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+                raise ValueError(
+                    f"legacy head cannot claim v25 provider media fields {injected_v25_keys!r}"
+                )
             injected_v24_keys = tuple(
                 sorted(
                     key
@@ -1784,6 +1797,7 @@ class SQLiteWorldLedger:
             consent_transitions=projection.consent_transitions,
             privacy_policies=projection.privacy_policies,
             privacy_transitions=projection.privacy_transitions,
+            provider_media_grants=projection.provider_media_grants,
             consumed_authorization_root_nonces=projection.consumed_authorization_root_nonces,
             consumed_authorization_challenge_ids=projection.consumed_authorization_challenge_ids,
             consumed_authorization_source_ids=projection.consumed_authorization_source_ids,

@@ -103,6 +103,10 @@ def reduce_authorization(
         attested_principal_ref=payload.attested_principal_ref,
         attestation_mode=payload.attestation_mode,
         attestation_environment=payload.attestation_environment,
+        principal_possession_status=(
+            "verified" if payload.attestation_environment == "enforcement" else "not_evaluated"
+        ),
+        enforcement_eligible=payload.attestation_environment == "enforcement",
         evidence_hash=evidence_hash,
         root_key_id=payload.root_proof.root_key_id,
         root_keyset_digest=payload.root_proof.keyset_digest,

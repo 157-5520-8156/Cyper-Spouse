@@ -13,8 +13,9 @@ import json
 from typing import Literal, Protocol
 
 from .action_pump import ActionExecutor
+from .media_provider_grants import require_provider_media_grant
 from .schema_core import FrozenModel
-from .schemas import Action, DispatchPending, ProviderReceipt
+from .schemas import Action, DispatchPending, LedgerProjection, ProviderReceipt
 
 
 SUPPORTED_PLATFORM_ACTION_KINDS = frozenset({"reply", "reaction", "typing", "sticker"})
@@ -174,6 +175,144 @@ class PlatformActionExecutor(ActionExecutor):
         )
 
 
+class MediaProviderDispatchRequest(FrozenModel):
+    """A request which may only be built after provider-media enforcement."""
+
+    action_id: str
+    kind: Literal["media_planning", "media_render", "media_inspection"]
+    provider_ref: str
+    payload_ref: str
+    payload_hash: str
+    content_type: str
+    body: str
+    idempotency_key: str
+    grant_id: str
+    grant_revision: int
+
+    @property
+    def fingerprint(self) -> str:
+        canonical = json.dumps(
+            self.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        )
+        return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+class MediaProviderTransport(Protocol):
+    provider: str
+
+    async def send(self, request: MediaProviderDispatchRequest) -> PlatformDispatchReceipt | DispatchPending: ...
+
+    async def lookup(
+        self, *, idempotency_key: str, request_fingerprint: str
+    ) -> PlatformDispatchReceipt | DispatchPending | None: ...
+
+
+class ProviderMediaActionExecutor(ActionExecutor):
+    """Provider media executor with an enforcement-only ActionPump seam.
+
+    It deliberately does not inherit :class:`PlatformActionExecutor`: message
+    payload/content rules and media-provider grant checks are separate deep
+    modules.  ``assert_dispatch_authorized`` is invoked by ActionPump against
+    its final ledger projection immediately before the external call.
+    """
+
+    def __init__(self, *, payloads: AuthorizedPayloadReader, transport: MediaProviderTransport) -> None:
+        if not transport.provider:
+            raise ValueError("media provider transport provider is required")
+        self._payloads = payloads
+        self._transport = transport
+        self._dispatch_authorizations: set[tuple[str, str, int]] = set()
+
+    async def assert_dispatch_authorized(self, *, action: Action, projection: LedgerProjection) -> None:
+        logical_time = projection.logical_time or action.logical_time
+        grant = require_provider_media_grant(
+            action=action, projection=projection, logical_time=logical_time
+        )
+        self._dispatch_authorizations.add(
+            (action.action_id, grant.grant_id, grant.entity_revision)
+        )
+
+    async def dispatch(self, action: Action) -> ProviderReceipt | DispatchPending | None:
+        request = await self._request_for(action)
+        result = await self._transport.send(request)
+        return self._bind_result(action=action, result=result, request=request)
+
+    async def lookup_result(self, action: Action) -> ProviderReceipt | DispatchPending | None:
+        request = await self._request_for(action)
+        result = await self._transport.lookup(
+            idempotency_key=action.idempotency_key, request_fingerprint=request.fingerprint
+        )
+        return self._bind_result(action=action, result=result, request=request)
+
+    async def _request_for(self, action: Action) -> MediaProviderDispatchRequest:
+        if action.kind not in {"media_planning", "media_render", "media_inspection"}:
+            raise ValueError("media provider executor does not support this Action kind")
+        if action.layer != "media_action" or action.provider_media_grant is None:
+            raise ValueError("media provider Action lacks enforcement grant binding")
+        authority_key = (
+            action.action_id,
+            action.provider_media_grant.grant_id,
+            action.provider_media_grant.grant_revision,
+        )
+        if authority_key not in self._dispatch_authorizations:
+            raise ValueError("media provider dispatch was not authorized by ActionPump")
+        # One verified permission is consumed by one provider RPC.  Recovery
+        # must therefore obtain a fresh final-projection check for lookup and
+        # again before a retry dispatch.
+        self._dispatch_authorizations.remove(authority_key)
+        payload = await self._payloads.resolve(action)
+        if payload.payload_ref != action.payload_ref or payload.payload_hash != action.payload_hash:
+            raise ValueError("resolved payload does not bind the authorized Action")
+        actual = "sha256:" + hashlib.sha256(payload.body.encode("utf-8")).hexdigest()
+        if actual != action.payload_hash:
+            raise ValueError("resolved payload hash does not match authorized payload bytes")
+        return MediaProviderDispatchRequest(
+            action_id=action.action_id,
+            kind=action.kind,  # type: ignore[arg-type]
+            provider_ref=action.target,
+            payload_ref=payload.payload_ref,
+            payload_hash=payload.payload_hash,
+            content_type=payload.content_type,
+            body=payload.body,
+            idempotency_key=action.idempotency_key,
+            grant_id=action.provider_media_grant.grant_id,
+            grant_revision=action.provider_media_grant.grant_revision,
+        )
+
+    def _bind_result(
+        self,
+        *,
+        action: Action,
+        result: PlatformDispatchReceipt | DispatchPending | None,
+        request: MediaProviderDispatchRequest,
+    ) -> ProviderReceipt | DispatchPending | None:
+        if result is None:
+            return None
+        if isinstance(result, DispatchPending):
+            if result.action_id != action.action_id or result.idempotency_key != action.idempotency_key:
+                raise ValueError("media provider pending result does not bind the Action")
+            if result.provider != self._transport.provider:
+                raise ValueError("media provider pending result provider mismatch")
+            return result
+        if result.idempotency_key != action.idempotency_key:
+            raise ValueError("media provider receipt idempotency key does not bind the Action")
+        if result.request_fingerprint != request.fingerprint:
+            raise ValueError("media provider receipt request fingerprint does not bind dispatched payload")
+        return ProviderReceipt(
+            provider_receipt_id=result.provider_receipt_id,
+            action_id=action.action_id,
+            idempotency_key=action.idempotency_key,
+            provider=self._transport.provider,
+            provider_ref=result.provider_ref,
+            status=result.status,
+            artifact_refs=result.artifact_refs,
+            cost_actual=result.cost_actual,
+            error_class=result.error_class,
+            received_at=result.received_at,
+            raw_payload_hash=result.raw_payload_hash,
+        )
+
+
 __all__ = [
     "AuthorizedPayloadReader",
     "PlatformActionExecutor",
@@ -182,4 +321,7 @@ __all__ = [
     "PlatformTransport",
     "ResolvedActionPayload",
     "SUPPORTED_PLATFORM_ACTION_KINDS",
+    "ProviderMediaActionExecutor",
+    "MediaProviderDispatchRequest",
+    "MediaProviderTransport",
 ]

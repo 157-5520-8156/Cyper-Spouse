@@ -59,6 +59,7 @@ from .outcome_acceptance_manifest import (
 )
 from .fact_accepted_contracts import FactCommitMaterializedPayloadV2
 from .minimal_reply_events import MINIMAL_REPLY_EVENT_PAYLOAD_MODELS
+from .media_provider_grants import ProviderMediaGrantRecordedPayload
 from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION, MinimalReplyManifest
 from .expression_plan_manifest import (
     EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
@@ -97,7 +98,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.24"
+    reducer_bundle: str = "world-v2-reducers.25"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -309,6 +310,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "BudgetAccountConfigured": _payload_model(
             "BudgetAccountConfiguredPayload", {"account": (BudgetAccount, ...)}
         ),
+        "ProviderMediaGrantRecorded": ProviderMediaGrantRecordedPayload,
         "BudgetReserved": _payload_model(
             "BudgetReservedPayload", {"reservation": (BudgetReservation, ...)}
         ),
@@ -407,6 +409,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "AffectEpisodeSuperseded": "episode_id+successor_episode_id+transition_id",
         "AffectBaselineAdjusted": "world_id+dimension+calibration_revision+transition_id",
         "BudgetAccountConfigured": "account_id+window_id",
+        "ProviderMediaGrantRecorded": "world_id+grant_id+grant_revision",
         "BudgetReserved": "reservation_id",
         "BudgetSettled": "reservation_id+result_id+terminal",
         "BudgetReleased": "reservation_id+result_id+terminal",
@@ -761,6 +764,14 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "BudgetAccountConfiguredPayload",
                 evidence_types=("budget_policy",),
                 successors=("BudgetReserved",),
+            ),
+            _contract(
+                "ProviderMediaGrantRecorded",
+                "enforcement_authorization",
+                "world",
+                "ProviderMediaGrantRecordedPayload",
+                evidence_types=("enforcement_capability", "enforcement_consent", "enforcement_privacy"),
+                successors=("ActionAuthorized",),
             ),
             _contract(
                 "MessagePayloadStored",

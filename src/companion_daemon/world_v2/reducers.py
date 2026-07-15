@@ -192,6 +192,12 @@ from .life_reducers import (
     terminate_occurrence,
     transition_activity,
 )
+from .media_provider_grants import (
+    ProviderMediaGrantRecordedPayload,
+    is_provider_media_action,
+    require_provider_media_grant,
+    validate_provider_media_grant_record,
+)
 from .memory_events import (
     MEMORY_CANDIDATE_PAYLOAD_MODELS,
     MemoryCandidateAuthorizedMutationPayload,
@@ -296,6 +302,7 @@ from .schemas import (
     OutcomeObservationProjection,
     PrivacyPolicyProjection,
     PrivacyTransitionProjection,
+    ProviderMediaGrant,
     OutcomeProposalProjection,
     OperatorObservationRef,
     PlanStateProjection,
@@ -315,7 +322,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.24"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.25"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -354,6 +361,7 @@ def _experience_semantic_dump(
             "world-v2-reducers.19",
             "world-v2-reducers.20",
             "world-v2-reducers.21",
+            "world-v2-reducers.24",
             REDUCER_BUNDLE_VERSION,
         }
         and isinstance(experience, LegacyExperienceProjection)
@@ -386,9 +394,11 @@ def _actor_authority_transition_semantic_dump(
 
 def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dict[str, Any]:
     dumped = action.model_dump(mode="json")
-    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", REDUCER_BUNDLE_VERSION}:
+    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", REDUCER_BUNDLE_VERSION}:
         dumped.pop("expression_plan_id", None)
         dumped.pop("expression_beat_id", None)
+    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+        dumped.pop("provider_media_grant", None)
     return dumped
 
 
@@ -396,7 +406,7 @@ def _expression_plan_semantic_dump(
     plan: ExpressionPlanProjection, *, reducer_bundle_version: str
 ) -> dict[str, Any]:
     dumped = plan.model_dump(mode="json")
-    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", REDUCER_BUNDLE_VERSION}:
+    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", REDUCER_BUNDLE_VERSION}:
         dumped.pop("state", None)
         dumped.pop("history", None)
     return dumped
@@ -406,7 +416,7 @@ def _expression_beat_semantic_dump(
     beat: ExpressionBeatProjection, *, reducer_bundle_version: str
 ) -> dict[str, Any]:
     dumped = beat.model_dump(mode="json")
-    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", REDUCER_BUNDLE_VERSION}:
+    if reducer_bundle_version not in {"world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", REDUCER_BUNDLE_VERSION}:
         dumped.pop("action_id", None)
         dumped.pop("state", None)
         dumped.pop("history", None)
@@ -446,6 +456,7 @@ class ReducerState(FrozenModel):
     consent_transitions: tuple[ConsentTransitionProjection, ...] = ()
     privacy_policies: tuple[PrivacyPolicyProjection, ...] = ()
     privacy_transitions: tuple[PrivacyTransitionProjection, ...] = ()
+    provider_media_grants: tuple[ProviderMediaGrant, ...] = ()
     consumed_authorization_root_nonces: tuple[str, ...] = ()
     consumed_authorization_challenge_ids: tuple[str, ...] = ()
     consumed_authorization_source_ids: tuple[str, ...] = ()
@@ -1070,11 +1081,12 @@ class ReducerState(FrozenModel):
         world_revision: int,
         reducer_bundle_version: str = REDUCER_BUNDLE_VERSION,
     ) -> dict[str, Any]:
-        # .24 adds generic multi-beat expression manifests.  The .23 feature
-        # layout remains byte-for-byte stable when reconstructing old heads.
+        # .25 adds executable provider-media grants.  The earlier expression
+        # manifest layouts remain byte-for-byte stable when reconstructing old
+        # heads.
         declared_reducer_bundle_version = reducer_bundle_version
         if reducer_bundle_version in {"world-v2-reducers.22", "world-v2-reducers.23"}:
-            reducer_bundle_version = REDUCER_BUNDLE_VERSION
+            reducer_bundle_version = "world-v2-reducers.24"
         payload = {
             "reducer_bundle_version": declared_reducer_bundle_version,
             "schema_version": "world-v2.1",
@@ -1129,6 +1141,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.21",
                         "world-v2-reducers.22",
                         "world-v2-reducers.23",
+                        "world-v2-reducers.24",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else item.model_dump(
@@ -1249,6 +1262,10 @@ class ReducerState(FrozenModel):
             ),
             "boundaries": tuple(item.model_dump(mode="json") for item in self.boundaries),
         }
+        if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            payload["provider_media_grants"] = tuple(
+                item.model_dump(mode="json") for item in self.provider_media_grants
+            )
         if reducer_bundle_version in {
             "world-v2-reducers.10",
             "world-v2-reducers.11",
@@ -1262,6 +1279,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.19",
             "world-v2-reducers.20",
             "world-v2-reducers.21",
+            "world-v2-reducers.24",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["threads"] = tuple(item.model_dump(mode="json") for item in self.threads)
@@ -1280,6 +1298,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.19",
             "world-v2-reducers.20",
             "world-v2-reducers.21",
+            "world-v2-reducers.24",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["commitments"] = tuple(
@@ -1299,6 +1318,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.19",
             "world-v2-reducers.20",
             "world-v2-reducers.21",
+            "world-v2-reducers.24",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["facts"] = tuple(item.model_dump(mode="json") for item in self.facts)
@@ -1315,6 +1335,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.19",
             "world-v2-reducers.20",
             "world-v2-reducers.21",
+            "world-v2-reducers.24",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["experience_transitions"] = tuple(
@@ -1329,6 +1350,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.19",
             "world-v2-reducers.20",
             "world-v2-reducers.21",
+            "world-v2-reducers.24",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["memory_candidates"] = tuple(
@@ -1346,6 +1368,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.19",
             "world-v2-reducers.20",
             "world-v2-reducers.21",
+            "world-v2-reducers.24",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["character_core"] = (
@@ -1363,6 +1386,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.19",
             "world-v2-reducers.20",
             "world-v2-reducers.21",
+            "world-v2-reducers.24",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["clock_transition_history"] = tuple(
@@ -1395,6 +1419,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.19",
             "world-v2-reducers.20",
             "world-v2-reducers.21",
+            "world-v2-reducers.24",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["fact_commit_proposal_audits_v2"] = tuple(
@@ -1403,14 +1428,14 @@ class ReducerState(FrozenModel):
             payload["acceptance_manifests_v3"] = tuple(
                 item.model_dump(mode="json") for item in self.acceptance_manifests_v3
             )
-        if reducer_bundle_version in {"world-v2-reducers.21", "world-v2-reducers.22", "world-v2-reducers.23", REDUCER_BUNDLE_VERSION}:
+        if reducer_bundle_version in {"world-v2-reducers.21", "world-v2-reducers.22", "world-v2-reducers.23", "world-v2-reducers.24", REDUCER_BUNDLE_VERSION}:
             payload["life_content_descriptors"] = tuple(
                 item.model_dump(mode="json") for item in self.life_content_descriptors
             )
             payload["minimal_reply_manifests"] = tuple(
                 item.model_dump(mode="json") for item in self.minimal_reply_manifests
             )
-            if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            if declared_reducer_bundle_version in {"world-v2-reducers.24", REDUCER_BUNDLE_VERSION}:
                 payload["expression_plan_manifests"] = tuple(
                     _expression_plan_manifest_semantic_dump(item)
                     for item in self.expression_plan_manifests
@@ -4216,6 +4241,15 @@ def _action_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
         raise ValueError("ActionAuthorized requires its matching budget reservation")
     if reservation.state != "reserved":
         raise ValueError("ActionAuthorized budget reservation is not active")
+    if is_provider_media_action(action):
+        # A provider-side media action is executable only through the
+        # enforcement grant vertical.  Existing message/media_send Actions do
+        # not enter this branch and retain their legacy compatibility.
+        require_provider_media_grant(
+            action=action,
+            projection=state,
+            logical_time=event.logical_time,
+        )
     generic_manifest = next(
         (
             manifest
@@ -4267,6 +4301,17 @@ def _action_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
             "pending_actions": (*state.pending_actions, action),
         }
     )
+
+
+def _provider_media_grant_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = ProviderMediaGrantRecordedPayload.model_validate_json(event.payload_json)
+    grant = payload.grant
+    if any(item.grant_id == grant.grant_id for item in state.provider_media_grants):
+        raise ValueError("provider media grant identity is already registered")
+    if event.logical_time != grant.issued_at:
+        raise ValueError("provider media grant event time does not bind grant issue time")
+    validate_provider_media_grant_record(grant=grant, projection=state, logical_time=event.logical_time)
+    return state.model_copy(update={"provider_media_grants": (*state.provider_media_grants, grant)})
 
 
 def _budget_reserved(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -6782,6 +6827,9 @@ _EVENTS = {
         EventDefinition("PrivacyPolicyRevised", RevisionClass.WORLD, _authorization_changed),
         EventDefinition("PrivacyPolicyRevoked", RevisionClass.WORLD, _authorization_changed),
         EventDefinition("PrivacyPolicyCompensated", RevisionClass.WORLD, _authorization_changed),
+        EventDefinition(
+            "ProviderMediaGrantRecorded", RevisionClass.WORLD, _provider_media_grant_recorded
+        ),
         EventDefinition("ObservationRecorded", RevisionClass.WORLD, _observation_recorded),
         EventDefinition(
             "OperatorObservationRecorded",
@@ -7185,6 +7233,7 @@ def make_projection(
         consent_transitions=state.consent_transitions,
         privacy_policies=state.privacy_policies,
         privacy_transitions=state.privacy_transitions,
+        provider_media_grants=state.provider_media_grants,
         consumed_authorization_root_nonces=state.consumed_authorization_root_nonces,
         consumed_authorization_challenge_ids=state.consumed_authorization_challenge_ids,
         consumed_authorization_source_ids=state.consumed_authorization_source_ids,

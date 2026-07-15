@@ -681,7 +681,7 @@ def test_v16_sqlite_head_migrates_to_v18_without_forged_audit_indexes(tmp_path) 
     connection.close()
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.24"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.25"
     assert migrated.project().semantic_hash == before.semantic_hash
     assert migrated.project().model_result_audits == ()
 
@@ -724,7 +724,7 @@ def test_v17_sqlite_head_migrates_to_v18_preserving_proposal_audit(tmp_path) -> 
             ),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.24"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.25"
     assert migrated.project().proposal_audits == before.proposal_audits
     assert migrated.project().acceptance_manifests_v2 == ()
 
