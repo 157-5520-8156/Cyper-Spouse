@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+import json
 
 import pytest
 
@@ -15,6 +16,9 @@ from companion_daemon.world_v2.expression_reconsideration_runtime import (
     ExpressionReconsiderationDecision,
     ExpressionReconsiderationRuntime,
 )
+from companion_daemon.world_v2.expression_reconsideration_model_adapter import (
+    ExpressionReconsiderationChatModelAdapter,
+)
 from companion_daemon.world_v2.reducers import ReducerState, make_projection, reduce_event
 from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import (
@@ -27,6 +31,8 @@ from companion_daemon.world_v2.schemas import (
     ExpressionPlanLifecycleEntry,
     ExpressionPlanProjection,
     Observation,
+    ProjectionCursor,
+    TriggerProcess,
     WorldEvent,
 )
 
@@ -476,6 +482,41 @@ async def test_defer_is_durable_and_keeps_the_old_payload_gated() -> None:
     assert expression_beat_is_gated(
         projection=projection, plan_id="plan:expression:1", beat_id="beat:expression:2"
     )
+
+
+class _DecisionModel:
+    model = "test-decision"
+
+    def __init__(self, raw: str) -> None:
+        self.raw = raw
+
+    async def complete(self, _messages, *, temperature: float):
+        assert temperature == 0.25
+        return self.raw
+
+
+@pytest.mark.asyncio
+async def test_chat_model_adapter_cannot_inject_new_payload_or_unbound_replacement() -> None:
+    observation, source_event = _observation()
+    trigger = expression_reconsideration_trigger_event(
+        world_id=WORLD_ID, source_event=source_event, observation=observation,
+        plan_id="plan:expression:1", beat_id="beat:expression:2",
+    ).payload()["process"]
+    process = TriggerProcess.model_validate_json(json.dumps(trigger))
+    accepted = await ExpressionReconsiderationChatModelAdapter(
+        model=_DecisionModel('{"disposition":"cancel"}')
+    ).review(
+        process=process,
+        observation_event=source_event,
+        cursor=ProjectionCursor(world_revision=1, deliberation_revision=1, ledger_sequence=2),
+    )
+
+    assert accepted.disposition == "cancel"
+    assert accepted.rationale_ref and accepted.rationale_ref.startswith("model-decision:")
+    with pytest.raises(ValueError, match="unsupported"):
+        ExpressionReconsiderationChatModelAdapter._decision(
+            '{"disposition":"new_beat","inline_text":"you should not see this"}'
+        )
 
 
 @pytest.mark.asyncio

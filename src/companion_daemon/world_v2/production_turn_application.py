@@ -56,6 +56,7 @@ from .minimal_reply_acceptance import ReplyBudgetPolicy
 from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .expression_plan_acceptance import ExpressionPlanBudgetPolicy
 from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder
+from .expression_reconsideration_runtime import ExpressionReconsiderationReviewer
 from .pinned_turn import PinnedTurnCompiler
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .platform_action_executor import PlatformActionExecutor, PlatformTransport
@@ -89,6 +90,7 @@ class WorldV2TurnApplicationConfig:
     affect_worker_owner: str = "worker:world-v2:affect"
     fact_worker_owner: str = "worker:world-v2:fact"
     outcome_worker_owner: str = "worker:world-v2:outcome"
+    expression_reconsideration_owner: str = "worker:world-v2:expression-reconsideration"
 
     def __post_init__(self) -> None:
         for name in (
@@ -100,6 +102,7 @@ class WorldV2TurnApplicationConfig:
             "affect_worker_owner",
             "fact_worker_owner",
             "outcome_worker_owner",
+            "expression_reconsideration_owner",
         ):
             if not getattr(self, name):
                 raise ValueError(f"{name} must not be empty")
@@ -187,6 +190,7 @@ def build_sqlite_world_v2_turn_application(
     outcome_model: DeliberationModelAdapter | None = None,
     fact_model: FactDraftChatModel | None = None,
     memory_model: FactMemoryDraftChatModel | None = None,
+    expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
     now: datetime,
 ) -> WorldV2TurnApplication:
     """Build one durable v2 chat lane without importing the legacy application.
@@ -394,6 +398,12 @@ def build_sqlite_world_v2_turn_application(
             ),
             action_executor=build_platform_action_executor(ledger=ledger, transport=transport, expression_payload_store=expression_payload_store),
             action_pump_owner=config.action_pump_owner,
+            expression_reconsideration_owner=(
+                config.expression_reconsideration_owner
+                if expression_reconsideration_reviewer is not None
+                else None
+            ),
+            expression_reconsideration_reviewer=expression_reconsideration_reviewer,
         )
         return WorldV2TurnApplication(
             turns=WorldTurnRuntime(runtime=runtime, identities=identities),
