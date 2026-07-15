@@ -711,6 +711,68 @@ class AcceptanceDecisionRef(FrozenModel):
         return self
 
 
+class MinimalReplyManifestRef(FrozenModel):
+    """Durable authority record for one isolated ordinary-reply acceptance."""
+
+    acceptance_id: str = Field(min_length=1)
+    proposal_id: str = Field(min_length=1)
+    proposal_event_ref: str = Field(min_length=1)
+    proposal_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    proposal_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    evaluated_world_revision: int = Field(ge=0)
+    policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expression_change_id: str = Field(min_length=1)
+    expression_change_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    intent_id: str = Field(min_length=1)
+    intent_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_id: str = Field(min_length=1)
+    beat_id: str = Field(min_length=1)
+    message_payload_ref: str = Field(min_length=1)
+    message_payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    reservation_id: str = Field(min_length=1)
+    action_id: str = Field(min_length=1)
+    manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    acceptance_event_ref: str = Field(min_length=1)
+    acceptance_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recorded_at_world_revision: int = Field(ge=1)
+
+
+class StoredMessagePayloadProjection(FrozenModel):
+    acceptance_id: str = Field(min_length=1)
+    proposal_id: str = Field(min_length=1)
+    payload_ref: str = Field(min_length=1)
+    payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    text: str = Field(min_length=1, max_length=4_096)
+    content_type: str = Field(min_length=1, max_length=128)
+    event_ref: str = Field(min_length=1)
+    event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ExpressionPlanProjection(FrozenModel):
+    acceptance_id: str = Field(min_length=1)
+    proposal_id: str = Field(min_length=1)
+    expression_change_id: str = Field(min_length=1)
+    plan_id: str = Field(min_length=1)
+    event_ref: str = Field(min_length=1)
+    event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ExpressionBeatProjection(FrozenModel):
+    acceptance_id: str = Field(min_length=1)
+    proposal_id: str = Field(min_length=1)
+    expression_change_id: str = Field(min_length=1)
+    plan_id: str = Field(min_length=1)
+    beat_id: str = Field(min_length=1)
+    payload_ref: str = Field(min_length=1)
+    payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    dependency_beat_ids: tuple[str, ...] = ()
+    cancel_policy: str = Field(min_length=1, max_length=128)
+    reconsider_policy: str = Field(min_length=1, max_length=128)
+    merge_policy: str = Field(min_length=1, max_length=128)
+    event_ref: str = Field(min_length=1)
+    event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ProposalRevisionRef(FrozenModel):
     proposal_id: str = Field(min_length=1)
     evaluated_world_revision: int = Field(ge=0)
@@ -3770,7 +3832,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.19"
+    reducer_bundle_version: str = "world-v2-reducers.20"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -3867,6 +3929,10 @@ class LedgerProjection(FrozenModel):
     acceptance_manifests_v2: tuple[AcceptanceManifestRefV2, ...] = ()
     fact_commit_proposal_audits_v2: tuple[FactCommitProposalAuditRefV2, ...] = ()
     acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()
+    minimal_reply_manifests: tuple[MinimalReplyManifestRef, ...] = ()
+    stored_message_payloads: tuple[StoredMessagePayloadProjection, ...] = ()
+    expression_plans: tuple[ExpressionPlanProjection, ...] = ()
+    expression_beats: tuple[ExpressionBeatProjection, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
     outcome_proposals: tuple[OutcomeProposalProjection, ...] = ()
     semantic_hash: str

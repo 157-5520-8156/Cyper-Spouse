@@ -9,6 +9,7 @@ from companion_daemon.media_expression import (
     build_complete_candidates,
     candidate_perceptual_signature,
 )
+from companion_daemon.media_moment import choose_moment_capture
 from companion_daemon.media_subject import build_subject_candidates
 
 
@@ -500,6 +501,20 @@ def test_character_media_candidates_freeze_lived_moment_contracts() -> None:
         item.moment_capture.anti_static_direction
         for item in candidates
     )
+
+
+def test_moment_capture_uses_stable_but_varied_wording_without_reading_world_facts() -> None:
+    choices = {
+        choose_moment_capture(
+            temporal_beat="held_for_response",
+            capture_mode="character_front_camera",
+            visual_form="portrait_context",
+            stable_seed=f"moment:{index}",
+        ).strategy_id
+        for index in range(16)
+    }
+
+    assert choices == {"recipient-pause", "show-then-return"}
 
 
 def test_complete_candidates_use_versioned_perceptual_axes_and_varied_face_geometry() -> None:

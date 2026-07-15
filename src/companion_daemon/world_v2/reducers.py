@@ -83,6 +83,13 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2
 from .fact_accepted_contracts import rehydrate_fact_commit_materialized_v2_json
 from .fact_reducers import reduce_fact
 from .fact_v2_reducers import materialized_fact_v2_as_projection_change
+from .minimal_reply_events import (
+    ExpressionBeatAuthorizedPayload,
+    ExpressionPlanAcceptedPayload,
+    MessagePayloadStoredPayload,
+)
+from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION, MinimalReplyManifest
+from .proposal_envelope import MinimalProposal, validate_proposal_envelope
 from .proposal_envelope_v2 import (
     canonical_full_change_authority_hash_v2,
     validate_fact_commit_proposal_v2,
@@ -237,6 +244,10 @@ from .schemas import (
     ExperienceProposalProjection,
     ExperienceOccurrenceSettlementBinding,
     LegacyExperienceProjection,
+    MinimalReplyManifestRef,
+    StoredMessagePayloadProjection,
+    ExpressionPlanProjection,
+    ExpressionBeatProjection,
     FactProjection,
     FactProposalProjection,
     FactTransitionProjection,
@@ -269,7 +280,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.19"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.20"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -305,6 +316,7 @@ def _experience_semantic_dump(
             "world-v2-reducers.16",
             "world-v2-reducers.17",
             "world-v2-reducers.18",
+            "world-v2-reducers.19",
             REDUCER_BUNDLE_VERSION,
         }
         and isinstance(experience, LegacyExperienceProjection)
@@ -324,6 +336,7 @@ def _actor_authority_transition_semantic_dump(
         "world-v2-reducers.16",
         "world-v2-reducers.17",
         "world-v2-reducers.18",
+        "world-v2-reducers.19",
         REDUCER_BUNDLE_VERSION,
     }:
         dumped.pop("accepted_event_ref", None)
@@ -431,6 +444,10 @@ class ReducerState(FrozenModel):
     acceptance_manifests_v2: tuple[AcceptanceManifestRefV2, ...] = ()
     fact_commit_proposal_audits_v2: tuple[FactCommitProposalAuditRefV2, ...] = ()
     acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()
+    minimal_reply_manifests: tuple[MinimalReplyManifestRef, ...] = ()
+    stored_message_payloads: tuple[StoredMessagePayloadProjection, ...] = ()
+    expression_plans: tuple[ExpressionPlanProjection, ...] = ()
+    expression_beats: tuple[ExpressionBeatProjection, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
 
     @model_validator(mode="after")
@@ -1013,6 +1030,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.16",
                         "world-v2-reducers.17",
                         "world-v2-reducers.18",
+                        "world-v2-reducers.19",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else item.model_dump(
@@ -1056,6 +1074,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.16",
                         "world-v2-reducers.17",
                         "world-v2-reducers.18",
+                        "world-v2-reducers.19",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else plan.model_dump(
@@ -1072,6 +1091,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.16",
                         "world-v2-reducers.17",
                         "world-v2-reducers.18",
+                        "world-v2-reducers.19",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else occurrence.model_dump(
@@ -1132,6 +1152,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.16",
             "world-v2-reducers.17",
             "world-v2-reducers.18",
+            "world-v2-reducers.19",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["threads"] = tuple(item.model_dump(mode="json") for item in self.threads)
@@ -1147,6 +1168,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.16",
             "world-v2-reducers.17",
             "world-v2-reducers.18",
+            "world-v2-reducers.19",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["commitments"] = tuple(
@@ -1163,6 +1185,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.16",
             "world-v2-reducers.17",
             "world-v2-reducers.18",
+            "world-v2-reducers.19",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["facts"] = tuple(item.model_dump(mode="json") for item in self.facts)
@@ -1176,6 +1199,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.16",
             "world-v2-reducers.17",
             "world-v2-reducers.18",
+            "world-v2-reducers.19",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["experience_transitions"] = tuple(
@@ -1187,6 +1211,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.16",
             "world-v2-reducers.17",
             "world-v2-reducers.18",
+            "world-v2-reducers.19",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["memory_candidates"] = tuple(
@@ -1201,6 +1226,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.16",
             "world-v2-reducers.17",
             "world-v2-reducers.18",
+            "world-v2-reducers.19",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["character_core"] = (
@@ -1215,6 +1241,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.16",
             "world-v2-reducers.17",
             "world-v2-reducers.18",
+            "world-v2-reducers.19",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["clock_transition_history"] = tuple(
@@ -1243,12 +1270,25 @@ class ReducerState(FrozenModel):
             payload["attention_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.attention_transitions
             )
-        if reducer_bundle_version == "world-v2-reducers.19":
+        if reducer_bundle_version in {"world-v2-reducers.19", REDUCER_BUNDLE_VERSION}:
             payload["fact_commit_proposal_audits_v2"] = tuple(
                 item.model_dump(mode="json") for item in self.fact_commit_proposal_audits_v2
             )
             payload["acceptance_manifests_v3"] = tuple(
                 item.model_dump(mode="json") for item in self.acceptance_manifests_v3
+            )
+        if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+            payload["minimal_reply_manifests"] = tuple(
+                item.model_dump(mode="json") for item in self.minimal_reply_manifests
+            )
+            payload["stored_message_payloads"] = tuple(
+                item.model_dump(mode="json") for item in self.stored_message_payloads
+            )
+            payload["expression_plans"] = tuple(
+                item.model_dump(mode="json") for item in self.expression_plans
+            )
+            payload["expression_beats"] = tuple(
+                item.model_dump(mode="json") for item in self.expression_beats
             )
         return payload
 
@@ -2677,13 +2717,19 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
     if (
         "manifest_version" in raw
         and raw.get("manifest_version")
-        not in {"acceptance-manifest.2", "acceptance-manifest.3"}
+        not in {
+            "acceptance-manifest.2",
+            "acceptance-manifest.3",
+            MINIMAL_REPLY_MANIFEST_VERSION,
+        }
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
     if raw.get("manifest_version") == "acceptance-manifest.2":
         return _acceptance_manifest_v2_recorded(state, event)
     if raw.get("manifest_version") == "acceptance-manifest.3":
         return _acceptance_manifest_v3_recorded(state, event)
+    if raw.get("manifest_version") == MINIMAL_REPLY_MANIFEST_VERSION:
+        return _minimal_reply_manifest_recorded(state, event)
     proposal_id = raw.get("proposal_id")
     evaluated_world_revision = raw.get("evaluated_world_revision")
     if not isinstance(proposal_id, str) or not isinstance(evaluated_world_revision, int):
@@ -3021,6 +3067,209 @@ def _acceptance_manifest_v3_recorded(
     )
 
 
+def _minimal_reply_manifest_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    """Index one reply-only acceptance without granting Fact-v3 semantics."""
+
+    manifest = MinimalReplyManifest.model_validate_json(event.payload_json)
+    current_world_revision = len(state.committed_world_event_refs)
+    if manifest.evaluated_world_revision != current_world_revision:
+        raise ValueError("minimal reply manifest must evaluate the current world")
+    if event.causation_id != manifest.proposal_event_ref:
+        raise ValueError("minimal reply manifest causation does not bind its audit")
+    if any(item.acceptance_id == manifest.acceptance_id for item in state.minimal_reply_manifests):
+        raise ValueError("minimal reply acceptance identity is already registered")
+    if any(item.proposal_id == manifest.proposal_id for item in state.minimal_reply_manifests):
+        raise ValueError("minimal reply proposal already has an acceptance")
+    audit = next(
+        (item for item in state.proposal_audits if item.proposal_id == manifest.proposal_id), None
+    )
+    if audit is None or audit.proposal_kind != "minimal":
+        raise ValueError("minimal reply manifest references unavailable proposal authority")
+    if (
+        audit.event_ref != manifest.proposal_event_ref
+        or audit.event_payload_hash != manifest.proposal_event_payload_hash
+        or audit.proposal_hash != manifest.proposal_hash
+        or audit.evaluated_world_revision != manifest.evaluated_world_revision
+    ):
+        raise ValueError("minimal reply manifest does not exactly bind its proposal audit")
+    try:
+        proposal = validate_proposal_envelope(
+            MinimalProposal.model_validate_json(audit.proposal_json, strict=True)
+        )
+    except Exception as exc:
+        raise ValueError("minimal reply proposal audit is invalid") from exc
+    if not isinstance(proposal, MinimalProposal) or (
+        proposal.proposal_id != manifest.proposal_id
+        or proposal.proposal_hash != manifest.proposal_hash
+        or len(proposal.proposed_changes) != 1
+        or len(proposal.action_intents) != 1
+    ):
+        raise ValueError("minimal reply proposal authority is not exact")
+    change = proposal.proposed_changes[0]
+    intent = proposal.action_intents[0]
+    payload = change.payload.value()
+    drafts = payload.get("beat_drafts")
+    if not isinstance(drafts, list) or len(drafts) != 1 or not isinstance(drafts[0], dict):
+        raise ValueError("minimal reply proposal has no single expression beat")
+    draft = drafts[0]
+    intent_hash = hashlib.sha256(
+        json.dumps(
+            intent.model_dump(mode="json"),
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if (
+        change.kind != "expression_plan_transition"
+        or change.transition != "accept"
+        or change.change_id != manifest.expression_change_id
+        or change.payload.payload_hash == ""
+        or intent.intent_id != manifest.intent_id
+        or intent_hash != manifest.intent_hash
+        or intent.causal_change_id != change.change_id
+        or payload.get("plan_id") != manifest.plan_id
+        or draft.get("beat_id") != manifest.beat_id
+        or draft.get("materialized_payload_ref") != manifest.message_payload_ref
+        or draft.get("payload_hash") != manifest.message_payload_hash
+        or intent.payload_ref != manifest.message_payload_ref
+        or intent.payload_hash != manifest.message_payload_hash
+    ):
+        raise ValueError("minimal reply manifest does not exactly bind proposal content")
+    ref = MinimalReplyManifestRef(
+        **manifest.model_dump(mode="python", exclude={"manifest_version"}),
+        expression_change_hash=change.payload.payload_hash,
+        acceptance_event_ref=event.event_id,
+        acceptance_event_payload_hash=event.payload_hash,
+        recorded_at_world_revision=current_world_revision + 1,
+    )
+    return state.model_copy(
+        update={"minimal_reply_manifests": (*state.minimal_reply_manifests, ref)}
+    )
+
+
+def _message_payload_stored(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = MessagePayloadStoredPayload.model_validate_json(event.payload_json)
+    manifest = _minimal_reply_manifest(state, payload.acceptance_id)
+    _require_previous_event(state, "AcceptanceRecorded", manifest.acceptance_event_ref)
+    if (
+        payload.proposal_id != manifest.proposal_id
+        or payload.message.payload_ref != manifest.message_payload_ref
+        or payload.message.payload_hash != manifest.message_payload_hash
+        or any(item.payload_ref == payload.message.payload_ref for item in state.stored_message_payloads)
+    ):
+        raise ValueError("minimal reply message payload is not authorized")
+    return state.model_copy(
+        update={
+            "stored_message_payloads": (
+                *state.stored_message_payloads,
+                StoredMessagePayloadProjection(
+                    acceptance_id=payload.acceptance_id,
+                    proposal_id=payload.proposal_id,
+                    payload_ref=payload.message.payload_ref,
+                    payload_hash=payload.message.payload_hash,
+                    text=payload.message.text,
+                    content_type=payload.message.content_type,
+                    event_ref=event.event_id,
+                    event_payload_hash=event.payload_hash,
+                ),
+            )
+        }
+    )
+
+
+def _expression_plan_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = ExpressionPlanAcceptedPayload.model_validate_json(event.payload_json)
+    manifest = _minimal_reply_manifest(state, payload.acceptance_id)
+    _require_previous_event(state, "MessagePayloadStored")
+    if (
+        payload.proposal_id != manifest.proposal_id
+        or payload.expression_change_id != manifest.expression_change_id
+        or payload.plan_id != manifest.plan_id
+        or any(item.plan_id == payload.plan_id for item in state.expression_plans)
+    ):
+        raise ValueError("minimal reply expression plan is not authorized")
+    return state.model_copy(
+        update={
+            "expression_plans": (
+                *state.expression_plans,
+                ExpressionPlanProjection(
+                    acceptance_id=payload.acceptance_id,
+                    proposal_id=payload.proposal_id,
+                    expression_change_id=payload.expression_change_id,
+                    plan_id=payload.plan_id,
+                    event_ref=event.event_id,
+                    event_payload_hash=event.payload_hash,
+                ),
+            )
+        }
+    )
+
+
+def _expression_beat_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = ExpressionBeatAuthorizedPayload.model_validate_json(event.payload_json)
+    manifest = _minimal_reply_manifest(state, payload.acceptance_id)
+    _require_previous_event(state, "ExpressionPlanAccepted")
+    if (
+        payload.proposal_id != manifest.proposal_id
+        or payload.expression_change_id != manifest.expression_change_id
+        or payload.beat.plan_id != manifest.plan_id
+        or payload.beat.beat_id != manifest.beat_id
+        or payload.beat.payload.payload_ref != manifest.message_payload_ref
+        or payload.beat.payload.payload_hash != manifest.message_payload_hash
+        or not any(
+            item.payload_ref == manifest.message_payload_ref
+            and item.payload_hash == manifest.message_payload_hash
+            for item in state.stored_message_payloads
+        )
+        or any(item.beat_id == payload.beat.beat_id for item in state.expression_beats)
+    ):
+        raise ValueError("minimal reply expression beat is not authorized")
+    return state.model_copy(
+        update={
+            "expression_beats": (
+                *state.expression_beats,
+                ExpressionBeatProjection(
+                    acceptance_id=payload.acceptance_id,
+                    proposal_id=payload.proposal_id,
+                    expression_change_id=payload.expression_change_id,
+                    plan_id=payload.beat.plan_id,
+                    beat_id=payload.beat.beat_id,
+                    payload_ref=payload.beat.payload.payload_ref,
+                    payload_hash=payload.beat.payload.payload_hash,
+                    dependency_beat_ids=payload.beat.dependency_beat_ids,
+                    cancel_policy=payload.beat.cancel_policy,
+                    reconsider_policy=payload.beat.reconsider_policy,
+                    merge_policy=payload.beat.merge_policy,
+                    event_ref=event.event_id,
+                    event_payload_hash=event.payload_hash,
+                ),
+            )
+        }
+    )
+
+
+def _minimal_reply_manifest(state: ReducerState, acceptance_id: str) -> MinimalReplyManifestRef:
+    manifest = next(
+        (item for item in state.minimal_reply_manifests if item.acceptance_id == acceptance_id),
+        None,
+    )
+    if manifest is None:
+        raise ValueError("minimal reply effect has no accepted manifest")
+    return manifest
+
+
+def _require_previous_event(
+    state: ReducerState, event_type: str, event_id: str | None = None
+) -> None:
+    if not state.committed_world_event_refs:
+        raise ValueError("minimal reply effect has no predecessor")
+    previous = state.committed_world_event_refs[-1]
+    if previous.event_type != event_type or (event_id is not None and previous.event_id != event_id):
+        raise ValueError("minimal reply effect predecessor is not exact")
+
+
 def _world_started(state: ReducerState, _event: WorldEvent) -> ReducerState:
     return state
 
@@ -3174,6 +3423,24 @@ def _action_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
         raise ValueError("ActionAuthorized requires its matching budget reservation")
     if reservation.state != "reserved":
         raise ValueError("ActionAuthorized budget reservation is not active")
+    minimal = next(
+        (item for item in state.minimal_reply_manifests if item.action_id == action.action_id), None
+    )
+    if minimal is not None:
+        _require_previous_event(state, "BudgetReserved")
+        if (
+            action.budget_reservation_id != minimal.reservation_id
+            or action.payload_ref != minimal.message_payload_ref
+            or action.payload_hash != minimal.message_payload_hash
+            or action.intent_ref != f"{minimal.proposal_id}:{minimal.intent_id}"
+            or not any(
+                beat.acceptance_id == minimal.acceptance_id
+                and beat.beat_id == minimal.beat_id
+                and beat.payload_ref == minimal.message_payload_ref
+                for beat in state.expression_beats
+            )
+        ):
+            raise ValueError("minimal reply ActionAuthorized is not bound to its expression")
     return state.model_copy(
         update={
             "actions": (*state.actions, action),
@@ -3188,6 +3455,14 @@ def _budget_reserved(state: ReducerState, event: WorldEvent) -> ReducerState:
         raise ValueError(f"budget reservation {reservation.reservation_id!r} already exists")
     if reservation.state != "reserved":
         raise ValueError("BudgetReserved requires reserved state")
+    minimal = next(
+        (item for item in state.minimal_reply_manifests if item.reservation_id == reservation.reservation_id),
+        None,
+    )
+    if minimal is not None:
+        _require_previous_event(state, "ExpressionBeatAuthorized")
+        if reservation.action_id != minimal.action_id or reservation.category != "chat":
+            raise ValueError("minimal reply reservation is not bound to its manifest")
     account_index = next(
         (
             index
@@ -5433,6 +5708,9 @@ _EVENTS = {
             _trigger_process_reclaimed,
         ),
         EventDefinition("BudgetAccountConfigured", RevisionClass.WORLD, _budget_account_configured),
+        EventDefinition("MessagePayloadStored", RevisionClass.WORLD, _message_payload_stored),
+        EventDefinition("ExpressionPlanAccepted", RevisionClass.WORLD, _expression_plan_accepted),
+        EventDefinition("ExpressionBeatAuthorized", RevisionClass.WORLD, _expression_beat_authorized),
         EventDefinition("BudgetReserved", RevisionClass.WORLD, _budget_reserved),
         EventDefinition(
             "ExecutionReceiptRecorded",
@@ -5877,6 +6155,10 @@ def make_projection(
         acceptance_manifests_v2=state.acceptance_manifests_v2,
         fact_commit_proposal_audits_v2=state.fact_commit_proposal_audits_v2,
         acceptance_manifests_v3=state.acceptance_manifests_v3,
+        minimal_reply_manifests=state.minimal_reply_manifests,
+        stored_message_payloads=state.stored_message_payloads,
+        expression_plans=state.expression_plans,
+        expression_beats=state.expression_beats,
         acceptance_decisions=state.acceptance_decisions,
         outcome_proposals=state.outcome_proposals,
         semantic_hash=semantic_hash(

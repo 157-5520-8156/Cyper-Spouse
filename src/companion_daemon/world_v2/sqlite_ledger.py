@@ -96,6 +96,14 @@ _V18_ONLY_STATE_KEYS = frozenset({"acceptance_manifests_v2"})
 _V19_ONLY_STATE_KEYS = frozenset(
     {"fact_commit_proposal_audits_v2", "acceptance_manifests_v3"}
 )
+_V20_ONLY_STATE_KEYS = frozenset(
+    {
+        "minimal_reply_manifests",
+        "stored_message_payloads",
+        "expression_plans",
+        "expression_beats",
+    }
+)
 _PREFIX_PROOF_VERSION = "world-v2-prefix-proof.2"
 _PREVIOUS_PREFIX_PROOF_VERSION = "world-v2-prefix-proof.1"
 _PREFIX_BITS_BYTES = 32
@@ -1348,6 +1356,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.16",
                 "world-v2-reducers.17",
                 "world-v2-reducers.18",
+                "world-v2-reducers.19",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -1456,6 +1465,17 @@ class SQLiteWorldLedger:
             if not isinstance(raw_state, dict):
                 raise ValueError("legacy state is not an object")
             raw_state = dict(raw_state)
+            injected_v20_keys = tuple(
+                sorted(
+                    key
+                    for key in _V20_ONLY_STATE_KEYS.intersection(raw_state)
+                    if raw_state.get(key) not in (None, [], {})
+                )
+            )
+            if injected_v20_keys:
+                raise ValueError(
+                    f"legacy head cannot claim v20 reply fields {injected_v20_keys!r}"
+                )
             injected_v19_keys = tuple(
                 sorted(
                     key
@@ -1463,7 +1483,7 @@ class SQLiteWorldLedger:
                     if raw_state.get(key) not in (None, [], {})
                 )
             )
-            if injected_v19_keys:
+            if injected_v19_keys and reducer_bundle_version != "world-v2-reducers.19":
                 raise ValueError(
                     f"legacy head cannot claim v19 Fact fields {injected_v19_keys!r}"
                 )
@@ -1484,6 +1504,7 @@ class SQLiteWorldLedger:
             if injected_v17_keys and reducer_bundle_version not in {
                 "world-v2-reducers.17",
                 "world-v2-reducers.18",
+                "world-v2-reducers.19",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v17 audit fields {injected_v17_keys!r}"
@@ -1493,6 +1514,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.16",
                 "world-v2-reducers.17",
                 "world-v2-reducers.18",
+                "world-v2-reducers.19",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v16 authority fields {injected_v16_keys!r}"
@@ -1509,6 +1531,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.16",
                     "world-v2-reducers.17",
                     "world-v2-reducers.18",
+                    "world-v2-reducers.19",
                 }
                 and isinstance(actor_transitions, list)
                 and any(
@@ -1528,6 +1551,7 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.16",
                     "world-v2-reducers.17",
                     "world-v2-reducers.18",
+                    "world-v2-reducers.19",
                 }
                 and isinstance(plans, list)
                 and any(
@@ -1678,6 +1702,7 @@ class SQLiteWorldLedger:
             "world-v2-reducers.16",
             "world-v2-reducers.17",
             "world-v2-reducers.18",
+            "world-v2-reducers.19",
             REDUCER_BUNDLE_VERSION,
         }:
             payload.pop("commitments", None)
@@ -1785,6 +1810,10 @@ class SQLiteWorldLedger:
             acceptance_manifests_v2=projection.acceptance_manifests_v2,
             fact_commit_proposal_audits_v2=projection.fact_commit_proposal_audits_v2,
             acceptance_manifests_v3=projection.acceptance_manifests_v3,
+            minimal_reply_manifests=projection.minimal_reply_manifests,
+            stored_message_payloads=projection.stored_message_payloads,
+            expression_plans=projection.expression_plans,
+            expression_beats=projection.expression_beats,
             acceptance_decisions=projection.acceptance_decisions,
             outcome_proposals=projection.outcome_proposals,
         )

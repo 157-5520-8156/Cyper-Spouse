@@ -16,6 +16,7 @@ import json
 from weakref import WeakKeyDictionary
 
 from .schemas import ProjectionCursor, WorldEvent
+from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION
 
 
 class AcceptedLedgerBatchError(ValueError):
@@ -124,9 +125,10 @@ class AcceptedLedgerBatchIssuer:
         acceptance = materialized[0]
         if (
             acceptance.event_type != "AcceptanceRecorded"
-            or acceptance.payload().get("manifest_version") != "acceptance-manifest.3"
+            or acceptance.payload().get("manifest_version")
+            not in {"acceptance-manifest.3", MINIMAL_REPLY_MANIFEST_VERSION}
         ):
-            raise AcceptedLedgerBatchError("accepted batch must begin with an accepted v3 manifest")
+            raise AcceptedLedgerBatchError("accepted batch must begin with an accepted manifest")
         for name, value in {
             "manifest_hash": manifest_hash,
             "registry_digest": registry_digest,

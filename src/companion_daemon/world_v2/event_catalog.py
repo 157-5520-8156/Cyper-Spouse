@@ -44,6 +44,8 @@ from .proposal_audit_schemas import ModelResultRecordedPayload, ProposalRecorded
 from .acceptance_manifest import parse_acceptance_manifest_v2
 from .accepted_effect_contracts import rehydrate_acceptance_manifest_v3
 from .fact_accepted_contracts import FactCommitMaterializedPayloadV2
+from .minimal_reply_events import MINIMAL_REPLY_EVENT_PAYLOAD_MODELS
+from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION, MinimalReplyManifest
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .thread_events import THREAD_MECHANICAL_PAYLOAD_MODELS, THREAD_PAYLOAD_MODELS
 from .schemas import (
@@ -76,7 +78,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.19"
+    reducer_bundle: str = "world-v2-reducers.20"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -114,6 +116,7 @@ class EventContract:
             if manifest_version not in {
                 "acceptance-manifest.2",
                 "acceptance-manifest.3",
+                MINIMAL_REPLY_MANIFEST_VERSION,
             }:
                 raise ValueError("acceptance_manifest.unsupported_manifest_version")
         model = (
@@ -139,6 +142,12 @@ class EventContract:
             # effects, so ordinary callers cannot obtain authority merely by
             # passing a syntactically valid manifest here.
             rehydrate_acceptance_manifest_v3(dict(payload))
+            return
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version") == MINIMAL_REPLY_MANIFEST_VERSION
+        ):
+            MinimalReplyManifest.model_validate(dict(payload), strict=True)
             return
         model.model_validate_json(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -241,6 +250,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
             },
             allow_audit_extensions=True,
         ),
+        **MINIMAL_REPLY_EVENT_PAYLOAD_MODELS,
         "LegacyAcceptanceAuditRecorded": _payload_model(
             "LegacyAcceptanceAuditRecordedPayload",
             {"status": _ID},
@@ -328,6 +338,9 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ProposalRecorded": "world_id+trigger_id+proposal_id",
         "ModelResultRecorded": "world_id+model_call_id+model_result_ref",
         "AcceptanceRecorded": "v2:world_id+manifest_version+acceptance_id;legacy:proposal+revision",
+        "MessagePayloadStored": "world_id+acceptance_id+payload_ref+payload_hash",
+        "ExpressionPlanAccepted": "world_id+acceptance_id+plan_id+expression_change_id",
+        "ExpressionBeatAuthorized": "world_id+acceptance_id+plan_id+beat_id+payload_hash",
         "LegacyAcceptanceAuditRecorded": "migration-only:original-event-id",
         "AffectEpisodeOpened": "world_id+episode_id+transition_id",
         "AffectEpisodeUpdated": "episode_id+transition_id",
@@ -687,6 +700,33 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "world",
                 "BudgetAccountConfiguredPayload",
                 evidence_types=("budget_policy",),
+                successors=("BudgetReserved",),
+            ),
+            _contract(
+                "MessagePayloadStored",
+                "minimal_reply_recorder",
+                "world",
+                "MessagePayloadStoredPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=("minimal_reply_manifest",),
+                successors=("ExpressionPlanAccepted", "ExpressionBeatAuthorized"),
+            ),
+            _contract(
+                "ExpressionPlanAccepted",
+                "minimal_reply_recorder",
+                "world",
+                "ExpressionPlanAcceptedPayload",
+                allowed_predecessors=("MessagePayloadStored",),
+                evidence_types=("minimal_reply_manifest",),
+                successors=("ExpressionBeatAuthorized",),
+            ),
+            _contract(
+                "ExpressionBeatAuthorized",
+                "minimal_reply_recorder",
+                "world",
+                "ExpressionBeatAuthorizedPayload",
+                allowed_predecessors=("ExpressionPlanAccepted",),
+                evidence_types=("stored_message_payload", "minimal_reply_manifest"),
                 successors=("BudgetReserved",),
             ),
             _contract(

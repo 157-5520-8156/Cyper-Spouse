@@ -18,39 +18,67 @@ temporal_beats:
       known_companion: companion_catch
       external_sender: external_shared_frame
       existing_artifact: artifact_inherited
+    alternatives:
+      - strategy_id: transition-glimpsed
+        continuity_cue: the camera catches a practical transition before the person has decided whether to make it a photo
+        anti_static_direction: show the interrupted adjustment or movement without inventing theatrical motion
   mid_action:
     strategy_id: activity-still-moving
     moment_mode: uninterrupted_activity
     continuity_cue: the visible action is genuinely underway rather than demonstrated after completion
     anti_static_direction: preserve an active hand, attention target, or weight shift; do not replace it with a neutral standing portrait
     camera_relations: *relations
+    alternatives:
+      - strategy_id: attention-still-elsewhere
+        continuity_cue: attention remains partly on the real task, with the camera receiving only a secondary response
+        anti_static_direction: keep the task legible and prevent both hands and gaze from collapsing into a finished portrait pose
   just_after:
     strategy_id: brief-after-pause
     moment_mode: brief_pause
     continuity_cue: the main action has just ended and the person has not yet reset for the camera
     anti_static_direction: keep one believable residual cue of the preceding activity; avoid a polished finished pose
     camera_relations: *relations
+    alternatives:
+      - strategy_id: unplanned-check-in
+        continuity_cue: a quick check-in happens before the person tidies the scene or resets their expression
+        anti_static_direction: preserve one small imperfection or residual action cue, not a deliberately completed display
   reaction:
     strategy_id: response-arriving
     moment_mode: responsive_reaction
     continuity_cue: the frame catches a response that is still arriving, not a preselected expression
     anti_static_direction: let gaze, hands, or posture show the response sequence; avoid a symmetrical catalogue smile
     camera_relations: *relations
+    alternatives:
+      - strategy_id: reaction-not-yet-settled
+        continuity_cue: a reaction has changed the face or posture but has not resolved into a rehearsed expression
+        anti_static_direction: retain asymmetry or attention shift; do not replace it with a neutral catalogue smile
   held_for_response:
     strategy_id: recipient-pause
     moment_mode: recipient_pause
     continuity_cue: the person has made a brief intentional pause for this recipient while remaining situated in the event
     anti_static_direction: allow light posing, but retain a grounded prop, surface, or task trace so it is not an isolated portrait
     camera_relations: *relations
+    alternatives:
+      - strategy_id: show-then-return
+        continuity_cue: the person briefly pauses to show something, then is about to return to the surrounding activity
+        anti_static_direction: permit a conscious pose, but keep the scene as a lived interruption rather than a standalone beauty shot
   aftermath:
     strategy_id: lived-aftermath
     moment_mode: settled_aftermath
     continuity_cue: the moment has settled but still visibly belongs to what just happened
     anti_static_direction: preserve the unreset environment and relaxed body logic; avoid editorial cleanliness or rigid display
     camera_relations: *relations
+    alternatives:
+      - strategy_id: quiet-reset-not-complete
+        continuity_cue: the person is beginning to settle after the event, with ordinary traces of it still present
+        anti_static_direction: keep relaxed weight, surface contact, or surrounding trace instead of an editorially cleaned composition
   retrospective:
     strategy_id: memory-held
     moment_mode: composed_recall
     continuity_cue: this is a deliberately retained memory rather than a live interruption
     anti_static_direction: keep the remembered context legible; do not invent an active gesture just to make it candid
     camera_relations: *relations
+    alternatives:
+      - strategy_id: memory-with-context
+        continuity_cue: the chosen frame is intentionally retained because its setting still carries the memory
+        anti_static_direction: preserve contextual evidence rather than manufacturing a fake candid action

@@ -8,6 +8,7 @@ from typing import Any
 
 from .schemas import WorldEvent
 from .typed_proposal_families import family_for_mutation, family_for_record
+from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION
 
 
 def domain_idempotency_key(
@@ -51,6 +52,7 @@ def _life_identity_components(
         and payload.get("manifest_version") not in {
             "acceptance-manifest.2",
             "acceptance-manifest.3",
+            MINIMAL_REPLY_MANIFEST_VERSION,
         }
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -158,6 +160,40 @@ def _life_identity_components(
             payload.get("acceptance_id"),
             payload.get("manifest_hash"),
         )
+    if (
+        event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version") == MINIMAL_REPLY_MANIFEST_VERSION
+    ):
+        return (
+            world_id,
+            payload.get("manifest_version"),
+            payload.get("acceptance_id"),
+            payload.get("manifest_hash"),
+        )
+    if event_type == "MessagePayloadStored":
+        message = payload.get("message")
+        return (
+            world_id,
+            payload.get("acceptance_id"),
+            _mapping_value(message, "payload_ref"),
+            _mapping_value(message, "payload_hash"),
+        )
+    if event_type == "ExpressionPlanAccepted":
+        return (
+            world_id,
+            payload.get("acceptance_id"),
+            payload.get("plan_id"),
+            payload.get("expression_change_id"),
+        )
+    if event_type == "ExpressionBeatAuthorized":
+        beat = payload.get("beat")
+        return (
+            world_id,
+            payload.get("acceptance_id"),
+            _mapping_value(beat, "plan_id"),
+            _mapping_value(beat, "beat_id"),
+            _mapping_value(_mapping_value(beat, "payload"), "payload_hash"),
+        )
     if event_type == "FactCommittedV2":
         return (
             world_id,
@@ -233,3 +269,7 @@ def _nested(payload: dict[str, Any], parent: str, child: str) -> object:
     if not isinstance(value, dict):
         return None
     return value.get(child)
+
+
+def _mapping_value(value: object, key: str) -> object:
+    return value.get(key) if isinstance(value, dict) else None

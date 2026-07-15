@@ -378,7 +378,12 @@ async def test_v5_freezes_complete_expression_candidate_without_free_direction_t
     assert result.plan.embodied_presentation.version == "embodied-presentation-v3"
     payload = result.plan.to_payload()
     assert not {"composition", "action", "camera_direction", "sharing_motive"} & payload.keys()
+    assert set(result.plan.moment_capture.evidence_refs) == set(result.plan.evidence_values)
     assert MediaPlan.from_payload(payload) == result.plan
+    tampered_moment = result.plan.to_payload()
+    tampered_moment["moment_capture"]["scene_anchor"] = "social_context"
+    with pytest.raises(ValueError, match="invalid media plan payload"):
+        MediaPlan.from_payload(tampered_moment)
     assert "photographic_authenticity" not in replace(
         result.plan, photographic_authenticity=None
     ).to_payload()

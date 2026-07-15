@@ -419,7 +419,10 @@ def build_complete_candidates(
                             temporal_beat=address.temporal_beat,
                             capture_mode=capture_mode,
                             visual_form=visual_form,
-                            event_snapshot=event_snapshot,
+                            stable_seed=(
+                                f"{opportunity_id}:{index}:{subject_index}:{capture_mode}:"
+                                f"{visual_form}:{address.temporal_beat}"
+                            ),
                         )
                         if family == "character_media" and capture_mode != "existing_artifact"
                         else None

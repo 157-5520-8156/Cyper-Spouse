@@ -7,6 +7,7 @@ import hashlib
 import json
 
 from .accepted_effect_contracts import rehydrate_acceptance_manifest_v3
+from .event_identity import domain_idempotency_key
 from .experience_events import ExperienceCommittedPayload
 from .fact_accepted_contracts import (
     fact_commit_event_payload_hash,
@@ -18,12 +19,20 @@ from .proposal_audit_schemas import (
     ProposalRecordedV2Payload,
 )
 from .acceptance_manifest import parse_acceptance_manifest_v2
+from .minimal_reply_events import (
+    ExpressionBeatAuthorizedPayload,
+    ExpressionPlanAcceptedPayload,
+    MessagePayloadStoredPayload,
+    minimal_reply_event_id,
+    minimal_reply_idempotency_key,
+)
+from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION, MinimalReplyManifest
 from .appraisal_events import (
     AppraisalAcceptedPayload,
     AppraisalContradictedPayload,
     AppraisalSupersededPayload,
 )
-from .schemas import ExperienceOccurrenceSettlementBinding, WorldEvent
+from .schemas import Action, BudgetReservation, ExperienceOccurrenceSettlementBinding, WorldEvent
 from .typed_proposal_families import (
     family_for_mutation,
     family_for_record,
@@ -42,9 +51,15 @@ def validate_commit_batch(
         raise ValueError("accepted manifest v3 authorization must be an exact boolean")
     if not accepted_manifest_v3_authorized:
         reject_accepted_manifest_v3_without_recorder(events)
+        reject_minimal_reply_manifest_without_recorder(events)
     _validate_deliberation_audit_transaction(events)
     _validate_acceptance_manifest_v2_batch(events)
     _validate_authorized_fact_manifest_v3_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_minimal_reply_manifest_batch(
         events,
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
@@ -322,7 +337,11 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
         if event.event_type == "AcceptanceRecorded"
         and "manifest_version" in event.payload()
         and event.payload().get("manifest_version")
-        not in {"acceptance-manifest.2", "acceptance-manifest.3"}
+        not in {
+            "acceptance-manifest.2",
+            "acceptance-manifest.3",
+            MINIMAL_REPLY_MANIFEST_VERSION,
+        }
     ]
     if unknown:
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -445,6 +464,186 @@ def reject_accepted_manifest_v3_without_recorder(events: Sequence[WorldEvent]) -
         # authorization to record one: callers must not be able to forge an
         # accepted effect by using ``commit_at_cursor`` directly.
         raise ValueError("accepted_manifest.recorder_capability_required")
+
+
+def _validate_authorized_minimal_reply_manifest_batch(
+    events: Sequence[WorldEvent],
+    *,
+    expected_world_revision: int,
+    authorized: bool,
+) -> None:
+    """Close the ordinary-reply effect path without borrowing Fact-v3 authority."""
+
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == MINIMAL_REPLY_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("minimal_reply.recorder_capability_required")
+    expected_types = (
+        "AcceptanceRecorded",
+        "MessagePayloadStored",
+        "ExpressionPlanAccepted",
+        "ExpressionBeatAuthorized",
+        "BudgetReserved",
+        "ActionAuthorized",
+    )
+    if len(manifests) != 1 or tuple(event.event_type for event in events) != expected_types:
+        raise ValueError("minimal_reply.accepted_batch_must_be_exact")
+    acceptance, message_event, plan_event, beat_event, reservation_event, action_event = events
+    try:
+        manifest = MinimalReplyManifest.model_validate_json(acceptance.payload_json)
+        message = MessagePayloadStoredPayload.model_validate_json(message_event.payload_json)
+        plan = ExpressionPlanAcceptedPayload.model_validate_json(plan_event.payload_json)
+        beat = ExpressionBeatAuthorizedPayload.model_validate_json(beat_event.payload_json)
+        reservation = BudgetReservation.model_validate_json(
+            json.dumps(reservation_event.payload()["reservation"], ensure_ascii=False)
+        )
+        action = Action.model_validate_json(
+            json.dumps(action_event.payload()["action"], ensure_ascii=False)
+        )
+    except Exception as exc:
+        raise ValueError("minimal_reply.accepted_batch_payload_is_invalid") from exc
+    if manifest.evaluated_world_revision != expected_world_revision:
+        raise ValueError("minimal_reply.accepted_batch_authority_is_not_pinned")
+    chain = (acceptance, message_event, plan_event, beat_event, reservation_event, action_event)
+    if acceptance.causation_id != manifest.proposal_event_ref or any(
+        current.causation_id != previous.event_id for previous, current in zip(chain, chain[1:])
+    ):
+        raise ValueError("minimal_reply.accepted_batch_causation_is_not_exact")
+    first = acceptance
+    if any(
+        (
+            event.world_id != first.world_id
+            or event.logical_time != first.logical_time
+            or event.created_at != first.created_at
+            or event.actor != first.actor
+            or event.source != first.source
+            or event.trace_id != first.trace_id
+            or event.correlation_id != first.correlation_id
+        )
+        for event in chain[1:]
+    ):
+        raise ValueError("minimal_reply.accepted_batch_envelope_metadata_mismatch")
+    _validate_minimal_reply_event_identity(
+        acceptance,
+        manifest=manifest,
+        role="acceptance",
+        stable_id=manifest.acceptance_id,
+        domain_identity=True,
+    )
+    _validate_minimal_reply_event_identity(
+        message_event,
+        manifest=manifest,
+        role="message",
+        stable_id=manifest.message_payload_ref,
+        domain_identity=True,
+    )
+    _validate_minimal_reply_event_identity(
+        plan_event,
+        manifest=manifest,
+        role="plan",
+        stable_id=manifest.plan_id,
+        domain_identity=True,
+    )
+    _validate_minimal_reply_event_identity(
+        beat_event,
+        manifest=manifest,
+        role="beat",
+        stable_id=manifest.beat_id,
+        domain_identity=True,
+    )
+    _validate_minimal_reply_event_identity(
+        reservation_event,
+        manifest=manifest,
+        role="reservation",
+        stable_id=manifest.reservation_id,
+    )
+    _validate_minimal_reply_event_identity(
+        action_event,
+        manifest=manifest,
+        role="action",
+        stable_id=manifest.action_id,
+    )
+    payload = message.message
+    if (
+        message.acceptance_id != manifest.acceptance_id
+        or message.proposal_id != manifest.proposal_id
+        or payload.payload_ref != manifest.message_payload_ref
+        or payload.payload_hash != manifest.message_payload_hash
+    ):
+        raise ValueError("minimal_reply.message_does_not_match_manifest")
+    if (
+        plan.acceptance_id != manifest.acceptance_id
+        or plan.proposal_id != manifest.proposal_id
+        or plan.expression_change_id != manifest.expression_change_id
+        or plan.plan_id != manifest.plan_id
+    ):
+        raise ValueError("minimal_reply.plan_does_not_match_manifest")
+    if (
+        beat.acceptance_id != manifest.acceptance_id
+        or beat.proposal_id != manifest.proposal_id
+        or beat.expression_change_id != manifest.expression_change_id
+        or beat.beat.plan_id != manifest.plan_id
+        or beat.beat.beat_id != manifest.beat_id
+        or beat.beat.payload != payload
+    ):
+        raise ValueError("minimal_reply.beat_does_not_match_manifest")
+    if (
+        reservation.reservation_id != manifest.reservation_id
+        or reservation.action_id != manifest.action_id
+        or reservation.category != "chat"
+        or reservation.state != "reserved"
+        or action.action_id != manifest.action_id
+        or action.budget_reservation_id != manifest.reservation_id
+        or action.intent_ref != f"{manifest.proposal_id}:{manifest.intent_id}"
+        or action.payload_ref != manifest.message_payload_ref
+        or action.payload_hash != manifest.message_payload_hash
+        or action.causation_id != manifest.proposal_event_ref
+        or action.state != "authorized"
+    ):
+        raise ValueError("minimal_reply.action_or_budget_does_not_match_manifest")
+
+
+def _validate_minimal_reply_event_identity(
+    event: WorldEvent,
+    *,
+    manifest: MinimalReplyManifest,
+    role: str,
+    stable_id: str,
+    domain_identity: bool = False,
+) -> None:
+    if event.event_id != minimal_reply_event_id(
+        manifest_hash=manifest.manifest_hash, role=role, stable_id=stable_id
+    ):
+        raise ValueError("minimal_reply.event_id_is_not_deterministic")
+    expected_key = (
+        domain_idempotency_key(
+            event_type=event.event_type, world_id=event.world_id, payload=event.payload()
+        )
+        if domain_identity
+        else minimal_reply_idempotency_key(
+            world_id=event.world_id,
+            manifest_hash=manifest.manifest_hash,
+            role=role,
+            stable_id=stable_id,
+        )
+    )
+    if expected_key is None or event.idempotency_key != expected_key:
+        raise ValueError("minimal_reply.idempotency_key_is_not_deterministic")
+
+
+def reject_minimal_reply_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == MINIMAL_REPLY_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("minimal_reply.recorder_capability_required")
 
 
 def appraisal_trigger_identity(occurrence_id: str, result_id: str) -> str:

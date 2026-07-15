@@ -92,6 +92,7 @@ _CAPTURE_DISTANCES = {
     "external_sender": {"close", "medium", "full_body", "long", "wide"},
     "existing_artifact": SHOT_DISTANCES,
 }
+CAPTURE_MODES = frozenset(_CAPTURE_DISTANCES)
 _CAPTURE_DEVICES = {
     "character_front_camera": {"out_of_frame", "visible_handheld"},
     "character_rear_camera": {"out_of_frame", "visible_handheld"},

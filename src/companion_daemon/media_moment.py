@@ -13,9 +13,12 @@ from functools import lru_cache
 from hashlib import sha256
 import json
 from pathlib import Path
-from typing import Mapping
+from typing import Mapping, Sequence
 
 import yaml
+
+from companion_daemon.media_address import TEMPORAL_BEATS
+from companion_daemon.media_camera import CAPTURE_MODES
 
 
 DEFAULT_MOMENT_CONFIG = Path("configs/media_moment_templates.yaml")
@@ -47,18 +50,6 @@ SCENE_ANCHORS = {
     "social_context",
     "memory_context",
 }
-_CAPTURE_MODES = (
-    "character_front_camera",
-    "character_rear_camera",
-    "mirror",
-    "timer_fixed",
-    "requested_helper",
-    "known_companion",
-    "external_sender",
-    "existing_artifact",
-)
-
-
 @dataclass(frozen=True)
 class MomentCapture:
     """A signed, shot-local continuity contract.
@@ -73,6 +64,7 @@ class MomentCapture:
     scene_anchor: str
     continuity_cue: str
     anti_static_direction: str
+    evidence_refs: tuple[str, ...]
     contract_signature: str
     version: str = MOMENT_CAPTURE_VERSION
 
@@ -86,6 +78,7 @@ class MomentCapture:
         scene_anchor: str,
         continuity_cue: str,
         anti_static_direction: str,
+        evidence_refs: Sequence[str] = (),
     ) -> "MomentCapture":
         payload = {
             "strategy_id": strategy_id,
@@ -94,12 +87,28 @@ class MomentCapture:
             "scene_anchor": scene_anchor,
             "continuity_cue": continuity_cue,
             "anti_static_direction": anti_static_direction,
+            "evidence_refs": tuple(evidence_refs),
         }
         _validate(payload)
         return cls(**payload, contract_signature=_signature(payload))
 
-    def to_payload(self) -> dict[str, str]:
-        return asdict(self)
+    def to_payload(self) -> dict[str, object]:
+        payload = asdict(self)
+        payload["evidence_refs"] = list(self.evidence_refs)
+        return payload
+
+    def bind_evidence(self, evidence_refs: Sequence[str]) -> "MomentCapture":
+        """Bind the already selected event evidence without reinterpreting the moment."""
+
+        return self.create(
+            strategy_id=self.strategy_id,
+            moment_mode=self.moment_mode,
+            camera_relation=self.camera_relation,
+            scene_anchor=_scene_anchor_from_evidence(evidence_refs, fallback=self.scene_anchor),
+            continuity_cue=self.continuity_cue,
+            anti_static_direction=self.anti_static_direction,
+            evidence_refs=tuple(evidence_refs),
+        )
 
     @classmethod
     def from_payload(cls, value: object) -> "MomentCapture":
@@ -116,6 +125,9 @@ class MomentCapture:
                 "anti_static_direction",
             )
         }
+        payload["evidence_refs"] = tuple(
+            str(item) for item in value.get("evidence_refs", []) if str(item)
+        )
         _validate(payload)
         if str(value.get("version") or "") != MOMENT_CAPTURE_VERSION:
             raise ValueError("unsupported moment capture version")
@@ -129,15 +141,17 @@ def choose_moment_capture(
     temporal_beat: str,
     capture_mode: str,
     visual_form: str,
-    event_snapshot: Mapping[str, object] | None,
+    stable_seed: str,
     config_path: Path = DEFAULT_MOMENT_CONFIG,
 ) -> MomentCapture:
     """Return the bounded life-moment interpretation for one candidate."""
 
     catalog = load_moment_catalog(config_path)
-    strategy = catalog["temporal_beats"].get(temporal_beat)
-    if not isinstance(strategy, dict):
+    base = catalog["temporal_beats"].get(temporal_beat)
+    if not isinstance(base, dict):
         raise ValueError("unknown moment temporal beat")
+    variants = [base, *(item for item in base.get("alternatives", []) if isinstance(item, dict))]
+    strategy = {**base, **variants[_stable_index(stable_seed, len(variants))]}
     relations = strategy.get("camera_relations")
     if not isinstance(relations, dict):
         raise ValueError("invalid moment camera relation catalog")
@@ -148,7 +162,7 @@ def choose_moment_capture(
         strategy_id=str(strategy["strategy_id"]),
         moment_mode=str(strategy["moment_mode"]),
         camera_relation=camera_relation,
-        scene_anchor=_scene_anchor(visual_form=visual_form, snapshot=event_snapshot),
+        scene_anchor=_scene_anchor(visual_form=visual_form),
         continuity_cue=str(strategy["continuity_cue"]),
         anti_static_direction=str(strategy["anti_static_direction"]),
     )
@@ -173,31 +187,65 @@ def load_moment_catalog(config_path: Path = DEFAULT_MOMENT_CONFIG) -> dict[str, 
                 "scene_anchor": "event_object",
                 "continuity_cue": str(value.get("continuity_cue") or ""),
                 "anti_static_direction": str(value.get("anti_static_direction") or ""),
+                "evidence_refs": (),
             }
         )
         relations = value.get("camera_relations")
-        if not isinstance(relations, dict) or set(relations) != set(_CAPTURE_MODES):
+        if not isinstance(relations, dict) or set(relations) != set(CAPTURE_MODES):
             raise ValueError("incomplete moment capture relations")
         if any(item not in CAMERA_RELATIONS for item in relations.values()):
             raise ValueError("invalid moment capture relation")
+        alternatives = value.get("alternatives", [])
+        if not isinstance(alternatives, list):
+            raise ValueError("invalid moment alternatives")
+        for alternative in alternatives:
+            if not isinstance(alternative, dict):
+                raise ValueError("invalid moment alternative")
+            merged = {**value, **alternative}
+            _validate(
+                {
+                    "strategy_id": str(merged.get("strategy_id") or ""),
+                    "moment_mode": str(merged.get("moment_mode") or ""),
+                    "camera_relation": "self_interruption",
+                    "scene_anchor": "event_object",
+                    "continuity_cue": str(merged.get("continuity_cue") or ""),
+                    "anti_static_direction": str(merged.get("anti_static_direction") or ""),
+                    "evidence_refs": (),
+                }
+            )
+    if set(beats) != TEMPORAL_BEATS:
+        raise ValueError("incomplete moment temporal beat catalog")
     return raw
 
 
-def _scene_anchor(*, visual_form: str, snapshot: Mapping[str, object] | None) -> str:
+def _scene_anchor(*, visual_form: str) -> str:
     if visual_form == "social_frame":
         return "social_context"
     if visual_form in {"process_pov", "body_detail"}:
         return "body_transition" if visual_form == "body_detail" else "task_surface"
-    if snapshot and isinstance(snapshot.get("objects"), list) and snapshot["objects"]:
-        return "event_object"
-    if snapshot and isinstance(snapshot.get("activity"), dict):
-        return "task_surface"
     if visual_form in {"portrait_context", "wide_scene", "full_body"}:
         return "transient_environment"
     return "memory_context"
 
 
-def _validate(value: Mapping[str, str]) -> None:
+def _scene_anchor_from_evidence(
+    evidence_refs: Sequence[str], *, fallback: str
+) -> str:
+    refs = set(evidence_refs)
+    if any(ref.startswith("/participants/") for ref in refs):
+        return "social_context"
+    if any(ref.startswith("/character/visible_physical_state") for ref in refs):
+        return "body_transition"
+    if any(ref.startswith("/objects/") for ref in refs):
+        return "event_object"
+    if any(ref.startswith("/activity/") for ref in refs):
+        return "task_surface"
+    if any(ref.startswith(("/location/", "/environment/")) for ref in refs):
+        return "transient_environment"
+    return fallback
+
+
+def _validate(value: Mapping[str, object]) -> None:
     if not value["strategy_id"]:
         raise ValueError("missing moment strategy id")
     if value["moment_mode"] not in MOMENT_MODES:
@@ -208,9 +256,18 @@ def _validate(value: Mapping[str, str]) -> None:
         raise ValueError("invalid moment scene anchor")
     if not value["continuity_cue"] or not value["anti_static_direction"]:
         raise ValueError("missing moment direction")
+    refs = value.get("evidence_refs", ())
+    if not isinstance(refs, tuple) or any(not item.startswith("/") for item in refs):
+        raise ValueError("invalid moment evidence references")
 
 
-def _signature(value: Mapping[str, str]) -> str:
+def _signature(value: Mapping[str, object]) -> str:
     return sha256(
         json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _stable_index(seed: str, length: int) -> int:
+    if length < 1:
+        raise ValueError("empty moment alternatives")
+    return int(sha256(seed.encode()).hexdigest()[:16], 16) % length

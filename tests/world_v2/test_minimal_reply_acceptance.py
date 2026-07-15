@@ -11,6 +11,9 @@ from companion_daemon.world_v2.minimal_reply_acceptance import (
     derive_minimal_reply_material,
 )
 from companion_daemon.world_v2.minimal_reply_manifest import build_minimal_reply_manifest
+from companion_daemon.world_v2.minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
+from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
+from companion_daemon.world_v2.batch_invariants import validate_commit_batch
 from companion_daemon.world_v2.proposal_audit_schemas import (
     ProposalAuditProjection,
     canonical_json,
@@ -22,7 +25,12 @@ from companion_daemon.world_v2.proposal_envelope import (
     ProposalEvidenceRef,
     TypedChange,
 )
-from companion_daemon.world_v2.schemas import BudgetAccount, ProjectionCursor
+from companion_daemon.world_v2.reducers import ReducerState, reduce_event
+from companion_daemon.world_v2.schemas import (
+    BudgetAccount,
+    CommittedWorldEventRef,
+    ProjectionCursor,
+)
 
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
@@ -193,3 +201,55 @@ def test_manifest_binds_every_reply_side_effect_to_its_audited_material() -> Non
             trace_id="trace:1",
             correlation_id="correlation:1",
         )
+
+
+def test_recorder_materializes_a_closed_reply_batch_that_reduces_to_dispatchable_state() -> None:
+    material = derive_minimal_reply_material(
+        audit=_audit(),
+        cursor=ProjectionCursor(world_revision=4, deliberation_revision=2, ledger_sequence=7),
+        world_id=WORLD,
+        policy=_policy(),
+        account=_account(),
+        logical_time=NOW,
+        created_at=NOW,
+        trace_id="trace:1",
+        correlation_id="correlation:1",
+    )
+    issuer = AcceptedLedgerBatchIssuer()
+    handle = MinimalReplyAtomicRecorder(batch_issuer=issuer).prepare_batch(
+        acceptance_id="acceptance:reply:1",
+        material=material,
+        actor="agent:companion",
+        source="minimal-reply-test",
+    )
+    events, _ = issuer.verify(handle=handle, world_id=WORLD, expected_cursor=material.cursor)
+    assert tuple(event.event_type for event in events) == (
+        "AcceptanceRecorded",
+        "MessagePayloadStored",
+        "ExpressionPlanAccepted",
+        "ExpressionBeatAuthorized",
+        "BudgetReserved",
+        "ActionAuthorized",
+    )
+    validate_commit_batch(events, expected_world_revision=4, accepted_manifest_v3_authorized=True)
+
+    state = ReducerState(
+        proposal_audits=(_audit(),),
+        budget_accounts=(_account(),),
+        committed_world_event_refs=tuple(
+            CommittedWorldEventRef(
+                event_id=f"event:prior:{index}",
+                event_type="WorldStarted",
+                world_revision=index + 1,
+                payload_hash="a" * 64,
+                logical_time=NOW,
+            )
+            for index in range(4)
+        ),
+    )
+    for event in events:
+        state = reduce_event(state, event)
+
+    assert state.stored_message_payloads[0].text == "我明白了，刚刚确实没有接住。"
+    assert state.expression_beats[0].beat_id == "beat:reply:1"
+    assert state.pending_actions == (material.action,)
