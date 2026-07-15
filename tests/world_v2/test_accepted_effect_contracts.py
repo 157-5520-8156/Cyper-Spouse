@@ -22,6 +22,7 @@ from companion_daemon.world_v2.accepted_effect_contracts import (
     AcceptedEffectContractError,
     AcceptanceChangeAuthorityV3,
     AcceptanceManifestProposalV3,
+    AcceptanceManifestRefV3,
     AcceptanceManifestV3,
     DurableDomainCompilerKeyV1,
     DurableEffectCompilerAuthorityV1,
@@ -493,6 +494,66 @@ def test_model_construct_does_not_bypass_parse_revalidation() -> None:
         rehydrate_acceptance_manifest_v3(forged)
 
 
+def test_v3_manifest_reference_retains_a_validated_manifest_and_event_proof() -> None:
+    manifest = rehydrate_acceptance_manifest_v3(_manifest_raw())
+
+    reference = AcceptanceManifestRefV3.from_manifest(
+        manifest,
+        acceptance_event_ref="event:acceptance:1",
+        acceptance_event_payload_hash=_digest("a"),
+        recorded_at_world_revision=13,
+    )
+
+    assert reference.manifest == manifest
+    assert reference.manifest.manifest_hash == manifest.manifest_hash
+    assert reference.acceptance_event_ref == "event:acceptance:1"
+
+    with pytest.raises(ValidationError):
+        reference.recorded_at_world_revision = 14  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("acceptance_event_ref", ""),
+        ("acceptance_event_payload_hash", "A" * 64),
+        ("recorded_at_world_revision", 0),
+    ],
+)
+def test_v3_manifest_reference_rejects_invalid_event_proof(
+    field: str, value: object
+) -> None:
+    raw: dict[str, object] = {
+        "acceptance_event_ref": "event:acceptance:1",
+        "acceptance_event_payload_hash": _digest("a"),
+        "recorded_at_world_revision": 13,
+        "manifest": _manifest_raw(),
+    }
+    raw[field] = value
+
+    with pytest.raises(ValidationError):
+        AcceptanceManifestRefV3.model_validate(raw, strict=True)
+
+
+def test_v3_manifest_reference_revalidates_a_forged_nested_manifest() -> None:
+    manifest = rehydrate_acceptance_manifest_v3(_manifest_raw())
+    forged = AcceptanceManifestV3.model_construct(
+        **manifest.model_dump(mode="python", warnings=False)
+    )
+    forged.__dict__["manifest_hash"] = _digest("f")
+    reference = AcceptanceManifestRefV3.model_construct(
+        acceptance_event_ref="event:acceptance:1",
+        acceptance_event_payload_hash=_digest("a"),
+        recorded_at_world_revision=13,
+        manifest=forged,
+    )
+
+    with pytest.raises(ValidationError, match="manifest hash"):
+        AcceptanceManifestRefV3.model_validate(
+            reference.model_dump(mode="python", warnings=False), strict=True
+        )
+
+
 def test_nested_model_construct_is_strictly_rehydrated() -> None:
     forged_dependency = TypedCompilerDependencyV1.model_construct(
         dependency_kind="other",
@@ -545,6 +606,7 @@ def test_contracts_are_inert_and_do_not_materialize_world_events() -> None:
     for contract in (
         DurableEffectCompilerAuthorityV1,
         AcceptanceAuthorizedEffectV3,
+        AcceptanceManifestRefV3,
         AcceptanceManifestV3,
     ):
         assert not hasattr(contract, "to_world_event")

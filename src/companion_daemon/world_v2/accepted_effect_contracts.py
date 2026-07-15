@@ -387,6 +387,48 @@ class AcceptanceManifestV3(_ContractModel):
         return self
 
 
+class AcceptanceManifestRefV3(_ContractModel):
+    """Immutable projection-safe retention of a recorded v3 acceptance manifest.
+
+    This remains a value object: the event reference proves where the manifest
+    was observed, but does not grant event-materialization or ledger authority.
+    Keeping the complete manifest nested avoids a second, independently
+    serializable authority summary that could drift from the hash-bound v3
+    contract.
+    """
+
+    acceptance_event_ref: str = Field(min_length=1, max_length=MAX_REF_LENGTH)
+    acceptance_event_payload_hash: str = Field(pattern=_DIGEST_PATTERN)
+    recorded_at_world_revision: int = Field(ge=1)
+    manifest: AcceptanceManifestV3
+
+    @model_validator(mode="after")
+    def retained_manifest_is_still_valid(self) -> AcceptanceManifestRefV3:
+        # ``model_construct`` can forge a nested Pydantic instance.  Rehydrate
+        # from its stored material so a retained reference never turns that
+        # escape hatch into a projection authority.
+        rehydrate_acceptance_manifest_v3(self.manifest)
+        return self
+
+    @classmethod
+    def from_manifest(
+        cls,
+        manifest: AcceptanceManifestV3,
+        *,
+        acceptance_event_ref: str,
+        acceptance_event_payload_hash: str,
+        recorded_at_world_revision: int,
+    ) -> AcceptanceManifestRefV3:
+        """Retain an already validated manifest with its acceptance event proof."""
+
+        return cls(
+            acceptance_event_ref=acceptance_event_ref,
+            acceptance_event_payload_hash=acceptance_event_payload_hash,
+            recorded_at_world_revision=recorded_at_world_revision,
+            manifest=rehydrate_acceptance_manifest_v3(manifest),
+        )
+
+
 class _MaterialBudget:
     __slots__ = ("bytes", "max_bytes", "max_depth", "max_nodes", "nodes", "visiting")
 
@@ -624,6 +666,7 @@ __all__ = [
     "AcceptanceAuthorizedEffectV3",
     "AcceptanceChangeAuthorityV3",
     "AcceptanceManifestProposalV3",
+    "AcceptanceManifestRefV3",
     "AcceptanceManifestV3",
     "DomainCompilerKeyV1",
     "DurableDomainCompilerKeyV1",
