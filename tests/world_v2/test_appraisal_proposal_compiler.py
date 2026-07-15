@@ -13,7 +13,6 @@ from companion_daemon.world_v2.proposal_envelope import (
     ProposalEvidenceRef,
     TypedChange,
 )
-from companion_daemon.world_v2.schemas import ProjectionCursor
 
 from test_appraisal_authority import NOW, WORLD_ID, prepare_claimed_interaction
 from test_proposal_audit import _digest, _result
