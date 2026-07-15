@@ -17,7 +17,11 @@ from .affect_acceptance_manifest import (
     AffectAcceptanceManifest,
     canonical_affect_acceptance_value_hash,
 )
-from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
+from .outcome_acceptance_manifest import (
+    OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+    OutcomeAcceptanceManifest,
+    canonical_outcome_acceptance_value_hash,
+)
 from .event_identity import domain_idempotency_key
 from .experience_events import ExperienceCommittedPayload
 from .fact_accepted_contracts import (
@@ -48,7 +52,13 @@ from .appraisal_events import (
     AppraisalSupersededPayload,
 )
 from .affect_events import AFFECT_PAYLOAD_MODELS, AffectAuthorizedMutationPayload
-from .schemas import Action, BudgetReservation, ExperienceOccurrenceSettlementBinding, WorldEvent
+from .schemas import (
+    Action,
+    BudgetReservation,
+    ExperienceOccurrenceSettlementBinding,
+    TriggerProcess,
+    WorldEvent,
+)
 from .typed_proposal_families import (
     family_for_mutation,
     family_for_record,
@@ -89,6 +99,11 @@ def validate_commit_batch(
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_authorized_affect_acceptance_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_outcome_acceptance_manifest_batch(
         events,
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
@@ -860,6 +875,95 @@ def reject_outcome_acceptance_manifest_without_recorder(events: Sequence[WorldEv
         for event in events
     ):
         raise ValueError("outcome_acceptance.recorder_capability_required")
+
+
+def _validate_authorized_outcome_acceptance_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == OUTCOME_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("outcome_acceptance.recorder_capability_required")
+    if len(manifests) != 1 or len(events) != 3:
+        raise ValueError("outcome_acceptance.accepted_batch_must_be_exact")
+    acceptance, settlement, trigger_event = events
+    try:
+        manifest = OutcomeAcceptanceManifest.model_validate_json(acceptance.payload_json)
+        settlement_payload = WorldOccurrenceSettledPayload.model_validate_json(settlement.payload_json)
+        process = trigger_event.payload().get("process")
+        trigger = TriggerProcess.model_validate_json(
+            json.dumps(process, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        )
+    except Exception as exc:
+        raise ValueError("outcome_acceptance.accepted_batch_payload_is_invalid") from exc
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or tuple(event.event_type for event in events)
+        != ("AcceptanceRecorded", "WorldOccurrenceSettled", "TriggerProcessOpened")
+        or acceptance.causation_id != manifest.proposal_event_ref
+        or settlement.causation_id != acceptance.event_id
+        or trigger_event.causation_id != settlement.event_id
+        or settlement.event_id != manifest.settlement_event_id
+        or settlement.payload_hash != manifest.settlement_payload_hash
+        or trigger_event.event_id != manifest.npc_appraisal_trigger_event_id
+        or trigger_event.payload_hash != manifest.npc_appraisal_trigger_payload_hash
+    ):
+        raise ValueError("outcome_acceptance.batch_does_not_match_manifest")
+    first = acceptance
+    if any(
+        (
+            item.world_id != first.world_id
+            or item.logical_time != first.logical_time
+            or item.created_at != first.created_at
+            or item.actor != first.actor
+            or item.source != first.source
+            or item.trace_id != first.trace_id
+            or item.correlation_id != first.correlation_id
+        )
+        for item in (settlement, trigger_event)
+    ):
+        raise ValueError("outcome_acceptance.envelope_metadata_mismatch")
+    if (
+        settlement_payload.acceptance_id != manifest.acceptance_id
+        or settlement_payload.outcome_proposal_id != manifest.proposal_id
+        or settlement_payload.change_id != manifest.accepted_change_id
+        or settlement_payload.accepted_change_hash != manifest.accepted_change_hash
+        or settlement_payload.evaluated_world_revision != manifest.evaluated_world_revision
+        or settlement_payload.appraisal_trigger_ref != manifest.npc_appraisal_trigger_id
+        # The manifest pins the recorded wire payload (including the original
+        # RFC3339 spelling), while model serialization may normalize ``+00:00``
+        # to ``Z``.  Validate fields through the model above, then hash bytes
+        # as actually committed.
+        or canonical_outcome_acceptance_value_hash(settlement.payload())
+        != manifest.settlement_payload_hash
+    ):
+        raise ValueError("outcome_acceptance.settlement_does_not_match_manifest")
+    expected_trigger_id = appraisal_trigger_identity(
+        settlement_payload.occurrence_id, settlement_payload.result_id
+    )
+    if (
+        trigger.trigger_id != manifest.npc_appraisal_trigger_id
+        or trigger.trigger_id != expected_trigger_id
+        or trigger.trigger_ref != trigger.trigger_id
+        or trigger.process_kind != "npc_world_appraisal"
+        or trigger.state != "open"
+        or trigger.source_evidence_ref != settlement.event_id
+        or canonical_outcome_acceptance_value_hash(trigger_event.payload())
+        != manifest.npc_appraisal_trigger_payload_hash
+    ):
+        raise ValueError("outcome_acceptance.npc_trigger_does_not_match_manifest")
+    for event in events:
+        expected = domain_idempotency_key(
+            event_type=event.event_type, world_id=event.world_id, payload=event.payload()
+        )
+        if expected is None or event.idempotency_key != expected:
+            raise ValueError("outcome_acceptance.event_identity_is_not_deterministic")
 
 
 def appraisal_trigger_identity(occurrence_id: str, result_id: str) -> str:

@@ -46,7 +46,10 @@ from .affect_acceptance_manifest import (
     AffectAcceptanceManifest,
     canonical_affect_acceptance_value_hash,
 )
-from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
+from .outcome_acceptance_manifest import (
+    OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+    OutcomeAcceptanceManifest,
+)
 from .appraisal_reducers import (
     accept_appraisal,
     contradict_appraisal,
@@ -2810,7 +2813,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
     if raw.get("manifest_version") == AFFECT_ACCEPTANCE_MANIFEST_VERSION:
         return _affect_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == OUTCOME_ACCEPTANCE_MANIFEST_VERSION:
-        raise ValueError("outcome_acceptance.runtime_not_installed")
+        return _outcome_acceptance_manifest_recorded(state, event)
     proposal_id = raw.get("proposal_id")
     evaluated_world_revision = raw.get("evaluated_world_revision")
     if not isinstance(proposal_id, str) or not isinstance(evaluated_world_revision, int):
@@ -3314,6 +3317,97 @@ def _affect_acceptance_manifest_recorded(
     proposed = json.loads(proposal.proposed_mutation.payload_json)
     if canonical_affect_acceptance_value_hash(proposed) != manifest.mutation_payload_hash:
         raise ValueError("affect acceptance manifest mutation hash is invalid")
+    return state.model_copy(
+        update={
+            "acceptance_decisions": (
+                *state.acceptance_decisions,
+                AcceptanceDecisionRef(
+                    proposal_id=manifest.proposal_id,
+                    evaluated_world_revision=manifest.evaluated_world_revision,
+                    acceptance_id=manifest.acceptance_id,
+                    status="accepted",
+                    accepted_change_id=manifest.accepted_change_id,
+                    accepted_change_hash=manifest.accepted_change_hash,
+                    manifest_version=manifest.manifest_version,
+                    manifest_hash=manifest.manifest_hash,
+                    acceptance_event_ref=event.event_id,
+                    acceptance_event_payload_hash=event.payload_hash,
+                ),
+            )
+        }
+    )
+
+
+def _outcome_acceptance_manifest_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    """Record only a compiler-bound Outcome acceptance decision.
+
+    The batch invariant separately verifies the settlement and continuation;
+    this reducer makes direct or legacy Outcome acceptance fail closed.
+    """
+
+    manifest = OutcomeAcceptanceManifest.model_validate_json(event.payload_json)
+    current_world_revision = len(state.committed_world_event_refs)
+    if manifest.evaluated_world_revision != current_world_revision:
+        raise ValueError("outcome acceptance manifest must evaluate the current world")
+    if event.causation_id != manifest.proposal_event_ref:
+        raise ValueError("outcome acceptance manifest causation does not bind proposal")
+    if any(
+        item.acceptance_id == manifest.acceptance_id or item.proposal_id == manifest.proposal_id
+        for item in state.acceptance_decisions
+    ):
+        raise ValueError("outcome proposal or acceptance is already decided")
+    proposal = next(
+        (item for item in state.outcome_proposals if item.outcome_proposal_id == manifest.proposal_id),
+        None,
+    )
+    audit = next(
+        (item for item in state.proposal_audits if item.proposal_id == proposal.decision_proposal_id)
+        if proposal is not None
+        else (),
+        None,
+    )
+    expected_proposal_ref = None
+    if audit is not None and proposal is not None:
+        encoded = json.dumps(
+            {
+                "contract": "outcome-proposal-compiler.1",
+                "source_proposal_event": audit.event_ref,
+                "source_change": proposal.change_id,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        expected_proposal_ref = "event:outcome-proposal-compiled:" + hashlib.sha256(encoded).hexdigest()
+    if proposal is None or audit is None or (
+        manifest.proposal_event_ref != expected_proposal_ref
+        or proposal.change_id != manifest.accepted_change_id
+        or proposal.evaluated_world_revision != manifest.evaluated_world_revision
+        or proposal.proposed_change_hash != manifest.accepted_change_hash
+        or proposal.deliberation_trigger_id != manifest.deliberation_trigger_id
+        or proposal.deliberation_trigger_id is None
+        or proposal.source_observation_id is None
+    ):
+        raise ValueError("outcome acceptance manifest does not bind persisted proposal")
+    trigger = next(
+        (item for item in state.trigger_processes if item.trigger_id == manifest.deliberation_trigger_id),
+        None,
+    )
+    source_event_id = f"event:outcome-observation:{proposal.source_observation_id}"
+    if (
+        trigger is None
+        or trigger.process_kind != "outcome_deliberation"
+        or trigger.state != "claimed"
+        or trigger.claim_lease is None
+        or trigger.source_evidence_ref != source_event_id
+        or not any(
+            item.event_id == source_event_id and item.event_type == "OutcomeObservationRecorded"
+            for item in state.committed_world_event_refs
+        )
+    ):
+        raise ValueError("outcome acceptance manifest source trigger is not claimed")
     return state.model_copy(
         update={
             "acceptance_decisions": (

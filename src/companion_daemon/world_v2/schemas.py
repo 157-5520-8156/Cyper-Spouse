@@ -740,6 +740,7 @@ class AcceptanceDecisionRef(FrozenModel):
         "acceptance-manifest.3",
         "appraisal-acceptance.1",
         "affect-acceptance.1",
+        "outcome-acceptance.1",
     ] | None = None
     manifest_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     acceptance_event_ref: str | None = None

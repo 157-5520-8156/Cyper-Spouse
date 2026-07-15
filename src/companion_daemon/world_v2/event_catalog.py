@@ -52,6 +52,10 @@ from .affect_acceptance_manifest import (
     AFFECT_ACCEPTANCE_MANIFEST_VERSION,
     AffectAcceptanceManifest,
 )
+from .outcome_acceptance_manifest import (
+    OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+    OutcomeAcceptanceManifest,
+)
 from .fact_accepted_contracts import FactCommitMaterializedPayloadV2
 from .minimal_reply_events import MINIMAL_REPLY_EVENT_PAYLOAD_MODELS
 from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION, MinimalReplyManifest
@@ -129,6 +133,7 @@ class EventContract:
                 MINIMAL_REPLY_MANIFEST_VERSION,
                 APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
                 AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+                OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             }:
                 raise ValueError("acceptance_manifest.unsupported_manifest_version")
         model = (
@@ -172,6 +177,12 @@ class EventContract:
             and payload.get("manifest_version") == AFFECT_ACCEPTANCE_MANIFEST_VERSION
         ):
             AffectAcceptanceManifest.model_validate(dict(payload), strict=True)
+            return
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version") == OUTCOME_ACCEPTANCE_MANIFEST_VERSION
+        ):
+            OutcomeAcceptanceManifest.model_validate(dict(payload), strict=True)
             return
         model.model_validate_json(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
