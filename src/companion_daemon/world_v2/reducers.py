@@ -5266,6 +5266,33 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             or any(item.kind == "media_repair" and item.intent_ref == inspection.plan_id for item in state.actions)
         ):
             raise ValueError("media repair trigger is not bound to the first repairable inspection failure")
+    if process.process_kind == "media_delivery_interaction":
+        source = next(
+            (item for item in state.committed_world_event_refs if item.event_id == process.source_evidence_ref),
+            None,
+        )
+        if source is None or source.event_type != "MediaDeliveryShared":
+            raise ValueError("media delivery interaction trigger requires a delivered media share")
+        delivery = next(
+            (
+                item
+                for item in state.media_deliveries
+                if process.trigger_ref == f"media-delivery:{item.delivery_id}"
+            ),
+            None,
+        )
+        if delivery is None:
+            raise ValueError("media delivery interaction trigger source delivery is unavailable")
+        from .media_delivery_interaction import media_delivery_interaction_trigger_id
+
+        if (
+            process.trigger_id
+            != media_delivery_interaction_trigger_id(
+                world_id=event.world_id, delivery_id=delivery.delivery_id
+            )
+            or event.causation_id != source.event_id
+        ):
+            raise ValueError("media delivery interaction trigger identity is not deterministic")
     if process.process_kind == "expression_reconsideration":
         source = next(
             (

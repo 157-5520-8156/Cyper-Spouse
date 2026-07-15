@@ -8,6 +8,10 @@ from companion_daemon.world_v2.media_delivery_runtime import (
     MediaDeliveryReceiptLifecycle,
     require_current_media_delivery_approval,
 )
+from companion_daemon.world_v2.media_delivery_interaction import (
+    media_delivery_interaction_trigger_event,
+    media_delivery_interaction_trigger_id,
+)
 from companion_daemon.world_v2.media_v2 import (
     MediaArtifact,
     MediaAutomaticDeliveryApproval,
@@ -142,13 +146,43 @@ def test_share_materializes_only_after_delivered_receipt() -> None:
         projection=_projection(state), action=action, receipt=receipt,
     )
     assert len(events) == 1 and events[0][0] == "MediaDeliveryShared"
-    state = reduce_event(state, _event(events[0][0], events[0][2], "shared"))
+    shared_event = _event(events[0][0], events[0][2], "shared")
+    state = reduce_event(state, shared_event)
     assert state.media_deliveries[0].recipient_ref == "user:1"
+
+    trigger_event = media_delivery_interaction_trigger_event(source_event=shared_event)
+    state = reduce_event(state, trigger_event)
+    assert state.trigger_processes[-1].trigger_id == media_delivery_interaction_trigger_id(
+        world_id=WORLD, delivery_id=state.media_deliveries[0].delivery_id
+    )
 
     failed = receipt.model_copy(update={"receipt_id": "receipt:delivery:failed", "observed_state": "failed"})
     assert MediaDeliveryReceiptLifecycle().events_for_terminal_receipt(
         projection=_projection(state), action=action.model_copy(update={"state": "failed"}), receipt=failed,
     ) == ()
+
+
+def test_media_delivery_interaction_trigger_rejects_preview_or_unrelated_source() -> None:
+    approval = _approval()
+    state = reduce_event(
+        _state(), _event("MediaAutomaticDeliveryApproved", {"approval": approval.model_dump(mode="json")}, "approved-preview"),
+    )
+    action = _action(approval=approval)
+    receipt = ExecutionReceipt(
+        receipt_id="receipt:delivery:preview", result_id="result:delivery:preview", action_id=action.action_id,
+        provider="platform", provider_ref="platform:message:preview", source_event_id="callback:preview",
+        receipt_kind="terminal", observed_state="delivered", is_terminal=True, cost_actual=0,
+        received_at=NOW, raw_payload_hash="sha256:" + "6" * 64,
+    )
+    state = state.model_copy(update={"actions": (action,), "execution_receipts": (receipt,)})
+    share_type, _, share_payload = MediaDeliveryReceiptLifecycle().events_for_terminal_receipt(
+        projection=_projection(state), action=action, receipt=receipt,
+    )[0]
+    # A preview cannot impersonate the durable share authority even if it has
+    # the same delivery-shaped payload.
+    preview_source = _event("MediaPreviewGenerated", share_payload, "preview-source")
+    with pytest.raises(ValueError, match="MediaDeliveryShared"):
+        media_delivery_interaction_trigger_event(source_event=preview_source)
 
 
 @pytest.mark.parametrize("status, shared", [("delivered", True), ("failed", False), ("unknown", False)])
@@ -179,7 +213,14 @@ def test_settlement_uow_only_derives_media_share_from_delivered_receipt(status: 
         raw_payload_hash="sha256:" + ("4" if status == "delivered" else "5") * 64,
     )
     plan = SettlementPlanner(world_id=WORLD).plan(result, trigger_id=trigger_id, projection=_projection(state))
-    assert ("MediaDeliveryShared" in tuple(event.event_type for event in plan.events)) is shared
+    event_types = tuple(event.event_type for event in plan.events)
+    assert ("MediaDeliveryShared" in event_types) is shared
+    assert ("TriggerProcessOpened" in event_types) is shared
+    if shared:
+        delivery_index = event_types.index("MediaDeliveryShared")
+        trigger = plan.events[delivery_index + 1]
+        assert trigger.event_type == "TriggerProcessOpened"
+        assert trigger.payload()["process"]["process_kind"] == "media_delivery_interaction"
 
 
 def _projection(state: ReducerState):

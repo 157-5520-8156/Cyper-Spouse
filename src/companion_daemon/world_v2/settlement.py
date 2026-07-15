@@ -9,6 +9,7 @@ from .errors import InvalidActionTransition
 from .event_identity import domain_idempotency_key
 from .expression_lifecycle_runtime import ExpressionReceiptLifecycle
 from .media_delivery_runtime import MediaDeliveryReceiptLifecycle
+from .media_delivery_interaction import media_delivery_interaction_trigger_event
 from .schemas import (
     Action,
     ActionReconciliation,
@@ -276,7 +277,7 @@ class SettlementPlanner:
                 receipt_event=receipt_event,
             )
         )
-        events.extend(
+        media_events = tuple(
             self._event(
                 result,
                 trigger_id=trigger_id,
@@ -287,6 +288,15 @@ class SettlementPlanner:
             for event_type, suffix, payload in self._media_delivery_lifecycle.events_for_terminal_receipt(
                 projection=projection, action=action, receipt=receipt,
             )
+        )
+        events.extend(media_events)
+        # A viewer-facing continuation cannot be inferred from an artifact,
+        # preview, provider ack, or even a generic receipt.  It is opened in
+        # the same atomic settlement batch as the sole durable share claim.
+        events.extend(
+            media_delivery_interaction_trigger_event(source_event=event)
+            for event in media_events
+            if event.event_type == "MediaDeliveryShared"
         )
         if receipt.is_terminal:
             budget = BudgetSettlement(
