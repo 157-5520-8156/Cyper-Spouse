@@ -17,5 +17,10 @@ jobs:
         run: uv sync --dev
       - name: Verify mechanism closure catalog
         run: uv run python scripts/verify_mechanism_catalog.py
+      - name: Verify frozen World v2 offline scenario evidence
+        run: >-
+          uv run python scripts/verify_world_v2_scenarios.py
+          --workdir "$RUNNER_TEMP/world-v2-scenarios"
+          --output "$RUNNER_TEMP/world-v2-scenarios/manifest.json"
       - name: Run tests
         run: uv run pytest -q

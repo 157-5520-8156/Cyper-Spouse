@@ -71,6 +71,7 @@ from .platform_action_executor import (
     ProviderMediaActionExecutor, RoutedActionExecutor,
 )
 from .runtime import WorldRuntime
+from .replay_evidence import ReplayEvidence
 from .schemas import (
     BudgetAccount,
     ClockObservation,
@@ -317,6 +318,16 @@ class WorldV2TurnApplication:
         """Run one separately scheduled mental-state or memory work unit."""
 
         return await self._turns.drain_background_once()
+
+    def export_replay_evidence(self) -> ReplayEvidence:
+        """Export a cursor-consistent, read-only replay snapshot for evaluation.
+
+        Hosts and offline scenario runners need evidence, not ledger mutation
+        access.  Keeping this operation on the application seam preserves the
+        invariant that platform-facing code never writes through the ledger.
+        """
+
+        return self._ledger.export_replay_evidence()
 
     def close(self) -> None:
         self._life_content_store.close()

@@ -79,6 +79,12 @@ adapter 仍须从只读 fixture/replay/receipt/performance exports 重算这些 
 
 情绪 gold 的通过条件是 output、Proposal 或持久 `AffectEpisode` 至少一项有证据地响应一个允许 tag，且没有把竞争性解释断言为事实。它允许“我看见了但此刻不安慰”。
 
+### 离线机制回归（不是盲评）
+
+`world-v2-scenario-corpus.1` 冻结 120 个独立 scenario-turn（49 个 emotion-gold），每项都绑定输入与无前置事实 fixture 的 hash。`ScenarioRunner` 用固定 fake Flash 模型和固定 fake provider，为每项建立独立 SQLite World v2，再且只再经 `WorldV2TurnApplication.inbound → drain_actions_once → export_replay_evidence` 执行。它验证 Observation/Proposal/Action/receipt 的事件谓词、重复 ingress 的 effect-once、provider failure 的终态、replay hash 和 `test-economy-v1` 的一次主模型调用上限。
+
+CI 通过 `scripts/verify_world_v2_scenarios.py` 导出哈希 manifest。该产物只能作为机制回归证据，**绝不**代替 bare/archive/v2 的三 seed 输出、匿名化、两份独立评审或正式 `human-likeness-eval-v1` baseline；没有后者仍必须是评估 blocker。
+
 ## 评分与门槛
 
 Rubric 每项 1–5：`current_input_fit`、`subtext_awareness`、`subjectivity`、`continuity`、`non_scriptedness`、`fact_safety`、`world_synchronicity`。人味分只是这些独立评审分的标准化平均，绝不作为绝对“真人率”。
