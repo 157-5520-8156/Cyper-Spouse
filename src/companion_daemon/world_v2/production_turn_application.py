@@ -19,6 +19,8 @@ from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .action_pump import ActionExecutor, ActionPumpResult
 from .affect_trigger_runtime import AffectTriggerRunResult
 from .fact_draft_adapter import FactDraftChatModel, FactObservationProposalAdapter
+from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
+from .fact_memory_draft import FactMemoryDraftChatModel, FactMemoryDraftAdapter
 from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
 from .interaction_fact_trigger_runtime import FactTriggerRunResult
 from .affect_acceptance_runtime import AffectAcceptanceRuntime
@@ -126,6 +128,7 @@ def build_sqlite_world_v2_turn_application(
     appraisal_model: DeliberationModelAdapter | None = None,
     affect_model: DeliberationModelAdapter | None = None,
     fact_model: FactDraftChatModel | None = None,
+    memory_model: FactMemoryDraftChatModel | None = None,
     now: datetime,
 ) -> WorldV2TurnApplication:
     """Build one durable v2 chat lane without importing the legacy application.
@@ -243,6 +246,20 @@ def build_sqlite_world_v2_turn_application(
             fact_adapter=(
                 FactObservationProposalAdapter(model=fact_model)
                 if fact_model is not None
+                else None
+            ),
+            fact_memory_adapter=(
+                FactMemoryDraftAdapter(model=memory_model)
+                if fact_acceptance is not None and memory_model is not None
+                else None
+            ),
+            fact_memory_lifecycle=(
+                FactMemoryCandidateLifecycle(
+                    ledger=ledger,
+                    actor=config.fact_worker_owner,
+                    source="world-v2:fact-memory-lifecycle",
+                )
+                if fact_acceptance is not None and memory_model is not None
                 else None
             ),
             affect_deliberation_owner=(

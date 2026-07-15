@@ -4200,7 +4200,7 @@ def _validate_evidence_authority(
             )
             if (
                 committed is None
-                or committed.event_type not in FACT_PAYLOAD_MODELS
+                    or committed.event_type not in {*FACT_PAYLOAD_MODELS, "FactCommittedV2"}
                 or transition is None
                 or evidence.source_world_revision != committed.world_revision
                 or evidence.immutable_hash != _canonical_model_hash(transition.values_after)

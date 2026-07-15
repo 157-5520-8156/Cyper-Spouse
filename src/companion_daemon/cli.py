@@ -94,6 +94,7 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
         appraisal_model=AppraisalDraftDeliberationAdapter(model=flash_model),
         affect_model=AffectDraftDeliberationAdapter(model=flash_model),
         fact_model=flash_model,
+        memory_model=flash_model,
         now=now,
     )
     try:

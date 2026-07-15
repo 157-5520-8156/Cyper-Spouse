@@ -24,6 +24,8 @@ from .minimal_reply_events import minimal_reply_event_id
 from .appraisal_trigger import interaction_appraisal_trigger_events
 from .fact_trigger import interaction_fact_trigger_event
 from .fact_draft_adapter import FactObservationProposalAdapter
+from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
+from .fact_memory_draft import FactMemoryDraftAdapter
 from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
 from .interaction_fact_trigger_runtime import FactTriggerRunResult, InteractionFactTriggerRuntime
 from .batch_invariants import interaction_appraisal_trigger_identity
@@ -78,6 +80,8 @@ class WorldRuntime:
         interaction_fact_owner: str | None = None,
         fact_acceptance: FactV2AcceptanceRuntime | None = None,
         fact_adapter: FactObservationProposalAdapter | None = None,
+        fact_memory_adapter: FactMemoryDraftAdapter | None = None,
+        fact_memory_lifecycle: FactMemoryCandidateLifecycle | None = None,
         affect_deliberation_owner: str | None = None,
         affect_worker: AffectDeliberationWorker | None = None,
         action_executor: ActionExecutor | None = None,
@@ -126,6 +130,10 @@ class WorldRuntime:
         self._interaction_fact_owner = interaction_fact_owner
         self._fact_acceptance = fact_acceptance
         self._fact_adapter = fact_adapter
+        if (fact_memory_adapter is None) != (fact_memory_lifecycle is None):
+            raise ValueError("Fact memory adapter and lifecycle must be configured together")
+        self._fact_memory_adapter = fact_memory_adapter
+        self._fact_memory_lifecycle = fact_memory_lifecycle
         if affect_deliberation_owner is not None and not affect_deliberation_owner:
             raise ValueError("affect deliberation owner must not be empty")
         self._affect_deliberation_owner = affect_deliberation_owner
@@ -186,6 +194,8 @@ class WorldRuntime:
                     ledger=self._fact_acceptance.ledger,
                     acceptance=self._fact_acceptance,
                     adapter=self._fact_adapter,
+                    memory_adapter=self._fact_memory_adapter,
+                    memory_lifecycle=self._fact_memory_lifecycle,
                     owner_id=self._interaction_fact_owner,
                 ).drain_one()
                 if fact.status != "idle":

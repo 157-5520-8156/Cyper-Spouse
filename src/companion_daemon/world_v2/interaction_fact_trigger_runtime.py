@@ -17,6 +17,8 @@ from typing import Literal
 from .event_identity import domain_idempotency_key
 from .fact_accepted_contracts import rehydrate_fact_commit_intent_v2_json
 from .fact_draft_adapter import FactObservationProposalAdapter
+from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
+from .fact_memory_draft import FactMemoryDraftAdapter
 from .fact_proposal_audit_v2 import build_fact_commit_proposal_recorded_event_v2
 from .fact_reducers import INSTALLED_FACT_PREDICATE_CARDINALITY
 from .fact_v2_acceptance_envelope_authority import FactV2AcceptanceEnvelopeRequestV2
@@ -49,6 +51,8 @@ class InteractionFactTriggerRuntime:
         ledger: SQLiteWorldLedger,
         acceptance: FactV2AcceptanceRuntime,
         adapter: FactObservationProposalAdapter,
+        memory_adapter: FactMemoryDraftAdapter | None = None,
+        memory_lifecycle: FactMemoryCandidateLifecycle | None = None,
         owner_id: str,
         lease_seconds: int = 120,
         source: str = "world-v2:interaction-fact-trigger-runtime",
@@ -57,9 +61,13 @@ class InteractionFactTriggerRuntime:
             raise ValueError("Fact trigger must use the acceptance runtime's exact SQLite ledger")
         if not owner_id or lease_seconds <= 0:
             raise ValueError("Fact trigger runtime needs an owner and positive lease")
+        if (memory_adapter is None) != (memory_lifecycle is None):
+            raise ValueError("Fact memory adapter and lifecycle must be configured together")
         self._ledger = ledger
         self._acceptance = acceptance
         self._adapter = adapter
+        self._memory_adapter = memory_adapter
+        self._memory_lifecycle = memory_lifecycle
         self._owner_id = owner_id
         self._lease_seconds = lease_seconds
         self._source = source
@@ -183,14 +191,73 @@ class InteractionFactTriggerRuntime:
             prepared=prepared,
             sources=sources,
         )
+        if self._memory_adapter is not None:
+            assert self._memory_lifecycle is not None
+            try:
+                await self._materialize_memory(
+                    accepted=accepted,
+                    observation=observation,
+                    source_event=source_event,
+                )
+            except ValueError:
+                # Fact acceptance is already durable and source-proven. A
+                # malformed retention classification therefore means only
+                # that this source receives no retrieval candidate; it must
+                # not turn into a retry loop or undo the Fact.
+                pass
+        completion_cursor = self._cursor(await self._project())
         await self._complete(
             process=active,
             source_event=source_event,
-            cursor=self._cursor_from_commit(accepted),
+            cursor=completion_cursor,
             outcome_ref=f"outcome:{active.trigger_id}:accepted:{proposal.proposal_id}",
         )
         return FactTriggerRunResult(
             trigger_id=active.trigger_id, status="processed", work_status="accepted"
+        )
+
+    async def _materialize_memory(self, *, accepted, observation: Observation, source_event: WorldEvent) -> None:
+        if observation.text is None:
+            return
+        projection = await self._project()
+        fact = next(
+            (
+                item
+                for item in projection.facts
+                if item.origin.accepted_event_ref in accepted.event_ids
+            ),
+            None,
+        )
+        if fact is None:
+            raise ValueError("accepted Fact has no projected authority")
+        transition = next(
+            item
+            for item in projection.fact_transitions
+            if item.transition_id == fact.origin.transition_id
+        )
+        stored = await self._lookup_event_commit(fact.origin.accepted_event_ref)
+        if stored is None:
+            raise ValueError("accepted Fact event is unavailable")
+        fact_event, fact_commit = stored
+        assert self._memory_adapter is not None
+        draft = await self._memory_adapter.classify(
+            predicate_code=fact.values.predicate_code,
+            source_text=observation.text,
+        )
+        if draft is None:
+            return
+        assert self._memory_lifecycle is not None
+        await asyncio.to_thread(
+            self._memory_lifecycle.accept,
+            fact=fact,
+            transition=transition,
+            fact_event=fact_event,
+            fact_world_revision=fact_commit.world_revision,
+            draft=draft,
+            logical_time=source_event.logical_time,
+            created_at=source_event.created_at,
+            trace_id=source_event.trace_id,
+            correlation_id=source_event.correlation_id,
         )
 
     async def _source_observation(

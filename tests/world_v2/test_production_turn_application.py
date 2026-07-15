@@ -15,12 +15,13 @@ from companion_daemon.world_v2.deliberation import (
 from companion_daemon.world_v2.chat_model_deliberation_adapter import ChatModelDeliberationAdapter
 from companion_daemon.world_v2.appraisal_chat_model_adapter import AppraisalDraftDeliberationAdapter
 from companion_daemon.world_v2.affect_chat_model_adapter import AffectDraftDeliberationAdapter
+from companion_daemon.world_v2.memory_retrieval import MemoryRetrievalCompiler
 from companion_daemon.world_v2.platform_action_executor import PlatformDispatchReceipt
 from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
-from companion_daemon.world_v2.schemas import ClockObservation
+from companion_daemon.world_v2.schemas import ClockObservation, ProjectionCursor
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn
 
@@ -165,6 +166,31 @@ class _FactChat:
                 "privacy_class": "personal",
                 "confidence": 8600,
                 "rationale": "The user stated an enduring preference.",
+            },
+            ensure_ascii=False,
+        )
+
+
+class _MemoryChat:
+    model = "test-memory"
+
+    async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        assert temperature == 0.15
+        return json.dumps(
+            {
+                "retain": True,
+                "cue_kind": "future_utility",
+                "retention_rationales": ["future_utility"],
+                "salience": {
+                    "autobiographical_relevance_bp": 6200,
+                    "relationship_relevance_bp": 1800,
+                    "emotional_residue_bp": 0,
+                    "unfinished_business_bp": 0,
+                    "recurrence_bp": 1200,
+                    "novelty_bp": 2800,
+                    "future_utility_bp": 7600,
+                    "world_continuity_bp": 1000,
+                },
             },
             ensure_ascii=False,
         )
@@ -358,6 +384,7 @@ async def test_production_application_accepts_a_fact_outside_the_visible_reply_l
         main_model=reply_model,
         quick_recovery=reply_model,
         fact_model=_FactChat(),
+        memory_model=_MemoryChat(),
         transport=_DeliveredTransport(),
         now=NOW,
     )
@@ -381,11 +408,24 @@ async def test_production_application_accepts_a_fact_outside_the_visible_reply_l
     assert background.work_status == "accepted"
     ledger = SQLiteWorldLedger(path=path, world_id=_config().world_id)
     try:
-        facts = ledger.project().facts
+        projection = ledger.project()
+        retrieval = MemoryRetrievalCompiler(ledger=ledger).compile(
+            cursor=ProjectionCursor(
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                ledger_sequence=projection.ledger_sequence,
+            ),
+            candidates=projection.memory_candidates,
+            viewer_privacy_ceiling="private",
+            projection=projection,
+        )
     finally:
         ledger.close()
-    assert len(facts) == 1
-    assert facts[0].values.predicate_code == "preference.likes"
+    assert len(projection.facts) == 1
+    assert projection.facts[0].values.predicate_code == "preference.likes"
+    assert len(projection.memory_candidates) == 1
+    assert projection.memory_candidates[0].values.status == "active"
+    assert retrieval.items[0].source_excerpts[0].text == "我最近很喜欢喝乌龙茶。"
 
 
 @pytest.mark.asyncio

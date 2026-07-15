@@ -623,7 +623,7 @@ def _resolve_source(
             (item for item in facts if item.fact_id == binding.source_id), None
         )
         if (
-            authority.event_type not in FACT_PAYLOAD_MODELS
+            authority.event_type not in {*FACT_PAYLOAD_MODELS, "FactCommittedV2"}
             or transition is None
             or _canonical_hash(transition.values_after) != binding.source_values_hash
         ):
