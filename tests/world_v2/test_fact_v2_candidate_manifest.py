@@ -36,6 +36,8 @@ from companion_daemon.world_v2.fact_v2_reducers import (
 )
 from companion_daemon.world_v2.fact_v2_atomic_recorder import FactV2AtomicRecorder
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
+from companion_daemon.world_v2.batch_invariants import validate_commit_batch
+from companion_daemon.world_v2.event_catalog import event_contract
 from companion_daemon.world_v2.fact_v2_candidate_manifest import (
     FACT_V2_CANDIDATE_EVENT_TYPE,
     FactV2AcceptanceEnvelopeCandidate,
@@ -485,4 +487,23 @@ def test_atomic_recorder_materializes_exact_acceptance_then_fact_batch(tmp_path)
     assert events[1].causation_id == events[0].event_id
     assert events[1].idempotency_key == builder.inspect(handle=bundle_handle).effect_idempotency_key
     assert commit_id.startswith("commit:accepted-v3:")
+    for event in events:
+        event_contract(event.event_type).validate_payload(event.payload())
+    validate_commit_batch(
+        events,
+        expected_world_revision=_cursor(ledger).world_revision,
+        accepted_manifest_v3_authorized=True,
+    )
+    with pytest.raises(ValueError, match="accepted_manifest.recorder_capability_required"):
+        validate_commit_batch(
+            events,
+            expected_world_revision=_cursor(ledger).world_revision,
+            accepted_manifest_v3_authorized=False,
+        )
+    with pytest.raises(ValueError, match="v3_fact_batch_must_be_ordered"):
+        validate_commit_batch(
+            tuple(reversed(events)),
+            expected_world_revision=_cursor(ledger).world_revision,
+            accepted_manifest_v3_authorized=True,
+        )
     ledger.close()

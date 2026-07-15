@@ -42,6 +42,8 @@ from .life_events import LIFE_PAYLOAD_MODELS
 from .memory_events import MEMORY_CANDIDATE_PAYLOAD_MODELS
 from .proposal_audit_schemas import ModelResultRecordedPayload, ProposalRecordedV2Payload
 from .acceptance_manifest import parse_acceptance_manifest_v2
+from .accepted_effect_contracts import rehydrate_acceptance_manifest_v3
+from .fact_accepted_contracts import FactCommitMaterializedPayloadV2
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .thread_events import THREAD_MECHANICAL_PAYLOAD_MODELS, THREAD_PAYLOAD_MODELS
 from .schemas import (
@@ -107,12 +109,13 @@ class EventContract:
         return schema
 
     def validate_payload(self, payload: Mapping[str, object]) -> None:
-        if (
-            self.event_type == "AcceptanceRecorded"
-            and "manifest_version" in payload
-            and payload.get("manifest_version") != "acceptance-manifest.2"
-        ):
-            raise ValueError("acceptance_manifest.unsupported_manifest_version")
+        if self.event_type == "AcceptanceRecorded" and "manifest_version" in payload:
+            manifest_version = payload.get("manifest_version")
+            if manifest_version not in {
+                "acceptance-manifest.2",
+                "acceptance-manifest.3",
+            }:
+                raise ValueError("acceptance_manifest.unsupported_manifest_version")
         model = (
             ProposalRecordedV2Payload
             if self.event_type == "ProposalRecorded"
@@ -126,6 +129,16 @@ class EventContract:
             and payload.get("manifest_version") == "acceptance-manifest.2"
         ):
             parse_acceptance_manifest_v2(dict(payload))
+            return
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version") == "acceptance-manifest.3"
+        ):
+            # The catalog only validates closed wire bytes.  The ledger batch
+            # invariant remains the authorization boundary for accepted v3
+            # effects, so ordinary callers cannot obtain authority merely by
+            # passing a syntactically valid manifest here.
+            rehydrate_acceptance_manifest_v3(dict(payload))
             return
         model.model_validate_json(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -217,6 +230,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
             "ProposalRecordedPayload", {"proposal_id": _ID}, allow_audit_extensions=True
         ),
         "FactCommitProposalRecorded": FactCommitProposalRecordedPayloadV2,
+        "FactCommittedV2": FactCommitMaterializedPayloadV2,
         "ModelResultRecorded": ModelResultRecordedPayload,
         "AcceptanceRecorded": _payload_model(
             "AcceptanceRecordedPayload",
@@ -375,6 +389,9 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
             event_type: "world_id+fact_id+expected_entity_revision+transition_id"
             for event_type in FACT_PAYLOAD_MODELS
         },
+        "FactCommittedV2": (
+            "world_id+payload_contract+fact_id+transition_id+materialized_change_hash"
+        ),
         **{
             event_type: "world_id+candidate_id+expected_entity_revision+transition_id"
             for event_type in MEMORY_CANDIDATE_PAYLOAD_MODELS
@@ -642,6 +659,14 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 ),
                 evidence_types=("decision_proposal",),
                 successors=("AcceptanceRecorded",),
+            ),
+            _contract(
+                "FactCommittedV2",
+                "accepted_fact_v2_recorder",
+                "world",
+                "FactCommitMaterializedPayloadV2",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=("accepted_manifest_v3", "committed_world_event"),
             ),
             _contract(
                 "AcceptanceRecorded",

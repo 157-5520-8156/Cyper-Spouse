@@ -6,7 +6,12 @@ from collections.abc import Sequence
 import hashlib
 import json
 
+from .accepted_effect_contracts import rehydrate_acceptance_manifest_v3
 from .experience_events import ExperienceCommittedPayload
+from .fact_accepted_contracts import (
+    fact_commit_event_payload_hash,
+    rehydrate_fact_commit_materialized_v2_json,
+)
 from .life_events import WorldOccurrenceSettledPayload
 from .proposal_audit_schemas import (
     ModelResultRecordedPayload,
@@ -33,10 +38,17 @@ def validate_commit_batch(
 ) -> None:
     """Require every settled lived-world occurrence to schedule its appraisal."""
 
+    if type(accepted_manifest_v3_authorized) is not bool:
+        raise ValueError("accepted manifest v3 authorization must be an exact boolean")
     if not accepted_manifest_v3_authorized:
         reject_accepted_manifest_v3_without_recorder(events)
     _validate_deliberation_audit_transaction(events)
     _validate_acceptance_manifest_v2_batch(events)
+    _validate_authorized_fact_manifest_v3_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
 
     appraisal_triggers: dict[str, list[tuple[str, str, str | None]]] = {}
     experiences: list[ExperienceCommittedPayload] = []
@@ -309,7 +321,8 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
         for event in events
         if event.event_type == "AcceptanceRecorded"
         and "manifest_version" in event.payload()
-        and event.payload().get("manifest_version") != "acceptance-manifest.2"
+        and event.payload().get("manifest_version")
+        not in {"acceptance-manifest.2", "acceptance-manifest.3"}
     ]
     if unknown:
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -326,6 +339,92 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
     manifest = parse_acceptance_manifest_v2(manifests[0].payload())
     if manifest.status != "accepted" and manifest.authorized_effects:
         raise ValueError("non-accepted manifest cannot carry effects")
+
+
+def _validate_authorized_fact_manifest_v3_batch(
+    events: Sequence[WorldEvent],
+    *,
+    expected_world_revision: int,
+    authorized: bool,
+) -> None:
+    """Bind the first accepted-v3 vertical to its one exact Fact event.
+
+    ``AcceptanceManifestV3`` is a broad, inert compiler contract.  This ledger
+    seam intentionally installs only its first production vertical: exactly one
+    accepted manifest followed immediately by exactly one ``FactCommittedV2``.
+    The opaque batch capability selects this code path; a complete CAS cursor
+    or a syntactically valid manifest is not authorization by itself.
+    """
+
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == "acceptance-manifest.3"
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("accepted_manifest.recorder_capability_required")
+    if len(manifests) != 1 or len(events) != 2:
+        raise ValueError("accepted_manifest.v3_fact_batch_must_be_exact")
+    acceptance, fact_event = events
+    if acceptance is not manifests[0] or fact_event.event_type != "FactCommittedV2":
+        raise ValueError("accepted_manifest.v3_fact_batch_must_be_ordered")
+    try:
+        manifest = rehydrate_acceptance_manifest_v3(acceptance.payload())
+        payload = rehydrate_fact_commit_materialized_v2_json(fact_event.payload_json)
+    except Exception as exc:
+        raise ValueError("accepted_manifest.v3_fact_batch_payload_is_invalid") from exc
+    if (
+        manifest.status != "accepted"
+        or manifest.evaluated_world_revision != expected_world_revision
+        or payload.evaluated_world_revision != expected_world_revision
+        or payload.acceptance_id != manifest.acceptance_id
+        or fact_event.causation_id != acceptance.event_id
+    ):
+        raise ValueError("accepted_manifest.v3_fact_batch_authority_is_not_pinned")
+    if fact_commit_event_payload_hash(payload) != fact_event.payload_hash:
+        raise ValueError("accepted_manifest.v3_fact_payload_hash_is_not_exact")
+    if len(manifest.authorized_effects) != 1:
+        raise ValueError("accepted_manifest.v3_fact_requires_one_effect")
+    effect = manifest.authorized_effects[0]
+    if (
+        effect.ordinal != 0
+        or effect.role != "domain_mutation"
+        or effect.event_type != "FactCommittedV2"
+        or effect.event_id != fact_event.event_id
+        or effect.payload_hash != fact_event.payload_hash
+        or len(effect.authority_refs) != 1
+    ):
+        raise ValueError("accepted_manifest.v3_fact_effect_does_not_match_event")
+    authority = effect.authority_refs[0]
+    if (
+        authority.proposal_id != payload.proposal_id
+        or authority.authority_kind != "change"
+        or authority.authority_id != payload.change_id
+        or authority.authority_hash != payload.full_change_authority_hash
+    ):
+        raise ValueError("accepted_manifest.v3_fact_effect_does_not_match_payload")
+    proposals = tuple(
+        proposal for proposal in manifest.proposals if proposal.proposal_id == payload.proposal_id
+    )
+    if len(proposals) != 1:
+        raise ValueError("accepted_manifest.v3_fact_proposal_is_not_exact")
+    proposal = proposals[0]
+    matching_changes = tuple(
+        change
+        for change in proposal.changes
+        if change.change_id == payload.change_id
+        and change.full_change_authority_hash == payload.full_change_authority_hash
+    )
+    if (
+        proposal.evaluated_world_revision != expected_world_revision
+        or len(matching_changes) != 1
+        or matching_changes[0].kind != "fact_transition"
+        or matching_changes[0].transition != "commit"
+    ):
+        raise ValueError("accepted_manifest.v3_fact_change_authority_is_not_exact")
 
 
 def reject_accepted_manifest_v3_without_recorder(events: Sequence[WorldEvent]) -> None:
