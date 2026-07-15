@@ -25,6 +25,12 @@ from companion_daemon.world_v2.fact_v2_production_plan import (
     FactV2ProductionPlanError,
     FactV2ProductionPlanIssuer,
 )
+from companion_daemon.world_v2.fact_v2_accepted_manifest_builder import (
+    FACT_V2_ACCEPTED_EVENT_TYPE,
+    FactV2AcceptedManifestBuilder,
+    FactV2AcceptedManifestBuilderError,
+    FactV2ProductionAcceptedBundleHandle,
+)
 from companion_daemon.world_v2.fact_v2_candidate_manifest import (
     FACT_V2_CANDIDATE_EVENT_TYPE,
     FactV2AcceptanceEnvelopeCandidate,
@@ -359,4 +365,42 @@ def test_production_plan_revalidates_opaque_fact_capabilities(tmp_path) -> None:
             operation(plan_handle)
     with pytest.raises(FactV2ProductionPlanError, match="another issuer"):
         issuer.inspect(handle=FactV2ProductionExecutionPlanHandle())
+    ledger.close()
+
+
+def test_manifest_builder_derives_a_canonical_inert_production_bundle(tmp_path) -> None:
+    ledger, registry, reader, proposal_handle, prepared, sources, candidate, _ = _bound(tmp_path)
+    envelope_request = FactV2AcceptanceEnvelopeRequestV2.model_validate(
+        candidate.model_dump(mode="python")
+        | {"acceptance_causation_id": reader.audit(handle=proposal_handle).event_ref},
+        strict=True,
+    )
+    envelope_issuer = FactV2AcceptanceEnvelopeAuthorityIssuer()
+    envelope_handle = envelope_issuer.issue(
+        proposal_reader=reader, proposal_handle=proposal_handle, request=envelope_request
+    )
+    plan_issuer = FactV2ProductionPlanIssuer(
+        registry=registry, proposal_reader=reader, envelope_issuer=envelope_issuer
+    )
+    plan_handle = plan_issuer.issue(
+        envelope_handle=envelope_handle,
+        proposal_handle=proposal_handle,
+        prepared=prepared,
+        sources=sources,
+    )
+    builder = FactV2AcceptedManifestBuilder(plan_issuer=plan_issuer)
+    bundle_handle = builder.build(plan_handle=plan_handle)
+
+    bundle = builder.revalidate(handle=bundle_handle)
+    assert bundle.manifest.manifest_version == "acceptance-manifest.3"
+    assert bundle.manifest.authorized_effects[0].event_type == FACT_V2_ACCEPTED_EVENT_TYPE
+    assert bundle.plan.payload.acceptance_id == envelope_request.acceptance_id
+    assert not hasattr(bundle_handle, "to_world_event")
+    with pytest.raises(FactV2AcceptedManifestBuilderError, match="another builder"):
+        FactV2AcceptedManifestBuilder(plan_issuer=plan_issuer).inspect(handle=bundle_handle)
+    for operation in (copy.copy, copy.deepcopy, pickle.dumps):
+        with pytest.raises(TypeError):
+            operation(bundle_handle)
+    with pytest.raises(FactV2AcceptedManifestBuilderError, match="another builder"):
+        builder.inspect(handle=FactV2ProductionAcceptedBundleHandle())
     ledger.close()
