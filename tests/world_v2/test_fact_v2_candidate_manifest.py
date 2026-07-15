@@ -14,6 +14,12 @@ from companion_daemon.world_v2.fact_proposal_audit_v2 import (
     FactCommitProposalAuthorityReaderV2,
     build_fact_commit_proposal_recorded_event_v2,
 )
+from companion_daemon.world_v2.fact_v2_acceptance_envelope_authority import (
+    FactV2AcceptanceEnvelopeAuthorityError,
+    FactV2AcceptanceEnvelopeAuthorityHandle,
+    FactV2AcceptanceEnvelopeAuthorityIssuer,
+    FactV2AcceptanceEnvelopeRequestV2,
+)
 from companion_daemon.world_v2.fact_v2_candidate_manifest import (
     FACT_V2_CANDIDATE_EVENT_TYPE,
     FactV2AcceptanceEnvelopeCandidate,
@@ -278,4 +284,36 @@ def test_candidate_builder_requires_exact_full_cursor(tmp_path) -> None:
         builder.build(
             envelope=bad, proposal_handle=handle, prepared=prepared, sources=sources
         )
+    ledger.close()
+
+
+def test_production_envelope_is_pinned_to_the_fact_proposal_audit(tmp_path) -> None:
+    ledger, _, reader, proposal_handle, _, _, candidate, _ = _bound(tmp_path)
+    request = FactV2AcceptanceEnvelopeRequestV2.model_validate(
+        candidate.model_dump(mode="python")
+        | {"acceptance_causation_id": reader.audit(handle=proposal_handle).event_ref},
+        strict=True,
+    )
+    issuer = FactV2AcceptanceEnvelopeAuthorityIssuer()
+    handle = issuer.issue(
+        proposal_reader=reader, proposal_handle=proposal_handle, request=request
+    )
+
+    envelope = issuer.envelope(handle=handle)
+    assert envelope.cursor == candidate.cursor
+    assert envelope.proposal_audit_event_ref == request.acceptance_causation_id
+    assert issuer.owns(handle)
+    with pytest.raises(FactV2AcceptanceEnvelopeAuthorityError, match="proposal audit"):
+        issuer.issue(
+            proposal_reader=reader,
+            proposal_handle=proposal_handle,
+            request=request.model_copy(update={"acceptance_id": "acceptance:wrong-cause", "acceptance_causation_id": "cause:forged"}),
+        )
+    with pytest.raises(FactV2AcceptanceEnvelopeAuthorityError, match="another issuer"):
+        FactV2AcceptanceEnvelopeAuthorityIssuer().envelope(handle=handle)
+    for operation in (copy.copy, copy.deepcopy, pickle.dumps):
+        with pytest.raises(TypeError):
+            operation(handle)
+    with pytest.raises(FactV2AcceptanceEnvelopeAuthorityError, match="another issuer"):
+        issuer.envelope(handle=FactV2AcceptanceEnvelopeAuthorityHandle())
     ledger.close()
