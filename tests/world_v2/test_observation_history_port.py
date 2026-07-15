@@ -19,6 +19,11 @@ from companion_daemon.world_v2.ledger import (
     WorldLedger,
     canonical_event_json,
 )
+from companion_daemon.world_v2.ledger_prefix_proof import (
+    ObservationLocatorValueV1,
+    observation_locator_key,
+    verify_checkpoint_in_prefix,
+)
 from companion_daemon.world_v2.schemas import ProjectionCursor, WorldEvent
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 
@@ -135,6 +140,33 @@ def test_locator_uses_domain_identity_and_returns_exact_envelope(
                 canonical_event_json(event).encode("utf-8")
             ).hexdigest(),
         ),
+    )
+
+
+def test_memory_ledger_atomically_builds_checkpoint_and_locator_proofs() -> None:
+    memory = WorldLedger.in_memory(world_id=WORLD)
+    event = _event("event:proof", "ObservationRecorded", {"observation_id": "proof"})
+    cursor = _commit(memory, (event,))
+    checkpoint = memory._prefix_checkpoints[(cursor.world_revision, cursor.deliberation_revision, cursor.ledger_sequence)]
+    verify_checkpoint_in_prefix(
+        checkpoint=checkpoint,
+        proof=memory._prefix_mmr.prove(checkpoint.mmr_leaf_count - 1),
+        expected_root=memory._prefix_mmr.root,
+        expected_world_id=WORLD,
+        expected_commit_id=next(iter(memory._commits)),
+        expected_cursor=(cursor.world_revision, cursor.deliberation_revision, cursor.ledger_sequence),
+    )
+    key = observation_locator_key(world_id=WORLD, event_type=event.event_type, idempotency_key=event.idempotency_key)
+    stored = memory._by_event_id[event.event_id]
+    leaf_hash = memory._prefix_mmr.nodes[(0, 0)]
+    memory._prefix_locator_map.prove(key).verify_membership(
+        expected_root=memory._prefix_locator_map.root,
+        expected_key=key,
+        expected_value_hash=ObservationLocatorValueV1(
+            observation_id="proof", event_type=event.event_type, event_id=event.event_id,
+            ledger_sequence=stored.ledger_sequence, world_revision=stored.world_revision,
+            deliberation_revision=stored.deliberation_revision, event_leaf_index=0, event_leaf_hash=leaf_hash,
+        ).digest(),
     )
 
 

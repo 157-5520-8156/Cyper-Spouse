@@ -12,6 +12,16 @@ from typing import Protocol
 from .batch_invariants import validate_commit_batch
 from .errors import ConcurrencyConflict, IdempotencyConflict, LedgerIntegrityError
 from .event_identity import domain_idempotency_key, validate_event_identity
+from .ledger_prefix_proof import (
+    IncrementalMmrV1,
+    IncrementalSparseMerkleMapV1,
+    LedgerLeafV1,
+    ObservationLocatorValueV1,
+    PrefixCheckpointLeafV1,
+    commit_result_hash_v1,
+    observation_locator_key,
+    ordered_event_ids_hash_v1,
+)
 from .reducers import (
     REDUCER_BUNDLE_VERSION,
     RevisionClass,
@@ -381,6 +391,9 @@ class WorldLedger:
         self._commit_events: dict[str, tuple[_StoredEvent, ...]] = {}
         self._event_commit_ids: dict[str, str] = {}
         self._commit_cursors: set[tuple[int, int, int]] = {(0, 0, 0)}
+        self._prefix_mmr = IncrementalMmrV1()
+        self._prefix_locator_map = IncrementalSparseMerkleMapV1()
+        self._prefix_checkpoints: dict[tuple[int, int, int], PrefixCheckpointLeafV1] = {}
         self._world_revision = 0
         self._deliberation_revision = 0
         self._state = ReducerState()
@@ -472,18 +485,60 @@ class WorldLedger:
                 )
             )
 
+        result = CommitResult(
+            world_revision=next_world_revision,
+            deliberation_revision=next_deliberation_revision,
+            ledger_sequence=len(self._events) + len(staged),
+            event_ids=tuple(event.event_id for event in events),
+        )
+        # Mutations below cannot fail after reducer/identity validation: MMR and
+        # sparse-map appends only consume deterministic, bounded ledger values.
+        prefix_leaf_hashes: list[tuple[_StoredEvent, bytes, int]] = []
+        for stored in staged:
+            event = stored.event
+            leaf_hash = LedgerLeafV1(
+                world_id=self._world_id,
+                ledger_sequence=stored.ledger_sequence,
+                world_revision=stored.world_revision,
+                deliberation_revision=stored.deliberation_revision,
+                commit_id=commit_id,
+                event_id=event.event_id,
+                idempotency_key=event.idempotency_key,
+                event_envelope_hash=hashlib.sha256(canonical_event_json(event).encode("utf-8")).hexdigest(),
+            ).digest()
+            prefix_leaf_hashes.append((stored, leaf_hash, self._prefix_mmr.leaf_count + len(prefix_leaf_hashes)))
+        for stored, leaf_hash, leaf_index in prefix_leaf_hashes:
+            self._prefix_mmr.append(leaf_hash)
+            event = stored.event
+            observation_id = _observation_id(event)
+            if observation_id is not None:
+                self._prefix_locator_map.put(
+                    key=observation_locator_key(world_id=self._world_id, event_type=event.event_type, idempotency_key=event.idempotency_key),
+                    value_hash=ObservationLocatorValueV1(
+                        observation_id=observation_id, event_type=event.event_type, event_id=event.event_id,
+                        ledger_sequence=stored.ledger_sequence, world_revision=stored.world_revision,
+                        deliberation_revision=stored.deliberation_revision, event_leaf_index=leaf_index,
+                        event_leaf_hash=leaf_hash,
+                    ).digest(),
+                )
+        checkpoint = PrefixCheckpointLeafV1(
+            world_id=self._world_id, commit_id=commit_id,
+            first_ledger_sequence=staged[0].ledger_sequence, last_ledger_sequence=staged[-1].ledger_sequence,
+            world_revision=result.world_revision, deliberation_revision=result.deliberation_revision,
+            request_hash=request_hash,
+            result_hash=commit_result_hash_v1(world_revision=result.world_revision, deliberation_revision=result.deliberation_revision, ledger_sequence=result.ledger_sequence, event_ids=result.event_ids),
+            ordered_event_ids_hash=ordered_event_ids_hash_v1(result.event_ids),
+            locator_root=self._prefix_locator_map.root.hex(), mmr_leaf_count=self._prefix_mmr.leaf_count + 1,
+        )
+        self._prefix_mmr.append(checkpoint.digest())
+
         self._events.extend(staged)
         self._by_idempotency.update((stored.event.idempotency_key, stored) for stored in staged)
         self._by_event_id.update((stored.event.event_id, stored) for stored in staged)
         self._world_revision = next_world_revision
         self._deliberation_revision = next_deliberation_revision
         self._state = next_state
-        result = CommitResult(
-            world_revision=self._world_revision,
-            deliberation_revision=self._deliberation_revision,
-            ledger_sequence=len(self._events),
-            event_ids=tuple(event.event_id for event in events),
-        )
+        self._prefix_checkpoints[(result.world_revision, result.deliberation_revision, result.ledger_sequence)] = checkpoint
         self._commits[commit_id] = _StoredCommit(request_hash=request_hash, result=result)
         self._commit_events[commit_id] = tuple(staged)
         self._event_commit_ids.update((stored.event.event_id, commit_id) for stored in staged)
