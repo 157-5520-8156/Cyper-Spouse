@@ -6,17 +6,21 @@ import pytest
 
 from companion_daemon.world_v2.action_pump import ActionPump
 from companion_daemon.world_v2.expression_reconsideration import (
+    expression_beat_is_gated,
     expression_reconsideration_events_for_observation,
     expression_reconsideration_trigger_event,
     expression_reconsideration_trigger_id,
 )
 from companion_daemon.world_v2.expression_reconsideration_runtime import (
+    ExpressionReconsiderationDecision,
     ExpressionReconsiderationRuntime,
 )
 from companion_daemon.world_v2.reducers import ReducerState, make_projection, reduce_event
 from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import (
     Action,
+    BudgetAccount,
+    BudgetReservation,
     CommitResult,
     ExpressionBeatLifecycleEntry,
     ExpressionBeatProjection,
@@ -387,6 +391,91 @@ async def test_only_explicit_reviewer_continuation_releases_expression_gate() ->
 
     assert result.status == "continued"
     assert ledger.project().trigger_processes[0].state == "terminal"
+
+
+class _CancelReviewer:
+    async def review(self, **_kwargs):
+        return ExpressionReconsiderationDecision(
+            disposition="supersede",
+            rationale_ref="decision-rationale:interjection:1",
+            replacement_plan_ref="proposal:expression:replacement:1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_replacement_decision_atomically_cancels_undispatched_action_and_releases_budget() -> None:
+    """An LLM may reject stale prose, but cannot alter a dispatched payload."""
+
+    observation, source_event = _observation()
+    trigger_event = expression_reconsideration_trigger_event(
+        world_id=WORLD_ID,
+        source_event=source_event,
+        observation=observation,
+        plan_id="plan:expression:1",
+        beat_id="beat:expression:2",
+    )
+    action = _action()
+    state = _state().model_copy(
+        update={
+            "budget_accounts": (
+                BudgetAccount(
+                    account_id="account:chat:1", category="chat", window_id="window:1", limit=100,
+                    reserved=10,
+                ),
+            ),
+            "budget_reservations": (
+                BudgetReservation(
+                    reservation_id=action.budget_reservation_id, account_id="account:chat:1",
+                    action_id=action.action_id, category="chat", amount_limit=10,
+                ),
+            ),
+        }
+    )
+    ledger = _TriggerLedger(state)
+    ledger.commit((source_event, trigger_event))
+
+    result = await ExpressionReconsiderationRuntime(
+        ledger=ledger, owner_id="worker:reconsideration", reviewer=_CancelReviewer()
+    ).drain_one()
+
+    projection = ledger.project()
+    assert result.status == "replacement_required"
+    assert result.disposition == "supersede"
+    assert projection.actions[0].state == "cancelled"
+    assert projection.budget_reservations[0].state == "released"
+    assert projection.budget_accounts[0].reserved == 0
+    assert projection.trigger_processes[0].state == "terminal"
+    assert "replacement:1" in (projection.trigger_processes[0].runtime_outcome_ref or "")
+
+
+class _DeferReviewer:
+    async def review(self, **_kwargs):
+        return ExpressionReconsiderationDecision(disposition="defer")
+
+
+@pytest.mark.asyncio
+async def test_defer_is_durable_and_keeps_the_old_payload_gated() -> None:
+    observation, source_event = _observation()
+    trigger_event = expression_reconsideration_trigger_event(
+        world_id=WORLD_ID,
+        source_event=source_event,
+        observation=observation,
+        plan_id="plan:expression:1",
+        beat_id="beat:expression:2",
+    )
+    ledger = _TriggerLedger(_state())
+    ledger.commit((source_event, trigger_event))
+
+    result = await ExpressionReconsiderationRuntime(
+        ledger=ledger, owner_id="worker:reconsideration", reviewer=_DeferReviewer()
+    ).drain_one()
+
+    projection = ledger.project()
+    assert result.status == "deferred"
+    assert projection.actions[0].state == "authorized"
+    assert expression_beat_is_gated(
+        projection=projection, plan_id="plan:expression:1", beat_id="beat:expression:2"
+    )
 
 
 @pytest.mark.asyncio

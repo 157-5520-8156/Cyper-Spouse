@@ -26,15 +26,35 @@ def _digest(value: object) -> str:
     ).hexdigest()
 
 
-ExpressionReconsiderationDisposition = Literal["continue"]
+ExpressionReconsiderationDisposition = Literal[
+    "continue", "cancel", "merge", "defer", "supersede", "new_beat"
+]
+
+
+class ExpressionReconsiderationDecision(FrozenModel):
+    """An LLM-facing, closed decision for one frozen beat.
+
+    ``replacement_plan_ref`` is deliberately opaque.  A reviewer may point to
+    an already-audited follow-up ExpressionPlan proposal, but it cannot inject
+    prose or mutate this beat's payload through this decision.  A composition
+    root is responsible for accepting that new plan through the normal
+    ExpressionPlan acceptance capability.
+    """
+
+    disposition: ExpressionReconsiderationDisposition
+    rationale_ref: str | None = None
+    replacement_plan_ref: str | None = None
+
+    def requires_replacement(self) -> bool:
+        return self.disposition in {"merge", "supersede", "new_beat"}
 
 
 class ExpressionReconsiderationReviewer(Protocol):
     """Optional LLM/semantic reviewer hook.
 
-    Returning ``None`` means no explicit acceptance.  More expansive outcomes
-    (cancel/merge/supersede) require their own accepted materializer and are
-    deliberately not faked by this first safety vertical.
+    Returning ``None`` means no explicit acceptance.  Replacement dispositions
+    may only reference a separately audited plan; this worker never accepts
+    arbitrary generated text or changes an already-dispatched payload.
     """
 
     async def review(
@@ -43,12 +63,17 @@ class ExpressionReconsiderationReviewer(Protocol):
         process: TriggerProcess,
         observation_event: WorldEvent,
         cursor: ProjectionCursor,
-    ) -> ExpressionReconsiderationDisposition | None: ...
+    ) -> ExpressionReconsiderationDecision | ExpressionReconsiderationDisposition | None: ...
 
 
 class ExpressionReconsiderationRunResult(FrozenModel):
     trigger_id: str
-    status: Literal["idle", "owned_elsewhere", "awaiting_review", "continued"]
+    status: Literal[
+        "idle", "owned_elsewhere", "awaiting_review", "continued", "cancelled",
+        "replacement_required", "deferred",
+    ]
+    disposition: ExpressionReconsiderationDisposition | None = None
+    replacement_plan_ref: str | None = None
 
 
 class ExpressionReconsiderationRuntime:
@@ -93,15 +118,50 @@ class ExpressionReconsiderationRuntime:
             return ExpressionReconsiderationRunResult(
                 trigger_id=active.trigger_id, status="awaiting_review"
             )
-        disposition = await self._reviewer.review(
+        reviewed = await self._reviewer.review(
             process=active, observation_event=source[0], cursor=self._cursor(await self._project())
         )
-        if disposition != "continue":
+        decision = self._normalize_decision(reviewed)
+        if decision is None:
             return ExpressionReconsiderationRunResult(
                 trigger_id=active.trigger_id, status="awaiting_review"
             )
-        await self._complete(process=active, source_event=source[0])
-        return ExpressionReconsiderationRunResult(trigger_id=active.trigger_id, status="continued")
+        if decision.disposition == "continue":
+            await self._complete(process=active, source_event=source[0], decision=decision)
+            return ExpressionReconsiderationRunResult(
+                trigger_id=active.trigger_id, status="continued", disposition=decision.disposition
+            )
+        if decision.disposition == "defer":
+            # Completion makes the decision durable, while the gate helper
+            # keeps this particular frozen beat non-dispatchable until a later
+            # source-bound observation opens a fresh reconsideration trigger.
+            await self._complete(process=active, source_event=source[0], decision=decision)
+            return ExpressionReconsiderationRunResult(
+                trigger_id=active.trigger_id, status="deferred", disposition=decision.disposition
+            )
+        await self._replace_or_cancel(process=active, source_event=source[0], decision=decision)
+        return ExpressionReconsiderationRunResult(
+            trigger_id=active.trigger_id,
+            status="replacement_required" if decision.requires_replacement() else "cancelled",
+            disposition=decision.disposition,
+            replacement_plan_ref=decision.replacement_plan_ref,
+        )
+
+    @staticmethod
+    def _normalize_decision(
+        value: ExpressionReconsiderationDecision | ExpressionReconsiderationDisposition | None,
+    ) -> ExpressionReconsiderationDecision | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return ExpressionReconsiderationDecision(disposition=value)
+        if type(value) is not ExpressionReconsiderationDecision:
+            raise TypeError("expression reconsideration reviewer returned an invalid decision")
+        if value.requires_replacement() and not value.replacement_plan_ref:
+            raise ValueError("expression reconsideration replacement requires an audited plan ref")
+        if value.disposition == "defer" and value.replacement_plan_ref is not None:
+            raise ValueError("expression reconsideration defer cannot carry a replacement plan")
+        return value
 
     async def _claim_or_reclaim(self, *, process: TriggerProcess, source_event: WorldEvent, projection) -> TriggerProcess | None:
         at = projection.logical_time or source_event.logical_time
@@ -159,7 +219,10 @@ class ExpressionReconsiderationRuntime:
         )
         return claimed
 
-    async def _complete(self, *, process: TriggerProcess, source_event: WorldEvent) -> None:
+    async def _complete(
+        self, *, process: TriggerProcess, source_event: WorldEvent,
+        decision: ExpressionReconsiderationDecision,
+    ) -> None:
         if process.claim_lease is None:
             raise ValueError("expression reconsideration completion requires a claim")
         projection = await self._project()
@@ -171,7 +234,7 @@ class ExpressionReconsiderationRuntime:
             "owner_id": process.claim_lease.owner_id,
             "attempt_id": process.claim_lease.attempt_id,
             "completed_at": at.isoformat(),
-            "runtime_outcome_ref": f"expression-reconsideration:{process.trigger_id}:continue",
+            "runtime_outcome_ref": self._outcome_ref(process=process, decision=decision),
         }
         identity = "world-v2:expression-reconsideration:completed:" + _digest(
             [self._ledger.world_id, process.trigger_id, process.claim_lease.attempt_id]
@@ -198,6 +261,118 @@ class ExpressionReconsiderationRuntime:
             cursor=cursor,
             commit_id="commit:expression-reconsideration:completed:"
             + _digest([process.trigger_id, process.claim_lease.attempt_id]),
+        )
+
+    async def _replace_or_cancel(
+        self, *, process: TriggerProcess, source_event: WorldEvent,
+        decision: ExpressionReconsiderationDecision,
+    ) -> None:
+        """Atomically retire the old, not-yet-dispatched Action and its budget.
+
+        ``ActionCancelled`` is intentionally unavailable for dispatch-started
+        actions (the reducer transition table rejects it).  That property is
+        the durable guard against silently changing an effect already handed to
+        a provider.
+        """
+        if process.claim_lease is None:
+            raise ValueError("expression reconsideration cancellation requires a claim")
+        projection = await self._project()
+        at = max(projection.logical_time or source_event.logical_time, process.claim_lease.acquired_at)
+        if at > process.claim_lease.expires_at:
+            raise ValueError("expression reconsideration claim expired before cancellation")
+        lineage = self._lineage(process)
+        action = next(
+            (
+                item for item in projection.actions
+                if item.expression_plan_id == lineage["plan_id"]
+                and item.expression_beat_id == lineage["beat_id"]
+            ),
+            None,
+        )
+        if action is None or action.state not in {"authorized", "scheduled", "claimed"}:
+            raise ValueError("expression reconsideration cannot replace a dispatched or terminal action")
+        reservation = next(
+            (item for item in projection.budget_reservations if item.reservation_id == action.budget_reservation_id),
+            None,
+        )
+        if reservation is None or reservation.state != "reserved":
+            raise ValueError("expression reconsideration requires an active budget reservation")
+        decision_hash = _digest(decision.model_dump(mode="json"))
+        cancellation_id = "cancellation:expression-reconsideration:" + _digest(
+            [process.trigger_id, process.claim_lease.attempt_id, decision_hash]
+        )
+        result_id = "result:expression-reconsideration:" + _digest(
+            [process.trigger_id, action.action_id, cancellation_id]
+        )
+        settlement = {
+            "settlement_id": "settlement:expression-reconsideration:" + _digest(
+                [reservation.reservation_id, result_id]
+            ),
+            "reservation_id": reservation.reservation_id,
+            "action_id": action.action_id,
+            "result_id": result_id,
+            "state": "released",
+            "settlement_kind": "terminal",
+            "previous_cost": reservation.settled_cost,
+            "cost_actual": 0,
+            "cost_delta": -reservation.settled_cost,
+        }
+        common = {
+            "schema_version": "world-v2.1", "world_id": self._ledger.world_id,
+            "logical_time": at, "created_at": source_event.created_at,
+            "actor": self._owner_id, "source": self._source,
+            "trace_id": source_event.trace_id, "causation_id": source_event.event_id,
+            "correlation_id": source_event.correlation_id,
+        }
+        cancellation_payload = {"action_id": action.action_id}
+        cancellation = WorldEvent.from_payload(
+            **common,
+            event_id="event:expression-reconsideration:action-cancelled:" + _digest([action.action_id, cancellation_id]),
+            event_type="ActionCancelled", idempotency_key="world-v2:expression-reconsideration:cancel:" + _digest([self._ledger.world_id, cancellation_id]),
+            payload=cancellation_payload,
+        )
+        release = WorldEvent.from_payload(
+            **{**common, "causation_id": cancellation.event_id},
+            event_id="event:expression-reconsideration:budget-released:" + _digest([reservation.reservation_id, result_id]),
+            event_type="BudgetReleased", idempotency_key="world-v2:expression-reconsideration:release:" + _digest([self._ledger.world_id, reservation.reservation_id, result_id]),
+            payload={"settlement": settlement},
+        )
+        completion_payload = {
+            "trigger_id": process.trigger_id, "owner_id": process.claim_lease.owner_id,
+            "attempt_id": process.claim_lease.attempt_id, "completed_at": at.isoformat(),
+            "runtime_outcome_ref": self._outcome_ref(process=process, decision=decision),
+        }
+        completion = WorldEvent.from_payload(
+            **{**common, "causation_id": release.event_id},
+            event_id="event:expression-reconsideration:trigger:completed:" + _digest([process.trigger_id, process.claim_lease.attempt_id]),
+            event_type="TriggerProcessCompleted", idempotency_key="world-v2:expression-reconsideration:completed:" + _digest([self._ledger.world_id, process.trigger_id, process.claim_lease.attempt_id]),
+            payload=completion_payload,
+        )
+        await self._commit_at_cursor(
+            (cancellation, release, completion), cursor=self._cursor(projection),
+            commit_id="commit:expression-reconsideration:replace:" + _digest([process.trigger_id, process.claim_lease.attempt_id, decision_hash]),
+        )
+
+    @staticmethod
+    def _lineage(process: TriggerProcess) -> dict[str, str]:
+        prefix = "expression-reconsideration:"
+        if not process.trigger_ref.startswith(prefix):
+            raise ValueError("expression reconsideration trigger lineage is invalid")
+        value = json.loads(process.trigger_ref.removeprefix(prefix))
+        if not isinstance(value, dict) or not all(isinstance(value.get(key), str) and value[key] for key in ("plan_id", "beat_id", "observation_id")):
+            raise ValueError("expression reconsideration trigger lineage is invalid")
+        return value
+
+    @classmethod
+    def _outcome_ref(cls, *, process: TriggerProcess, decision: ExpressionReconsiderationDecision) -> str:
+        # A canonical JSON ref is the durable decision/audit lineage.  The
+        # payload itself remains immutable and any replacement is only a ref.
+        return "expression-reconsideration-decision:" + json.dumps(
+            {
+                "trigger_id": process.trigger_id,
+                "decision": decision.model_dump(mode="json"),
+                "lineage": cls._lineage(process),
+            }, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         )
 
     async def _project(self):
@@ -247,6 +422,7 @@ class ExpressionReconsiderationRuntime:
 
 __all__ = [
     "ExpressionReconsiderationDisposition",
+    "ExpressionReconsiderationDecision",
     "ExpressionReconsiderationReviewer",
     "ExpressionReconsiderationRunResult",
     "ExpressionReconsiderationRuntime",

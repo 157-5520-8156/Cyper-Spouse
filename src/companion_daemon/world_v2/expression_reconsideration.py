@@ -148,7 +148,7 @@ def expression_beat_is_gated(*, projection: LedgerProjection, plan_id: str, beat
     """Whether an open/claimed interjection gate prevents old-payload dispatch."""
 
     for process in projection.trigger_processes:
-        if process.process_kind != "expression_reconsideration" or process.state == "terminal":
+        if process.process_kind != "expression_reconsideration":
             continue
         prefix = "expression-reconsideration:"
         if not process.trigger_ref.startswith(prefix):
@@ -159,7 +159,26 @@ def expression_beat_is_gated(*, projection: LedgerProjection, plan_id: str, beat
             return True
         if not isinstance(lineage, dict):
             return True
-        if lineage.get("plan_id") == plan_id and lineage.get("beat_id") == beat_id:
+        if lineage.get("plan_id") != plan_id or lineage.get("beat_id") != beat_id:
+            continue
+        if process.state != "terminal":
+            return True
+        # A recorded defer is a decision, not an accidental unlock.  It holds
+        # the frozen payload until later user/world evidence opens a *new*
+        # source-bound gate.  Other terminal decisions deliberately release
+        # this gate: continue permits the old immutable payload; replacement
+        # dispositions have cancelled the old Action atomically.
+        outcome = process.runtime_outcome_ref or ""
+        prefix = "expression-reconsideration-decision:"
+        if not outcome.startswith(prefix):
+            continue
+        try:
+            decision = json.loads(outcome.removeprefix(prefix)).get("decision")
+        except json.JSONDecodeError:
+            return True
+        if not isinstance(decision, dict):
+            return True
+        if decision.get("disposition") == "defer":
             return True
     return False
 
