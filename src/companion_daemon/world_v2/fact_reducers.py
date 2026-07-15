@@ -36,7 +36,7 @@ def reduce_fact(
     operator_observations: tuple[OperatorObservationRef, ...],
 ) -> tuple[tuple[FactProjection, ...], tuple[FactTransitionProjection, ...]]:
     expected = {
-        "FactCommitted": "commit", "FactCorrected": "correct",
+        "FactCommitted": "commit", "FactCommittedV2": "commit", "FactCorrected": "correct",
         "FactWithdrawn": "withdraw", "FactCorrectionCompensated": "compensate",
     }[event_type]
     if payload.operation != expected:

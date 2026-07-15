@@ -31,6 +31,9 @@ from companion_daemon.world_v2.fact_v2_accepted_manifest_builder import (
     FactV2AcceptedManifestBuilderError,
     FactV2ProductionAcceptedBundleHandle,
 )
+from companion_daemon.world_v2.fact_v2_reducers import (
+    materialized_fact_v2_as_projection_change,
+)
 from companion_daemon.world_v2.fact_v2_candidate_manifest import (
     FACT_V2_CANDIDATE_EVENT_TYPE,
     FactV2AcceptanceEnvelopeCandidate,
@@ -403,4 +406,35 @@ def test_manifest_builder_derives_a_canonical_inert_production_bundle(tmp_path) 
             operation(bundle_handle)
     with pytest.raises(FactV2AcceptedManifestBuilderError, match="another builder"):
         builder.inspect(handle=FactV2ProductionAcceptedBundleHandle())
+    ledger.close()
+
+
+def test_materialized_fact_v2_maps_to_shared_fact_projection_without_legacy_proposal(tmp_path) -> None:
+    ledger, registry, reader, proposal_handle, prepared, sources, candidate, _ = _bound(tmp_path)
+    envelope_request = FactV2AcceptanceEnvelopeRequestV2.model_validate(
+        candidate.model_dump(mode="python")
+        | {"acceptance_causation_id": reader.audit(handle=proposal_handle).event_ref},
+        strict=True,
+    )
+    envelope_issuer = FactV2AcceptanceEnvelopeAuthorityIssuer()
+    envelope_handle = envelope_issuer.issue(
+        proposal_reader=reader, proposal_handle=proposal_handle, request=envelope_request
+    )
+    owned_issuer = FactV2ProductionPlanIssuer(
+        registry=registry, proposal_reader=reader, envelope_issuer=envelope_issuer
+    )
+    owned = owned_issuer.issue(
+        envelope_handle=envelope_handle,
+        proposal_handle=proposal_handle,
+        prepared=prepared,
+        sources=sources,
+    )
+    change = materialized_fact_v2_as_projection_change(
+        payload=owned_issuer.inspect(handle=owned).payload,
+        event_id="event:fact-v2:projection",
+        logical_time=NOW,
+    )
+    assert change.operation == "commit"
+    assert change.fact_after.origin.accepted_event_ref == "event:fact-v2:projection"
+    assert change.fact_after.entity_revision == 1
     ledger.close()
