@@ -152,6 +152,14 @@ _Avoid_: Rule verdict, mandatory stance
 A bounded, revision-pinned packet compiled from authoritative World Projections plus explicitly non-authoritative advisories for one Deliberation. It has a token budget and truncation log, and is not a second store of truth.
 _Avoid_: Full-history prompt, free-form context dump
 
+## Pinned Turn
+
+One effect-once deliberation attempt whose Context Capsule, Inner Advisories,
+Model Result and Proposal Audit all refer to the same complete ledger cursor.
+If that cursor becomes stale before an authoritative write, the Pinned Turn is
+discarded and rebuilt; it never grants a stale Proposal acceptance.
+_Avoid_: Chat turn, mutable prompt session
+
 ## Internal World Snapshot
 
 A revision-pinned, read-only deep Projection containing the authoritative material required by WorldRuntime internals. It is produced by deterministic reducers and is never exposed as a viewer-facing projection or edited as a second source of truth.

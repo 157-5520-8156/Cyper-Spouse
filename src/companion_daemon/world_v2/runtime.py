@@ -8,6 +8,7 @@ from .ledger import LedgerPort, WorldLedger
 from .event_identity import domain_idempotency_key
 from .clock_authority import append_clock_transition, resolve_latest_clock
 from .goal_expiry_runtime import build_due_goal_expiry_events
+from .pinned_turn import PinnedTurnCompiler
 from .projection import ProjectionAuthority, ProjectionCompiler
 from .settlement import SettlementPlanner
 from .schemas import (
@@ -15,6 +16,7 @@ from .schemas import (
     CommitResult,
     ExternalObservation,
     Observation,
+    ProjectionCursor,
     ProjectionRequest,
     RuntimeOutcome,
     WorldEvent,
@@ -35,6 +37,7 @@ class WorldRuntime:
         world_id: str,
         ledger: LedgerPort | None = None,
         projection_authority: ProjectionAuthority | None = None,
+        pinned_turn: PinnedTurnCompiler | None = None,
     ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
@@ -44,6 +47,7 @@ class WorldRuntime:
         self._ledger = ledger or WorldLedger.in_memory(world_id=world_id)
         self._settlement = SettlementPlanner(world_id=world_id)
         self._projection = ProjectionCompiler(authority=projection_authority)
+        self._pinned_turn = pinned_turn
         self._lock = asyncio.Lock()
 
     @classmethod
@@ -116,12 +120,38 @@ class WorldRuntime:
             payload=observation.model_dump(mode="json"),
         )
         async with self._lock:
+            existing = await self._lookup_event_commit(event.event_id)
+            if existing is not None:
+                persisted, original_commit = existing
+                if persisted != event:
+                    raise IdempotencyConflict(
+                        "observation trigger was already committed with different content"
+                    )
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:{trigger_id}",
+                    trigger_id=trigger_id,
+                    observation_ref=observation.observation_id,
+                    committed_world_revision=original_commit.world_revision,
+                    ledger_sequence=original_commit.ledger_sequence,
+                    status="observed_only",
+                    projection_hint=f"world-revision:{original_commit.world_revision}",
+                )
             before = await self._project_for_write()
             committed = await self._commit(
                 [event],
                 world_revision=before.world_revision,
                 deliberation_revision=before.deliberation_revision,
             )
+            if self._pinned_turn is not None:
+                await self._pinned_turn.audit_observation(
+                    observation=observation,
+                    observation_event=event,
+                    cursor=ProjectionCursor(
+                        world_revision=committed.world_revision,
+                        deliberation_revision=committed.deliberation_revision,
+                        ledger_sequence=committed.ledger_sequence,
+                    ),
+                )
         return RuntimeOutcome(
             outcome_id=f"outcome:{trigger_id}",
             trigger_id=trigger_id,
