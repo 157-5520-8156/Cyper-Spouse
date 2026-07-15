@@ -81,9 +81,9 @@ adapter 仍须从只读 fixture/replay/receipt/performance exports 重算这些 
 
 ### 离线机制回归（不是盲评）
 
-`world-v2-scenario-corpus.1` 冻结 120 个独立 scenario-turn（49 个 emotion-gold），每项都绑定输入与无前置事实 fixture 的 hash。`ScenarioRunner` 用固定 fake Flash 模型和固定 fake provider，为每项建立独立 SQLite World v2，再且只再经 `WorldV2TurnApplication.inbound → drain_actions_once → export_replay_evidence` 执行。它验证 Observation/Proposal/Action/receipt 的事件谓词、重复 ingress 的 effect-once、provider failure 的终态、replay hash 和 `test-economy-v1` 的一次主模型调用上限。
+`world-v2-scenario-corpus.1` 冻结 120 个独立 scenario-turn（49 个 emotion-gold），每项都绑定输入与无前置事实 fixture 的 hash。`ScenarioRunner` 用固定 fake Flash 模型和固定 fake provider，为每项建立独立 SQLite World v2，再且只再经 `WorldV2TurnApplication.inbound → drain_actions_once → export_replay_evidence` 执行。它验证 Observation/Proposal/Action/receipt 的事件谓词、重复 ingress 的 effect-once、provider failure/unknown、dispatch 前重启恢复、replay hash 和 `test-economy-v1` 的一次主模型调用上限；完整套件还与版本化 manifest hash 精确比对。
 
-CI 通过 `scripts/verify_world_v2_scenarios.py` 导出哈希 manifest。该产物只能作为机制回归证据，**绝不**代替 bare/archive/v2 的三 seed 输出、匿名化、两份独立评审或正式 `human-likeness-eval-v1` baseline；没有后者仍必须是评估 blocker。
+CI 通过 `scripts/verify_world_v2_scenarios.py` 导出哈希 manifest。当前首纵切的 120 条均为**无前置事实的独立 ingress**：family/emotion 标签冻结了后续多回合 fixture 的覆盖目标，但尚不证明 NPC 前置、计划/拖延、`reply_later`、插话重审、媒体和 projection gap 的特定世界闭环。该产物只能作为机制回归证据，**绝不**代替 bare/archive/v2 的三 seed 输出、匿名化、两份独立评审或正式 `human-likeness-eval-v1` baseline；没有后者仍必须是评估 blocker。
 
 ## 评分与门槛
 

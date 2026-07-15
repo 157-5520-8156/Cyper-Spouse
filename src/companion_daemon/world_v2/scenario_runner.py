@@ -31,6 +31,7 @@ from .scenario_corpus import (
     SCENARIO_CORPUS_VERSION,
     TEST_ECONOMY_PROFILE_VERSION,
     ScenarioCase,
+    ScenarioFault,
     verify_frozen_scenario_corpus,
 )
 from .simulator_adapters import SimulatorIdentityResolver
@@ -38,6 +39,12 @@ from .simulator_adapters import SimulatorIdentityResolver
 
 class ScenarioVerificationError(AssertionError):
     """A frozen scenario did not exercise its declared authority predicates."""
+
+
+# Filled after the complete, fixed fake suite has been run.  A change to this
+# value is a new offline mechanism baseline, not evidence of a human-likeness
+# improvement.
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "236f49cb889f21cdb78fbd4ef1575094a64a661f4d714a51e9f2c9966637cad3"
 
 
 class _FixedScenarioRouter:
@@ -54,7 +61,7 @@ class _FixedScenarioTransport:
 
     provider = "scenario:fixed-provider"
 
-    def __init__(self, *, received_at: datetime, fault: str) -> None:
+    def __init__(self, *, received_at: datetime, fault: ScenarioFault) -> None:
         self._received_at = received_at
         self._fault = fault
         self._receipts: dict[str, PlatformDispatchReceipt] = {}
@@ -64,15 +71,25 @@ class _FixedScenarioTransport:
         existing = self._receipts.get(request.idempotency_key)
         if existing is not None:
             return existing
-        status: Literal["delivered", "failed"] = (
-            "failed" if self._fault == "provider_failed" else "delivered"
+        status: Literal["delivered", "failed", "unknown"] = (
+            "failed"
+            if self._fault == "provider_failed"
+            else "unknown"
+            if self._fault == "provider_unknown"
+            else "delivered"
         )
         identity = hashlib.sha256(request.fingerprint.encode("utf-8")).hexdigest()
         receipt = PlatformDispatchReceipt(
             provider_receipt_id=f"receipt:scenario:{identity}",
             provider_ref=f"message:scenario:{identity}",
             status=status,
-            error_class="simulated_provider_timeout" if status == "failed" else None,
+            error_class=(
+                "simulated_provider_timeout"
+                if status == "failed"
+                else "simulated_provider_unknown"
+                if status == "unknown"
+                else None
+            ),
             received_at=self._received_at,
             raw_payload_hash="sha256:" + hashlib.sha256(request.body.encode("utf-8")).hexdigest(),
             idempotency_key=request.idempotency_key,
@@ -96,7 +113,7 @@ class ScenarioRunResult:
     scenario_turn_id: str
     scenario_family: str
     emotional_gold: bool
-    fault: str
+    fault: ScenarioFault
     world_id: str
     output_hash: str | None
     event_types: tuple[str, ...]
@@ -104,7 +121,7 @@ class ScenarioRunResult:
     replay_hash: str
     replay_passed: bool
     model_calls: int
-    duplicate_observation_count: int
+    observation_count: int
     verification_errors: tuple[str, ...]
 
     @property
@@ -124,7 +141,7 @@ class ScenarioRunResult:
             "replay_hash": self.replay_hash,
             "replay_passed": self.replay_passed,
             "model_calls": self.model_calls,
-            "duplicate_observation_count": self.duplicate_observation_count,
+            "observation_count": self.observation_count,
             "verification_errors": self.verification_errors,
         }
 
@@ -182,21 +199,25 @@ class ScenarioRunner:
             flash_model_id="phase8-fixed-fake-flash",
         )
         transport = _FixedScenarioTransport(received_at=now, fault=case.fault)
-        app = build_sqlite_world_v2_turn_application(
-            path=database_path,
-            config=WorldV2TurnApplicationConfig(
-                world_id=world_id,
-                companion_actor_ref="agent:companion",
-                reply_target="user:scenario",
-                action_pump_owner="pump:phase8-scenario",
-            ),
-            identities=SimulatorIdentityResolver(canonical_user_id="scenario"),
-            router=_FixedScenarioRouter(),
-            main_model=adapter,
-            quick_recovery=adapter,
-            transport=transport,
-            now=now,
-        )
+
+        def build_application():
+            return build_sqlite_world_v2_turn_application(
+                path=database_path,
+                config=WorldV2TurnApplicationConfig(
+                    world_id=world_id,
+                    companion_actor_ref="agent:companion",
+                    reply_target="user:scenario",
+                    action_pump_owner="pump:phase8-scenario",
+                ),
+                identities=SimulatorIdentityResolver(canonical_user_id="scenario"),
+                router=_FixedScenarioRouter(),
+                main_model=adapter,
+                quick_recovery=adapter,
+                transport=transport,
+                now=now,
+            )
+
+        app = build_application()
         try:
             inbound = dict(
                 platform="simulator",
@@ -210,6 +231,9 @@ class ScenarioRunner:
             await app.inbound(**inbound)
             if case.fault == "duplicate_ingress":
                 await app.inbound(**inbound)
+            if case.fault == "restart_before_dispatch":
+                app.close()
+                app = build_application()
             await app.drain_actions_once()
             evidence = app.export_replay_evidence()
         finally:
@@ -245,7 +269,7 @@ class ScenarioRunner:
             replay_hash=projection.semantic_hash,
             replay_passed=replay.passed,
             model_calls=len(model.calls),
-            duplicate_observation_count=observation_count,
+            observation_count=observation_count,
             verification_errors=errors,
         )
 
@@ -255,12 +279,20 @@ class ScenarioRunner:
             if limit < 1:
                 raise ValueError("scenario limit must be positive")
             cases = cases[:limit]
-        runs = tuple([await self.run_case(case) for case in cases])
-        return ScenarioSuiteResult(
+        runs_list: list[ScenarioRunResult] = []
+        for case in cases:
+            runs_list.append(await self.run_case(case))
+        runs = tuple(runs_list)
+        suite = ScenarioSuiteResult(
             corpus_version=SCENARIO_CORPUS_VERSION,
             economy_profile_version=TEST_ECONOMY_PROFILE_VERSION,
             runs=runs,
         )
+        if limit is None and suite.manifest_hash != FROZEN_OFFLINE_SUITE_MANIFEST_HASH:
+            raise ScenarioVerificationError(
+                "offline scenario manifest drifted; establish a new versioned mechanism baseline"
+            )
+        return suite
 
     @staticmethod
     def _verify(
@@ -282,9 +314,18 @@ class ScenarioRunner:
         missing = sorted(required.difference(event_types))
         if missing:
             errors.append("missing_required_events:" + ",".join(missing))
-        expected_terminal = "failed" if case.fault == "provider_failed" else "delivered"
+        expected_terminal = {
+            "provider_failed": "failed",
+            "provider_unknown": "unknown",
+        }.get(case.fault, "delivered")
         if action_states != (expected_terminal,):
             errors.append("terminal_action_state_mismatch")
+        required_terminal_event = {
+            "provider_failed": "ActionFailed",
+            "provider_unknown": "ActionUnknown",
+        }.get(case.fault)
+        if required_terminal_event is not None and required_terminal_event not in event_types:
+            errors.append("fault_terminal_event_missing")
         if not replay_passed:
             errors.append("replay_evaluator_failed")
         # test-economy-v1: regular chat has exactly one main fake call; this
@@ -308,5 +349,6 @@ __all__ = [
     "ScenarioRunner",
     "ScenarioSuiteResult",
     "ScenarioVerificationError",
+    "FROZEN_OFFLINE_SUITE_MANIFEST_HASH",
     "run_frozen_suite_sync",
 ]

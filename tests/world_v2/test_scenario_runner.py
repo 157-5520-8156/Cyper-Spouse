@@ -42,15 +42,23 @@ async def test_runner_executes_a_real_v2_turn_then_exports_verified_replay(tmp_p
 async def test_runner_fault_injection_covers_failed_receipt_and_duplicate_ingress(tmp_path) -> None:
     runner = ScenarioRunner(workdir=tmp_path)
     failed = next(item for item in SCENARIO_CASES if item.fault == "provider_failed")
+    unknown = next(item for item in SCENARIO_CASES if item.fault == "provider_unknown")
+    restarted = next(item for item in SCENARIO_CASES if item.fault == "restart_before_dispatch")
     duplicate = next(item for item in SCENARIO_CASES if item.fault == "duplicate_ingress")
 
     failed_result = await runner.run_case(failed)
+    unknown_result = await runner.run_case(unknown)
+    restarted_result = await runner.run_case(restarted)
     duplicate_result = await runner.run_case(duplicate)
 
     assert failed_result.passed
     assert failed_result.terminal_action_states == ("failed",)
+    assert unknown_result.passed
+    assert unknown_result.terminal_action_states == ("unknown",)
+    assert restarted_result.passed
+    assert restarted_result.terminal_action_states == ("delivered",)
     assert duplicate_result.passed
-    assert duplicate_result.duplicate_observation_count == 1
+    assert duplicate_result.observation_count == 1
 
 
 @pytest.mark.asyncio

@@ -20,6 +20,9 @@ SCENARIO_CORPUS_VERSION = "world-v2-scenario-corpus.1"
 TEST_ECONOMY_PROFILE_VERSION = "test-economy-v1"
 SCENARIO_CORPUS_SIZE = 120
 MINIMUM_EMOTION_GOLD_SIZE = 40
+ScenarioFault = Literal[
+    "none", "provider_failed", "provider_unknown", "duplicate_ingress", "restart_before_dispatch"
+]
 
 
 def _hash(value: object) -> str:
@@ -40,7 +43,7 @@ class ScenarioCase:
     entry: ScenarioCorpusEntry
     user_text: str
     fact_set: tuple[tuple[str, str], ...]
-    fault: Literal["none", "provider_failed", "duplicate_ingress"] = "none"
+    fault: ScenarioFault = "none"
 
     def __post_init__(self) -> None:
         if not self.user_text.strip():
@@ -72,9 +75,13 @@ _FAMILY_PROMPTS: tuple[tuple[str, str, bool, tuple[str, ...]], ...] = (
 )
 
 
-def _fault_for(*, family: str, ordinal: int) -> Literal["none", "provider_failed", "duplicate_ingress"]:
+def _fault_for(*, family: str, ordinal: int) -> ScenarioFault:
     if family == "provider_timeout":
-        return "provider_failed"
+        return {
+            1: "provider_failed",
+            2: "provider_unknown",
+            3: "restart_before_dispatch",
+        }.get(ordinal, "none")
     if family == "interruption" and ordinal == 1:
         return "duplicate_ingress"
     return "none"
@@ -142,6 +149,7 @@ __all__ = [
     "SCENARIO_CORPUS",
     "SCENARIO_CORPUS_SIZE",
     "SCENARIO_CORPUS_VERSION",
+    "ScenarioFault",
     "ScenarioCase",
     "TEST_ECONOMY_PROFILE_VERSION",
     "verify_frozen_scenario_corpus",
