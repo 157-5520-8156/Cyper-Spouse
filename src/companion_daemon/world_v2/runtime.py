@@ -32,6 +32,7 @@ from .affect_trigger import affect_deliberation_trigger_events
 from .affect_acceptance_runtime import AffectAcceptanceError, AffectAcceptanceRuntime
 from .affect_deliberation_worker import AffectDeliberationWorker
 from .affect_trigger_runtime import AffectTriggerRunResult, AffectTriggerRuntime
+from .action_pump import ActionExecutor, ActionPump, ActionPumpResult
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -67,6 +68,8 @@ class WorldRuntime:
         appraisal_worker: AppraisalProposalWorker | None = None,
         affect_deliberation_owner: str | None = None,
         affect_worker: AffectDeliberationWorker | None = None,
+        action_executor: ActionExecutor | None = None,
+        action_pump_owner: str | None = None,
         affect_acceptance: AffectAcceptanceRuntime | None = None,
         affect_acceptance_actor: str | None = None,
     ) -> None:
@@ -105,6 +108,12 @@ class WorldRuntime:
         if affect_worker is not None and affect_deliberation_owner is None:
             raise ValueError("affect worker requires affect deliberation triggers")
         self._affect_worker = affect_worker
+        if (action_executor is None) != (action_pump_owner is None):
+            raise ValueError("action executor and action pump owner must be configured together")
+        if action_pump_owner is not None and not action_pump_owner:
+            raise ValueError("action pump owner must not be empty")
+        self._action_executor = action_executor
+        self._action_pump_owner = action_pump_owner
         if (affect_acceptance is None) != (affect_acceptance_actor is None):
             raise ValueError("affect acceptance runtime and actor must be configured together")
         if affect_acceptance is not None and affect_acceptance.ledger is not self._ledger:
@@ -130,6 +139,25 @@ class WorldRuntime:
                 worker=self._affect_worker,
                 owner_id=self._affect_deliberation_owner,
             ).drain_one()
+
+    async def drain_actions_once(self) -> ActionPumpResult | None:
+        """Dispatch one authorized external Action through the durable pump.
+
+        This deliberately does not hold ``_lock`` while calling an executor:
+        ``ActionDispatchStarted`` is already durable before that call and a
+        receipt comes back through :meth:`settle`, which owns its own lock.
+        Concurrent pump instances race only on ledger CAS and must retry.
+        """
+
+        if self._action_executor is None:
+            return None
+        assert self._action_pump_owner is not None
+        return await ActionPump(
+            ledger=self._ledger,
+            executor=self._action_executor,
+            settle=self.settle,
+            owner_id=self._action_pump_owner,
+        ).drain_once()
 
     @classmethod
     def in_memory(

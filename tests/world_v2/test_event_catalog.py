@@ -39,6 +39,7 @@ def test_action_delivery_contract_exposes_lineage_and_compensation() -> None:
 
     assert contract.allowed_predecessors == (
         "ActionDispatchStarted",
+        "ActionDispatchPending",
         "ActionProviderAccepted",
     )
     assert contract.evidence_types == ("provider_receipt", "execution_receipt")

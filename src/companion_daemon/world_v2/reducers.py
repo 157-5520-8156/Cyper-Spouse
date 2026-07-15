@@ -240,6 +240,7 @@ from .schemas import (
     BudgetReservation,
     BudgetSettlement,
     ClaimLease,
+    DispatchPending,
     CharacterCoreProjection,
     CharacterCoreProposalProjection,
     CharacterCoreTransitionProjection,
@@ -3685,6 +3686,8 @@ def _action_transitioned(
     for index, existing in enumerate(state.actions):
         if existing.action_id == action_id:
             transitioned = transition_action(existing, target)
+            if target != "dispatch_started":
+                transitioned = transitioned.model_copy(update={"dispatch_pending": None})
             return _replace_action(state, index=index, action=transitioned)
     raise ValueError(f"action {action_id!r} does not exist")
 
@@ -3762,6 +3765,23 @@ def _action_dispatch_started(state: ReducerState, event: WorldEvent) -> ReducerS
         transitioned = transition_action(existing, "dispatch_started")
         return _replace_action(state, index=index, action=transitioned)
     raise ValueError(f"action {action_id!r} does not exist")
+
+
+def _action_dispatch_pending(state: ReducerState, event: WorldEvent) -> ReducerState:
+    pending = _model_from_payload(event, "pending", DispatchPending)
+    for index, existing in enumerate(state.actions):
+        if existing.action_id != pending.action_id:
+            continue
+        if existing.state != "dispatch_started":
+            raise ValueError("ActionDispatchPending requires dispatch_started Action")
+        if pending.idempotency_key != existing.idempotency_key:
+            raise ValueError("ActionDispatchPending has another Action identity")
+        return _replace_action(
+            state,
+            index=index,
+            action=existing.model_copy(update={"dispatch_pending": pending}),
+        )
+    raise ValueError(f"action {pending.action_id!r} does not exist")
 
 
 def _required_action_id(event: WorldEvent) -> str:
@@ -5949,6 +5969,7 @@ _EVENTS = {
             RevisionClass.WORLD,
             _action_dispatch_started,
         ),
+        EventDefinition("ActionDispatchPending", RevisionClass.WORLD, _action_dispatch_pending),
         EventDefinition(
             "ActionProviderAccepted",
             RevisionClass.WORLD,

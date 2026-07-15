@@ -64,6 +64,7 @@ from .schemas import (
     BudgetSettlement,
     ClaimLease,
     ClockObservation,
+    DispatchPending,
     ExecutionReceipt,
     ExternalObservation,
     Observation,
@@ -305,6 +306,9 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
             "ActionDispatchStartedPayload",
             {"action_id": _ID, "owner_id": _ID, "attempt_id": _ID, "started_at": (datetime, ...)},
         ),
+        "ActionDispatchPending": _payload_model(
+            "ActionDispatchPendingPayload", {"pending": (DispatchPending, ...)}
+        ),
         **{
             event_type: _action_settlement_payload(f"{event_type}Payload")
             for event_type in (
@@ -380,6 +384,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ActionClaimed": "action_id+attempt_id+claimed",
         "ActionReclaimed": "action_id+attempt_id+reclaimed",
         "ActionDispatchStarted": "action_id+attempt_id+dispatch_started",
+        "ActionDispatchPending": "action_id+provider+provider_ref+pending",
         "ActionProviderAccepted": "provider+source_event_id+provider_accepted",
         "ActionDelivered": "provider+source_event_id+delivered",
         "ActionFailed": "provider+source_event_id+failed",
@@ -832,6 +837,22 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 allowed_predecessors=("ActionClaimed", "ActionReclaimed"),
                 evidence_types=("active_claim_lease",),
                 successors=(
+                    "ActionDispatchPending",
+                    "ActionProviderAccepted",
+                    "ActionDelivered",
+                    "ActionFailed",
+                    "ActionUnknown",
+                ),
+            ),
+            _contract(
+                "ActionDispatchPending",
+                "action_pump",
+                "world",
+                "ActionDispatchPendingPayload",
+                allowed_predecessors=("ActionDispatchStarted", "ActionDispatchPending"),
+                evidence_types=("provider_pending",),
+                successors=(
+                    "ActionDispatchPending",
                     "ActionProviderAccepted",
                     "ActionDelivered",
                     "ActionFailed",
@@ -843,7 +864,7 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "settlement_planner",
                 "world",
                 "ActionIdentityPayload",
-                allowed_predecessors=("ActionDispatchStarted",),
+                allowed_predecessors=("ActionDispatchStarted", "ActionDispatchPending"),
                 evidence_types=("provider_receipt", "execution_receipt"),
                 successors=("ActionDelivered", "ActionFailed", "ActionUnknown"),
             ),
@@ -852,7 +873,11 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "settlement_planner",
                 "world",
                 "ActionIdentityPayload",
-                allowed_predecessors=("ActionDispatchStarted", "ActionProviderAccepted"),
+                allowed_predecessors=(
+                    "ActionDispatchStarted",
+                    "ActionDispatchPending",
+                    "ActionProviderAccepted",
+                ),
                 evidence_types=("provider_receipt", "execution_receipt"),
                 successors=("BudgetSettled", "TriggerProcessCompleted"),
                 compensations=("ActionReconciliationRequired",),
@@ -862,7 +887,11 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "settlement_planner",
                 "world",
                 "ActionIdentityPayload",
-                allowed_predecessors=("ActionDispatchStarted", "ActionProviderAccepted"),
+                allowed_predecessors=(
+                    "ActionDispatchStarted",
+                    "ActionDispatchPending",
+                    "ActionProviderAccepted",
+                ),
                 evidence_types=("provider_receipt", "execution_receipt"),
                 successors=("BudgetReleased", "TriggerProcessCompleted"),
                 compensations=("ActionReconciliationRequired",),
@@ -872,7 +901,11 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "settlement_planner",
                 "world",
                 "ActionIdentityPayload",
-                allowed_predecessors=("ActionDispatchStarted", "ActionProviderAccepted"),
+                allowed_predecessors=(
+                    "ActionDispatchStarted",
+                    "ActionDispatchPending",
+                    "ActionProviderAccepted",
+                ),
                 evidence_types=("provider_receipt", "execution_receipt", "timeout"),
                 successors=("ActionReconciliationRequired", "TriggerProcessCompleted"),
                 compensations=("ActionReconciliationRequired",),

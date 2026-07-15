@@ -112,7 +112,7 @@ class Observation(FrozenModel):
 
     @property
     def idempotency_identity(self) -> tuple[str, str]:
-        return (self.source, self.source_event_id)
+        return (self.provider, self.provider_ref or self.idempotency_key)
 
 
 class ClockObservation(FrozenModel):
@@ -174,6 +174,41 @@ class ExternalObservation(FrozenModel):
     error_class: str | None = None
     retryability: Literal["retryable", "not_retryable", "unknown"] | None = None
     raw_payload_hash: str = Field(min_length=1)
+
+
+class ProviderReceipt(FrozenModel):
+    """Raw provider result, before Runtime turns it into ledger input."""
+
+    provider_receipt_id: str = Field(min_length=1)
+    action_id: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    provider_ref: str = Field(min_length=1)
+    status: Literal["provider_accepted", "delivered", "failed", "unknown"]
+    artifact_refs: tuple[str, ...] = ()
+    cost_actual: int = Field(ge=0)
+    error_class: str | None = Field(default=None, min_length=1)
+    received_at: datetime
+    raw_payload_hash: str = Field(min_length=1)
+
+
+class DispatchPending(FrozenModel):
+    """Provider accepted the hand-off but has no terminal receipt yet."""
+
+    action_id: str = Field(min_length=1)
+    idempotency_key: str = Field(min_length=1)
+    provider: str = Field(min_length=1)
+    provider_ref: str | None = Field(default=None, min_length=1)
+    lookup_after: datetime
+    deadline: datetime
+    dispatch_started_at: datetime
+    idempotency_mode: Literal["effect_once", "result_lookup", "none"]
+
+    @model_validator(mode="after")
+    def deadline_is_not_before_lookup(self) -> DispatchPending:
+        if self.deadline < self.lookup_after or self.lookup_after < self.dispatch_started_at:
+            raise ValueError("dispatch pending time window is invalid")
+        return self
 
     @property
     def idempotency_identity(self) -> tuple[str, str]:
@@ -353,6 +388,7 @@ class Action(FrozenModel):
     dependencies: tuple[str, ...] = ()
     budget_reservation_id: str = Field(min_length=1)
     claim_lease: ClaimLease | None = None
+    dispatch_pending: DispatchPending | None = None
     state: ActionState
     recovery_policy: str = Field(min_length=1)
 
@@ -370,6 +406,15 @@ class Action(FrozenModel):
         )
         if self.state in lease_required_states and self.claim_lease is None:
             raise ValueError(f"action state {self.state!r} requires claim_lease")
+        if self.dispatch_pending is not None:
+            if self.state != "dispatch_started":
+                raise ValueError("only a dispatch-started action may retain pending provider state")
+            if (
+                self.dispatch_pending.action_id != self.action_id
+                or self.dispatch_pending.idempotency_key != self.idempotency_key
+                or self.dispatch_pending.idempotency_mode != self.recovery_policy
+            ):
+                raise ValueError("pending provider state does not bind its Action")
         return self
 
 
