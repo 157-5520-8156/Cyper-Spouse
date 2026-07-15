@@ -35,6 +35,7 @@ companion-eval-experience = "companion_daemon.experience_evaluation_cli:main"
 companion-napcat = "companion_daemon.napcat_cli:main"
 companion-onebot = "companion_daemon.napcat_cli:onebot_main"
 companion-world-v2-test-economy = "companion_daemon.world_v2.test_economy_cli:main"
+companion-world-v2-formal-eval = "companion_daemon.world_v2.formal_evaluation_cli:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"

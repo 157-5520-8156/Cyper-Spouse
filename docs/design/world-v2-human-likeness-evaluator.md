@@ -87,6 +87,46 @@ adapter 仍须从只读 fixture/replay/receipt/performance exports 重算这些 
 
 CI 通过 `scripts/verify_world_v2_scenarios.py` 导出版本化 manifest。该产物只能作为机制回归证据，**绝不**代替 bare/archive/v2 的三 seed 输出、匿名化、两份独立评审或正式 `human-likeness-eval-v1` baseline；没有后者仍必须是评估 blocker。
 
+## Formal artifact pipeline
+
+`companion-world-v2-formal-eval` is the file-backed boundary between a real
+capture run and the evaluator. It does not run models or synthesize a score.
+The capture producer must create one JSON row for every
+`bare/archive/v2 × world-v2-scenario-corpus.3 × seed.1/seed.2/seed.3`, with
+the exact frozen input/fact hashes, raw output text, and a non-empty opaque
+trace payload. The pipeline hash-addresses both output and trace and rejects a
+missing or duplicate unit.
+
+```bash
+# secret is held by the evaluation operator; do not give it to reviewers.
+uv run companion-world-v2-formal-eval prepare \
+  --captures var/evaluation/captures-real.json \
+  --output-dir var/evaluation/formal-20260716 \
+  --blinding-secret-file /secure/eval-blinding-secret.txt \
+  --judge-model-id <fixed-reviewer-or-judge-id> \
+  --judge-prompt-version world-v2-rubric.1
+
+# Reviewers receive only blind-reviewer-input.json, then submit two independent
+# JSON review panels. The operator keeps unblinding-map.json private.
+uv run companion-world-v2-formal-eval finalize \
+  --packet-dir var/evaluation/formal-20260716 \
+  --reviews var/evaluation/reviews-real.json \
+  --mechanical-trace var/evaluation/mechanical-trace-real.json \
+  --output var/evaluation/formal-20260716/report.json
+```
+
+The review schema requires every rubric dimension plus question necessity,
+fallback, fact-assertion, response-tag and source-reference annotations. The
+finalizer accepts no reviewer record without a matching blind ID and no output
+without two distinct reviewer identities. It rebuilds the verified artifact
+bundle, invokes the existing paired bootstrap evaluator, and writes only
+hashes/metrics/issues to the report (not raw reply text).
+
+CI runs `verify-fixture`, which constructs a complete **synthetic** matrix to
+prove that the capture/blind/review/bootstrap/report schemas still compose. Its
+output is always blocked by `synthetic_fixture_not_external_evidence`; it is not
+a baseline, blind review, live-model result, or network SLO artifact.
+
 ## 评分与门槛
 
 Rubric 每项 1–5：`current_input_fit`、`subtext_awareness`、`subjectivity`、`continuity`、`non_scriptedness`、`fact_safety`、`world_synchronicity`。人味分只是这些独立评审分的标准化平均，绝不作为绝对“真人率”。

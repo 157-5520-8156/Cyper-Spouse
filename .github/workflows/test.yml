@@ -22,6 +22,10 @@ jobs:
           uv run python scripts/verify_world_v2_scenarios.py
           --workdir "$RUNNER_TEMP/world-v2-scenarios"
           --output "$RUNNER_TEMP/world-v2-scenarios/manifest.json"
+      - name: Verify formal World v2 evaluation artifact pipeline structure
+        run: >-
+          uv run companion-world-v2-formal-eval verify-fixture
+          --output-dir "$RUNNER_TEMP/world-v2-formal-eval"
       - name: Verify World v2 platform reverse-dependency boundary
         run: uv run python scripts/verify_world_v2_platform_architecture.py
       - name: Run tests
