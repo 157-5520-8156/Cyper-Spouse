@@ -5235,6 +5235,9 @@ _EVENTS = {
             "ModelResultRecorded", RevisionClass.DELIBERATION, _model_result_recorded
         ),
         EventDefinition("ProposalRecorded", RevisionClass.DELIBERATION, _proposal_recorded),
+        EventDefinition(
+            "FactCommitProposalRecorded", RevisionClass.DELIBERATION, _audit_only
+        ),
         EventDefinition("AcceptanceRecorded", RevisionClass.WORLD, _acceptance_recorded),
         EventDefinition("LegacyAcceptanceAuditRecorded", RevisionClass.WORLD, _audit_only),
         EventDefinition("NpcRegistered", RevisionClass.WORLD, _npc_registered),

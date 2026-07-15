@@ -23,6 +23,7 @@ from .authorization_events import AUTHORIZATION_PAYLOAD_MODELS
 from .commitment_events import COMMITMENT_PAYLOAD_MODELS
 from .character_core_events import CHARACTER_CORE_PAYLOAD_MODELS
 from .fact_events import FACT_PAYLOAD_MODELS
+from .fact_proposal_audit_v2 import FactCommitProposalRecordedPayloadV2
 from .goal_authority_events import (
     V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
     V2_GOAL_PAYLOAD_MODELS,
@@ -116,6 +117,8 @@ class EventContract:
             ProposalRecordedV2Payload
             if self.event_type == "ProposalRecorded"
             and payload.get("audit_contract") == "proposal-envelope-audit.1"
+            else FactCommitProposalRecordedPayloadV2
+            if self.event_type == "FactCommitProposalRecorded"
             else self.payload_model
         )
         if (
@@ -213,6 +216,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "ProposalRecorded": _payload_model(
             "ProposalRecordedPayload", {"proposal_id": _ID}, allow_audit_extensions=True
         ),
+        "FactCommitProposalRecorded": FactCommitProposalRecordedPayloadV2,
         "ModelResultRecorded": ModelResultRecordedPayload,
         "AcceptanceRecorded": _payload_model(
             "AcceptanceRecordedPayload",
@@ -406,6 +410,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ActorAuthorityRotated": "world_id+authority_id+expected_entity_revision+transition_id",
         "ActorAuthorityRevoked": "world_id+authority_id+expected_entity_revision+transition_id",
         "ActorAuthorityCompensated": "world_id+authority_id+expected_entity_revision+transition_id",
+        "FactCommitProposalRecorded": "world_id+proposal_id+proposal_hash",
         **{
             event_type: "world_id+entity_id+expected_entity_revision+transition_id"
             for event_type in AUTHORIZATION_PAYLOAD_MODELS
@@ -623,6 +628,19 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     "ModelResultRecorded",
                 ),
                 evidence_types=("model_result", "context_capsule"),
+                successors=("AcceptanceRecorded",),
+            ),
+            _contract(
+                "FactCommitProposalRecorded",
+                "fact_deliberation",
+                "deliberation",
+                "FactCommitProposalRecordedPayloadV2",
+                allowed_predecessors=(
+                    "TriggerProcessClaimed",
+                    "TriggerProcessReclaimed",
+                    "ModelResultRecorded",
+                ),
+                evidence_types=("decision_proposal",),
                 successors=("AcceptanceRecorded",),
             ),
             _contract(
