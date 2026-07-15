@@ -29,6 +29,9 @@ from .expression_plan_manifest import ExpressionPlanAcceptanceManifest
 from .outcome_acceptance_manifest import OutcomeAcceptanceManifest
 from .outcome_acceptance_runtime import OutcomeAcceptanceRuntime
 from .outcome_proposal_compiler import OutcomeProposalCompiler
+from .interaction_bid_acceptance_manifest import InteractionBidAcceptanceManifest
+from .interaction_bid_acceptance_runtime import InteractionBidAcceptanceRuntime
+from .interaction_bid_proposal_compiler import InteractionBidProposalCompiler
 
 from .proposal_envelope import (
     CHANGE_TRANSITION_REGISTRY,
@@ -44,6 +47,7 @@ ProductionProposalLaneId = Literal[
     "settled_world_appraisal",
     "affect",
     "outcome",
+    "interaction_bid",
 ]
 
 
@@ -160,6 +164,13 @@ _OUTCOME = SpecializedProposalCapability(
     manifest_ref="outcome-acceptance-manifest.1",
     reverse_verifier_ref="outcome-acceptance-runtime.1",
 )
+_INTERACTION_BID = SpecializedProposalCapability(
+    change_kind="interaction_bid_transition",
+    transition="open",
+    compiler_ref="interaction-bid-proposal-compiler.1",
+    manifest_ref="interaction-bid-acceptance-manifest.1",
+    reverse_verifier_ref="interaction-bid-acceptance-runtime.1",
+)
 
 
 _SPECIALIZED_AUTHORITY_SEAMS: Mapping[tuple[str, str, str], SpecializedAuthoritySeam] = (
@@ -197,6 +208,17 @@ _SPECIALIZED_AUTHORITY_SEAMS: Mapping[tuple[str, str, str], SpecializedAuthority
                     reverse_verifier=OutcomeAcceptanceRuntime.accept_runtime_owned,
                 )
             ),
+            (
+                _INTERACTION_BID.compiler_ref,
+                _INTERACTION_BID.manifest_ref,
+                _INTERACTION_BID.reverse_verifier_ref,
+            ): (
+                SpecializedAuthoritySeam(
+                    compiler=InteractionBidProposalCompiler,
+                    manifest=InteractionBidAcceptanceManifest,
+                    reverse_verifier=InteractionBidAcceptanceRuntime.accept_runtime_owned,
+                )
+            ),
         }
     )
 )
@@ -227,6 +249,11 @@ _EXPECTED_PRODUCTION_PROPOSAL_GRAMMARS: Mapping[
         "outcome": ProductionProposalGrammar(
             lane_id="outcome", capabilities=(_OUTCOME,), allows_no_change_decision=False
         ),
+        "interaction_bid": ProductionProposalGrammar(
+            lane_id="interaction_bid",
+            capabilities=(_INTERACTION_BID,),
+            allows_no_change_decision=True,
+        ),
     }
 )
 # A public read-only view is useful to architecture tests and diagnostics, but
@@ -251,6 +278,7 @@ def assert_production_proposal_grammar_coverage() -> None:
         "settled_world_appraisal",
         "affect",
         "outcome",
+        "interaction_bid",
     }:
         raise RuntimeError("production proposal grammar lane coverage changed")
     for lane_id, grammar in expected.items():

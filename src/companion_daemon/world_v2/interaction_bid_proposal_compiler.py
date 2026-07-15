@@ -45,6 +45,12 @@ class InteractionBidProposalCompiler:
         self._ledger = ledger
         self._reader = DecisionProposalAuthorityReader(ledger=ledger)
 
+    @property
+    def ledger(self) -> LedgerPort:
+        """The sole ledger this compiler may read and commit against."""
+
+        return self._ledger
+
     def record(self, *, world_id: str, cursor: ProjectionCursor, proposal_id: str) -> InteractionBidProposalCompilation:
         authority = self._reader.read(self._reader.pin(world_id=world_id, cursor=cursor, proposal_id=proposal_id))
         change, source_event, source_commit, trigger = self._verify(authority=authority, cursor=cursor)

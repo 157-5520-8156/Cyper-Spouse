@@ -56,6 +56,12 @@ from .outcome_deliberation_turn import OutcomeDeliberationTurn
 from .outcome_proposal_worker import OutcomeProposalWorker
 from .outcome_trigger_runtime import OutcomeTriggerRunResult, OutcomeTriggerRuntime
 from .outcome_trigger import outcome_deliberation_trigger_event, outcome_deliberation_trigger_id
+from .interaction_bid_deliberation_turn import InteractionBidDeliberationTurn
+from .interaction_bid_proposal_worker import InteractionBidProposalWorker
+from .interaction_bid_trigger_runtime import (
+    InteractionBidTriggerRunResult,
+    InteractionBidTriggerRuntime,
+)
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .action_pump import ActionExecutor, ActionPump, ActionPumpResult
 from .expression_reconsideration import expression_reconsideration_events_for_observation
@@ -126,6 +132,9 @@ class WorldRuntime:
         outcome_deliberation_turn: OutcomeDeliberationTurn | None = None,
         outcome_worker: OutcomeProposalWorker | None = None,
         outcome_deliberation_owner: str | None = None,
+        interaction_bid_turn: InteractionBidDeliberationTurn | None = None,
+        interaction_bid_worker: InteractionBidProposalWorker | None = None,
+        interaction_bid_owner: str | None = None,
         interaction_fact_owner: str | None = None,
         fact_acceptance: FactV2AcceptanceRuntime | None = None,
         fact_adapter: FactObservationProposalAdapter | None = None,
@@ -193,6 +202,17 @@ class WorldRuntime:
         self._outcome_deliberation_turn = outcome_deliberation_turn
         self._outcome_worker = outcome_worker
         self._outcome_deliberation_owner = outcome_deliberation_owner
+        if interaction_bid_owner is not None and not interaction_bid_owner:
+            raise ValueError("interaction bid owner must not be empty")
+        if interaction_bid_worker is not None and interaction_bid_worker.ledger is not self._ledger:
+            raise ValueError("interaction bid worker must own this exact ledger")
+        if (interaction_bid_turn is None) != (interaction_bid_worker is None):
+            raise ValueError("interaction bid turn and worker must be configured together")
+        if interaction_bid_worker is not None and interaction_bid_owner is None:
+            raise ValueError("interaction bid worker requires an interaction bid owner")
+        self._interaction_bid_turn = interaction_bid_turn
+        self._interaction_bid_worker = interaction_bid_worker
+        self._interaction_bid_owner = interaction_bid_owner
         if interaction_fact_owner is not None and not interaction_fact_owner:
             raise ValueError("interaction fact owner must not be empty")
         if (fact_acceptance is None) != (fact_adapter is None):
@@ -247,6 +267,7 @@ class WorldRuntime:
     ) -> (
         AppraisalTriggerRunResult
         | OutcomeTriggerRunResult
+        | InteractionBidTriggerRunResult
         | AffectTriggerRunResult
         | FactTriggerRunResult
         | ExpressionReconsiderationRunResult
@@ -279,6 +300,17 @@ class WorldRuntime:
                 ).drain_one()
                 if outcome.status != "idle":
                     return outcome
+            if self._interaction_bid_turn is not None:
+                assert self._interaction_bid_worker is not None
+                assert self._interaction_bid_owner is not None
+                interaction_bid = await InteractionBidTriggerRuntime(
+                    ledger=self._ledger,
+                    turn=self._interaction_bid_turn,
+                    worker=self._interaction_bid_worker,
+                    owner_id=self._interaction_bid_owner,
+                ).drain_one()
+                if interaction_bid.status != "idle":
+                    return interaction_bid
             appraisal_result: AppraisalTriggerRunResult | None = None
             if self._npc_world_appraisal_turn is not None:
                 assert self._appraisal_worker is not None

@@ -353,6 +353,7 @@ def _life_identity_components(
             "interaction_fact",
             "affect_deliberation",
             "outcome_deliberation",
+            "media_delivery_interaction",
             "expression_reconsideration",
         }:
             attempts = process.get("attempt_ids")

@@ -44,6 +44,11 @@ from .outcome_deliberation_turn import OutcomeDeliberationTurn
 from .outcome_proposal_compiler import OutcomeProposalCompiler
 from .outcome_proposal_worker import OutcomeProposalWorker
 from .outcome_trigger_runtime import OutcomeTriggerRunResult
+from .interaction_bid_acceptance_runtime import InteractionBidAcceptanceRuntime
+from .interaction_bid_deliberation_turn import InteractionBidDeliberationTurn
+from .interaction_bid_proposal_compiler import InteractionBidProposalCompiler
+from .interaction_bid_proposal_worker import InteractionBidProposalWorker
+from .interaction_bid_trigger_runtime import InteractionBidTriggerRunResult
 from .advisory_compiler import AdvisoryCompiler
 from .deliberation import (
     DeliberationModelAdapter,
@@ -114,6 +119,7 @@ class WorldV2TurnApplicationConfig:
     affect_worker_owner: str = "worker:world-v2:affect"
     fact_worker_owner: str = "worker:world-v2:fact"
     outcome_worker_owner: str = "worker:world-v2:outcome"
+    interaction_bid_worker_owner: str = "worker:world-v2:interaction-bid"
     expression_reconsideration_owner: str = "worker:world-v2:expression-reconsideration"
     media_cost_profile: CostProfile | None = None
 
@@ -127,6 +133,7 @@ class WorldV2TurnApplicationConfig:
             "affect_worker_owner",
             "fact_worker_owner",
             "outcome_worker_owner",
+            "interaction_bid_worker_owner",
             "expression_reconsideration_owner",
         ):
             if not getattr(self, name):
@@ -505,6 +512,7 @@ class WorldV2TurnApplication:
     ) -> (
         AppraisalTriggerRunResult
         | OutcomeTriggerRunResult
+        | InteractionBidTriggerRunResult
         | AffectTriggerRunResult
         | FactTriggerRunResult
         | ExpressionReconsiderationRunResult
@@ -560,6 +568,7 @@ def build_sqlite_world_v2_turn_application(
     appraisal_model: DeliberationModelAdapter | None = None,
     affect_model: DeliberationModelAdapter | None = None,
     outcome_model: DeliberationModelAdapter | None = None,
+    interaction_bid_model: DeliberationModelAdapter | None = None,
     fact_model: FactDraftChatModel | None = None,
     memory_model: FactMemoryDraftChatModel | None = None,
     expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
@@ -681,6 +690,35 @@ def build_sqlite_world_v2_turn_application(
             if outcome_acceptance is not None
             else None
         )
+        interaction_bid_acceptance = (
+            InteractionBidAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
+            if interaction_bid_model is not None
+            else None
+        )
+        interaction_bid_turn = (
+            InteractionBidDeliberationTurn(
+                ledger=ledger,
+                capsule_compiler=capsules,
+                deliberation=compose_production_deliberation(
+                    lane_id="interaction_bid",
+                    router=router,
+                    main_model=interaction_bid_model,
+                    quick_recovery=interaction_bid_model,
+                ),
+                companion_actor_ref=config.companion_actor_ref,
+            )
+            if interaction_bid_model is not None
+            else None
+        )
+        interaction_bid_worker = (
+            InteractionBidProposalWorker(
+                compiler=InteractionBidProposalCompiler(ledger=ledger),
+                acceptance=interaction_bid_acceptance,
+                actor=config.interaction_bid_worker_owner,
+            )
+            if interaction_bid_acceptance is not None
+            else None
+        )
         affect_acceptance = (
             AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
             if affect_model is not None
@@ -764,6 +802,13 @@ def build_sqlite_world_v2_turn_application(
             outcome_worker=outcome_worker,
             outcome_deliberation_owner=(
                 config.outcome_worker_owner if outcome_worker is not None else None
+            ),
+            interaction_bid_turn=interaction_bid_turn,
+            interaction_bid_worker=interaction_bid_worker,
+            interaction_bid_owner=(
+                config.interaction_bid_worker_owner
+                if interaction_bid_worker is not None
+                else None
             ),
             interaction_fact_owner=(
                 config.fact_worker_owner if fact_acceptance is not None else None

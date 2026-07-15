@@ -182,6 +182,7 @@ def test_catalogue_is_closed_and_every_reachable_change_has_all_three_authority_
         "settled_world_appraisal",
         "affect",
         "outcome",
+        "interaction_bid",
     }
     for grammar in PRODUCTION_PROPOSAL_GRAMMARS.values():
         for capability in grammar.capabilities:
