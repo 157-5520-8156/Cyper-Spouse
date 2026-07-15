@@ -52,6 +52,7 @@ from companion_daemon.media_interaction import (
 )
 from companion_daemon.media_eligibility import (
     CHARGE_RANK as _ELIGIBILITY_CHARGE_RANK,
+    FrozenPrivateExpressionBasis,
     MediaEligibilityRouter,
     PrivateExpressionBasis,
 )
@@ -472,6 +473,7 @@ class MediaPlan:
     relationship_stage_basis: str | None = None
     photographic_authenticity: PhotographicAuthenticityProfile | None = None
     moment_capture: MomentCapture | None = None
+    private_expression_basis: FrozenPrivateExpressionBasis | None = None
 
     def to_payload(self) -> dict[str, object]:
         payload = asdict(self)
@@ -506,6 +508,11 @@ class MediaPlan:
                 payload["moment_capture"] = self.moment_capture.to_payload()
             else:
                 payload.pop("moment_capture", None)
+            payload["private_expression_basis"] = (
+                self.private_expression_basis.to_payload()
+                if self.private_expression_basis
+                else None
+            )
             for key in ("composition", "action", "camera_direction", "sharing_motive"):
                 payload.pop(key, None)
         else:
@@ -519,6 +526,7 @@ class MediaPlan:
                 "relationship_stage_basis",
                 "photographic_authenticity",
                 "moment_capture",
+                "private_expression_basis",
             ):
                 payload.pop(key, None)
         return payload
@@ -648,6 +656,11 @@ class MediaPlan:
                 moment_capture=(
                     MomentCapture.from_payload(payload["moment_capture"])
                     if payload.get("moment_capture") is not None
+                    else None
+                ),
+                private_expression_basis=(
+                    FrozenPrivateExpressionBasis.from_payload(payload["private_expression_basis"])
+                    if payload.get("private_expression_basis") is not None
                     else None
                 ),
             )
@@ -811,6 +824,9 @@ class MediaPlanner:
             expression_charge_ceiling=_expression_charge_ceiling(opportunity),
             event_snapshot=opportunity.event_snapshot,
             private_expression_basis=opportunity.private_expression_basis,
+            recipient_ref=(
+                opportunity.audience_context.recipient_ref if opportunity.audience_context else ""
+            ),
         )
         # Historical v1-v4 plans retain their original replay semantics.  The
         # eligibility lane is a v5 entry rule, not a reinterpretation of them.
@@ -909,6 +925,10 @@ class MediaPlanner:
                         str(payload["media_address_strategy"]["expression_charge"])
                     ]
                     >= _ELIGIBILITY_CHARGE_RANK[lane.required_charge]
+                )
+                and (
+                    lane.lane != "private_expression"
+                    or payload["legal_capture_modes"] in (["character_front_camera"], ["mirror"])
                 )
             )
             if not complete_candidates:
@@ -1065,6 +1085,7 @@ class MediaRenderer:
                     )
                 ),
                 moment_capture_required=plan.moment_capture is not None,
+                self_authored_capture_required=plan.private_expression_basis is not None,
             )
             last_inspection = inspection
             if inspection.passed:
@@ -1144,6 +1165,7 @@ class MediaRenderer:
                 )
             ),
             moment_capture_required=plan.moment_capture is not None,
+            self_authored_capture_required=plan.private_expression_basis is not None,
         )
         if not inspection.passed:
             return MediaRenderFailure(plan.plan_id, inspection.reason, 0, inspection)
@@ -1680,8 +1702,8 @@ def _compile_media_prompt_v5(
     capture_physics = {
         "character_front_camera": (
             "Self-authorship invariant: the character is operating the front-facing phone herself. "
-            "Make that physically legible with a credible foreground holding hand, forearm, shoulder-to-camera "
-            "relationship, or partial device edge. It may be naturally cropped, but cannot disappear completely. "
+            "Make that physically legible with a credible foreground hand or forearm operating the phone, or a "
+            "partial device edge. It may be naturally cropped, but this evidence cannot disappear completely. "
             "No third photographer, tripod, or authorless portrait viewpoint."
         ),
         "mirror": (
@@ -1690,6 +1712,17 @@ def _compile_media_prompt_v5(
             "extra device."
         ),
     }.get(plan.capture_mode, "Capture authorship must remain physically visible and coherent.")
+    private_basis = (
+        "Private-expression proof: "
+        f"kind={plan.private_expression_basis.kind}; "
+        f"evidence={plan.private_expression_basis.evidence_ref}: "
+        f"{_compact_value(plan.private_expression_basis.evidence_value)}; "
+        f"minimum_charge={plan.private_expression_basis.required_charge}. "
+        "This recipient-directed private moment must remain grounded in that proof; do not replace it "
+        "with a generic glamour portrait or invent a different private situation.\n"
+        if plan.private_expression_basis
+        else ""
+    )
     return (
         "Create one believable fictional personal-media photograph. No text or watermark.\n"
         f"Frozen MediaPlan v5={plan.plan_id}; event={plan.event_id}; family={plan.family}.\n"
@@ -1697,6 +1730,7 @@ def _compile_media_prompt_v5(
         f"intent={plan.share_intent}; polish={plan.polish}; tone={plan.tone}; "
         f"action_template={plan.action_template_id}; action={plan.action_cue}.\n"
         f"Selected event evidence:\n{evidence}\n"
+        f"{private_basis}"
         f"Interaction Bid: goal={plan.interaction_bid.communicative_goal if plan.interaction_bid else 'none'}; "
         f"hoped_response={plan.interaction_bid.hoped_response if plan.interaction_bid else 'none'}; "
         f"pressure={plan.interaction_bid.response_pressure if plan.interaction_bid else 'none'}.\n"
@@ -2134,6 +2168,29 @@ def _freeze_proposal_v5(
     )
     if isinstance(frozen, NotRenderable):
         return frozen
+    private_basis: FrozenPrivateExpressionBasis | None = None
+    if opportunity.private_expression_basis is not None:
+        try:
+            private_basis = opportunity.private_expression_basis.freeze(
+                opportunity.event_snapshot,
+                recipient_ref=(
+                    opportunity.audience_context.recipient_ref
+                    if opportunity.audience_context
+                    else ""
+                ),
+            )
+        except ValueError as exc:
+            return NotRenderable(opportunity.opportunity_id, str(exc))
+        if private_basis.evidence_ref not in frozen.plan.evidence_values:
+            return NotRenderable(
+                opportunity.opportunity_id,
+                "unselected_private_expression_basis_evidence",
+            )
+        if str(proposal["capture_mode"]) not in {"character_front_camera", "mirror"}:
+            return NotRenderable(
+                opportunity.opportunity_id,
+                "private_expression_requires_self_authored_capture",
+            )
     identity = (
         IdentityReferenceSelection.from_payload(selected["identity_reference_selection"])
         if selected.get("identity_reference_selection") is not None
@@ -2198,6 +2255,7 @@ def _freeze_proposal_v5(
         ),
         photographic_authenticity=authenticity,
         moment_capture=moment_capture,
+        private_expression_basis=private_basis,
     )
     plan = replace(plan, diversity_fingerprint=_v5_fingerprint(plan))
     if plan.diversity_fingerprint in recent[-12:]:
@@ -2493,6 +2551,7 @@ def _validate_frozen_plan(plan: MediaPlan) -> str | None:
         plan.expression_charge_ceiling is not None
         or plan.relationship_stage_basis is not None
         or plan.photographic_authenticity is not None
+        or plan.private_expression_basis is not None
     ):
         return "v5_contract_in_legacy_plan"
     enums = (
@@ -2810,6 +2869,35 @@ def _validate_frozen_plan_v5(plan: MediaPlan) -> str | None:
             return "expression_charge_intent_conflict"
     elif plan.share_intent != "intimate_signal" or plan.privacy != "intimate":
         return "expression_charge_requires_intimate_signal"
+    private_expression = plan.family == "character_media" and (
+        plan.privacy == "intimate" or address.expression_charge != "none"
+    )
+    if private_expression:
+        basis = plan.private_expression_basis
+        if basis is None:
+            return "missing_private_expression_basis"
+        if basis.validate_payload():
+            return "invalid_private_expression_basis"
+        if basis.evidence_ref not in plan.evidence_values:
+            return "unselected_private_expression_basis_evidence"
+        if plan.evidence_values[basis.evidence_ref] != basis.evidence_value:
+            return "private_expression_basis_value_mismatch"
+        if not plan.interaction_bid or plan.interaction_bid.audience_ref != basis.recipient_ref:
+            return "private_expression_recipient_mismatch"
+        if (
+            SENSUAL_CHARGE_RANK[basis.required_charge]
+            > SENSUAL_CHARGE_RANK[plan.expression_charge_ceiling]
+        ):
+            return "private_expression_charge_ceiling_too_low"
+        if (
+            SENSUAL_CHARGE_RANK[address.expression_charge]
+            < SENSUAL_CHARGE_RANK[basis.required_charge]
+        ):
+            return "private_expression_charge_below_basis_floor"
+        if plan.capture_mode not in {"character_front_camera", "mirror"}:
+            return "private_expression_requires_self_authored_capture"
+    elif plan.private_expression_basis is not None:
+        return "unexpected_private_expression_basis"
     if address.engagement_tactic == "attraction":
         if not plan.interaction_bid or plan.interaction_bid.communicative_goal != "invite_desire":
             return "attraction_interaction_bid_conflict"
@@ -2970,6 +3058,7 @@ def _validate_frozen_plan_v5(plan: MediaPlan) -> str | None:
         expression_charge_ceiling=None,
         relationship_stage_basis=None,
         photographic_authenticity=None,
+        private_expression_basis=None,
         subject_presentation=legacy_subject,
         embodied_presentation=legacy_embodiment,
         share_intent=legacy_share_intent,
@@ -3069,13 +3158,16 @@ def _planning_messages_v5(
                 f"delivery_mode={opportunity.delivery_mode}\n"
                 f"audience_context={_stable_json(asdict(opportunity.audience_context) if opportunity.audience_context else {})}\n"
                 f"event_snapshot={_stable_json(opportunity.event_snapshot)}\n"
+                f"private_expression_basis={_stable_json(opportunity.private_expression_basis.__dict__ if opportunity.private_expression_basis else {})}\n"
                 f"hard_banned_fingerprints_last_12={_stable_json(recent)}\n"
                 f"legal_complete_media_expression_candidates={_stable_json(complete_candidates)}\n"
                 f"legal_interaction_bid_candidates={_stable_json(interaction_bids)}\n"
                 "Return fields: content_domain, visual_form, share_intent, capture_mode, "
                 "character_visibility, other_people_visibility, polish, tone, privacy, "
                 "primary_evidence_ref, supporting_evidence_refs, constraints, route, "
-                "interaction_bid_id, complete_candidate_id. Never return free visual directions or "
+                "interaction_bid_id, complete_candidate_id. When private_expression_basis is non-empty, "
+                "include its frozen basis evidence pointer among primary or "
+                "supporting evidence. Never return free visual directions or "
                 "intimate_intensity.\n"
                 f"content_domain={sorted(CONTENT_DOMAINS)}\nvisual_form={sorted(VISUAL_FORMS)}\n"
                 f"share_intent={sorted(SHARE_INTENTS)}\ncapture_mode={sorted(CAPTURE_MODES)}\n"
@@ -3160,8 +3252,9 @@ def _inspection_prompt(plan: MediaPlan) -> str:
             "Also return every v6 quality, subject, social, embodied and capture "
             "field applicable to the frozen plan. Reject a third-party image that reads as paparazzi or "
             "an authorless AI editorial; a front-camera image lacking a credible visible self-authorship "
-            "relationship (operator hand/forearm/shoulder or partial device) or that contradicts its frozen distance, "
-            "occupancy or device physics; invite_desire diluted into a polite generic portrait; camera, "
+            "relationship (operator hand/forearm operating the phone or a partial device) or that contradicts its frozen distance, "
+            "occupancy or device physics; a mirror image lacking the character visibly holding the reflected "
+            "phone with a physically consistent hand, reflection and camera angle; invite_desire diluted into a polite generic portrait; camera, "
             "hands, action or authorship conflicts; copied reference head tilt/smile/hair/framing; identity "
             "drift; structural defects; invented private facts; non-explicit boundary violations; a frozen "
             "social performance collapsed into the same polite small smile; a reference image's exact face "
@@ -3287,6 +3380,9 @@ def _inspection_contract_payload(plan: MediaPlan) -> dict[str, object]:
         "embodied_presentation": (
             plan.embodied_presentation.to_payload() if plan.embodied_presentation else None
         ),
+        "private_expression_basis": (
+            plan.private_expression_basis.to_payload() if plan.private_expression_basis else None
+        ),
     }
     return payload
 
@@ -3328,6 +3424,7 @@ def _enforce_inspection_contract(
     enhanced_v5_required: bool = False,
     facial_contract_required: bool = False,
     moment_capture_required: bool = False,
+    self_authored_capture_required: bool = False,
 ) -> MediaInspection:
     quality_defects = tuple(
         name
@@ -3565,6 +3662,12 @@ def _enforce_inspection_contract(
         )
     ):
         missing = "inspection_expression_authenticity_fields_missing"
+    if (
+        not missing
+        and self_authored_capture_required
+        and inspection.capture_relationship_legible is None
+    ):
+        missing = "inspection_self_authored_capture_relationship_missing"
     if inspection.passed and missing:
         return replace(
             inspection,

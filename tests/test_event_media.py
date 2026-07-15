@@ -139,7 +139,11 @@ async def test_v5_private_media_requires_a_world_frozen_private_expression_basis
     monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
     snapshot = _snapshot()
     snapshot["relationship_media_context"] = {
-        "declared_display": {"event_id": "display:42", "kind": "recipient_directed"}
+        "declared_display": {
+            "event_id": "display:42",
+            "kind": "recipient_directed",
+            "recipient_ref": "user:1",
+        }
     }
     opportunity = replace(
         _opportunity(
@@ -160,6 +164,10 @@ async def test_v5_private_media_requires_a_world_frozen_private_expression_basis
         share_intent="intimate_signal",
         privacy="intimate",
         interaction_bid_id="invite_desire",
+        supporting_evidence_refs=[
+            "/relationship_media_context/declared_display",
+            "/activity/kind",
+        ],
     )
     for field in (
         "composition",
@@ -169,11 +177,59 @@ async def test_v5_private_media_requires_a_world_frozen_private_expression_basis
         "subject_variant_id",
     ):
         proposal.pop(field, None)
-    result = await MediaPlanner(V5SelectingModel(proposal)).plan(opportunity)
+    unselected_basis = dict(proposal)
+    unselected_basis["supporting_evidence_refs"] = ["/activity/kind"]
+    rejected = await MediaPlanner(V5SelectingModel(unselected_basis)).plan(opportunity)
+    model = V5SelectingModel(proposal)
+    result = await MediaPlanner(model).plan(opportunity)
 
+    assert isinstance(rejected, NotRenderable)
+    assert rejected.reason == "unselected_private_expression_basis_evidence"
     assert isinstance(result, PlannedMedia)
     assert result.plan.media_address_strategy is not None
     assert result.plan.media_address_strategy.expression_charge == "charged"
+    assert result.plan.capture_mode in {"character_front_camera", "mirror"}
+    assert result.plan.private_expression_basis is not None
+    assert (
+        result.plan.private_expression_basis.evidence_ref
+        == "/relationship_media_context/declared_display"
+    )
+    assert "Private-expression proof" in compile_media_prompt(result.plan, None)
+    planning_prompt = str(model.messages[-1]["content"])
+    assert "private_expression_basis=" in planning_prompt
+    assert "include its frozen basis evidence pointer" in planning_prompt
+    tampered_basis = result.plan.to_payload()
+    tampered_basis["private_expression_basis"]["recipient_ref"] = "user:other"
+    with pytest.raises(ValueError, match="invalid media plan payload"):
+        MediaPlan.from_payload(tampered_basis)
+
+
+def test_private_self_authored_capture_requires_visual_proof_even_in_preview() -> None:
+    missing = _enforce_inspection_contract(
+        replace(
+            _inspection(True),
+            rule_version="media-inspection-v7",
+            capture_relationship_legible=None,
+        ),
+        automatic=False,
+        v5_required=True,
+        self_authored_capture_required=True,
+    )
+    rejected = _enforce_inspection_contract(
+        replace(
+            _inspection(True),
+            rule_version="media-inspection-v7",
+            capture_relationship_legible=False,
+        ),
+        automatic=False,
+        v5_required=True,
+        self_authored_capture_required=True,
+    )
+
+    assert not missing.passed
+    assert missing.reason == "inspection_self_authored_capture_relationship_missing"
+    assert not rejected.passed
+    assert rejected.reason == "capture_relationship_not_legible"
 
 
 def _proposal(**overrides: object) -> dict[str, object]:
@@ -464,6 +520,7 @@ async def test_v5_freezes_complete_expression_candidate_without_free_direction_t
     assert "frozen expression beat" in prompt
     assert "Character-photo realism" in prompt
     assert "Self-authorship invariant" in prompt
+    assert "hand or forearm operating the phone, or a partial device edge" in prompt
     assert "No third photographer, tripod, or authorless portrait viewpoint" in prompt
     assert "nose/cheek" in prompt
     assert "action unit" not in prompt.lower()

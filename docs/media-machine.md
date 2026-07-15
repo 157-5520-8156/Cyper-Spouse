@@ -316,9 +316,11 @@ available → selected → planned → generated → shared
 | `private_transition` | `/activity/private_transition` | 有明确衣装/活动证据的私人准备、整理或过渡，不可由“在卧室”推断。 |
 | `shared_ritual` | `/relationship_media_context/shared_ritual` | 已建立的共同私人仪式或记忆线索。 |
 
-没有该依据的普通回家、吃东西、读书、穿搭或镜前整理，只能作为 `personal_selfie` 规划。图片机返回 `private_lane_unsupported_by_event` 和 `recommended_lane=personal_selfie`，由世界机决定是否以日常自拍重新选择；不得在图片侧绕过世界授权。
+资格验证要求指向的值真实非空，并且每个私密机会都必须有冻结的 `AudienceContext.recipient_ref`。三种关系型依据（`relational_turn`、`recipient_display`、`shared_ritual`）还必须在其根对象中带与之完全一致的 `recipient_ref`；具身/过渡依据则由同一冻结收件人上下文绑定。规划成功后，图片机将主类别、唯一选中的证据指针、证据值、最小张力和收件人冻结进 `MediaPlan`，并要求这个指针同时出现在选中视觉证据、渲染 prompt 与视觉验收合同中；恢复或修复不会重新解释资格依据。
 
-对于 `character_front_camera`，计划与渲染必须让自拍作者关系可见：可信的持机手、前臂、肩部到镜头关系或局部设备边缘至少一项成立；它不能退化为第三方或隐形三脚架肖像。对于 `mirror`，镜中必须可见角色持有的手机，手机、手、反射和机位必须一致。视觉验收将这两者作为 `capture_relationship_legible` 的硬条件。
+没有该依据的普通回家、吃东西、读书、穿搭或镜前整理，只能作为 `personal_selfie` 规划。图片机返回 `private_lane_unsupported_by_event` 和 `recommended_lane=personal_selfie`，由世界机决定是否以日常自拍重新选择；不得在图片侧绕过世界授权。进入 `private_expression` 的人物媒体只能使用 `character_front_camera` 或 `mirror`；定时器、路人、同伴和外部拍摄均不属于“只给你看”的私密入口。
+
+对于 `character_front_camera`，计划与渲染必须让自拍作者关系可见：可信的持机手/前臂正在操作手机，或局部设备边缘至少一项成立；它不能退化为第三方或隐形三脚架肖像。对于 `mirror`，镜中必须可见角色持有的手机，手机、手、反射和机位必须一致。私密计划即使仅 preview 也必须返回 `capture_relationship_legible`，视觉验收将这两者作为硬条件。
 
 选择第一期完整闭环：只有媒体通过验收、世界机决定发送且收到真实投递回执后，世界机才把计划里的 `Media Interaction Bid` 建立为待回应状态：
 
