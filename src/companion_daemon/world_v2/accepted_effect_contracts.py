@@ -222,7 +222,9 @@ class AcceptanceManifestProposalV3(_ContractModel):
     proposal_id: str = Field(min_length=1, max_length=MAX_ID_LENGTH)
     proposal_kind: ProposalKind
     proposal_schema_registry: Literal["world-v2-proposals.2"]
-    audit_contract: Literal["proposal-envelope-audit.1"]
+    audit_contract: Literal[
+        "proposal-envelope-audit.1", "fact-commit-proposal-audit.2"
+    ]
     proposal_event_ref: str = Field(min_length=1, max_length=MAX_REF_LENGTH)
     proposal_event_payload_hash: str = Field(pattern=_DIGEST_PATTERN)
     proposal_hash: str = Field(pattern=_PREFIXED_DIGEST_PATTERN)

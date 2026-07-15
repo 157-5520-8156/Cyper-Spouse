@@ -29,6 +29,7 @@ from companion_daemon.world_v2.sealed_production_fact_registry_v2 import (
     SealedProductionFactPreparationRegistryV2,
     SealedProductionFactRegistryErrorV2,
 )
+from companion_daemon.world_v2.sealed_fact_commit_adapter_v2 import FactCommitPolicyResolutionV2
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.sqlite_ledger import SQLiteProofBackedObservationReader
 
@@ -241,5 +242,49 @@ def test_sealed_registry_derives_complete_durable_authority_only_from_pinned_aud
         registry.durable_authority_candidate(
             proposal_reader=proposal_reader,
             proposal_handle=PinnedFactCommitProposalAuthorityHandleV2(),
+        )
+    ledger.close()
+
+
+def test_sealed_registry_binds_pinned_audit_and_change_in_one_preparation_capability(tmp_path) -> None:
+    ledger, _ = _record(tmp_path)
+    proposal_reader = FactCommitProposalAuthorityReaderV2(ledger=ledger)
+    proposal_handle = proposal_reader.pin(
+        world_id=WORLD_ID, cursor=_cursor(ledger), proposal_id="proposal:fact-audit:1"
+    )
+    registry = SealedProductionFactPreparationRegistryV2(
+        resolver=ProofBackedFactEvidenceResolverV2(
+            reader=SQLiteProofBackedObservationReader(ledger=ledger)
+        )
+    )
+    policy = FactCommitPolicyResolutionV2(
+        cardinality="single", policy_refs=("policy:fact-commit.2",)
+    )
+    change_id = proposal_reader.proposal(handle=proposal_handle).proposed_changes[0].change_id
+
+    prepared = registry.prepare_from_pinned_audit(
+        proposal_reader=proposal_reader,
+        proposal_handle=proposal_handle,
+        change_id=change_id,
+        policy=policy,
+        world_id=WORLD_ID,
+    )
+
+    assert registry.owns_preparation(prepared)
+    with pytest.raises(SealedProductionFactRegistryErrorV2, match="does not belong"):
+        registry.prepare_from_pinned_audit(
+            proposal_reader=proposal_reader,
+            proposal_handle=proposal_handle,
+            change_id="change:" + "0" * 64,
+            policy=policy,
+            world_id=WORLD_ID,
+        )
+    with pytest.raises(SealedProductionFactRegistryErrorV2, match="reader-owned"):
+        registry.prepare_from_pinned_audit(
+            proposal_reader=proposal_reader,
+            proposal_handle=PinnedFactCommitProposalAuthorityHandleV2(),
+            change_id=change_id,
+            policy=policy,
+            world_id=WORLD_ID,
         )
     ledger.close()

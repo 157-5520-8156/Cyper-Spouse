@@ -186,6 +186,15 @@ def test_durable_fact_key_uses_the_approved_intent_contract_only() -> None:
         DurableDomainCompilerKeyV1.model_validate(key_raw, strict=True)
 
 
+def test_v3_manifest_proposal_explicitly_supports_the_fact_v2_audit_contract() -> None:
+    raw = _proposal_raw()
+    raw["audit_contract"] = "fact-commit-proposal-audit.2"
+
+    proposal = AcceptanceManifestProposalV3.model_validate(raw, strict=True)
+
+    assert proposal.audit_contract == "fact-commit-proposal-audit.2"
+
+
 @pytest.mark.parametrize(
     "field",
     [

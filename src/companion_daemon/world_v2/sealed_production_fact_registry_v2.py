@@ -238,6 +238,8 @@ class PreparedFactCommitMaterializationV2:
 @dataclass(frozen=True, slots=True)
 class _PreparedFactMaterializationV2:
     adapter_handle: SealedFactCommitCompilationHandleV2
+    proposal_audit: FactCommitProposalAuditProjectionV2 | None = None
+    proposal_reader: FactCommitProposalAuthorityReaderV2 | None = None
 
 
 class SealedProductionFactPreparationRegistryV2:
@@ -310,6 +312,75 @@ class SealedProductionFactPreparationRegistryV2:
         future seams.
         """
 
+        return self.__prepare(
+            proposal=proposal,
+            change=change,
+            policy=policy,
+            world_id=world_id,
+            proposal_audit=None,
+            proposal_reader=None,
+        )
+
+    def prepare_from_pinned_audit(
+        self,
+        *,
+        proposal_reader: FactCommitProposalAuthorityReaderV2,
+        proposal_handle: PinnedFactCommitProposalAuthorityHandleV2,
+        change_id: str,
+        policy: FactCommitPolicyResolutionV2,
+        world_id: str,
+    ) -> PreparedFactCommitMaterializationV2:
+        """Prepare one change from the exact audit that owns its proposal.
+
+        This is the only preparation form eligible for a future candidate
+        manifest.  It keeps the reader identity and audited proposal location
+        in the registry's private capability table, preventing a caller from
+        combining an audit for proposal A with a prepared change from proposal
+        B that happens to have similar values.
+        """
+
+        if type(proposal_reader) is not FactCommitProposalAuthorityReaderV2:
+            raise SealedProductionFactRegistryErrorV2(
+                "Fact pinned preparation requires the exact Fact proposal reader"
+            )
+        if type(change_id) is not str or not change_id:
+            raise SealedProductionFactRegistryErrorV2("Fact pinned preparation change id is invalid")
+        try:
+            proposal = proposal_reader.proposal(handle=proposal_handle)
+            audit = proposal_reader.audit(handle=proposal_handle)
+        except Exception as exc:
+            raise SealedProductionFactRegistryErrorV2(
+                "Fact pinned preparation requires a reader-owned proposal pin"
+            ) from exc
+        if audit.proposal_world_id != world_id or proposal.proposal_id != audit.proposal_id:
+            raise SealedProductionFactRegistryErrorV2(
+                "Fact pinned preparation world does not match its recorded proposal"
+            )
+        try:
+            change = next(item for item in proposal.proposed_changes if item.change_id == change_id)
+        except StopIteration as exc:
+            raise SealedProductionFactRegistryErrorV2(
+                "Fact pinned preparation change does not belong to the recorded proposal"
+            ) from exc
+        return self.__prepare(
+            proposal=proposal,
+            change=change,
+            policy=policy,
+            world_id=world_id,
+            proposal_audit=audit,
+            proposal_reader=proposal_reader,
+        )
+
+    def __prepare(
+        self,
+        *,
+        proposal: FactCommitProposalEnvelopeV2,
+        change: FactCommitTypedChangeV2,
+        policy: FactCommitPolicyResolutionV2,
+        world_id: str,
+        proposal_audit: FactCommitProposalAuditProjectionV2 | None,
+        proposal_reader: FactCommitProposalAuthorityReaderV2 | None,
+    ) -> PreparedFactCommitMaterializationV2:
         if type(policy) is not FactCommitPolicyResolutionV2 or policy.policy_refs != _SEALED_POLICY_REFS:
             raise SealedProductionFactRegistryErrorV2(
                 "Fact policy is not admitted by the sealed Fact install descriptor"
@@ -322,7 +393,11 @@ class SealedProductionFactPreparationRegistryV2:
             raise SealedProductionFactRegistryErrorV2(str(exc)) from exc
         prepared = PreparedFactCommitMaterializationV2()
         with self.__lock:
-            self.__prepared[prepared] = _PreparedFactMaterializationV2(adapter_handle=adapter_handle)
+            self.__prepared[prepared] = _PreparedFactMaterializationV2(
+                adapter_handle=adapter_handle,
+                proposal_audit=proposal_audit,
+                proposal_reader=proposal_reader,
+            )
         return prepared
 
     def compile(
