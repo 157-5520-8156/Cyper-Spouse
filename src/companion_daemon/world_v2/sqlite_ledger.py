@@ -33,6 +33,7 @@ from .ledger_prefix_proof import (
     MmrAppendPlanV1,
     ObservationLocatorValueV1,
     PrefixCheckpointLeafV1,
+    SparseMerkleProofV1,
     commit_result_hash_v1,
     mmr_append_plan_from_node_lookup_v1,
     mmr_inclusion_proof_from_node_lookup_v1,
@@ -2041,6 +2042,9 @@ class SQLiteWorldLedger:
                 value_hash=value.digest(),
                 node_lookup=self._prefix_locator_node_lookup_locked,
             )
+            SparseMerkleProofV1(
+                key=key, value_hash=None, siblings=plan.prior_siblings
+            ).verify_nonmembership(expected_root=locator_root, expected_key=key)
             self._persist_locator_put_plan_locked(key=key, value=value, node_updates=plan.node_updates)
             changed_locator_nodes.update(
                 { (depth, prefix): node_hash for depth, prefix, node_hash in plan.node_updates }

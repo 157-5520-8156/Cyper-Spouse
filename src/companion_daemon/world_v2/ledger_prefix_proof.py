@@ -779,6 +779,7 @@ class SparseMerklePutV1:
 
     root: bytes
     node_updates: tuple[tuple[int, int, bytes], ...]
+    prior_siblings: tuple[bytes, ...]
 
     def __post_init__(self) -> None:
         _require_hash_bytes(self.root, label="SMT updated root")
@@ -793,6 +794,10 @@ class SparseMerklePutV1:
             _require_hash_bytes(node_hash, label="SMT update node")
         if not hmac.compare_digest(self.root, self.node_updates[-1][2]):
             raise ValueError("SMT update root does not match its path")
+        if len(self.prior_siblings) != _SMT_DEPTH:
+            raise ValueError("SMT update prior sibling path is invalid")
+        for sibling in self.prior_siblings:
+            _require_hash_bytes(sibling, label="SMT update prior sibling")
 
 
 def sparse_merkle_put_from_node_lookup_v1(
@@ -817,6 +822,7 @@ def sparse_merkle_put_from_node_lookup_v1(
     key_int = int.from_bytes(key, "big")
     current = _smt_leaf(key, value_hash)
     updates: list[tuple[int, int, bytes]] = [(_SMT_DEPTH, key_int, current)]
+    prior_siblings: list[bytes] = []
     for depth in range(_SMT_DEPTH - 1, -1, -1):
         prefix = key_int >> (_SMT_DEPTH - depth)
         branch = (key_int >> (_SMT_DEPTH - 1 - depth)) & 1
@@ -826,9 +832,14 @@ def sparse_merkle_put_from_node_lookup_v1(
             sibling = _SMT_EMPTY[_SMT_DEPTH - depth - 1]
         else:
             sibling = _require_hash_bytes(sibling, label="persisted SMT sibling")
+        prior_siblings.append(sibling)
         current = _smt_parent(sibling, current) if branch else _smt_parent(current, sibling)
         updates.append((depth, prefix, current))
-    return SparseMerklePutV1(root=current, node_updates=tuple(updates))
+    return SparseMerklePutV1(
+        root=current,
+        node_updates=tuple(updates),
+        prior_siblings=tuple(reversed(prior_siblings)),
+    )
 
 
 def sparse_merkle_proof_from_nodes_v1(
