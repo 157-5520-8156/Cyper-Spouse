@@ -617,3 +617,30 @@ class IncrementalSparseMerkleMapV1:
             for depth in range(_SMT_DEPTH)
         )
         return SparseMerkleProofV1(key=key, value_hash=self.values.get(key), siblings=siblings)
+
+
+def sparse_merkle_proof_from_nodes_v1(
+    *, key: bytes, value_hash: bytes | None, nodes: dict[tuple[int, int], bytes]
+) -> SparseMerkleProofV1:
+    """Build one sparse-map proof from a persisted historical node path.
+
+    Adapters use this narrow helper when a checkpoint authenticates an older
+    locator root.  ``nodes`` may contain only the requested sibling path; a
+    missing address has the canonical empty-subtree value.  This deliberately
+    does not reconstruct a mutable map or grant callers access to its values.
+    """
+
+    _require_hash_bytes(key, label="SMT key")
+    if value_hash is not None:
+        _require_hash_bytes(value_hash, label="SMT value")
+    key_int = int.from_bytes(key, "big")
+    siblings: list[bytes] = []
+    for depth in range(_SMT_DEPTH):
+        sibling_address = (
+            depth + 1,
+            (key_int >> (_SMT_DEPTH - depth) << 1)
+            | (1 - ((key_int >> (_SMT_DEPTH - 1 - depth)) & 1)),
+        )
+        sibling = nodes.get(sibling_address, _SMT_EMPTY[_SMT_DEPTH - depth - 1])
+        siblings.append(_require_hash_bytes(sibling, label="persisted SMT sibling"))
+    return SparseMerkleProofV1(key=key, value_hash=value_hash, siblings=tuple(siblings))

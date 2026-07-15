@@ -6,9 +6,12 @@ import sqlite3
 import pytest
 
 from companion_daemon.world_v2.errors import LedgerIntegrityError
-from companion_daemon.world_v2.ledger import WorldLedger
-from companion_daemon.world_v2.schemas import WorldEvent
-from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
+from companion_daemon.world_v2.ledger import ObservationEventLocator, WorldLedger
+from companion_daemon.world_v2.schemas import ProjectionCursor, WorldEvent
+from companion_daemon.world_v2.sqlite_ledger import (
+    SQLiteProofBackedObservationReader,
+    SQLiteWorldLedger,
+)
 
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
@@ -69,6 +72,109 @@ def test_sqlite_prefix_state_is_incremental_and_survives_restart(tmp_path) -> No
     assert reopened._prefix_mmr.root == memory_ledger._prefix_mmr.root
     assert reopened._prefix_locator_map.root == memory_ledger._prefix_locator_map.root
     reopened.close()
+
+
+def test_sqlite_proof_reader_authenticates_historical_membership_and_absence(tmp_path) -> None:
+    path = tmp_path / "proof-reader.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    old = _observation("event:proof:old", "obs:proof:old")
+    _commit(ledger, old, 1)
+    old_projection = ledger.project()
+    old_cursor = ProjectionCursor(
+        world_revision=old_projection.world_revision,
+        deliberation_revision=old_projection.deliberation_revision,
+        ledger_sequence=old_projection.ledger_sequence,
+    )
+    new = _observation("event:proof:new", "obs:proof:new")
+    _commit(ledger, new, 2)
+
+    reader = SQLiteProofBackedObservationReader(ledger=ledger)
+    handle = reader.pin(world_id=WORLD, cursor=old_cursor)
+    old_locator = ObservationEventLocator(
+        observation_id="obs:proof:old",
+        event_type="ObservationRecorded",
+        idempotency_key=old.idempotency_key,
+    )
+    new_locator = ObservationEventLocator(
+        observation_id="obs:proof:new",
+        event_type="ObservationRecorded",
+        idempotency_key=new.idempotency_key,
+    )
+
+    found = reader.read(
+        handle=handle,
+        locators=tuple(sorted((old_locator, new_locator), key=lambda item: (item.observation_id, item.event_type, item.idempotency_key))),
+    )
+    by_observation = {item.locator.observation_id: item.event for item in found}
+
+    assert by_observation["obs:proof:old"] is not None
+    assert by_observation["obs:proof:old"].event == old
+    assert by_observation["obs:proof:new"] is None
+    ledger.close()
+
+
+def test_sqlite_proof_reader_handle_cannot_be_mutated_or_forged(tmp_path) -> None:
+    path = tmp_path / "proof-reader-handle.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    event = _observation("event:proof:handle", "obs:proof:handle")
+    _commit(ledger, event, 1)
+    projection = ledger.project()
+    cursor = ProjectionCursor(
+        world_revision=projection.world_revision,
+        deliberation_revision=projection.deliberation_revision,
+        ledger_sequence=projection.ledger_sequence,
+    )
+    reader = SQLiteProofBackedObservationReader(ledger=ledger)
+    handle = reader.pin(world_id=WORLD, cursor=cursor)
+    locator = ObservationEventLocator(
+        observation_id="obs:proof:handle",
+        event_type="ObservationRecorded",
+        idempotency_key=event.idempotency_key,
+    )
+
+    with pytest.raises(AttributeError):
+        handle.cursor = ProjectionCursor(  # type: ignore[misc]
+            world_revision=0, deliberation_revision=0, ledger_sequence=0
+        )
+    assert reader.read(handle=handle, locators=(locator,))[0].event is not None
+
+    other_reader = SQLiteProofBackedObservationReader(ledger=ledger)
+    with pytest.raises(ValueError, match="not owned"):
+        other_reader.read(handle=handle, locators=(locator,))
+    ledger.close()
+
+
+def test_sqlite_proof_reader_rejects_tampered_historical_sibling_path(tmp_path) -> None:
+    path = tmp_path / "proof-reader-tampered.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    old = _observation("event:proof:path", "obs:proof:path")
+    _commit(ledger, old, 1)
+    # A second key makes one historical sibling non-empty; changing the
+    # journal then has a cryptographically observable effect on the first key.
+    _commit(ledger, _observation("event:proof:path:peer", "obs:proof:path:peer"), 2)
+    projection = ledger.project()
+    cursor = ProjectionCursor(
+        world_revision=projection.world_revision,
+        deliberation_revision=projection.deliberation_revision,
+        ledger_sequence=projection.ledger_sequence,
+    )
+    reader = SQLiteProofBackedObservationReader(ledger=ledger)
+    handle = reader.pin(world_id=WORLD, cursor=cursor)
+    locator = ObservationEventLocator(
+        observation_id="obs:proof:path",
+        event_type="ObservationRecorded",
+        idempotency_key=old.idempotency_key,
+    )
+    # Any changed sibling on the one historical path makes the root check fail.
+    ledger._connection.execute(
+        """UPDATE world_v2_prefix_locator_node_history
+           SET node_hash = zeroblob(32)
+           WHERE world_id = ? AND ledger_sequence = ?""",
+        (WORLD, cursor.ledger_sequence),
+    )
+    with pytest.raises(ValueError, match="SMT proof does not verify"):
+        reader.read(handle=handle, locators=(locator,))
+    ledger.close()
 
 
 def test_sqlite_legacy_prefix_migration_rebuilds_only_when_all_v1_rows_absent(tmp_path) -> None:
