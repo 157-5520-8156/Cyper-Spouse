@@ -1,0 +1,104 @@
+from __future__ import annotations
+
+import hashlib
+
+import pytest
+
+from companion_daemon.world_v2.ledger_prefix_proof import (
+    AppendMmrV1,
+    LedgerLeafV1,
+    PrefixCheckpointLeafV1,
+    SparseMerkleMapV1,
+    observation_locator_key,
+)
+
+
+def _hash(value: str) -> bytes:
+    return hashlib.sha256(value.encode()).digest()
+
+
+def test_mmr_proves_event_and_checkpoint_leaves_under_one_prefix() -> None:
+    event_one = LedgerLeafV1(
+        world_id="world:proof",
+        ledger_sequence=1,
+        world_revision=1,
+        deliberation_revision=0,
+        commit_id="commit:one",
+        event_id="event:one",
+        idempotency_key="idem:one",
+        event_envelope_hash=_hash("event-one").hex(),
+    ).digest()
+    checkpoint = PrefixCheckpointLeafV1(
+        world_id="world:proof",
+        commit_id="commit:one",
+        first_ledger_sequence=1,
+        last_ledger_sequence=1,
+        world_revision=1,
+        deliberation_revision=0,
+        request_hash=_hash("request").hex(),
+        result_hash=_hash("result").hex(),
+        ordered_event_ids_hash=_hash("event:one").hex(),
+        locator_root=_hash("locator-root").hex(),
+        mmr_leaf_count=2,
+    ).digest()
+    mmr = AppendMmrV1().append(event_one).append(checkpoint)
+
+    mmr.prove(0).verify(leaf_hash=event_one, expected_root=mmr.root)
+    mmr.prove(1).verify(leaf_hash=checkpoint, expected_root=mmr.root)
+
+
+def test_mmr_rejects_swapped_leaf_and_wrong_prefix_root() -> None:
+    mmr = AppendMmrV1()
+    for value in ("one", "two", "three"):
+        mmr = mmr.append(_hash(value))
+
+    with pytest.raises(ValueError, match="does not verify"):
+        mmr.prove(1).verify(leaf_hash=_hash("one"), expected_root=mmr.root)
+    with pytest.raises(ValueError, match="does not verify"):
+        mmr.prove(1).verify(leaf_hash=_hash("two"), expected_root=_hash("other-root"))
+
+
+def test_sparse_locator_map_proves_membership_and_non_membership() -> None:
+    message = observation_locator_key(
+        world_id="world:proof", event_type="ObservationRecorded", idempotency_key="idem:m"
+    )
+    operator = observation_locator_key(
+        world_id="world:proof", event_type="OperatorObservationRecorded", idempotency_key="idem:o"
+    )
+    missing = observation_locator_key(
+        world_id="world:proof", event_type="ObservationRecorded", idempotency_key="idem:missing"
+    )
+    locator_map = SparseMerkleMapV1().put(key=message, value_hash=_hash("event:m")).put(
+        key=operator, value_hash=_hash("event:o")
+    )
+
+    membership = locator_map.prove(message)
+    assert membership.value_hash == _hash("event:m")
+    membership.verify(expected_root=locator_map.root)
+    non_membership = locator_map.prove(missing)
+    assert non_membership.value_hash is None
+    non_membership.verify(expected_root=locator_map.root)
+
+
+def test_sparse_locator_map_rejects_tampered_branch_or_key_overwrite() -> None:
+    key = observation_locator_key(
+        world_id="world:proof", event_type="ObservationRecorded", idempotency_key="idem:m"
+    )
+    locator_map = SparseMerkleMapV1().put(key=key, value_hash=_hash("event:m"))
+    proof = locator_map.prove(key)
+    with pytest.raises(ValueError, match="does not verify"):
+        type(proof)(key=proof.key, value_hash=_hash("event:other"), siblings=proof.siblings).verify(
+            expected_root=locator_map.root
+        )
+    with pytest.raises(ValueError, match="append-only"):
+        locator_map.put(key=key, value_hash=_hash("event:other"))
+
+
+def test_locator_key_is_domain_separated_by_world_and_event_type() -> None:
+    common = {"idempotency_key": "idem:same"}
+    assert observation_locator_key(world_id="world:a", event_type="ObservationRecorded", **common) != observation_locator_key(
+        world_id="world:b", event_type="ObservationRecorded", **common
+    )
+    assert observation_locator_key(world_id="world:a", event_type="ObservationRecorded", **common) != observation_locator_key(
+        world_id="world:a", event_type="OperatorObservationRecorded", **common
+    )
