@@ -15,6 +15,7 @@ from .human_likeness_evaluator import (
     ReviewedRun,
     ScenarioTurn,
 )
+from .platform_action_executor import PlatformActionExecutor
 from .matrix_catalog import (
     CandidateDistribution,
     ClassificationCandidate,
@@ -75,6 +76,7 @@ __all__ = [
     "ProjectionRequest",
     "ProjectionAuthority",
     "ProjectionGrant",
+    "PlatformActionExecutor",
     "ReplayMode",
     "ReviewedRun",
     "RuntimeOutcome",
