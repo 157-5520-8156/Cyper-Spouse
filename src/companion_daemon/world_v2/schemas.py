@@ -1914,6 +1914,8 @@ class OutcomeProposalProjection(FrozenModel):
     evaluated_entity_revision: int = Field(ge=1)
     evaluated_world_revision: int = Field(ge=0)
     trigger_ref: str = Field(min_length=1)
+    deliberation_trigger_id: str | None = Field(default=None, min_length=1)
+    source_observation_id: str | None = Field(default=None, min_length=1)
     candidate_result_ref: str = Field(min_length=1)
     proposed_result_id: str = Field(min_length=1)
     proposed_result_payload_ref: str = Field(min_length=1)

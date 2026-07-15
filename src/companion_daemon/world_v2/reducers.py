@@ -4497,6 +4497,34 @@ def _outcome_proposal_recorded(state: ReducerState, event: WorldEvent) -> Reduce
         raise ValueError("outcome proposal must evaluate the current world revision")
     if payload.outcome_proposal_id in state.proposal_ids:
         raise ValueError("proposal identity is already registered")
+    if payload.deliberation_trigger_id is not None:
+        trigger = next(
+            (
+                item
+                for item in state.trigger_processes
+                if item.trigger_id == payload.deliberation_trigger_id
+            ),
+            None,
+        )
+        source_event_id = f"event:outcome-observation:{payload.source_observation_id}"
+        observation = next(
+            (
+                item
+                for item in state.outcome_observations
+                if item.observation_id == payload.source_observation_id
+            ),
+            None,
+        )
+        if (
+            trigger is None
+            or trigger.process_kind != "outcome_deliberation"
+            or trigger.state != "claimed"
+            or trigger.source_evidence_ref != source_event_id
+            or observation is None
+            or observation.occurrence_id != payload.occurrence_id
+            or payload.source_observation_id not in payload.observation_refs
+        ):
+            raise ValueError("outcome proposal does not bind a claimed source trigger")
     return state.model_copy(
         update={
             "outcome_proposals": record_outcome_proposal(

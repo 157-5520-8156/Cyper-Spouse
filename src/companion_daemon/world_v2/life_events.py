@@ -103,6 +103,10 @@ class OutcomeProposalRecordedPayload(FrozenModel):
     evaluated_entity_revision: int = Field(ge=1)
     evaluated_world_revision: int = Field(ge=0)
     trigger_ref: str = Field(min_length=1)
+    # Legacy records predate the outcome worker.  New production records must
+    # bind both fields and are validated by the reducer before acceptance.
+    deliberation_trigger_id: str | None = Field(default=None, min_length=1)
+    source_observation_id: str | None = Field(default=None, min_length=1)
     candidate_result_ref: str = Field(min_length=1)
     proposed_result_id: str = Field(min_length=1)
     proposed_result_payload_ref: str = Field(min_length=1)
@@ -116,6 +120,8 @@ class OutcomeProposalRecordedPayload(FrozenModel):
 
     @model_validator(mode="after")
     def proposed_change_hash_matches_fields(self) -> OutcomeProposalRecordedPayload:
+        if (self.deliberation_trigger_id is None) != (self.source_observation_id is None):
+            raise ValueError("outcome proposal trigger binding is incomplete")
         expected = outcome_mutation_hash(
             change_id=self.change_id,
             occurrence_id=self.occurrence_id,
