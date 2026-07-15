@@ -93,6 +93,9 @@ _V16_ONLY_STATE_KEYS = frozenset(
 )
 _V17_ONLY_STATE_KEYS = frozenset({"model_result_audits", "proposal_audits"})
 _V18_ONLY_STATE_KEYS = frozenset({"acceptance_manifests_v2"})
+_V19_ONLY_STATE_KEYS = frozenset(
+    {"fact_commit_proposal_audits_v2", "acceptance_manifests_v3"}
+)
 _PREFIX_PROOF_VERSION = "world-v2-prefix-proof.2"
 _PREVIOUS_PREFIX_PROOF_VERSION = "world-v2-prefix-proof.1"
 _PREFIX_BITS_BYTES = 32
@@ -1344,6 +1347,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.15",
                 "world-v2-reducers.16",
                 "world-v2-reducers.17",
+                "world-v2-reducers.18",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -1452,12 +1456,23 @@ class SQLiteWorldLedger:
             if not isinstance(raw_state, dict):
                 raise ValueError("legacy state is not an object")
             raw_state = dict(raw_state)
+            injected_v19_keys = tuple(
+                sorted(
+                    key
+                    for key in _V19_ONLY_STATE_KEYS.intersection(raw_state)
+                    if raw_state.get(key) not in (None, [], {})
+                )
+            )
+            if injected_v19_keys:
+                raise ValueError(
+                    f"legacy head cannot claim v19 Fact fields {injected_v19_keys!r}"
+                )
             injected_v18_keys = tuple(
                 key
                 for key in _V18_ONLY_STATE_KEYS.intersection(raw_state)
                 if raw_state.get(key) not in (None, [], {})
             )
-            if injected_v18_keys:
+            if injected_v18_keys and reducer_bundle_version != "world-v2-reducers.18":
                 raise ValueError("legacy head cannot claim v18 manifest fields")
             injected_v17_keys = tuple(
                 sorted(
@@ -1466,7 +1481,10 @@ class SQLiteWorldLedger:
                     if raw_state.get(key) not in (None, [], {})
                 )
             )
-            if injected_v17_keys and reducer_bundle_version != "world-v2-reducers.17":
+            if injected_v17_keys and reducer_bundle_version not in {
+                "world-v2-reducers.17",
+                "world-v2-reducers.18",
+            }:
                 raise ValueError(
                     f"legacy head cannot claim v17 audit fields {injected_v17_keys!r}"
                 )
@@ -1474,6 +1492,7 @@ class SQLiteWorldLedger:
             if injected_v16_keys and reducer_bundle_version not in {
                 "world-v2-reducers.16",
                 "world-v2-reducers.17",
+                "world-v2-reducers.18",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v16 authority fields {injected_v16_keys!r}"
@@ -1486,7 +1505,11 @@ class SQLiteWorldLedger:
             }
             if (
                 reducer_bundle_version
-                not in {"world-v2-reducers.16", "world-v2-reducers.17"}
+                not in {
+                    "world-v2-reducers.16",
+                    "world-v2-reducers.17",
+                    "world-v2-reducers.18",
+                }
                 and isinstance(actor_transitions, list)
                 and any(
                 isinstance(transition, dict)
@@ -1501,7 +1524,11 @@ class SQLiteWorldLedger:
             plan_authority_keys = {"owner_actor_ref", "authority_origin"}
             if (
                 reducer_bundle_version
-                not in {"world-v2-reducers.16", "world-v2-reducers.17"}
+                not in {
+                    "world-v2-reducers.16",
+                    "world-v2-reducers.17",
+                    "world-v2-reducers.18",
+                }
                 and isinstance(plans, list)
                 and any(
                     isinstance(plan, dict) and plan_authority_keys.intersection(plan)
@@ -1650,6 +1677,7 @@ class SQLiteWorldLedger:
             "world-v2-reducers.15",
             "world-v2-reducers.16",
             "world-v2-reducers.17",
+            "world-v2-reducers.18",
             REDUCER_BUNDLE_VERSION,
         }:
             payload.pop("commitments", None)
@@ -1755,6 +1783,8 @@ class SQLiteWorldLedger:
             model_result_audits=projection.model_result_audits,
             proposal_audits=projection.proposal_audits,
             acceptance_manifests_v2=projection.acceptance_manifests_v2,
+            fact_commit_proposal_audits_v2=projection.fact_commit_proposal_audits_v2,
+            acceptance_manifests_v3=projection.acceptance_manifests_v3,
             acceptance_decisions=projection.acceptance_decisions,
             outcome_proposals=projection.outcome_proposals,
         )
