@@ -145,10 +145,73 @@ class WorldV2TurnApplication:
     async def respond(self, inbound: InboundTurn) -> RuntimeOutcome:
         return await self._turns.respond(inbound)
 
+    async def inbound(
+        self,
+        *,
+        platform: str,
+        platform_user_id: str,
+        platform_message_id: str,
+        text: str,
+        observed_at: datetime,
+        trace_id: str,
+    ) -> RuntimeOutcome:
+        """Accept one platform-neutral message through the sole v2 ingress seam.
+
+        A platform host owns parsing provider envelopes, but not construction of
+        runtime or ledger commands.  Keeping this small primitive interface on
+        the application means a host can depend only on this composition root,
+        rather than importing ``WorldTurnRuntime`` or a ledger implementation.
+        """
+
+        return await self.respond(
+            InboundTurn(
+                platform=platform,
+                platform_user_id=platform_user_id,
+                platform_message_id=platform_message_id,
+                text=text,
+                observed_at=observed_at,
+                trace_id=trace_id,
+            )
+        )
+
     async def advance(self, clock: ClockObservation) -> RuntimeOutcome:
         """Advance logical time through the sole World v2 host seam."""
 
         return await self._turns.advance(clock)
+
+    async def tick(
+        self,
+        *,
+        tick_id: str,
+        logical_time_from: datetime,
+        logical_time_to: datetime,
+        observed_at: datetime,
+        trace_id: str,
+        causation_id: str,
+        correlation_id: str,
+        reason: str,
+        policy_version: str | None = None,
+        policy_digest: str | None = None,
+    ) -> RuntimeOutcome:
+        """Create a validated clock command without exposing World v2 schema internals."""
+
+        return await self.advance(
+            ClockObservation(
+                schema_version="world-v2.1",
+                tick_id=tick_id,
+                world_id=self._ledger.world_id,
+                logical_time=logical_time_to,
+                created_at=observed_at,
+                trace_id=trace_id,
+                causation_id=causation_id,
+                correlation_id=correlation_id,
+                logical_time_from=logical_time_from,
+                logical_time_to=logical_time_to,
+                reason=reason,
+                policy_version=policy_version,
+                policy_digest=policy_digest,
+            )
+        )
 
     async def record_outcome_observation(
         self, observation: OutcomeObservation
