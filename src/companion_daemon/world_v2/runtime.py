@@ -10,6 +10,7 @@ from .ledger import LedgerPort, WorldLedger
 from .event_identity import domain_idempotency_key
 from .clock_authority import append_clock_transition, resolve_latest_clock
 from .goal_expiry_runtime import build_due_goal_expiry_events
+from .occurrence_clock_continuation import build_occurrence_clock_events
 from .pinned_turn import PinnedTurnCompiler
 from .projection import ProjectionAuthority, ProjectionCompiler
 from .settlement import SettlementPlanner
@@ -1040,6 +1041,26 @@ class WorldRuntime:
             clock_transition=clock_transition,
         )
 
+    def _occurrence_clock_events(
+        self,
+        projection,
+        clock: ClockObservation,
+        *,
+        clock_event: WorldEvent,
+    ) -> list[WorldEvent]:
+        clock_transition = append_clock_transition(
+            projection.clock_transition_history,
+            event=clock_event,
+            current_logical_time=projection.logical_time,
+            computed_world_revision=projection.world_revision + 1,
+        )[-1]
+        return build_occurrence_clock_events(
+            world_id=self._world_id,
+            projection=projection,
+            clock=clock,
+            clock_transition=clock_transition,
+        )
+
     async def advance(self, clock: ClockObservation) -> RuntimeOutcome:
         if clock.world_id != self._world_id:
             raise ValueError("clock belongs to another world")
@@ -1082,6 +1103,7 @@ class WorldRuntime:
             events = [
                 event,
                 *self._goal_expiry_events(before, clock, clock_event=event),
+                *self._occurrence_clock_events(before, clock, clock_event=event),
                 *self._affect_decay_events(before, clock),
             ]
             try:
