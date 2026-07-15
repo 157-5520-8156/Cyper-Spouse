@@ -12,7 +12,7 @@ from .action_pump import ActionPumpResult
 from .affect_trigger_runtime import AffectTriggerRunResult
 from .interaction_fact_trigger_runtime import FactTriggerRunResult
 from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
-from .schemas import ClockObservation, Observation, RuntimeOutcome
+from .schemas import ClockObservation, Observation, OutcomeObservation, RuntimeOutcome
 
 
 class InboundIdentityResolver(Protocol):
@@ -73,6 +73,17 @@ class WorldTurnRuntime:
         """
 
         return await self._runtime.advance(clock)
+
+    async def record_outcome_observation(
+        self, observation: OutcomeObservation
+    ) -> RuntimeOutcome:
+        """Record a platform-neutral, source-bound world observation.
+
+        The host supplies no evidence or ledger access; the runtime resolves
+        every source reference before it records the lifecycle event.
+        """
+
+        return await self._runtime.record_outcome_observation(observation)
 
     async def drain_actions_once(self) -> ActionPumpResult | None:
         """Advance one already-authorized delivery without exposing the ledger.

@@ -11,6 +11,7 @@ from .event_identity import domain_idempotency_key
 from .clock_authority import append_clock_transition, resolve_latest_clock
 from .goal_expiry_runtime import build_due_goal_expiry_events
 from .occurrence_clock_continuation import build_occurrence_clock_events
+from .outcome_observation_runtime import build_outcome_observation_event
 from .pinned_turn import PinnedTurnCompiler
 from .projection import ProjectionAuthority, ProjectionCompiler
 from .settlement import SettlementPlanner
@@ -50,6 +51,7 @@ from .schemas import (
     ClockObservation,
     CommitResult,
     ExternalObservation,
+    OutcomeObservation,
     Observation,
     ProjectionCursor,
     ProjectionRequest,
@@ -57,6 +59,26 @@ from .schemas import (
     WorldEvent,
     WorldProjection,
 )
+
+
+def _matches_outcome_observation_command(
+    event: WorldEvent, observation: OutcomeObservation
+) -> bool:
+    """Compare the immutable command image without re-resolving current state."""
+
+    if (
+        event.event_type != "OutcomeObservationRecorded"
+        or event.world_id != observation.world_id
+        or event.logical_time != observation.logical_time
+        or event.created_at != observation.created_at
+        or event.trace_id != observation.trace_id
+        or event.causation_id != observation.causation_id
+        or event.correlation_id != observation.correlation_id
+    ):
+        return False
+    return event.payload().get("observation") == observation.as_projection().model_dump(
+        mode="json"
+    )
 
 
 class WorldRuntime:
@@ -1137,6 +1159,60 @@ class WorldRuntime:
             ledger_sequence=committed.ledger_sequence,
             status="observed_only",
             projection_hint=f"world-revision:{committed.world_revision}",
+        )
+
+    async def record_outcome_observation(
+        self, observation: OutcomeObservation
+    ) -> RuntimeOutcome:
+        """Record an externally observed result for one active occurrence.
+
+        The host supplies the observation payload and source references only.
+        Exact evidence is derived from the pinned ledger projection by the
+        runtime, which keeps platform adapters out of the ledger authority lane.
+        """
+
+        if observation.world_id != self._world_id:
+            raise ValueError("outcome observation belongs to another world")
+        trigger_id = f"trigger:outcome-observation:{observation.observation_id}"
+        event_id = f"event:outcome-observation:{observation.observation_id}"
+        async with self._lock:
+            existing = await self._lookup_event_commit(event_id)
+            if existing is not None:
+                persisted, commit = existing
+                if not _matches_outcome_observation_command(persisted, observation):
+                    raise IdempotencyConflict(
+                        "outcome observation identity was already committed with different content"
+                    )
+                return self._runtime_outcome_for_commit(
+                    trigger_id=trigger_id,
+                    committed=commit,
+                )
+            before = await self._project_for_write()
+            event = build_outcome_observation_event(
+                world_id=self._world_id,
+                projection=before,
+                observation=observation,
+            )
+            try:
+                committed = await self._commit(
+                    [event],
+                    world_revision=before.world_revision,
+                    deliberation_revision=before.deliberation_revision,
+                )
+            except IdempotencyConflict:
+                raced = await self._lookup_event_commit(event.event_id)
+                if raced is None:
+                    raise
+                persisted, commit = raced
+                if persisted != event:
+                    raise
+                return self._runtime_outcome_for_commit(
+                    trigger_id=trigger_id,
+                    committed=commit,
+                )
+        return self._runtime_outcome_for_commit(
+            trigger_id=trigger_id,
+            committed=committed,
         )
 
     async def _recover_goal_expiries(

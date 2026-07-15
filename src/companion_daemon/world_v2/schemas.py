@@ -1832,6 +1832,54 @@ class OutcomeObservationProjection(FrozenModel):
     confidence_bp: int = Field(ge=0, le=10_000)
 
 
+class OutcomeObservation(FrozenModel):
+    """A host-supplied, source-bound observation about an active occurrence.
+
+    This is an input command, not an assertion that an occurrence has settled.
+    ``WorldRuntime`` resolves every source reference against its pinned ledger
+    projection before it writes the corresponding lifecycle event.
+    """
+
+    schema_version: SchemaVersion
+    observation_id: str = Field(min_length=1)
+    world_id: str = Field(min_length=1)
+    logical_time: datetime
+    created_at: datetime
+    trace_id: str = Field(min_length=1)
+    causation_id: str = Field(min_length=1)
+    correlation_id: str = Field(min_length=1)
+    occurrence_id: str = Field(min_length=1)
+    source_kind: Literal[
+        "settled_external_result",
+        "clock_plan_precondition",
+        "operator_observation",
+        "committed_world_event",
+    ]
+    source_refs: tuple[str, ...] = Field(min_length=1)
+    observed_payload_ref: str = Field(min_length=1)
+    observed_payload_hash: str = Field(min_length=1)
+    observed_at: datetime
+    confidence_bp: int = Field(ge=0, le=10_000)
+
+    @model_validator(mode="after")
+    def observed_time_is_not_ahead_of_input_time(self) -> OutcomeObservation:
+        if self.observed_at > self.logical_time:
+            raise ValueError("outcome observation cannot be ahead of its input time")
+        return self
+
+    def as_projection(self) -> OutcomeObservationProjection:
+        return OutcomeObservationProjection(
+            observation_id=self.observation_id,
+            occurrence_id=self.occurrence_id,
+            source_kind=self.source_kind,
+            source_refs=self.source_refs,
+            observed_payload_ref=self.observed_payload_ref,
+            observed_payload_hash=self.observed_payload_hash,
+            observed_at=self.observed_at,
+            confidence_bp=self.confidence_bp,
+        )
+
+
 class OutcomeProposalProjection(FrozenModel):
     outcome_proposal_id: str = Field(min_length=1)
     decision_proposal_id: str = Field(min_length=1)

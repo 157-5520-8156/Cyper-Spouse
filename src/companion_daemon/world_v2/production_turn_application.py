@@ -45,7 +45,13 @@ from .pinned_turn import PinnedTurnCompiler
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .platform_action_executor import PlatformActionExecutor, PlatformTransport
 from .runtime import WorldRuntime
-from .schemas import BudgetAccount, ClockObservation, RuntimeOutcome, WorldEvent
+from .schemas import (
+    BudgetAccount,
+    ClockObservation,
+    OutcomeObservation,
+    RuntimeOutcome,
+    WorldEvent,
+)
 from .sqlite_ledger import SQLiteWorldLedger
 from .world_turn_runtime import InboundIdentityResolver, InboundTurn, WorldTurnRuntime
 
@@ -101,6 +107,13 @@ class WorldV2TurnApplication:
         """Advance logical time through the sole World v2 host seam."""
 
         return await self._turns.advance(clock)
+
+    async def record_outcome_observation(
+        self, observation: OutcomeObservation
+    ) -> RuntimeOutcome:
+        """Record a verified world observation without exposing the ledger."""
+
+        return await self._turns.record_outcome_observation(observation)
 
     async def drain_actions_once(self) -> ActionPumpResult | None:
         return await self._turns.drain_actions_once()

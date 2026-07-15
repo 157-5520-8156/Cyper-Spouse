@@ -9,6 +9,7 @@ from companion_daemon.world_v2.schemas import (
     ClockObservation,
     DueWindow,
     EvidenceRef,
+    OutcomeObservation,
     WorldOccurrenceProjection,
 )
 from test_life_projection import (
@@ -188,3 +189,106 @@ async def test_clock_does_not_activate_an_occurrence_with_an_unverifiable_precon
         and item.event_id != "occurrence-activated"
         for item in ledger.project().committed_world_event_refs
     )
+
+
+@pytest.mark.asyncio
+async def test_runtime_records_a_source_bound_outcome_observation_for_an_active_occurrence() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    seed_through_proposal(ledger)
+    _commit_occurrence(
+        ledger,
+        occurrence_id="occurrence:outcome-observed",
+        opens_at=LIFE_TIME,
+        closes_at=LIFE_TIME + timedelta(minutes=10),
+        precondition_refs=("plan:plan-tea",),
+    )
+    runtime = WorldRuntime(world_id=WORLD_ID, ledger=ledger)
+    target = LIFE_TIME + timedelta(minutes=1)
+    await runtime.advance(_clock(tick_id="outcome-observed-open", target=target))
+    observation = OutcomeObservation(
+        schema_version="world-v2.1",
+        observation_id="outcome-observation:tea-ready",
+        world_id=WORLD_ID,
+        logical_time=target,
+        created_at=target,
+        trace_id="trace:outcome-observation",
+        causation_id="sensor:tea-ready",
+        correlation_id="correlation:outcome-observation",
+        occurrence_id="occurrence:outcome-observed",
+        source_kind="clock_plan_precondition",
+        source_refs=("plan-tea",),
+        observed_payload_ref="sensor-payload:tea-ready",
+        observed_payload_hash="a" * 64,
+        observed_at=target,
+        confidence_bp=9_000,
+    )
+
+    first = await runtime.record_outcome_observation(observation)
+
+    projected = ledger.project()
+    occurrence = next(
+        item
+        for item in projected.world_occurrences
+        if item.occurrence_id == "occurrence:outcome-observed"
+    )
+    assert occurrence.entity_revision == 3
+    assert occurrence.observation_refs == ("outcome-observation:tea-ready",)
+    recorded_ref = next(
+        item
+        for item in projected.committed_world_event_refs
+        if item.event_type == "OutcomeObservationRecorded"
+        and item.event_id != "outcome-observed"
+    )
+    recorded = ledger.lookup_event_commit(recorded_ref.event_id)
+    assert recorded is not None
+    assert recorded[0].payload()["evidence_refs"] == [
+        {
+            "claim_purpose": "current_fact",
+            "evidence_type": "active_plan",
+            "immutable_hash": model_hash(projected.plans[0]),
+            "ref_id": "plan-tea",
+            "source_world_revision": None,
+        }
+    ]
+    assert await runtime.record_outcome_observation(observation) == first
+    assert ledger.project() == projected
+
+
+@pytest.mark.asyncio
+async def test_runtime_rejects_an_outcome_observation_with_an_unrelated_plan_source() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID)
+    seed_through_proposal(ledger)
+    _commit_occurrence(
+        ledger,
+        occurrence_id="occurrence:outcome-source-rejected",
+        opens_at=LIFE_TIME,
+        closes_at=LIFE_TIME + timedelta(minutes=10),
+        precondition_refs=("plan:plan-tea",),
+    )
+    runtime = WorldRuntime(world_id=WORLD_ID, ledger=ledger)
+    target = LIFE_TIME + timedelta(minutes=1)
+    await runtime.advance(_clock(tick_id="outcome-source-rejected-open", target=target))
+    before = ledger.project()
+
+    with pytest.raises(ValueError, match="not an occurrence precondition"):
+        await runtime.record_outcome_observation(
+            OutcomeObservation(
+                schema_version="world-v2.1",
+                observation_id="outcome-observation:unrelated-plan",
+                world_id=WORLD_ID,
+                logical_time=target,
+                created_at=target,
+                trace_id="trace:unrelated-plan",
+                causation_id="sensor:unrelated-plan",
+                correlation_id="correlation:unrelated-plan",
+                occurrence_id="occurrence:outcome-source-rejected",
+                source_kind="clock_plan_precondition",
+                source_refs=("plan:not-a-precondition",),
+                observed_payload_ref="sensor-payload:unrelated-plan",
+                observed_payload_hash="b" * 64,
+                observed_at=target,
+                confidence_bp=9_000,
+            )
+        )
+
+    assert ledger.project() == before
