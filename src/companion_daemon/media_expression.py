@@ -13,6 +13,10 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from companion_daemon.media_address import MediaAddressStrategy
+from companion_daemon.media_authenticity import (
+    PhotographicAuthenticityProfile,
+    choose_authenticity_profile,
+)
 from companion_daemon.media_camera import CameraGeometry
 from companion_daemon.media_embodiment import (
     EmbodiedPresentation,
@@ -20,13 +24,15 @@ from companion_daemon.media_embodiment import (
 )
 from companion_daemon.media_subject import (
     SubjectPresentationPlan,
-    adapt_subject_for_media_address_v3,
+    upgrade_subject_presentation_v4,
     upgrade_subject_presentation_v3,
 )
+from companion_daemon.media_facial import choose_facial_contract
 
 
 COMPLETE_CANDIDATE_VERSION = "complete-media-expression-candidate-v1"
 IDENTITY_SELECTION_VERSION = "identity-reference-selection-v1"
+PERCEPTUAL_SIGNATURE_VERSION = "media-perceptual-v2"
 
 
 @dataclass(frozen=True)
@@ -90,6 +96,7 @@ class CompleteMediaExpressionCandidate:
     subject_presentation: dict[str, object] | None = None
     embodied_presentation: dict[str, object] | None = None
     identity_reference_selection: IdentityReferenceSelection | None = None
+    photographic_authenticity: PhotographicAuthenticityProfile | None = None
     source_presentation_candidate_id: str | None = None
     version: str = COMPLETE_CANDIDATE_VERSION
 
@@ -112,6 +119,10 @@ class CompleteMediaExpressionCandidate:
                 self.identity_reference_selection.to_payload()
                 if self.identity_reference_selection
                 else None
+            ),
+            "photographic_authenticity": (
+                self.photographic_authenticity.to_payload()
+                if self.photographic_authenticity else None
             ),
             "source_presentation_candidate_id": self.source_presentation_candidate_id,
         }
@@ -250,6 +261,25 @@ _BID_ADDRESS_RECIPES: tuple[tuple[tuple[str, ...], dict[str, str | None]], ...] 
     ),
 )
 
+_ADDITIONAL_BID_ADDRESS_RECIPES: tuple[
+    tuple[tuple[str, ...], dict[str, str | None]], ...
+] = (
+    (("inform_status", "coordinate_next_step"), dict(address_mode="evidence_mediated", engagement_tactic="demonstration", disclosure_mode="evidence_first", staging_degree="lightly_arranged", temporal_beat="held_for_response", visual_priority="primary_evidence", expression_charge="none", attraction_mechanism=None)),
+    (("share_presence",), dict(address_mode="direct_recipient", engagement_tactic="presence", disclosure_mode="selective_focus", staging_degree="camera_aware", temporal_beat="held_for_response", visual_priority="character", expression_charge="none", attraction_mechanism=None)),
+    (("share_discovery",), dict(address_mode="evidence_mediated", engagement_tactic="demonstration", disclosure_mode="evidence_first", staging_degree="lightly_arranged", temporal_beat="mid_action", visual_priority="primary_evidence", expression_charge="none", attraction_mechanism=None)),
+    (("share_discovery",), dict(address_mode="consultative", engagement_tactic="comparison", disclosure_mode="selective_focus", staging_degree="camera_aware", temporal_beat="reaction", visual_priority="primary_evidence", expression_charge="none", attraction_mechanism=None)),
+    (("invite_opinion",), dict(address_mode="consultative", engagement_tactic="comparison", disclosure_mode="evidence_first", staging_degree="lightly_arranged", temporal_beat="held_for_response", visual_priority="primary_evidence", expression_charge="none", attraction_mechanism=None)),
+    (("invite_appreciation",), dict(address_mode="direct_recipient", engagement_tactic="reveal", disclosure_mode="polished_display", staging_degree="deliberately_posed", temporal_beat="held_for_response", visual_priority="character", expression_charge="none", attraction_mechanism=None)),
+    (("celebrate_together",), dict(address_mode="shared_attention", engagement_tactic="celebration", disclosure_mode="open_context", staging_degree="camera_aware", temporal_beat="reaction", visual_priority="relationship", expression_charge="none", attraction_mechanism=None)),
+    (("invite_playful_exchange",), dict(address_mode="photographer_relational", engagement_tactic="contrast", disclosure_mode="partial_reveal", staging_degree="camera_aware", temporal_beat="reaction", visual_priority="character", expression_charge="none", attraction_mechanism=None)),
+    (("seek_validation",), dict(address_mode="direct_recipient", engagement_tactic="vulnerability", disclosure_mode="unguarded_access", staging_degree="camera_aware", temporal_beat="aftermath", visual_priority="character", expression_charge="none", attraction_mechanism=None)),
+    (("seek_validation",), dict(address_mode="evidence_mediated", engagement_tactic="contrast", disclosure_mode="evidence_first", staging_degree="unposed", temporal_beat="aftermath", visual_priority="primary_evidence", expression_charge="none", attraction_mechanism=None)),
+    (("seek_care",), dict(address_mode="evidence_mediated", engagement_tactic="vulnerability", disclosure_mode="evidence_first", staging_degree="unposed", temporal_beat="aftermath", visual_priority="primary_evidence", expression_charge="none", attraction_mechanism=None)),
+    (("offer_reassurance",), dict(address_mode="direct_recipient", engagement_tactic="reassurance", disclosure_mode="open_context", staging_degree="camera_aware", temporal_beat="just_after", visual_priority="character", expression_charge="none", attraction_mechanism=None)),
+    (("revisit_memory",), dict(address_mode="shared_attention", engagement_tactic="presence", disclosure_mode="open_context", staging_degree="existing_artifact", temporal_beat="retrospective", visual_priority="relationship", expression_charge="none", attraction_mechanism=None)),
+    (("invite_closeness",), dict(address_mode="photographer_relational", engagement_tactic="affection", disclosure_mode="selective_focus", staging_degree="privately_composed", temporal_beat="reaction", visual_priority="relationship", expression_charge="subtle", attraction_mechanism=None)),
+)
+
 _ATTRACTION_MECHANISMS = (
     "direct_invitation",
     "playful_tease",
@@ -273,11 +303,12 @@ def build_complete_candidates(
     identity_assets: Sequence[str] = (),
     reference_pose_metadata: Mapping[str, Mapping[str, str]] | None = None,
     identity_catalog_version: str = "",
+    event_snapshot: Mapping[str, object] | None = None,
     limit: int = 24,
 ) -> tuple[CompleteMediaExpressionCandidate, ...]:
     """Build a stable, stratified candidate set without consulting a model."""
 
-    recipes = list(_BID_ADDRESS_RECIPES)
+    recipes = [*_BID_ADDRESS_RECIPES, *_ADDITIONAL_BID_ADDRESS_RECIPES]
     if expression_charge_ceiling in {"charged", "veiled"}:
         allowed_charges = (
             ("charged", "veiled") if expression_charge_ceiling == "veiled" else ("charged",)
@@ -346,16 +377,38 @@ def build_complete_candidates(
                     upgraded_subject = upgrade_subject_presentation_v3(
                         SubjectPresentationPlan.from_payload(presentation["subject_presentation"])
                     )
-                    upgraded_subject = adapt_subject_for_media_address_v3(
-                        upgraded_subject,
+                    facial_strategy, facial_micro = choose_facial_contract(
+                        stable_seed=(
+                            f"{opportunity_id}:{index}:{subject_index}:{capture_mode}:"
+                            f"{address.engagement_tactic}:{address.attraction_mechanism or 'none'}"
+                        ),
                         engagement_tactic=address.engagement_tactic,
                         attraction_mechanism=address.attraction_mechanism,
+                        capture_mode=capture_mode,
+                        face_visible=(
+                            str(presentation["character_visibility"]) == "identifiable"
+                        ),
+                    )
+                    upgraded_subject = upgrade_subject_presentation_v4(
+                        upgraded_subject,
+                        facial_display_strategy=facial_strategy,
+                        facial_micro_performance=facial_micro,
                     )
                     subject_payload = upgraded_subject.to_payload()
                     embodied_payload = upgrade_embodied_presentation_v3(
                         EmbodiedPresentation.from_payload(presentation["embodied_presentation"])
                     ).to_payload()
                 for visual_form in forms:
+                    authenticity = choose_authenticity_profile(
+                        stable_seed=(
+                            f"{opportunity_id}:{index}:{subject_index}:{capture_mode}:{visual_form}"
+                        ),
+                        capture_mode=capture_mode,
+                        family=family,
+                        staging_degree=address.staging_degree,
+                        visual_form=visual_form,
+                        event_snapshot=event_snapshot,
+                    )
                     candidate_id = (
                         f"expr:{index}:{subject_index}:{capture_mode}:{visual_form}:"
                         f"{charge}:{address.attraction_mechanism or 'none'}"
@@ -398,6 +451,7 @@ def build_complete_candidates(
                                 and capture_mode != "existing_artifact"
                                 else None
                             ),
+                            photographic_authenticity=authenticity,
                             source_presentation_candidate_id=(
                                 str(presentation["presentation_candidate_id"])
                                 if presentation and capture_mode != "existing_artifact"
@@ -470,41 +524,85 @@ def build_complete_candidates(
 def candidate_perceptual_signature(item: CompleteMediaExpressionCandidate) -> str:
     address = item.media_address_strategy
     camera = item.camera_geometry
-    expression = "no_face"
+    display_family = "no_face"
     gaze = "no_face"
+    nose_cheek = "no_face"
+    mouth = "no_face"
+    authorship = "no_face"
+    temporal_phase = "no_face"
     pose = "none"
     if item.subject_presentation:
         face = item.subject_presentation.get("facial_performance") or {}
+        display = item.subject_presentation.get("facial_display_strategy") or {}
+        micro = item.subject_presentation.get("facial_micro_performance") or {}
         performance = item.subject_presentation.get("performance") or {}
-        expression = str(face.get("expression_family") or "unknown")
-        gaze = str(face.get("gaze_sequence") or "unknown")
+        display_family = str(
+            display.get("strategy_family") or face.get("expression_family") or "unknown"
+        )
+        gaze = str(micro.get("gaze_sequence") or face.get("gaze_sequence") or "unknown")
+        nose_cheek = str(micro.get("nose_cheek_action") or "legacy_face_action")
+        mouth = str(micro.get("mouth_action") or face.get("mouth_behavior") or "unknown")
+        authorship = str(micro.get("performance_authorship") or "legacy_authorship")
+        temporal_phase = str(micro.get("temporal_phase") or "legacy_temporal")
         pose = ":".join(
             str(performance.get(key) or "")
             for key in ("head_yaw", "shoulder_orientation", "posture", "gesture")
         )
     embodied = item.embodied_presentation or {}
+    authenticity = item.photographic_authenticity
     refs = (
         ",".join(item.identity_reference_selection.asset_ids)
         if item.identity_reference_selection
         else "none"
     )
-    return "|".join(
-        (
-            address.engagement_tactic,
-            camera.shot_distance,
-            camera.camera_height,
-            camera.view_axis,
-            camera.subject_occupancy,
-            camera.subject_placement,
-            camera.orientation,
-            expression,
-            gaze,
-            pose,
-            str(embodied.get("body_strategy_id") or "none"),
-            item.legal_visual_forms[0],
-            refs,
-        )
+    return build_perceptual_signature(
+        engagement_tactic=address.engagement_tactic,
+        attraction_mechanism=address.attraction_mechanism or "none",
+        shot_distance=camera.shot_distance,
+        camera_height=camera.camera_height,
+        view_axis=camera.view_axis,
+        camera_face_distance=camera.camera_face_distance,
+        face_radial_position=camera.face_radial_position,
+        subject_occupancy=camera.subject_occupancy,
+        subject_placement=camera.subject_placement,
+        orientation=camera.orientation,
+        display_family=display_family,
+        gaze_sequence=gaze,
+        nose_cheek_action=nose_cheek,
+        mouth_action=mouth,
+        performance_authorship=authorship,
+        temporal_phase=temporal_phase,
+        pose=pose,
+        embodied_strategy=str(embodied.get("body_strategy_id") or "none"),
+        aesthetic_intent=(
+            authenticity.aesthetic_intent if authenticity else "legacy_authenticity"
+        ),
+        scene_orderliness=(
+            authenticity.scene_orderliness if authenticity else "legacy_orderliness"
+        ),
+        capture_imperfection=(
+            authenticity.capture_imperfection if authenticity else "legacy_imperfection"
+        ),
+        visual_form=item.legal_visual_forms[0],
+        identity_references=refs,
     )
+
+
+def build_perceptual_signature(**axes: str) -> str:
+    """Return one schema-versioned signature shared by candidates and history."""
+
+    ordered = (
+        "engagement_tactic", "attraction_mechanism", "shot_distance", "camera_height",
+        "view_axis", "camera_face_distance", "face_radial_position",
+        "subject_occupancy", "subject_placement", "orientation",
+        "display_family", "gaze_sequence", "nose_cheek_action", "mouth_action",
+        "performance_authorship", "temporal_phase", "pose", "embodied_strategy",
+        "aesthetic_intent", "scene_orderliness", "capture_imperfection", "visual_form",
+        "identity_references",
+    )
+    if set(axes) != set(ordered):
+        raise ValueError("invalid perceptual signature axes")
+    return "|".join((PERCEPTUAL_SIGNATURE_VERSION, *(axes[name] for name in ordered)))
 
 
 def _preferred_forms(tactic: str, family: str) -> tuple[str, ...]:
@@ -667,6 +765,35 @@ def _geo(
     device: str,
     imperfection: str,
 ) -> CameraGeometry:
+    face_visible = occupancy not in {"absent", "trace", "detail"}
+    if not face_visible:
+        face_distance = "not_applicable"
+        radial_position = "not_applicable"
+    elif device == "artifact_inherited":
+        face_distance = "artifact_inherited"
+        radial_position = "artifact_inherited"
+    else:
+        face_distance = {
+            "out_of_frame": (
+                "very_close"
+                if distance == "intimate_close"
+                else "supported_near"
+                if height in {"low", "chest"} and distance == "close"
+                else "arm_length"
+            ),
+            "mirror_visible": "conversational" if distance == "medium" else "distant",
+            "fixed_unseen": "conversational" if distance in {"close", "medium"} else "distant",
+            "external_unseen": "conversational" if distance in {"close", "medium"} else "distant",
+        }.get(device, "conversational")
+        radial_position = {
+            "center": "center_safe",
+            "left_third": "inner_third",
+            "right_third": "outer_third",
+            "edge_left": "edge_risk",
+            "edge_right": "edge_risk",
+            "distributed": "distributed",
+            "lower_frame": "outer_third",
+        }.get(placement, "center_safe")
     return CameraGeometry.create(
         shot_distance=distance,
         camera_height=height,
@@ -682,6 +809,8 @@ def _geo(
         else "evidence_priority",
         imperfection_profile=imperfection,
         device_visibility=device,
+        camera_face_distance=face_distance,
+        face_radial_position=radial_position,
     )
 
 

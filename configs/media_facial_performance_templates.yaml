@@ -1,0 +1,45 @@
+schema_version: media-facial-catalog-v1
+
+# This is a compatibility/weight catalog, not an event-to-expression lookup table.
+# A tactic may lead to several families; the stable seed chooses among legal candidates.
+tactic_affinities:
+  presence: [present_and_available, warm_connection, amusement_leaking]
+  reveal: [proud_display, amusement_leaking, warm_connection]
+  demonstration: [neutral_evidence, present_and_available, proud_display]
+  question: [consultative_check, deliberate_cuteness, present_and_available]
+  comparison: [consultative_check, mock_defiance, neutral_evidence]
+  contrast: [mock_defiance, amusement_leaking, comic_self_exposure, frustrated_complaint]
+  comic_hook: [deliberate_cuteness, mock_defiance, amusement_leaking, comic_self_exposure, embarrassed_repair]
+  celebration: [proud_display, amusement_leaking, warm_connection]
+  vulnerability: [vulnerable_disclosure, tired_access, embarrassed_repair]
+  reassurance: [warm_connection, tender_private, present_and_available]
+  coordination: [neutral_evidence, consultative_check, present_and_available]
+  affection: [tender_private, warm_connection, desire_withheld]
+  nostalgia: [tender_private, warm_connection, desire_withheld]
+  attraction: [desire_direct, desire_withheld, deliberate_cuteness, mock_defiance, tender_private]
+
+attraction_affinities:
+  direct_invitation: [desire_direct, mock_defiance, deliberate_cuteness]
+  confident_display: [desire_direct, mock_defiance, deliberate_cuteness]
+  sensory_immediacy: [desire_direct, mock_defiance, deliberate_cuteness]
+  withheld_attention: [desire_withheld, tender_private, amusement_leaking]
+  interrupted_transition: [desire_withheld, tender_private, amusement_leaking]
+  atmospheric_suggestion: [desire_withheld, tender_private, amusement_leaking]
+  playful_tease: [deliberate_cuteness, mock_defiance, amusement_leaking]
+  private_trust: [tender_private, desire_withheld, desire_direct]
+  close_proximity: [tender_private, desire_withheld, desire_direct]
+
+# All axes are visible still-frame observations. They must never be interpreted as
+# diagnoses, hidden emotions, personality traits, or a time series proven by one image.
+visible_action_axes:
+  brow_action: [neutral, settled, soft_lift, bilateral_lift, one_brow_lift, brief_question, slight_inward_draw, slight_knit, relaxed_lowered, not_visible]
+  eye_aperture: [natural, slightly_widened, wide_playful, smile_narrowed, heavy_lidded, relaxed_heavy, brief_squint, brief_squeeze, single_wink, not_visible]
+  gaze_target: [lens, screen, screen_preview, primary_evidence, off_frame, environment, companion, reflection, not_visible]
+  gaze_sequence: [held_lens, just_returned_to_lens, about_to_look_away, caught_off_frame, evidence_then_recipient, screen_then_lens, companion_then_camera, lens_then_away, no_face]
+  nose_cheek_action: [relaxed, cheek_lift, small_nose_scrunch, cheek_puff, one_cheek_tension, asymmetric_cheek, flushed_relaxation, not_visible]
+  mouth_action: [relaxed_closed, soft_parted, small_smile, suppressed_smile, asymmetric_half_smile, subtle_pout, lightly_pressed, mid_speech, open_laugh, breath_recovery, not_visible]
+  facial_asymmetry: [balanced, subtle_left, subtle_right, dynamic_natural, momentary_irregular, not_visible]
+  display_intensity: [trace, low, subtle, medium, clear, high, heightened]
+  performance_authorship: [spontaneous, recipient_aware, deliberately_performed, photographer_prompted, unperformed_capture, responsive_candid, selfie_micro_pose, playfully_performed, polished_portrait_performance, private_recipient_performance, not_visible]
+  temporal_phase: [preparation, onset, held_beat, leaking, apex, release, after_reaction, not_visible]
+  facial_energy: [low, contained, lively, breathless, held, recovering, not_visible]

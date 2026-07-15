@@ -34,9 +34,15 @@ from companion_daemon.media_embodiment import (
     embodiment_prompt_block,
 )
 from companion_daemon.media_address import MediaAddressStrategy
+from companion_daemon.media_authenticity import (
+    PhotographicAuthenticityProfile,
+    authenticity_prompt_block,
+)
 from companion_daemon.media_camera import CameraGeometry
 from companion_daemon.media_expression import (
     IdentityReferenceSelection,
+    PERCEPTUAL_SIGNATURE_VERSION,
+    build_perceptual_signature,
     build_complete_candidates,
 )
 from companion_daemon.media_interaction import (
@@ -47,8 +53,10 @@ from companion_daemon.media_interaction import (
 from companion_daemon.media_shot import MediaShotPlan
 from companion_daemon.media_subject import (
     DEFAULT_SUBJECT_CONFIG,
+    PhotoDisplayStrategy,
     SubjectPresentationPlan,
     SUBJECT_PRESENTATION_V3,
+    SUBJECT_PRESENTATION_V4,
     build_subject_candidates,
     capture_hand_feasibility_error,
     load_subject_catalog,
@@ -455,6 +463,7 @@ class MediaPlan:
     identity_reference_selection: IdentityReferenceSelection | None = None
     expression_charge_ceiling: str | None = None
     relationship_stage_basis: str | None = None
+    photographic_authenticity: PhotographicAuthenticityProfile | None = None
 
     def to_payload(self) -> dict[str, object]:
         payload = asdict(self)
@@ -481,6 +490,12 @@ class MediaPlan:
                 if self.identity_reference_selection
                 else None
             )
+            if self.photographic_authenticity:
+                payload["photographic_authenticity"] = (
+                    self.photographic_authenticity.to_payload()
+                )
+            else:
+                payload.pop("photographic_authenticity", None)
             for key in ("composition", "action", "camera_direction", "sharing_motive"):
                 payload.pop(key, None)
         else:
@@ -492,6 +507,7 @@ class MediaPlan:
                 "identity_reference_selection",
                 "expression_charge_ceiling",
                 "relationship_stage_basis",
+                "photographic_authenticity",
             ):
                 payload.pop(key, None)
         return payload
@@ -615,6 +631,13 @@ class MediaPlan:
                     if payload.get("relationship_stage_basis") is not None
                     else None
                 ),
+                photographic_authenticity=(
+                    PhotographicAuthenticityProfile.from_payload(
+                        payload["photographic_authenticity"]
+                    )
+                    if payload.get("photographic_authenticity") is not None
+                    else None
+                ),
             )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError("invalid media plan payload") from exc
@@ -679,6 +702,16 @@ class MediaInspection:
     identity_consistency_ok: bool | None = None
     observed_expression_family: str | None = None
     perceptual_signature: str | None = None
+    observed_facial_display_strategy: str | None = None
+    facial_display_strategy_matches: bool | None = None
+    observed_facial_actions: dict[str, object] | None = None
+    facial_micro_performance_matches: bool | None = None
+    generic_smile_fallback: bool | None = None
+    reference_expression_copy_detected: bool | None = None
+    authenticity_profile_matches: bool | None = None
+    commercial_render_dilution: bool | None = None
+    regional_grounding_matches: bool | None = None
+    observed_authenticity: dict[str, object] | None = None
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -840,6 +873,7 @@ class MediaPlanner:
                     identity_assets=identity_assets,
                     reference_pose_metadata=reference_pose_metadata,
                     identity_catalog_version=identity_catalog_version,
+                    event_snapshot=opportunity.event_snapshot,
                 )
                 if _complete_candidate_world_legal(item.planner_payload(), opportunity)
             )
@@ -965,6 +999,11 @@ class MediaRenderer:
                 inspection,
                 automatic=plan.delivery_mode == "automatic",
                 subject_required=plan.subject_presentation is not None,
+                facial_contract_required=(
+                    plan.character_visibility == "identifiable"
+                    and plan.subject_presentation is not None
+                    and plan.subject_presentation.version == SUBJECT_PRESENTATION_V4
+                ),
                 quality_required=plan.version in QUALITY_PLAN_VERSIONS,
                 social_required=(
                     plan.version in {PLAN_VERSION_V3, PLAN_VERSION, PLAN_VERSION_V5}
@@ -983,6 +1022,13 @@ class MediaRenderer:
                     }
                 ),
                 v5_required=plan.version == PLAN_VERSION_V5,
+                enhanced_v5_required=(
+                    plan.photographic_authenticity is not None
+                    or (
+                        plan.subject_presentation is not None
+                        and plan.subject_presentation.version == SUBJECT_PRESENTATION_V4
+                    )
+                ),
             )
             last_inspection = inspection
             if inspection.passed:
@@ -1030,6 +1076,11 @@ class MediaRenderer:
             inspection,
             automatic=plan.delivery_mode == "automatic",
             subject_required=plan.subject_presentation is not None,
+            facial_contract_required=(
+                plan.character_visibility == "identifiable"
+                and plan.subject_presentation is not None
+                and plan.subject_presentation.version == SUBJECT_PRESENTATION_V4
+            ),
             quality_required=plan.version in QUALITY_PLAN_VERSIONS,
             social_required=(
                 plan.version in {PLAN_VERSION_V3, PLAN_VERSION, PLAN_VERSION_V5}
@@ -1048,6 +1099,13 @@ class MediaRenderer:
                 }
             ),
             v5_required=plan.version == PLAN_VERSION_V5,
+            enhanced_v5_required=(
+                plan.photographic_authenticity is not None
+                or (
+                    plan.subject_presentation is not None
+                    and plan.subject_presentation.version == SUBJECT_PRESENTATION_V4
+                )
+            ),
         )
         if not inspection.passed:
             return MediaRenderFailure(plan.plan_id, inspection.reason, 0, inspection)
@@ -1277,6 +1335,38 @@ class OpenAIMediaInspector:
             ),
             perceptual_signature=(
                 str(payload.get("perceptual_signature") or "").strip() or None
+            ),
+            observed_facial_display_strategy=(
+                str(payload.get("observed_facial_display_strategy") or "").strip() or None
+            ),
+            facial_display_strategy_matches=_optional_bool(
+                payload, "facial_display_strategy_matches"
+            ),
+            observed_facial_actions=(
+                dict(payload["observed_facial_actions"])
+                if isinstance(payload.get("observed_facial_actions"), dict)
+                else None
+            ),
+            facial_micro_performance_matches=_optional_bool(
+                payload, "facial_micro_performance_matches"
+            ),
+            generic_smile_fallback=_optional_bool(payload, "generic_smile_fallback"),
+            reference_expression_copy_detected=_optional_bool(
+                payload, "reference_expression_copy_detected"
+            ),
+            authenticity_profile_matches=_optional_bool(
+                payload, "authenticity_profile_matches"
+            ),
+            commercial_render_dilution=_optional_bool(
+                payload, "commercial_render_dilution"
+            ),
+            regional_grounding_matches=_optional_bool(
+                payload, "regional_grounding_matches"
+            ),
+            observed_authenticity=(
+                dict(payload["observed_authenticity"])
+                if isinstance(payload.get("observed_authenticity"), dict)
+                else None
             ),
         )
 
@@ -1520,6 +1610,11 @@ def _compile_media_prompt_v5(
         if plan.embodied_presentation
         else "No invented bodily state, private apparel, or character action."
     )
+    authenticity = (
+        authenticity_prompt_block(plan.photographic_authenticity)
+        if plan.photographic_authenticity
+        else ""
+    )
     people = {
         "none": "No other person is visible.",
         "anonymous_incidental": "Incidental people remain generic, obscured, or out of focus.",
@@ -1552,10 +1647,13 @@ def _compile_media_prompt_v5(
         f"expression_charge={address.expression_charge}{attraction}.\n"
         f"Camera Geometry: capture_author={_camera_authorship(plan.capture_mode)}; "
         f"distance={camera.shot_distance}; height={camera.camera_height}; view_axis={camera.view_axis}; "
+        f"camera_face_distance={camera.camera_face_distance}; "
+        f"face_radial_position={camera.face_radial_position}; "
         f"pitch={camera.pitch}; roll={camera.roll}; orientation={camera.orientation}; "
         f"subject_occupancy={camera.subject_occupancy}; placement={camera.subject_placement}; "
         f"environment_share={camera.environment_share}; focus={camera.focus_behavior}; "
         f"imperfection={camera.imperfection_profile}; device={camera.device_visibility}.\n"
+        f"{authenticity + chr(10) if authenticity else ''}"
         f"{identity}{identity_anchor}\n"
         f"{subject}\n{embodiment}\n"
         f"People rule: {people}\nPrivacy rule: {privacy}\n"
@@ -1965,6 +2063,11 @@ def _freeze_proposal_v5(
         if selected.get("identity_reference_selection") is not None
         else None
     )
+    authenticity = (
+        PhotographicAuthenticityProfile.from_payload(selected["photographic_authenticity"])
+        if selected.get("photographic_authenticity") is not None
+        else None
+    )
     interaction_bid = frozen.plan.interaction_bid
     if intimate_life_share or legacy.get("interaction_bid_id") != original_bid_id:
         bid_values = _interaction_bid_values(
@@ -2007,6 +2110,7 @@ def _freeze_proposal_v5(
             if opportunity.audience_context
             else ""
         ),
+        photographic_authenticity=authenticity,
     )
     plan = replace(plan, diversity_fingerprint=_v5_fingerprint(plan))
     if plan.diversity_fingerprint in recent[-12:]:
@@ -2054,12 +2158,24 @@ def _v5_fingerprint(plan: MediaPlan) -> str:
         plan.camera_geometry.subject_placement, plan.camera_geometry.orientation,
         plan.camera_geometry.imperfection_profile,
     ]
+    if plan.camera_geometry.version == "camera-geometry-v2":
+        parts.extend((
+            plan.camera_geometry.camera_face_distance,
+            plan.camera_geometry.face_radial_position,
+        ))
     if plan.subject_presentation:
         parts.append(plan.subject_presentation.subject_signature)
     if plan.embodied_presentation:
         parts.extend((plan.embodied_presentation.body_strategy_id, plan.embodied_presentation.action_variant_id))
     if plan.identity_reference_selection:
         parts.extend(plan.identity_reference_selection.asset_ids)
+    if plan.photographic_authenticity:
+        parts.extend((
+            plan.photographic_authenticity.aesthetic_intent,
+            plan.photographic_authenticity.device_rendering,
+            plan.photographic_authenticity.scene_orderliness,
+            plan.photographic_authenticity.capture_imperfection,
+        ))
     return "|".join(parts)
 
 
@@ -2260,7 +2376,11 @@ def _validate_frozen_plan(plan: MediaPlan) -> str | None:
         return "unsupported_version"
     if plan.version == PLAN_VERSION_V5:
         return _validate_frozen_plan_v5(plan)
-    if plan.expression_charge_ceiling is not None or plan.relationship_stage_basis is not None:
+    if (
+        plan.expression_charge_ceiling is not None
+        or plan.relationship_stage_basis is not None
+        or plan.photographic_authenticity is not None
+    ):
         return "v5_contract_in_legacy_plan"
     enums = (
         (plan.family, FAMILIES),
@@ -2526,6 +2646,13 @@ def _validate_frozen_plan_v5(plan: MediaPlan) -> str | None:
         CameraGeometry.from_payload(plan.camera_geometry.to_payload())
     except ValueError:
         return "invalid_complete_expression_contract"
+    if plan.photographic_authenticity is not None:
+        try:
+            PhotographicAuthenticityProfile.from_payload(
+                plan.photographic_authenticity.to_payload()
+            )
+        except ValueError:
+            return "invalid_photographic_authenticity"
     geometry_error = plan.camera_geometry.compatibility_error(
         capture_mode=plan.capture_mode, visual_form=plan.visual_form
     )
@@ -2581,14 +2708,31 @@ def _validate_frozen_plan_v5(plan: MediaPlan) -> str | None:
     elif plan.route == "generate":
         if plan.subject_presentation is None or plan.embodied_presentation is None:
             return "missing_character_presentation"
-        if plan.subject_presentation.version != SUBJECT_PRESENTATION_V3:
+        if plan.subject_presentation.version not in {
+            SUBJECT_PRESENTATION_V3,
+            SUBJECT_PRESENTATION_V4,
+        }:
             return "legacy_subject_presentation_in_v5"
+        if (
+            plan.subject_presentation.version == SUBJECT_PRESENTATION_V4
+            and plan.photographic_authenticity is None
+        ):
+            return "missing_photographic_authenticity"
         if plan.embodied_presentation.version != EMBODIED_PRESENTATION_V3:
             return "legacy_embodied_presentation_in_v5"
         if plan.embodied_presentation.sensual_charge != address.expression_charge:
             return "expression_embodiment_charge_conflict"
     elif plan.subject_presentation is not None or plan.embodied_presentation is not None:
         return "artifact_presentation_reinterpretation"
+    if plan.photographic_authenticity is not None:
+        if (
+            plan.photographic_authenticity.regional_grounding == "explicit"
+            and not any(
+                pointer in {"/location/country", "/location/region", "/location/city"}
+                for pointer in plan.evidence_values
+            )
+        ):
+            return "unselected_regional_grounding"
     if plan.diversity_fingerprint != _v5_fingerprint(plan):
         return "invalid_fingerprint"
 
@@ -2640,6 +2784,30 @@ def _validate_frozen_plan_v5(plan: MediaPlan) -> str | None:
             ),
             display_strategy=legacy_strategy,
         )
+    elif legacy_subject and legacy_subject.version == SUBJECT_PRESENTATION_V4:
+        strategy = PhotoDisplayStrategy(
+            strategy_id=legacy_subject.facial_display_strategy.strategy_family,
+            communicative_goals=(legacy_interaction_bid.communicative_goal,),
+            intentionality="recipient_aware",
+            intensity=legacy_subject.facial_micro_performance.display_intensity,
+            holistic_cue=legacy_subject.facial_display_strategy.performance_intent,
+            mouth=legacy_subject.facial_micro_performance.mouth_action,
+            eyes=legacy_subject.facial_micro_performance.eye_aperture,
+            brows=legacy_subject.facial_micro_performance.brow_action,
+            gaze_quality=legacy_subject.facial_micro_performance.gaze_target,
+            facial_tension=legacy_subject.facial_micro_performance.facial_energy,
+            temporal_beat=legacy_subject.facial_micro_performance.temporal_phase,
+        )
+        legacy_subject = SubjectPresentationPlan.create_v2(
+            variant_id=legacy_subject.variant_id,
+            appearance=legacy_subject.appearance,
+            performance=replace(
+                legacy_subject.performance,
+                expression=strategy.strategy_id,
+                gaze_target=strategy.gaze_quality,
+            ),
+            display_strategy=strategy,
+        )
     if legacy_embodiment and legacy_embodiment.version == EMBODIED_PRESENTATION_V3:
         legacy_embodiment = EmbodiedPresentation.create(
             **{
@@ -2659,6 +2827,7 @@ def _validate_frozen_plan_v5(plan: MediaPlan) -> str | None:
         identity_reference_selection=None,
         expression_charge_ceiling=None,
         relationship_stage_basis=None,
+        photographic_authenticity=None,
         subject_presentation=legacy_subject,
         embodied_presentation=legacy_embodiment,
         share_intent=legacy_share_intent,
@@ -2839,16 +3008,30 @@ def _inspection_prompt(plan: MediaPlan) -> str:
             "address_strategy_broadly_matches, interaction_bid_legible, "
             "capture_relationship_legible, generic_portrait_dilution, "
             "photographic_authenticity_ok, identity_consistency_ok, observed_expression_family, and "
-            "perceptual_signature. Also return every v6 quality, subject, social, embodied and capture "
+            "perceptual_signature. For plans carrying the newer facial/authenticity contracts, also return "
+            "observed_facial_display_strategy, facial_display_strategy_matches, observed_facial_actions "
+            "(brow, eye_aperture, gaze, nose_cheek, mouth, asymmetry, temporal_phase), "
+            "facial_micro_performance_matches, generic_smile_fallback, "
+            "reference_expression_copy_detected, authenticity_profile_matches, "
+            "commercial_render_dilution, regional_grounding_matches, and observed_authenticity. "
+            "Also return every v6 quality, subject, social, embodied and capture "
             "field applicable to the frozen plan. Reject a third-party image that reads as paparazzi or "
             "an authorless AI editorial; a front-camera image that contradicts its frozen distance, "
             "occupancy or device physics; invite_desire diluted into a polite generic portrait; camera, "
             "hands, action or authorship conflicts; copied reference head tilt/smile/hair/framing; identity "
-            "drift; structural defects; invented private facts; or non-explicit boundary violations. "
-            "perceptual_signature must compactly encode address tactic, camera distance/height/axis, "
-            "occupancy/placement/orientation, expression family/gaze, pose silhouette, embodied strategy, "
-            "scene family and identity-reference appearance. Frozen plan: "
-            f"{_stable_json(plan.to_payload())[:9000]}"
+            "drift; structural defects; invented private facts; non-explicit boundary violations; a frozen "
+            "social performance collapsed into the same polite small smile; a reference image's exact face "
+            "performance copied into the output; ordinary personal media inflated into a commercial render; "
+            "or regional visual claims unsupported by selected evidence. Treat the frozen facial contract as "
+            "one coherent visible still-frame beat, never as a diagnosis or a requirement to show multiple times. "
+            f"perceptual_signature must use exactly this ordered schema: {PERCEPTUAL_SIGNATURE_VERSION}|"
+            "engagement_tactic|attraction_mechanism|shot_distance|camera_height|view_axis|"
+            "camera_face_distance|face_radial_position|subject_occupancy|subject_placement|orientation|"
+            "display_family|gaze_sequence|nose_cheek_action|mouth_action|performance_authorship|"
+            "temporal_phase|pose|embodied_strategy|aesthetic_intent|scene_orderliness|"
+            "capture_imperfection|visual_form|identity_references. Describe observed values, not merely "
+            "copying the planned values. Frozen inspection contract: "
+            f"{_stable_json(_inspection_contract_payload(plan))}"
         )
     subject_fields = (
         " Also return observed_subject_presentation as an object with visible hair_arrangement, "
@@ -2908,6 +3091,67 @@ def _inspection_prompt(plan: MediaPlan) -> str:
     )
 
 
+def _inspection_contract_payload(plan: MediaPlan) -> dict[str, object]:
+    """Keep every visual contract while bounding large event evidence values.
+
+    Inspection must not depend on field order or an arbitrary string slice: v5 plans can
+    legitimately grow beyond the old prompt cutoff, which used to remove the facial and
+    authenticity contracts near the end of the serialized payload.
+    """
+
+    payload: dict[str, object] = {
+        "version": plan.version,
+        "plan_id": plan.plan_id,
+        "event_id": plan.event_id,
+        "family": plan.family,
+        "classification": {
+            "content_domain": plan.content_domain,
+            "visual_form": plan.visual_form,
+            "share_intent": plan.share_intent,
+            "capture_mode": plan.capture_mode,
+            "character_visibility": plan.character_visibility,
+            "other_people_visibility": plan.other_people_visibility,
+            "polish": plan.polish,
+            "tone": plan.tone,
+            "privacy": plan.privacy,
+        },
+        "selected_evidence": {
+            pointer: _compact_value(value) for pointer, value in plan.evidence_values.items()
+        },
+        "action": {
+            "template_id": plan.action_template_id,
+            "cue": plan.action_cue,
+        },
+        "constraints": list(plan.constraints),
+        "interaction_bid": (
+            plan.interaction_bid.to_payload() if plan.interaction_bid else None
+        ),
+        "media_address_strategy": (
+            plan.media_address_strategy.to_payload() if plan.media_address_strategy else None
+        ),
+        "camera_geometry": (
+            plan.camera_geometry.to_payload() if plan.camera_geometry else None
+        ),
+        "photographic_authenticity": (
+            plan.photographic_authenticity.to_payload()
+            if plan.photographic_authenticity
+            else None
+        ),
+        "identity_reference_selection": (
+            plan.identity_reference_selection.to_payload()
+            if plan.identity_reference_selection
+            else None
+        ),
+        "subject_presentation": (
+            plan.subject_presentation.to_payload() if plan.subject_presentation else None
+        ),
+        "embodied_presentation": (
+            plan.embodied_presentation.to_payload() if plan.embodied_presentation else None
+        ),
+    }
+    return payload
+
+
 def _repair_prompt(prompt: str, inspection: MediaInspection) -> str:
     if inspection.rule_version == INSPECTION_VERSION_V7:
         return (
@@ -2916,7 +3160,9 @@ def _repair_prompt(prompt: str, inspection: MediaInspection) -> str:
             "Correct only the observed camera geometry, recipient address, capture relationship, facial "
             "legibility, identity, anatomy, or photographic-authenticity defect named above. Keep the "
             "same event evidence, complete candidate, camera author, geometry, interaction bid, address "
-            "strategy, expression family, embodied contract, wardrobe facts, coverage and charge."
+            "strategy, same frozen facial display and visible-action contract, embodied contract, wardrobe "
+            "facts, coverage and charge; do not replace the face with a generic smile or turn personal media "
+            "into a commercial render."
         )
     return (
         f"{prompt}\n\nThe previous image was rejected: {inspection.reason}. "
@@ -2938,6 +3184,8 @@ def _enforce_inspection_contract(
     embodied_required: bool = False,
     capture_contract_required: bool = False,
     v5_required: bool = False,
+    enhanced_v5_required: bool = False,
+    facial_contract_required: bool = False,
 ) -> MediaInspection:
     quality_defects = tuple(
         name
@@ -3025,6 +3273,35 @@ def _enforce_inspection_contract(
             reason=v5_defects[0],
             deviations=(*inspection.deviations, *v5_defects),
         )
+    facial_defects = tuple(
+        name
+        for name, failed in (
+            ("facial_display_strategy_mismatch", inspection.facial_display_strategy_matches is False),
+            ("facial_micro_performance_mismatch", inspection.facial_micro_performance_matches is False),
+            ("generic_smile_fallback", inspection.generic_smile_fallback is True),
+            ("reference_expression_copy_detected", inspection.reference_expression_copy_detected is True),
+        )
+        if failed
+    )
+    authenticity_defects = tuple(
+        name
+        for name, failed in (
+            ("authenticity_profile_mismatch", inspection.authenticity_profile_matches is False),
+            ("commercial_render_dilution", inspection.commercial_render_dilution is True),
+            ("regional_grounding_mismatch", inspection.regional_grounding_matches is False),
+        )
+        if failed
+    )
+    enhanced_defects = authenticity_defects + (
+        facial_defects if facial_contract_required else ()
+    )
+    if inspection.passed and enhanced_v5_required and enhanced_defects:
+        return replace(
+            inspection,
+            passed=False,
+            reason=enhanced_defects[0],
+            deviations=(*inspection.deviations, *enhanced_defects),
+        )
     missing = ""
     if automatic and not inspection.observed_summary.strip():
         missing = "inspection_summary_missing"
@@ -3089,8 +3366,8 @@ def _enforce_inspection_contract(
         and (
             not inspection.observed_camera_geometry
             or not inspection.observed_address_strategy
-            or not inspection.observed_expression_family
             or not inspection.perceptual_signature
+            or (facial_contract_required and not inspection.observed_expression_family)
             or any(
                 value is None
                 for value in (
@@ -3106,6 +3383,38 @@ def _enforce_inspection_contract(
         )
     ):
         missing = "inspection_v7_fields_missing"
+    elif (
+        automatic
+        and enhanced_v5_required
+        and (
+            not inspection.observed_authenticity
+            or any(
+                value is None
+                for value in (
+                    inspection.authenticity_profile_matches,
+                    inspection.commercial_render_dilution,
+                    inspection.regional_grounding_matches,
+                )
+            )
+            or (
+                facial_contract_required
+                and (
+                    not inspection.observed_facial_display_strategy
+                    or not inspection.observed_facial_actions
+                    or any(
+                        value is None
+                        for value in (
+                            inspection.facial_display_strategy_matches,
+                            inspection.facial_micro_performance_matches,
+                            inspection.generic_smile_fallback,
+                            inspection.reference_expression_copy_detected,
+                        )
+                    )
+                )
+            )
+        )
+    ):
+        missing = "inspection_expression_authenticity_fields_missing"
     if inspection.passed and missing:
         return replace(
             inspection,
@@ -3169,10 +3478,16 @@ def _history_embodiment_signature(item: str | MediaPlan | dict[str, object]) -> 
 def _history_perceptual_signature(item: str | MediaPlan | dict[str, object]) -> str:
     if isinstance(item, dict):
         inspection = item.get("inspection")
-        if isinstance(inspection, dict) and inspection.get("perceptual_signature"):
-            return str(inspection["perceptual_signature"])
-        if item.get("perceptual_signature"):
-            return str(item["perceptual_signature"])
+        observed = (
+            str(inspection.get("perceptual_signature") or "")
+            if isinstance(inspection, dict)
+            else str(item.get("perceptual_signature") or "")
+        )
+        if observed.startswith(PERCEPTUAL_SIGNATURE_VERSION + "|"):
+            return observed
+        nested = item.get("plan")
+        if isinstance(nested, dict):
+            item = nested
         try:
             item = MediaPlan.from_payload(item)
         except ValueError:
@@ -3182,6 +3497,14 @@ def _history_perceptual_signature(item: str | MediaPlan | dict[str, object]) -> 
     if item.media_address_strategy is None or item.camera_geometry is None:
         return ""
     facial = item.subject_presentation.facial_performance if item.subject_presentation else None
+    facial_display = (
+        item.subject_presentation.facial_display_strategy
+        if item.subject_presentation else None
+    )
+    facial_micro = (
+        item.subject_presentation.facial_micro_performance
+        if item.subject_presentation else None
+    )
     performance = item.subject_presentation.performance if item.subject_presentation else None
     pose = (
         ":".join((
@@ -3198,21 +3521,55 @@ def _history_perceptual_signature(item: str | MediaPlan | dict[str, object]) -> 
         if item.identity_reference_selection
         else "none"
     )
-    return "|".join((
-        item.media_address_strategy.engagement_tactic,
-        item.camera_geometry.shot_distance,
-        item.camera_geometry.camera_height,
-        item.camera_geometry.view_axis,
-        item.camera_geometry.subject_occupancy,
-        item.camera_geometry.subject_placement,
-        item.camera_geometry.orientation,
-        facial.expression_family if facial else "no_face",
-        facial.gaze_sequence if facial else "no_face",
-        pose,
-        item.embodied_presentation.body_strategy_id if item.embodied_presentation else "none",
-        item.visual_form,
-        refs,
-    ))
+    return build_perceptual_signature(
+        engagement_tactic=item.media_address_strategy.engagement_tactic,
+        attraction_mechanism=item.media_address_strategy.attraction_mechanism or "none",
+        shot_distance=item.camera_geometry.shot_distance,
+        camera_height=item.camera_geometry.camera_height,
+        view_axis=item.camera_geometry.view_axis,
+        camera_face_distance=item.camera_geometry.camera_face_distance,
+        face_radial_position=item.camera_geometry.face_radial_position,
+        subject_occupancy=item.camera_geometry.subject_occupancy,
+        subject_placement=item.camera_geometry.subject_placement,
+        orientation=item.camera_geometry.orientation,
+        display_family=(
+            facial_display.strategy_family
+            if facial_display else facial.expression_family if facial else "no_face"
+        ),
+        gaze_sequence=(
+            facial_micro.gaze_sequence
+            if facial_micro else facial.gaze_sequence if facial else "no_face"
+        ),
+        nose_cheek_action=(
+            facial_micro.nose_cheek_action if facial_micro else "legacy_face_action"
+        ),
+        mouth_action=(facial_micro.mouth_action if facial_micro else "legacy_mouth_action"),
+        performance_authorship=(
+            facial_micro.performance_authorship if facial_micro else "legacy_authorship"
+        ),
+        temporal_phase=(facial_micro.temporal_phase if facial_micro else "legacy_temporal"),
+        pose=pose,
+        embodied_strategy=(
+            item.embodied_presentation.body_strategy_id
+            if item.embodied_presentation else "none"
+        ),
+        aesthetic_intent=(
+            item.photographic_authenticity.aesthetic_intent
+            if item.photographic_authenticity else "legacy_authenticity"
+        ),
+        scene_orderliness=(
+            item.photographic_authenticity.scene_orderliness
+            if item.photographic_authenticity else "legacy_orderliness"
+        ),
+        capture_imperfection=(
+            item.photographic_authenticity.capture_imperfection
+            if item.photographic_authenticity else "legacy_imperfection"
+        ),
+        visual_form=item.visual_form,
+        identity_references=refs,
+    )
+
+
 def _planner_character_candidates(
     opportunity: MediaOpportunity,
     *,

@@ -1,0 +1,18 @@
+schema_version: media-authenticity-catalog-v1
+
+# Orthogonal axes: authenticity is not shorthand for grain, blur, low saturation or clutter.
+axes:
+  device_rendering: [front_wide, rear_standard, rear_ultrawide, tele_crop, unknown_phone, artifact_inherited]
+  exposure_behavior: [stable, highlight_protected, shadow_lifted, backlit_compromise, mixed_light_compromise, low_light_stack, flash_falloff, artifact_inherited]
+  color_behavior: [neutral_phone, warm_cast, cool_cast, mixed_white_balance, moderately_vivid, muted, artifact_inherited]
+  processing_level: [light, typical_phone, social_edit, strong_filter, artifact_inherited]
+  scene_orderliness: [lived_in, ordinary, lightly_arranged, display_ready, commercial]
+  capture_imperfection: [clean, off_center, partial_crop, minor_motion, focus_transition, reflection_layer, foreground_interrupt, lens_smudge_or_flare, artifact_inherited]
+  environment_entropy: [sparse, normal, busy, transient, artifact_inherited]
+  regional_grounding: [explicit, weak, none, artifact_inherited]
+  aesthetic_intent: [documentary, pleasant_share, atmospheric, editorial, commercial, artifact_inherited]
+
+constraints:
+  life_share_default_forbidden_aesthetic: [editorial, commercial]
+  explicit_region_requires_selected_pointer: [/location/country, /location/region, /location/city]
+  ordinary_scene_must_not_invent: [backlight, crowd, clutter, rain, steam, regional_architecture]

@@ -80,9 +80,23 @@ The frozen, whole-image way a Media Plan addresses its intended recipient: obser
 
 The frozen physical camera contract for one Media Plan: distance, height, view axis, pitch, roll, orientation, subject occupancy and placement, environment share, focus, imperfection, and device visibility. It is independent of Capture Mode, which identifies who operates the camera.
 
+Version 2 also freezes camera-to-face distance and the face's radial position in the frame so a front-camera image is not reduced to one arm-length ratio and wide-angle edge distortion can be reasoned about explicitly. Version 1 payloads remain immutable.
+
 ## Photo Display Strategy
 
 The shot-local social performance used to make a Media Interaction Bid visually legible, such as playing innocent, sharing restrained pride, or presenting a mishap deadpan. It belongs to Subject Presentation, not Affect or World truth, and freezes a coherent expression recipe rather than independently composed facial axes.
+
+## Facial Display Strategy
+
+The semantic, recipient-facing family of one visible facial performance, such as amusement leaking, deliberate cuteness, mock defiance, tender privacy, or direct/withheld desire. It describes communicative display rather than inferred inner emotion.
+
+## Facial Micro-Performance
+
+The frozen visible actions of one still-frame facial beat: brow, eye aperture, current gaze, nose/cheek action, mouth, asymmetry, intensity, authorship, temporal phase, and energy. The name refers to fine-grained visible performance, not a scientific claim that a static image proves a temporal microexpression.
+
+## Photographic Authenticity Profile
+
+The frozen whole-image phone-photography behavior of one Media Plan: device rendering, exposure and color compromise, processing, scene orderliness, one credible capture imperfection, environmental entropy, regional grounding, and aesthetic intent. It never adds unsupported location facts and does not equate authenticity with blanket noise, blur, clutter, or poor quality.
 
 ## Relationship Stage
 

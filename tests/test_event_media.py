@@ -18,6 +18,8 @@ from companion_daemon.event_media import (
     PlannedMedia,
     RenderedMedia,
     compile_media_prompt,
+    _enforce_inspection_contract,
+    _inspection_prompt,
 )
 from companion_daemon.image_generation import GeneratedImage
 
@@ -368,16 +370,27 @@ async def test_v5_freezes_complete_expression_candidate_without_free_direction_t
     assert result.plan.media_address_strategy is not None
     assert result.plan.camera_geometry is not None
     assert result.plan.identity_reference_selection is not None
-    assert result.plan.subject_presentation.version == "subject-presentation-v3"
+    assert result.plan.photographic_authenticity is not None
+    assert result.plan.subject_presentation.version == "subject-presentation-v4"
+    assert result.plan.subject_presentation.facial_display_strategy is not None
+    assert result.plan.subject_presentation.facial_micro_performance is not None
     assert result.plan.embodied_presentation.version == "embodied-presentation-v3"
     payload = result.plan.to_payload()
     assert not {"composition", "action", "camera_direction", "sharing_motive"} & payload.keys()
     assert MediaPlan.from_payload(payload) == result.plan
+    assert "photographic_authenticity" not in replace(
+        result.plan, photographic_authenticity=None
+    ).to_payload()
     prompt = compile_media_prompt(result.plan, None)
     assert prompt.index("Selected event evidence") < prompt.index("Interaction Bid")
     assert prompt.index("Interaction Bid") < prompt.index("Media Address Strategy")
     assert prompt.index("Media Address Strategy") < prompt.index("Camera Geometry")
-    assert "facial performance" in prompt
+    assert prompt.index("Camera Geometry") < prompt.index("Photographic Authenticity")
+    assert "Facial Display Strategy" in prompt
+    assert "Facial Micro-Performance" in prompt
+    assert "nose/cheek" in prompt
+    assert "action unit" not in prompt.lower()
+    assert "facial micro performance v1" not in prompt.lower()
 
 
 @pytest.mark.asyncio
@@ -396,7 +409,7 @@ async def test_v5_allows_grounded_intimate_life_share_without_character_inventio
         "tone": "tender",
         "privacy": "intimate",
         "primary_evidence_ref": "/location/name",
-        "supporting_evidence_refs": ["/environment/lighting"],
+        "supporting_evidence_refs": ["/environment/lighting", "/participants/0/id"],
         "constraints": ["不生成可读文字"],
         "route": "generate",
         "interaction_bid_id": "invite_desire",
@@ -474,7 +487,7 @@ async def test_v5_candidate_space_is_replay_stable_and_varies_across_opportuniti
                 result.plan.camera_geometry.camera_height,
                 result.plan.camera_geometry.view_axis,
                 result.plan.camera_geometry.orientation,
-                result.plan.subject_presentation.facial_performance.expression_family,
+                    result.plan.subject_presentation.facial_display_strategy.strategy_family,
                 result.plan.subject_presentation.performance.head_yaw,
             )
         )
@@ -1589,6 +1602,16 @@ def _inspection(
         identity_consistency_ok=True,
         observed_expression_family="warm",
         perceptual_signature="presence|medium|eye|left_three_quarter|balanced|warm",
+        observed_facial_display_strategy="warm_connection",
+        facial_display_strategy_matches=True,
+        observed_facial_actions={"mouth": "small_smile", "nose_cheek": "cheek_lift"},
+        facial_micro_performance_matches=True,
+        generic_smile_fallback=False,
+        reference_expression_copy_detected=False,
+        authenticity_profile_matches=True,
+        commercial_render_dilution=False,
+        regional_grounding_matches=True,
+        observed_authenticity={"aesthetic_intent": "pleasant_share"},
     )
 
 
@@ -1632,6 +1655,42 @@ async def test_v5_renderer_repairs_generic_portrait_without_replanning(
     assert rendered.attempts == 2
     assert "generic_portrait_dilution" in generator.prompts[1]
     assert planned.plan.plan_id in generator.prompts[1]
+
+
+@pytest.mark.asyncio
+async def test_v5_renderer_repairs_generic_smile_and_commercial_render_dilution(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    proposal = _proposal(interaction_bid_id="share_presence")
+    for field in ("composition", "action", "camera_direction", "sharing_motive", "subject_variant_id"):
+        proposal.pop(field, None)
+    planned = await MediaPlanner(V5SelectingModel(proposal)).plan(_opportunity())
+    assert isinstance(planned, PlannedMedia)
+    rejected = MediaInspection(
+        **{
+            **_inspection(True).__dict__,
+            "rule_version": "media-inspection-v7",
+            "generic_smile_fallback": True,
+            "commercial_render_dilution": True,
+        }
+    )
+    accepted = MediaInspection(**{**_inspection(True).__dict__, "rule_version": "media-inspection-v7"})
+    generator = FakeGenerator()
+
+    rendered = await MediaRenderer(
+        generator=generator,
+        inspector=FakeInspector([rejected, accepted]),
+        output_dir=tmp_path,
+        visual_identity_path=None,
+    ).render(planned.plan)
+
+    assert isinstance(rendered, RenderedMedia)
+    assert rendered.attempts == 2
+    assert "generic_smile_fallback" in generator.prompts[1]
+    assert "commercial_render_dilution" in generator.prompts[1]
+    assert "same frozen facial" in generator.prompts[1]
 
 
 @pytest.mark.asyncio
@@ -2080,3 +2139,85 @@ async def test_openai_inspector_returns_actual_summary_in_same_visual_call(tmp_p
     content = observed["payload"]["messages"][0]["content"]  # type: ignore[index]
     assert "observed_summary" in content[0]["text"]
     assert "garment_topology_ok" in content[0]["text"]
+
+
+@pytest.mark.asyncio
+async def test_v5_inspection_prompt_keeps_late_contracts_with_large_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    proposal = _proposal()
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
+        proposal.pop(field, None)
+    planned = await MediaPlanner(V5SelectingModel(proposal)).plan(_opportunity())
+    assert isinstance(planned, PlannedMedia)
+    expanded = replace(
+        planned.plan,
+        evidence_values={
+            pointer: ("很长的世界事实" * 2000 if index == 0 else value)
+            for index, (pointer, value) in enumerate(planned.plan.evidence_values.items())
+        },
+    )
+
+    prompt = _inspection_prompt(expanded)
+
+    assert '"facial_micro_performance"' in prompt
+    assert '"photographic_authenticity"' in prompt
+    assert '"camera_face_distance"' in prompt
+    assert len(prompt) < 20_000
+
+
+def test_body_detail_v5_inspection_does_not_require_visible_facial_fields() -> None:
+    no_face = replace(
+        _inspection(True),
+        observed_expression_family="",
+        observed_facial_display_strategy="",
+        facial_display_strategy_matches=None,
+        observed_facial_actions={},
+        facial_micro_performance_matches=None,
+        generic_smile_fallback=None,
+        reference_expression_copy_detected=None,
+    )
+
+    result = _enforce_inspection_contract(
+        no_face,
+        automatic=True,
+        subject_required=True,
+        quality_required=True,
+        embodied_required=True,
+        capture_contract_required=True,
+        v5_required=True,
+        enhanced_v5_required=True,
+        facial_contract_required=False,
+    )
+
+    assert result.passed
+
+
+def test_pre_extension_v5_does_not_adopt_new_inspection_rejection_semantics() -> None:
+    legacy_observation = replace(
+        _inspection(True),
+        facial_display_strategy_matches=False,
+        facial_micro_performance_matches=False,
+        generic_smile_fallback=True,
+        authenticity_profile_matches=False,
+        commercial_render_dilution=True,
+    )
+
+    result = _enforce_inspection_contract(
+        legacy_observation,
+        automatic=True,
+        subject_required=True,
+        quality_required=True,
+        v5_required=True,
+        enhanced_v5_required=False,
+        facial_contract_required=False,
+    )
+
+    assert result.passed

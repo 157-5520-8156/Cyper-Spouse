@@ -2,6 +2,7 @@ from pathlib import Path
 
 import yaml
 
+from companion_daemon.media_facial import choose_facial_contract
 from companion_daemon.media_subject import (
     PhotoDisplayStrategy,
     SubjectAppearance,
@@ -134,6 +135,95 @@ def test_subject_v3_keeps_expression_out_of_pose_performance() -> None:
     assert "gaze_target" not in payload["performance"]
     assert payload["facial_performance"]["expression_family"]
     assert SubjectPresentationPlan.from_payload(payload) == upgraded
+
+
+def test_facial_matrix_exposes_broad_social_and_visible_action_variety() -> None:
+    tactics = (
+        "presence", "reveal", "demonstration", "question", "comparison", "contrast",
+        "comic_hook", "celebration", "vulnerability", "reassurance", "coordination",
+        "affection", "nostalgia", "attraction",
+    )
+    mechanisms = (
+        None, "direct_invitation", "playful_tease", "withheld_attention",
+        "sensory_immediacy", "private_trust", "confident_display",
+        "interrupted_transition", "close_proximity", "atmospheric_suggestion",
+    )
+    contracts = [
+        choose_facial_contract(
+            stable_seed=f"matrix:{index}:{tactic}:{mechanism}",
+            engagement_tactic=tactic,
+            attraction_mechanism=mechanism if tactic == "attraction" else None,
+        )
+        for index in range(96)
+        for tactic in tactics
+        for mechanism in mechanisms
+        if tactic == "attraction" or mechanism is None
+    ]
+
+    strategies = {strategy.strategy_family for strategy, _micro in contracts}
+    assert {
+        "present_and_available", "warm_connection", "amusement_leaking",
+        "deliberate_cuteness", "mock_defiance", "comic_self_exposure", "proud_display",
+        "consultative_check", "frustrated_complaint", "embarrassed_repair", "tired_access",
+        "vulnerable_disclosure", "tender_private", "desire_direct", "desire_withheld",
+        "neutral_evidence",
+    }.issubset(strategies)
+    assert len({micro.mouth_action for _strategy, micro in contracts}) >= 9
+    assert len({micro.eye_aperture for _strategy, micro in contracts}) >= 7
+    assert len({micro.nose_cheek_action for _strategy, micro in contracts}) >= 6
+    assert len({micro.performance_authorship for _strategy, micro in contracts}) >= 6
+    assert len({micro.temporal_phase for _strategy, micro in contracts}) >= 6
+    assert all(strategy.catalog_version == "media-facial-catalog-v1" for strategy, _ in contracts)
+    assert all(micro.recipe_id and micro.catalog_version == "media-facial-catalog-v1" for _, micro in contracts)
+
+
+def test_facial_performance_respects_camera_authorship_and_face_visibility() -> None:
+    tactics = (
+        "presence",
+        "comic_hook",
+        "vulnerability",
+        "attraction",
+        "question",
+    )
+    mechanisms = (None, "playful_tease", "direct_invitation", "withheld_attention")
+    for capture_mode in (
+        "character_front_camera",
+        "mirror",
+        "timer_fixed",
+        "requested_helper",
+        "known_companion",
+        "external_sender",
+    ):
+        for index in range(48):
+            tactic = tactics[index % len(tactics)]
+            mechanism = mechanisms[index % len(mechanisms)] if tactic == "attraction" else None
+            _strategy, micro = choose_facial_contract(
+                stable_seed=f"physics:{capture_mode}:{index}",
+                engagement_tactic=tactic,
+                attraction_mechanism=mechanism,
+                capture_mode=capture_mode,
+            )
+            if capture_mode == "character_front_camera":
+                assert micro.performance_authorship not in {
+                    "responsive_candid",
+                    "photographer_prompted",
+                    "unperformed_capture",
+                }
+                assert micro.gaze_target != "companion"
+            if capture_mode in {"requested_helper", "known_companion", "external_sender"}:
+                assert micro.performance_authorship != "selfie_micro_pose"
+                assert micro.gaze_target not in {"screen", "screen_preview"}
+
+    strategy, micro = choose_facial_contract(
+        stable_seed="physics:no-face",
+        engagement_tactic="demonstration",
+        attraction_mechanism=None,
+        capture_mode="character_rear_camera",
+        face_visible=False,
+    )
+    assert strategy.performance_intent == "face is not visible"
+    assert micro.gaze_sequence == "no_face"
+    assert micro.performance_authorship == "not_visible"
 
 
 def test_subject_candidate_matrix_exposes_every_social_strategy_without_flat_rules() -> None:

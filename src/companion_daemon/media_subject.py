@@ -19,6 +19,11 @@ from typing import Any, Mapping, Sequence
 import yaml
 
 from companion_daemon.media_domain import PRIVACY_RANK
+from companion_daemon.media_facial import (
+    FacialDisplayStrategy,
+    FacialMicroPerformance,
+    facial_prompt_block,
+)
 from companion_daemon.visual_identity import load_visual_identity
 
 
@@ -37,6 +42,7 @@ _PERFORMANCE_REQUIRED_FIELDS = (
 _OCCLUSION_RANK = {"low": 0, "medium": 1, "high": 2}
 SUBJECT_PRESENTATION_V2 = "subject-presentation-v2"
 SUBJECT_PRESENTATION_V3 = "subject-presentation-v3"
+SUBJECT_PRESENTATION_V4 = "subject-presentation-v4"
 
 EXPRESSION_FAMILIES = {
     "neutral_present", "warm", "amused", "playfully_performed", "proud",
@@ -219,6 +225,8 @@ class SubjectPresentationPlan:
     version: str = "subject-presentation-v1"
     display_strategy: PhotoDisplayStrategy | None = None
     facial_performance: FacialPerformance | None = None
+    facial_display_strategy: FacialDisplayStrategy | None = None
+    facial_micro_performance: FacialMicroPerformance | None = None
 
     def to_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -241,6 +249,18 @@ class SubjectPresentationPlan:
             )
             payload["facial_performance"] = (
                 self.facial_performance.to_payload() if self.facial_performance else None
+            )
+        elif self.version == SUBJECT_PRESENTATION_V4:
+            payload["version"] = self.version
+            payload["performance"].pop("expression", None)
+            payload["performance"].pop("gaze_target", None)
+            payload["facial_display_strategy"] = (
+                self.facial_display_strategy.to_payload()
+                if self.facial_display_strategy else None
+            )
+            payload["facial_micro_performance"] = (
+                self.facial_micro_performance.to_payload()
+                if self.facial_micro_performance else None
             )
         return payload
 
@@ -273,16 +293,29 @@ class SubjectPresentationPlan:
             else None
         )
         performance_value = value.get("performance")
-        if version == SUBJECT_PRESENTATION_V3 and isinstance(performance_value, dict):
+        if version in {SUBJECT_PRESENTATION_V3, SUBJECT_PRESENTATION_V4} and isinstance(performance_value, dict):
+            placeholder = (
+                "facial_micro_performance_v1"
+                if version == SUBJECT_PRESENTATION_V4
+                else "facial_performance_v3"
+            )
             performance_value = {
                 **performance_value,
-                "expression": "facial_performance_v3",
-                "gaze_target": "facial_performance_v3",
+                "expression": placeholder,
+                "gaze_target": placeholder,
             }
         facial_performance = (
             FacialPerformance.from_payload(value.get("facial_performance"))
             if version == SUBJECT_PRESENTATION_V3
             else None
+        )
+        facial_display_strategy = (
+            FacialDisplayStrategy.from_payload(value.get("facial_display_strategy"))
+            if version == SUBJECT_PRESENTATION_V4 else None
+        )
+        facial_micro_performance = (
+            FacialMicroPerformance.from_payload(value.get("facial_micro_performance"))
+            if version == SUBJECT_PRESENTATION_V4 else None
         )
         presentation = cls(
             variant_id=_required_text(value, "variant_id"),
@@ -292,16 +325,23 @@ class SubjectPresentationPlan:
             version=version,
             display_strategy=display_strategy,
             facial_performance=facial_performance,
+            facial_display_strategy=facial_display_strategy,
+            facial_micro_performance=facial_micro_performance,
         )
-        if version not in {"subject-presentation-v1", SUBJECT_PRESENTATION_V2, SUBJECT_PRESENTATION_V3}:
+        if version not in {"subject-presentation-v1", SUBJECT_PRESENTATION_V2, SUBJECT_PRESENTATION_V3, SUBJECT_PRESENTATION_V4}:
             raise ValueError("unsupported subject presentation version")
         if version in {SUBJECT_PRESENTATION_V2, SUBJECT_PRESENTATION_V3} and display_strategy is None:
             raise ValueError("missing photo display strategy")
         if version == SUBJECT_PRESENTATION_V3 and facial_performance is None:
             raise ValueError("missing facial performance")
+        if version == SUBJECT_PRESENTATION_V4 and (
+            facial_display_strategy is None or facial_micro_performance is None
+        ):
+            raise ValueError("missing facial display contract")
         if presentation.subject_signature != _subject_signature(
             presentation.appearance, presentation.performance, presentation.display_strategy,
-            presentation.facial_performance,
+            presentation.facial_performance, presentation.facial_display_strategy,
+            presentation.facial_micro_performance,
         ):
             raise ValueError("invalid subject signature")
         return presentation
@@ -332,6 +372,39 @@ def upgrade_subject_presentation_v3(
         version=SUBJECT_PRESENTATION_V3,
         display_strategy=presentation.display_strategy,
         facial_performance=facial,
+    )
+
+
+def upgrade_subject_presentation_v4(
+    presentation: SubjectPresentationPlan,
+    *,
+    facial_display_strategy: FacialDisplayStrategy,
+    facial_micro_performance: FacialMicroPerformance,
+) -> SubjectPresentationPlan:
+    """Freeze a visible still-frame face contract without altering pose or appearance."""
+
+    if presentation.version not in {SUBJECT_PRESENTATION_V3, SUBJECT_PRESENTATION_V4}:
+        raise ValueError("subject v4 requires an expression-separated subject presentation")
+    performance = replace(
+        presentation.performance,
+        expression="facial_micro_performance_v1",
+        gaze_target="facial_micro_performance_v1",
+    )
+    return SubjectPresentationPlan(
+        variant_id=presentation.variant_id,
+        appearance=presentation.appearance,
+        performance=performance,
+        subject_signature=_subject_signature(
+            presentation.appearance,
+            performance,
+            None,
+            None,
+            facial_display_strategy,
+            facial_micro_performance,
+        ),
+        version=SUBJECT_PRESENTATION_V4,
+        facial_display_strategy=facial_display_strategy,
+        facial_micro_performance=facial_micro_performance,
     )
 
 
@@ -682,6 +755,14 @@ def presentation_prompt_block(
             f"- forbidden expression cues: {forbidden or 'none'}\n"
         )
     facial = presentation.facial_performance
+    modern_facial = (
+        facial_prompt_block(
+            presentation.facial_display_strategy,
+            presentation.facial_micro_performance,
+        )
+        if presentation.facial_display_strategy and presentation.facial_micro_performance
+        else ""
+    )
     facial_line = (
         f"- facial performance: family={facial.expression_family}; mouth={facial.mouth_behavior}; "
         f"eyes={facial.eye_behavior}; brows={facial.brow_behavior}; "
@@ -689,7 +770,7 @@ def presentation_prompt_block(
         if facial
         else f"- expression and body: {render('expression', performance.expression)}; "
     )
-    body_prefix = "- body: " if facial else ""
+    body_prefix = "- body: " if facial or modern_facial else ""
     return (
         "Frozen subject presentation (camera-frame directions, not the character's left/right):\n"
         f"- appearance source: {appearance.source}; hair: "
@@ -700,8 +781,9 @@ def presentation_prompt_block(
         f"- head geometry: {render('head_yaw', performance.head_yaw)}; "
         f"{render('head_pitch', performance.head_pitch)}; "
         f"{render('head_roll', performance.head_roll)}"
-        f"{'' if facial else '; ' + render('gaze_target', performance.gaze_target)}\n"
-        f"{facial_line}{body_prefix}{render('shoulder_orientation', performance.shoulder_orientation)}; "
+        f"{'' if facial or modern_facial else '; ' + render('gaze_target', performance.gaze_target)}\n"
+        f"{modern_facial + chr(10) if modern_facial else facial_line}"
+        f"{body_prefix}{render('shoulder_orientation', performance.shoulder_orientation)}; "
         f"{render('posture', performance.posture)}\n"
         f"- action and camera awareness: {render('gesture', performance.gesture)}; "
         f"{render('photo_awareness', performance.photo_awareness)}\n"
@@ -791,6 +873,8 @@ def _subject_signature(
     performance: SubjectPerformance,
     display_strategy: PhotoDisplayStrategy | None = None,
     facial_performance: FacialPerformance | None = None,
+    facial_display_strategy: FacialDisplayStrategy | None = None,
+    facial_micro_performance: FacialMicroPerformance | None = None,
 ) -> str:
     axes = [
             appearance.hair_arrangement,
@@ -820,6 +904,10 @@ def _subject_signature(
         )
     if facial_performance:
         axes.extend(facial_performance.to_payload().values())
+    if facial_display_strategy:
+        axes.extend(facial_display_strategy.to_payload().values())
+    if facial_micro_performance:
+        axes.extend(facial_micro_performance.to_payload().values())
     return "|".join(axes)
 
 

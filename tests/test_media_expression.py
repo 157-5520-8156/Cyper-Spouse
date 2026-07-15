@@ -1,9 +1,14 @@
 import pytest
 
 from companion_daemon.media_address import MediaAddressStrategy
+from companion_daemon.media_authenticity import choose_authenticity_profile
 from companion_daemon.media_camera import CameraGeometry
 from companion_daemon.media_embodiment import build_embodied_candidates
-from companion_daemon.media_expression import build_complete_candidates
+from companion_daemon.media_expression import (
+    PERCEPTUAL_SIGNATURE_VERSION,
+    build_complete_candidates,
+    candidate_perceptual_signature,
+)
 from companion_daemon.media_subject import build_subject_candidates
 
 
@@ -90,6 +95,38 @@ def test_camera_geometry_validates_capture_physics_and_visual_form(
         frozen.compatibility_error(capture_mode=capture_mode, visual_form=visual_form) == expected
     )
     assert CameraGeometry.from_payload(frozen.to_payload()) == frozen
+
+
+def test_camera_geometry_v2_freezes_face_distance_without_changing_v1_payloads() -> None:
+    legacy = CameraGeometry.create(
+        shot_distance="close",
+        camera_height="eye",
+        view_axis="front",
+        pitch="level",
+        roll="level",
+        orientation="portrait",
+        subject_occupancy="dominant",
+        subject_placement="center",
+        environment_share="supporting",
+        focus_behavior="subject_priority",
+        imperfection_profile="casual_offset",
+        device_visibility="out_of_frame",
+    )
+    assert legacy.version == "camera-geometry-v1"
+    assert "camera_face_distance" not in legacy.to_payload()
+
+    current = CameraGeometry.create(
+        **{
+            **{key: value for key, value in legacy.to_payload().items() if key not in {"version", "contract_signature"}},
+            "camera_face_distance": "arm_length",
+            "face_radial_position": "inner_third",
+        }
+    )
+    assert current.version == "camera-geometry-v2"
+    assert current.compatibility_error(
+        capture_mode="character_front_camera", visual_form="portrait_closeup"
+    ) is None
+    assert CameraGeometry.from_payload(current.to_payload()) == current
 
 
 @pytest.mark.parametrize(
@@ -290,10 +327,10 @@ def test_invite_desire_has_nine_visual_mechanisms_not_two_scene_templates() -> N
     )
     assert (
         len(
-            {
-                item.subject_presentation["facial_performance"]["expression_family"]
-                for item in invite_desire
-            }
+                {
+                    item.subject_presentation["facial_display_strategy"]["strategy_family"]
+                    for item in invite_desire
+                }
         )
         >= 4
     )
@@ -312,6 +349,266 @@ def test_life_share_candidates_cover_environment_process_and_detail_geometry() -
 
     assert {"wide_scene", "contextual_still_life", "process_pov"}.issubset(forms)
     assert {"character_rear_camera", "known_companion", "external_sender"}.issubset(captures)
+
+
+def test_interaction_bids_have_multiple_compatible_address_routes() -> None:
+    candidates = build_complete_candidates(
+        opportunity_id="op:broad-address-routes",
+        family="life_share",
+        expression_charge_ceiling="none",
+        limit=256,
+    )
+
+    discovery = {
+        (item.media_address_strategy.address_mode, item.media_address_strategy.engagement_tactic)
+        for item in candidates
+        if "share_discovery" in item.legal_interaction_bids
+    }
+    validation = {
+        (item.media_address_strategy.address_mode, item.media_address_strategy.engagement_tactic)
+        for item in candidates
+        if "seek_validation" in item.legal_interaction_bids
+    }
+
+    assert len(discovery) >= 3
+    assert {"reveal", "demonstration", "comparison"}.issubset(
+        {tactic for _address, tactic in discovery}
+    )
+    assert len(validation) >= 2
+    assert {"vulnerability", "contrast"}.issubset(
+        {tactic for _address, tactic in validation}
+    )
+
+
+def test_complete_candidates_freeze_authenticity_and_varied_visible_face_actions() -> None:
+    snapshot = {
+        "event": {"event_id": "event:kitchen", "status": "committed"},
+        "activity": {"kind": "cooking", "description": "料理刚刚翻车"},
+        "location": {"kind": "home", "name": "厨房"},
+        "character": {"emotion": "amused"},
+    }
+    subject = next(
+        item
+        for item in build_subject_candidates(
+            snapshot=snapshot,
+            opportunity_id="op:face-source",
+            capture_mode="character_front_camera",
+            character_visibility="identifiable",
+            privacy_ceiling="personal",
+            relationship_stage="close_friend",
+            limit=64,
+        )
+        if item.presentation.display_strategy is not None
+    )
+    embodiment = next(
+        item
+        for item in build_embodied_candidates(
+            snapshot=snapshot,
+            opportunity_id="op:face-source",
+            relationship_stage="close_friend",
+            sensual_charge_ceiling="none",
+            limit=256,
+        )
+        if "character_front_camera" in item.legal_capture_modes
+    )
+    source = {
+        "presentation_candidate_id": "source:kitchen",
+        "legal_capture_modes": ["character_front_camera"],
+        "legal_share_intents": ["record", "humor", "complain"],
+        "character_visibility": "identifiable",
+        "subject_presentation": subject.presentation.to_payload(),
+        "embodied_presentation": embodiment.presentation.to_payload(),
+    }
+
+    candidates = build_complete_candidates(
+        opportunity_id="op:facial-matrix",
+        family="character_media",
+        expression_charge_ceiling="none",
+        presentation_candidates=(source,),
+        event_snapshot=snapshot,
+        limit=24,
+    )
+
+    assert candidates
+    assert all(item.photographic_authenticity is not None for item in candidates)
+    faces = [item.subject_presentation for item in candidates if item.subject_presentation]
+    assert all(item["version"] == "subject-presentation-v4" for item in faces)
+    assert len({item["facial_display_strategy"]["strategy_family"] for item in faces}) >= 3
+    assert len({item["facial_micro_performance"]["nose_cheek_action"] for item in faces}) >= 2
+    assert len({item.photographic_authenticity.aesthetic_intent for item in candidates}) >= 2
+
+
+def test_complete_candidates_use_versioned_perceptual_axes_and_varied_face_geometry() -> None:
+    snapshot = {
+        "event": {"event_id": "event:selfie", "status": "committed"},
+        "activity": {"kind": "daily", "description": "准备出门"},
+        "character": {"emotion": "playful"},
+    }
+    subject = build_subject_candidates(
+        snapshot=snapshot,
+        opportunity_id="op:face-geometry-source",
+        capture_mode="character_front_camera",
+        character_visibility="identifiable",
+        privacy_ceiling="personal",
+        relationship_stage="close_friend",
+        limit=8,
+    )[0]
+    embodiment = next(
+        item
+        for item in build_embodied_candidates(
+            snapshot=snapshot,
+            opportunity_id="op:face-geometry-source",
+            relationship_stage="close_friend",
+            sensual_charge_ceiling="none",
+            limit=128,
+        )
+        if "character_front_camera" in item.legal_capture_modes
+    )
+    source = {
+        "presentation_candidate_id": "source:front",
+        "legal_capture_modes": ["character_front_camera"],
+        "legal_share_intents": ["record", "humor"],
+        "character_visibility": "identifiable",
+        "subject_presentation": subject.presentation.to_payload(),
+        "embodied_presentation": embodiment.presentation.to_payload(),
+    }
+
+    candidates = build_complete_candidates(
+        opportunity_id="op:face-geometry",
+        family="character_media",
+        expression_charge_ceiling="none",
+        presentation_candidates=(source,),
+        event_snapshot=snapshot,
+        limit=24,
+    )
+
+    assert candidates
+    assert {item.camera_geometry.version for item in candidates} == {"camera-geometry-v2"}
+    assert {
+        item.camera_geometry.camera_face_distance for item in candidates
+    }.issubset({"very_close", "arm_length", "supported_near"})
+    assert len({item.camera_geometry.face_radial_position for item in candidates}) >= 2
+    signatures = {candidate_perceptual_signature(item) for item in candidates}
+    assert all(item.startswith(PERCEPTUAL_SIGNATURE_VERSION + "|") for item in signatures)
+    assert len(signatures) == len(candidates)
+
+
+def test_body_detail_complete_candidate_carries_no_face_contract() -> None:
+    snapshot = {
+        "event": {"event_id": "event:bracelet", "status": "committed"},
+        "objects": [{"kind": "bracelet", "description": "新手链"}],
+        "character": {"emotion": "bright"},
+    }
+    subject = build_subject_candidates(
+        snapshot=snapshot,
+        opportunity_id="op:detail-source",
+        capture_mode="character_rear_camera",
+        character_visibility="body_detail",
+        privacy_ceiling="personal",
+        relationship_stage="close_friend",
+        limit=8,
+    )[0]
+    embodiment = next(
+        item
+        for item in build_embodied_candidates(
+            snapshot=snapshot,
+            opportunity_id="op:detail-source",
+            relationship_stage="close_friend",
+            sensual_charge_ceiling="none",
+            limit=128,
+        )
+        if "character_rear_camera" in item.legal_capture_modes
+    )
+    source = {
+        "presentation_candidate_id": "source:detail",
+        "legal_capture_modes": ["character_rear_camera"],
+        "legal_share_intents": ["show_and_tell"],
+        "character_visibility": "body_detail",
+        "subject_presentation": subject.presentation.to_payload(),
+        "embodied_presentation": embodiment.presentation.to_payload(),
+    }
+
+    candidates = build_complete_candidates(
+        opportunity_id="op:detail",
+        family="character_media",
+        expression_charge_ceiling="none",
+        presentation_candidates=(source,),
+        event_snapshot=snapshot,
+        limit=24,
+    )
+
+    face = candidates[0].subject_presentation["facial_micro_performance"]
+    assert face["mouth_action"] == "not_visible"
+    assert face["eye_aperture"] == "not_visible"
+    assert face["gaze_sequence"] == "no_face"
+
+
+def test_life_share_authenticity_never_invents_region_or_defaults_to_commercial() -> None:
+    snapshot = {
+        "event": {"event_id": "event:cafe", "status": "committed"},
+        "activity": {"kind": "reading"},
+        "location": {"kind": "public", "name": "咖啡店"},
+    }
+
+    candidates = build_complete_candidates(
+        opportunity_id="op:ordinary-life-share",
+        family="life_share",
+        expression_charge_ceiling="none",
+        event_snapshot=snapshot,
+        limit=24,
+    )
+
+    assert candidates
+    assert all(
+        item.photographic_authenticity.regional_grounding in {"none", "artifact_inherited"}
+        for item in candidates
+    )
+    assert all(item.photographic_authenticity.aesthetic_intent != "commercial" for item in candidates)
+    assert {
+        item.photographic_authenticity.catalog_version for item in candidates
+    } == {"media-authenticity-catalog-v1"}
+
+
+def test_authenticity_axes_vary_independently_but_only_from_grounded_scene_cues() -> None:
+    ordinary = {
+        "activity": {"kind": "reading", "description": "安静看书"},
+        "environment": {"lighting": "ordinary indoor daylight"},
+        "location": {"kind": "public"},
+    }
+    ordinary_profiles = {
+        choose_authenticity_profile(
+            stable_seed=f"ordinary:{index}",
+            capture_mode="character_rear_camera",
+            family="life_share",
+            staging_degree="unposed",
+            visual_form="contextual_still_life",
+            event_snapshot=ordinary,
+        )
+        for index in range(32)
+    }
+    assert {item.aesthetic_intent for item in ordinary_profiles} == {
+        "documentary",
+        "pleasant_share",
+    }
+    assert {item.exposure_behavior for item in ordinary_profiles}.issubset(
+        {"stable", "highlight_protected"}
+    )
+    assert all(item.regional_grounding == "none" for item in ordinary_profiles)
+    assert all(item.scene_orderliness != "commercial" for item in ordinary_profiles)
+
+    backlit = choose_authenticity_profile(
+        stable_seed="grounded:backlight",
+        capture_mode="character_rear_camera",
+        family="life_share",
+        staging_degree="unposed",
+        visual_form="wide_scene",
+        event_snapshot={
+            "environment": {"lighting": "strong backlight"},
+            "location": {"city": "上海"},
+        },
+    )
+    assert backlit.exposure_behavior in {"backlit_compromise", "highlight_protected"}
+    assert backlit.regional_grounding == "explicit"
 
 
 @pytest.mark.parametrize(

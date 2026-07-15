@@ -1,4 +1,4 @@
-version: media-camera-catalog-v1
+version: media-camera-catalog-v2
 
 axes:
   shot_distance: [detail, intimate_close, close, medium, full_body, long, wide]
@@ -13,11 +13,14 @@ axes:
   focus_behavior: [deep_context, subject_priority, evidence_priority, layered_foreground]
   imperfection_profile: [clean_intentional, casual_offset, partial_crop, motion_trace, foreground_interrupt, focus_breathing, reflection_layer]
   device_visibility: [out_of_frame, visible_handheld, mirror_visible, fixed_unseen, external_unseen, artifact_inherited]
+  camera_face_distance: [not_applicable, very_close, arm_length, supported_near, conversational, distant, artifact_inherited]
+  face_radial_position: [not_applicable, center_safe, inner_third, outer_third, edge_risk, distributed, artifact_inherited]
 
 capture_modes:
   character_front_camera:
     distances: [intimate_close, close, medium]
     devices: [out_of_frame, visible_handheld]
+    face_distances: [very_close, arm_length, supported_near]
   character_rear_camera:
     distances: [detail, intimate_close, close, medium, full_body, long, wide]
     devices: [out_of_frame, visible_handheld]
@@ -25,21 +28,27 @@ capture_modes:
     distances: [close, medium, full_body, long]
     devices: [mirror_visible]
     axes: [reflection_oblique]
+    face_distances: [conversational, distant]
   timer_fixed:
     distances: [close, medium, full_body, long, wide]
     devices: [fixed_unseen]
+    face_distances: [conversational, distant]
   requested_helper:
     distances: [close, medium, full_body, long, wide]
     devices: [external_unseen]
+    face_distances: [conversational, distant]
   known_companion:
     distances: [close, medium, full_body, long, wide]
     devices: [external_unseen]
+    face_distances: [conversational, distant]
   external_sender:
     distances: [close, medium, full_body, long, wide]
     devices: [external_unseen]
+    face_distances: [conversational, distant]
   existing_artifact:
     distances: [detail, intimate_close, close, medium, full_body, long, wide]
     devices: [artifact_inherited]
+    face_distances: [artifact_inherited, not_applicable]
 
 visual_forms:
   wide_scene: {distances: [medium, long, wide], occupancies: [absent, trace, small, balanced], environment: [balanced, dominant]}
