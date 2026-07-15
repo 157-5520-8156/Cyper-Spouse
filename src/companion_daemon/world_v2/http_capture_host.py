@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 from pathlib import Path
+import secrets
+from typing import Final
 
 from companion_daemon.config import Settings
 from companion_daemon.llm import DeepSeekChatModel, FakeCompanionModel
@@ -28,10 +30,80 @@ from .chat_model_deliberation_adapter import ChatCompletionModel, RoutedChatMode
 from .deliberation import ModelRoute, RouteRequest
 from .platform_action_executor import PlatformDispatchReceipt, PlatformDispatchRequest
 from .platform_host import PlatformClockTick, PlatformInbound, WorldV2PlatformHost
+from .dashboard_projection_adapter import (
+    DashboardProjectionAdapter,
+    DashboardRoomProjectionDTO,
+    DashboardRoomRouteCatalog,
+)
+from .projection import (
+    AuthenticatedProjectionPrincipal,
+    ProjectionAuthority,
+    ProjectionCapabilityIssuer,
+    ProjectionGrant,
+)
 from .production_turn_application import (
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
+from .schemas import ProjectionRequest
+
+
+_DASHBOARD_VIEWER_ID: Final = "dashboard:http-v2-room"
+
+
+class _HttpDashboardPrincipalVerifier:
+    """Authenticate the composition-only room reader, never an HTTP caller.
+
+    HTTP operator authentication happens in ``app.py``.  This smaller
+    credential merely prevents a platform adapter from manufacturing a signed
+    projection request after it receives the host object.
+    """
+
+    def __init__(self, *, world_id: str) -> None:
+        self._world_id = world_id
+        self._credential = object()
+
+    @property
+    def credential(self) -> object:
+        return self._credential
+
+    def authenticate(self, credential: object) -> AuthenticatedProjectionPrincipal:
+        if credential is not self._credential:
+            raise PermissionError("dashboard projection credential is not composition-owned")
+        return AuthenticatedProjectionPrincipal(
+            principal_id=_DASHBOARD_VIEWER_ID,
+            world_id=self._world_id,
+            authentication_context="world-v2:http-dashboard-composition.1",
+        )
+
+
+class _HttpDashboardRequestIssuer:
+    """Mint only the fixed public-room request used by the dashboard route."""
+
+    def __init__(
+        self,
+        *,
+        world_id: str,
+        issuer: ProjectionCapabilityIssuer,
+        credential: object,
+    ) -> None:
+        self._world_id = world_id
+        self._issuer = issuer
+        self._credential = credential
+
+    def issue(self) -> ProjectionRequest:
+        nonce = secrets.token_hex(16)
+        request = ProjectionRequest(
+            schema_version="world-v2.1",
+            request_id=f"request:http-v2-dashboard:{nonce}",
+            world_id=self._world_id,
+            viewer_kind="room_renderer",
+            viewer_id=_DASHBOARD_VIEWER_ID,
+            permissions=frozenset(),
+            trace_id=f"trace:http-v2-dashboard:{nonce}",
+            redaction_policy="room-public-v1",
+        )
+        return self._issuer.bind(request, credential=self._credential)
 
 
 class HttpCaptureIdentityResolver:
@@ -133,6 +205,7 @@ class HttpV2CaptureHost:
         host: WorldV2PlatformHost,
         transport: HttpCaptureTransport,
         primary_user_id: str,
+        dashboard_request_issuer: _HttpDashboardRequestIssuer | None = None,
         owned_model: DeepSeekChatModel | None = None,
     ) -> None:
         if not primary_user_id:
@@ -140,6 +213,7 @@ class HttpV2CaptureHost:
         self._host = host
         self._transport = transport
         self._primary_user_id = primary_user_id
+        self._dashboard_request_issuer = dashboard_request_issuer
         self._owned_model = owned_model
         self._lock = asyncio.Lock()
         self._closed = False
@@ -242,6 +316,18 @@ class HttpV2CaptureHost:
                 action_statuses=tuple(actions), background_statuses=tuple(background)
             )
 
+    def dashboard_room(self) -> DashboardRoomProjectionDTO:
+        """Return the fixed, public-only Room DTO for the operator route.
+
+        The caller cannot select a world, cursor, viewer kind, permission, or
+        redaction policy.  Those values stay in the composition-owned request
+        issuer so an HTTP reader never becomes a general ledger viewer.
+        """
+
+        if self._dashboard_request_issuer is None:
+            raise RuntimeError("World v2 dashboard capture is not configured")
+        return self._host.capture_dashboard_room(self._dashboard_request_issuer.issue())
+
     async def aclose(self) -> None:
         if self._closed:
             return
@@ -277,10 +363,31 @@ def build_http_v2_capture_host(
     )
     primary_user_id = settings.primary_user_id
     transport = HttpCaptureTransport()
+    world_id = f"world:companion-v2:{primary_user_id}"
+    dashboard_principal = _HttpDashboardPrincipalVerifier(world_id=world_id)
+    projection_authority = ProjectionAuthority(
+        grants=(
+            ProjectionGrant(
+                world_id=world_id,
+                viewer_id=_DASHBOARD_VIEWER_ID,
+                viewer_kind="room_renderer",
+                permissions=frozenset(),
+                redaction_policy="room-public-v1",
+            ),
+        )
+    )
+    dashboard_requests = _HttpDashboardRequestIssuer(
+        world_id=world_id,
+        issuer=ProjectionCapabilityIssuer(
+            authority=projection_authority,
+            principal_verifier=dashboard_principal,
+        ),
+        credential=dashboard_principal.credential,
+    )
     application = build_sqlite_world_v2_turn_application(
         path=Path(settings.database_path),
         config=WorldV2TurnApplicationConfig(
-            world_id=f"world:companion-v2:{primary_user_id}",
+            world_id=world_id,
             companion_actor_ref="agent:companion",
             reply_target=f"user:{primary_user_id}",
             action_pump_owner="pump:http-v2-capture",
@@ -292,6 +399,7 @@ def build_http_v2_capture_host(
         transport=transport,
         appraisal_model=AppraisalDraftDeliberationAdapter(model=model),
         affect_model=AffectDraftDeliberationAdapter(model=model),
+        projection_authority=projection_authority,
         # HTTP parsing happens before lazy composition.  Pinning the first
         # bootstrap to that already-observed ingress avoids rejecting the
         # process's very first message merely because it was parsed a few
@@ -299,9 +407,28 @@ def build_http_v2_capture_host(
         now=bootstrap_at or datetime.now(UTC),
     )
     return HttpV2CaptureHost(
-        host=WorldV2PlatformHost(application=application),
+        host=WorldV2PlatformHost(
+            application=application,
+            dashboard_capture=DashboardProjectionAdapter(
+                source=application,
+                # These are renderer route names, not world facts.  Only
+                # public labels represented by the shipped room are mapped;
+                # all unknown/private labels stay on unavailable/idle.
+                routes=DashboardRoomRouteCatalog(
+                    location_routes={
+                        "location:studio": "zhizhi-home-legacy",
+                        "location:apartment": "zhizhi-home-legacy",
+                    },
+                    activity_routes={
+                        "focused_work": "study",
+                        "relax": "relax",
+                    },
+                ),
+            ),
+        ),
         transport=transport,
         primary_user_id=primary_user_id,
+        dashboard_request_issuer=dashboard_requests,
         owned_model=owned_model,
     )
 

@@ -331,6 +331,38 @@ async def world_v2_drain(
     }
 
 
+@app.get("/internal/world-v2/dashboard-room")
+def world_v2_dashboard_room(
+    x_world_v2_internal_token: str | None = Header(default=None),
+) -> dict[str, object]:
+    """Return the operator-authorized, public-only World v2 room DTO.
+
+    This is intentionally separate from the legacy dashboard overview.  Its
+    fixed composition request can neither read private state nor ask the v2
+    projection compiler for diagnostic/operator fields.
+    """
+
+    _require_world_v2_internal_access(x_world_v2_internal_token)
+    # A dashboard GET must not be the process that opens and bootstraps a
+    # writable World v2 application.  The selected ingress/scheduler host
+    # owns that lifecycle; until it exists this reader is deliberately
+    # unavailable rather than turning a supposedly read-only request into a
+    # WorldStarted/BudgetAccountConfigured commit.
+    if http_v2_capture is None:
+        raise HTTPException(
+            status_code=503,
+            detail="World v2 dashboard capture is unavailable until the platform host is initialized",
+        )
+    try:
+        return http_v2_capture.dashboard_room().to_payload()
+    except PermissionError as exc:
+        # A composition/configuration error must not downgrade into a legacy
+        # overview or return an unredacted diagnostic projection.
+        raise HTTPException(status_code=403, detail="World v2 dashboard projection denied") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @app.post("/proactive/{canonical_user_id}", response_model=ProactiveDecision)
 async def proactive(canonical_user_id: str) -> ProactiveDecision:
     return await engine.proactive_tick(canonical_user_id)

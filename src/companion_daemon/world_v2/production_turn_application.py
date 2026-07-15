@@ -87,6 +87,7 @@ from .platform_action_executor import (
     ProviderMediaActionExecutor, RoutedActionExecutor,
 )
 from .runtime import WorldRuntime
+from .projection import ProjectionAuthority
 from .replay_evidence import ReplayEvidence
 from .schemas import (
     BudgetAccount,
@@ -575,6 +576,7 @@ def build_sqlite_world_v2_turn_application(
     memory_model: FactMemoryDraftChatModel | None = None,
     expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
     now: datetime,
+    projection_authority: ProjectionAuthority | None = None,
 ) -> WorldV2TurnApplication:
     """Build one durable v2 chat lane without importing the legacy application.
 
@@ -779,6 +781,7 @@ def build_sqlite_world_v2_turn_application(
         runtime = WorldRuntime(
             world_id=config.world_id,
             ledger=ledger,
+            projection_authority=projection_authority,
             pinned_turn=pinned,
             reply_policy=ReplyBudgetPolicy(
                 account_id=config.chat_account_id,

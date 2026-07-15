@@ -174,6 +174,135 @@ def test_http_attachment_evidence_changes_reused_message_identity_into_a_conflic
     assert "different content" in changed.json()["detail"]
 
 
+def test_http_dashboard_room_route_is_operator_gated_and_returns_only_the_v2_public_dto(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exercise the HTTP route as a black box, not the projection adapter directly."""
+
+    host = build_http_v2_capture_host(
+        settings=Settings(database_path=tmp_path / "http-dashboard-v2.sqlite"),
+        bootstrap_at=NOW,
+        model=FakeCompanionModel(),
+    )
+
+    class _NoLegacyEngine:
+        async def aclose(self) -> None:
+            return None
+
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"v2 dashboard route touched legacy Engine attribute {name!r}")
+
+    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    monkeypatch.setattr(app_module, "http_v2_capture", host)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings",
+        lambda: Settings(DELIVERY_RECONCILIATION_TOKEN="dashboard-operator-secret"),
+    )
+    try:
+        client = TestClient(app_module.app)
+        denied = client.get("/internal/world-v2/dashboard-room")
+        response = client.get(
+            "/internal/world-v2/dashboard-room",
+            headers={"X-World-V2-Internal-Token": "dashboard-operator-secret"},
+        )
+    finally:
+        asyncio.run(host.aclose())
+
+    assert denied.status_code == 403
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"schema_version", "cursor", "projection_hash", "route"}
+    assert payload["schema_version"] == "world-v2-dashboard-room.1"
+    assert set(payload["cursor"]) == {"world_revision", "ledger_sequence"}
+    assert set(payload["route"]) == {"scene_id", "action_id", "availability"}
+    assert payload["route"] == {
+        "scene_id": "unavailable",
+        "action_id": "idle",
+        "availability": "unavailable",
+    }
+    wire = str(payload)
+    for forbidden in (
+        "world_id",
+        "semantic_hash",
+        "affect",
+        "participant",
+        "media",
+        "debug",
+        "operator",
+    ):
+        assert forbidden not in wire
+
+
+def test_http_dashboard_room_route_never_falls_back_to_legacy_when_v2_capture_lacks_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _CaptureWithoutDashboard:
+        async def aclose(self) -> None:
+            return None
+
+        def dashboard_room(self):  # type: ignore[no-untyped-def]
+            raise RuntimeError("World v2 dashboard capture is not configured")
+
+    class _NoLegacyEngine:
+        async def aclose(self) -> None:
+            return None
+
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"dashboard fallback touched legacy Engine {name!r}")
+
+    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    monkeypatch.setattr(app_module, "http_v2_capture", _CaptureWithoutDashboard())
+    monkeypatch.setattr(
+        app_module,
+        "get_settings",
+        lambda: Settings(DELIVERY_RECONCILIATION_TOKEN="dashboard-operator-secret"),
+    )
+
+    response = TestClient(app_module.app).get(
+        "/internal/world-v2/dashboard-room",
+        headers={"X-World-V2-Internal-Token": "dashboard-operator-secret"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "World v2 dashboard capture is not configured"
+
+
+def test_http_dashboard_room_route_does_not_bootstrap_a_cold_v2_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An operator read must not create WorldStarted or budget events on GET."""
+
+    class _NoLegacyEngine:
+        async def aclose(self) -> None:
+            return None
+
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"cold dashboard route touched legacy Engine {name!r}")
+
+    def _must_not_compose(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("dashboard GET must not construct a writable World v2 host")
+
+    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    monkeypatch.setattr(app_module, "http_v2_capture", None)
+    monkeypatch.setattr(app_module, "build_http_v2_capture_host", _must_not_compose)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings",
+        lambda: Settings(DELIVERY_RECONCILIATION_TOKEN="dashboard-operator-secret"),
+    )
+
+    response = TestClient(app_module.app).get(
+        "/internal/world-v2/dashboard-room",
+        headers={"X-World-V2-Internal-Token": "dashboard-operator-secret"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "World v2 dashboard capture is unavailable until the platform host is initialized"
+    )
+
+
 @pytest.mark.asyncio
 async def test_http_capture_only_drains_the_action_authorized_by_its_own_ingress() -> None:
     class _TargetedHost:
