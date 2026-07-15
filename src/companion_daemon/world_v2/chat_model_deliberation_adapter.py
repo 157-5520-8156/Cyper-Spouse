@@ -106,6 +106,47 @@ class ChatModelDeliberationAdapter:
         return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
+class RoutedChatModelDeliberationAdapter:
+    """Route one proposal between a fast and an optional thinking model.
+
+    Its two-method interface is the same as a regular deliberation adapter.
+    Route choice stays inside this module, while the audit produced by
+    ``Deliberation`` still records the selected tier and actual model identity.
+    Quick recovery is always sent to Flash so a failed expensive turn cannot
+    turn a latency fallback into another thinking request.
+    """
+
+    def __init__(
+        self,
+        *,
+        flash_model: ChatCompletionModel,
+        thinking_model: ChatCompletionModel | None = None,
+        flash_model_id: str | None = None,
+        thinking_model_id: str | None = None,
+        temperature: float = 0.7,
+    ) -> None:
+        self._flash = ChatModelDeliberationAdapter(
+            model=flash_model, model_id=flash_model_id, temperature=temperature
+        )
+        self._thinking = (
+            ChatModelDeliberationAdapter(
+                model=thinking_model, model_id=thinking_model_id, temperature=temperature
+            )
+            if thinking_model is not None
+            else None
+        )
+
+    async def propose(self, request: ModelInput) -> ModelOutput:
+        if request.route.tier == "thinking":
+            if self._thinking is None:
+                raise RuntimeError("thinking deliberation route is not configured")
+            return await self._thinking.propose(request)
+        return await self._flash.propose(request)
+
+    async def recover(self, request: ModelInput, failure_code: str) -> ModelOutput:
+        return await self._flash.recover(request, failure_code)
+
+
 def _parse_json_object(raw: str) -> dict[str, object]:
     """Accept one object, including a provider's accidental fenced JSON wrapper."""
 
@@ -126,4 +167,8 @@ def _parse_json_object(raw: str) -> dict[str, object]:
     return value
 
 
-__all__ = ["ChatCompletionModel", "ChatModelDeliberationAdapter"]
+__all__ = [
+    "ChatCompletionModel",
+    "ChatModelDeliberationAdapter",
+    "RoutedChatModelDeliberationAdapter",
+]

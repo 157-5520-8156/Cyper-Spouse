@@ -4,7 +4,10 @@ import json
 
 import pytest
 
-from companion_daemon.world_v2.chat_model_deliberation_adapter import ChatModelDeliberationAdapter
+from companion_daemon.world_v2.chat_model_deliberation_adapter import (
+    ChatModelDeliberationAdapter,
+    RoutedChatModelDeliberationAdapter,
+)
 from companion_daemon.world_v2.deliberation import ModelInput, ModelRoute
 
 
@@ -69,3 +72,37 @@ async def test_adapter_rejects_non_object_or_malformed_model_output() -> None:
         adapter = ChatModelDeliberationAdapter(model=_Model(reply))
         with pytest.raises(ValueError, match="JSON"):
             await adapter.propose(_request())
+
+
+@pytest.mark.asyncio
+async def test_routed_adapter_uses_thinking_only_for_the_explicit_thinking_route() -> None:
+    flash = _Model('{"proposal_id":"proposal:flash"}')
+    thinking = _Model('{"proposal_id":"proposal:thinking"}')
+    adapter = RoutedChatModelDeliberationAdapter(
+        flash_model=flash, thinking_model=thinking, temperature=0.8
+    )
+
+    flash_output = await adapter.propose(_request())
+    thinking_output = await adapter.propose(
+        _request().model_copy(
+            update={"route": ModelRoute(tier="thinking", reason_code="ambiguity", router_version="test.1")}
+        )
+    )
+    quick_output = await adapter.recover(_request(), "main_timeout")
+
+    assert flash_output.raw_proposal == {"proposal_id": "proposal:flash"}
+    assert thinking_output.raw_proposal == {"proposal_id": "proposal:thinking"}
+    assert quick_output.raw_proposal == {"proposal_id": "proposal:flash"}
+    assert len(flash.calls) == 2
+    assert len(thinking.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_routed_adapter_fails_closed_when_thinking_was_selected_without_a_thinking_model() -> None:
+    adapter = RoutedChatModelDeliberationAdapter(flash_model=_Model("{}"))
+    thinking_request = _request().model_copy(
+        update={"route": ModelRoute(tier="thinking", reason_code="ambiguity", router_version="test.1")}
+    )
+
+    with pytest.raises(RuntimeError, match="not configured"):
+        await adapter.propose(thinking_request)
