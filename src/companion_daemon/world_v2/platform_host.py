@@ -274,6 +274,11 @@ class WorldV2PlatformHost:
 
         return await self._application.drain_background_once()
 
+    async def current_logical_time(self) -> datetime | None:
+        """Read the one scheduler scalar needed to continue a durable clock."""
+
+        return await self._application.current_logical_time()
+
     def capture_dashboard_room(self, request: ProjectionRequest) -> DashboardRoomProjectionDTO:
         """Capture one authorized viewer DTO; HTTP/WebSocket remains outside this host."""
 

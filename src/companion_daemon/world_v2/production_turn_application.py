@@ -514,6 +514,21 @@ class WorldV2TurnApplication:
 
         return await self._turns.drain_background_once()
 
+    async def current_logical_time(self) -> datetime | None:
+        """Return the current durable logical clock through the application seam.
+
+        Platform schedulers need the previous committed logical timestamp to
+        create a valid next tick after a process restart.  Returning this one
+        scalar does not expose a ledger writer or a projection capability.
+        """
+
+        projection = (
+            await asyncio.to_thread(self._ledger.project)
+            if self._ledger.blocks_event_loop
+            else self._ledger.project()
+        )
+        return projection.logical_time
+
     def export_replay_evidence(self) -> ReplayEvidence:
         """Export a cursor-consistent, read-only replay snapshot for evaluation.
 

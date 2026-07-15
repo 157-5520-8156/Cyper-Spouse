@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from datetime import datetime
 import logging
+import os
 from pathlib import Path
 import time
 
@@ -127,7 +128,12 @@ async def send_onebot_image_with_acceptance(
         )
 
 
-def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> FastAPI:
+def create_app(
+    *,
+    adapter: str = "napcat",
+    use_fake_model: bool = False,
+    world_v2_c2c: bool | None = None,
+) -> FastAPI:
     settings = get_settings()
     validate_qq_outbound_configuration(
         configured_adapter=settings.qq_adapter,
@@ -141,6 +147,21 @@ def create_app(*, adapter: str = "napcat", use_fake_model: bool = False) -> Fast
         access_token = settings.onebot_access_token or None
     else:
         raise ValueError(f"unsupported OneBot adapter: {adapter}")
+    if world_v2_c2c is None:
+        world_v2_c2c = os.getenv("WORLD_V2_QQ_C2C_ENABLED", "").strip().lower() in {
+            "1", "true", "yes", "on"
+        }
+    if world_v2_c2c:
+        # This is a separate, text-only v2 lane.  It intentionally returns
+        # before building CompanionEngine, QQMessageCoalescer, or legacy
+        # scheduler recovery, so there is no dual write/send path.
+        from companion_daemon.world_v2.qq_c2c_onebot_app import create_qq_c2c_onebot_app
+
+        return create_qq_c2c_onebot_app(
+            adapter=adapter,
+            settings=settings,
+            use_fake_model=use_fake_model,
+        )
     allowed_private_ids = _parse_id_list(settings.napcat_allowed_private_user_ids)
 
     engine = build_companion_engine(use_fake_model=use_fake_model)
@@ -433,6 +454,11 @@ def _run_cli(*, default_adapter: str) -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--fake", action="store_true", help="Use the local fake model.")
+    parser.add_argument(
+        "--world-v2-c2c",
+        action="store_true",
+        help="Use the opt-in World v2 C2C text-only lane (no groups/media/stickers).",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -441,7 +467,11 @@ def _run_cli(*, default_adapter: str) -> None:
     try:
         with QQOutboundOwnerLease(lock_path, adapter=args.adapter):
             uvicorn.run(
-                create_app(adapter=args.adapter, use_fake_model=args.fake),
+                create_app(
+                    adapter=args.adapter,
+                    use_fake_model=args.fake,
+                    world_v2_c2c=args.world_v2_c2c,
+                ),
                 host=args.host,
                 port=args.port,
             )
