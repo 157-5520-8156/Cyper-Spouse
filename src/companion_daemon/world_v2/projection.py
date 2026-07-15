@@ -16,6 +16,7 @@ from .affect_math import relative_baseline_saturation_bp
 from .ledger import LedgerPort
 from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditProjection
 from .acceptance_manifest import AcceptanceManifestRefV2
+from .room_projection import RoomProjectionMaterializer
 from .schemas import (
     Action,
     AffectAggregateProjection,
@@ -36,7 +37,6 @@ from .schemas import (
     ProjectionRequest,
     ProjectionSliceWindow,
     ProjectionSystemHealth,
-    RoomProjectionView,
     VersionRef,
     WorldProjection,
 )
@@ -969,7 +969,7 @@ class ProjectionCompiler:
                 slice_windows=slice_windows,
             )
         if request.viewer_kind == "room_renderer":
-            return RoomProjectionView()
+            return RoomProjectionMaterializer.materialize(projection)
         counts: dict[str, int] = {}
         if "projection:evaluator:trace" in permissions:
             for action in projection.actions:
