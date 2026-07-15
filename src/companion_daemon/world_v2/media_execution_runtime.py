@@ -17,6 +17,10 @@ from typing import Protocol
 
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
+from .media_provider_results import (
+    MediaProviderArtifactResult, MediaProviderResultTransport,
+    media_provider_result_hash,
+)
 from .media_v2 import (
     ImmutableMediaPayloadStore, MediaArtifact, MediaInspectionRecord,
     MediaInspectionRecordedPayload, MediaPreview, MediaPreviewFailedPayload,
@@ -25,7 +29,7 @@ from .media_v2 import (
     StoredMediaPayload, media_digest, media_repair_action_id, media_repair_attempt_id,
     media_repair_reservation_id, media_repair_trigger_id,
 )
-from .schemas import Action, BudgetReservation, ClaimLease, ProjectionCursor, ProviderMediaGrantBinding, TriggerProcess, WorldEvent
+from .schemas import Action, BudgetReservation, ClaimLease, ExecutionReceipt, ProjectionCursor, ProviderMediaGrantBinding, TriggerProcess, WorldEvent
 
 
 class MediaExecutionError(ValueError):
@@ -204,7 +208,7 @@ class MediaExecutionRuntime:
         return artifact
 
     def record_render_failure(self, *, action_id: str, reason_code: str, logical_time: datetime) -> None:
-        """Close the preview lane after a terminal render failure.
+        """Close the preview lane after a terminal render or repair failure.
 
         This is intentionally not an attempt to select a new opportunity or
         retry with changed semantics.  Transient retry is owned by the frozen
@@ -212,7 +216,7 @@ class MediaExecutionRuntime:
         v2 opportunity is visibly failed and effect-once recovery joins it.
         """
         projection = self._ledger.project()
-        action, plan = self._action_and_plan(projection, action_id, "media_render")
+        action, plan = self._action_and_plan(projection, action_id, {"media_render", "media_repair"})
         if plan.plan_id in projection.media_failed_plan_ids:
             return
         if action.state not in {"failed", "unknown", "expired", "cancelled"}:
@@ -369,4 +373,121 @@ class MediaExecutionRuntime:
         self._ledger.commit_at_cursor((event,), expected_cursor=self._cursor(projection), commit_id="commit:media-execution:" + event.event_id)
 
 
-__all__ = ["EventMediaExecutionAdapter", "MediaExecutionAdapter", "MediaExecutionError", "MediaExecutionRuntime"]
+class MediaExecutionWorker:
+    """Materialize exactly one already-receipted provider media result.
+
+    The worker deliberately cannot dispatch an Action and cannot invent a
+    result.  It only joins a durable terminal Action receipt to the provider's
+    idempotency-keyed sidecar contract.  It is therefore safe to rerun after a
+    process restart: an absent result remains pending, and an existing domain
+    record is returned without another media provider call.
+    """
+
+    def __init__(
+        self, *, runtime: MediaExecutionRuntime, ledger: LedgerPort,
+        transport: MediaProviderResultTransport,
+    ) -> None:
+        self._runtime, self._ledger, self._transport = runtime, ledger, transport
+
+    async def drain_once(self, *, logical_time: datetime) -> str | None:
+        projection = self._ledger.project()
+        for action in projection.actions:
+            if action.kind not in {"media_render", "media_repair", "media_inspection"}:
+                continue
+            if action.kind in {"media_render", "media_repair"} and any(
+                item.render_action_id == action.action_id for item in projection.media_artifacts
+            ):
+                continue
+            if action.kind == "media_inspection" and any(
+                item.inspection_action_id == action.action_id for item in projection.media_inspections
+            ):
+                continue
+            if action.state in {"failed", "unknown", "expired", "cancelled"}:
+                if action.kind in {"media_render", "media_repair"}:
+                    self._runtime.record_render_failure(
+                        action_id=action.action_id,
+                        reason_code="provider_" + action.state,
+                        logical_time=logical_time,
+                    )
+                    return "render_failed"
+                continue
+            if action.state != "delivered":
+                continue
+            receipt = _terminal_receipt(projection.execution_receipts, action.action_id)
+            if receipt is None:
+                raise MediaExecutionError("delivered media Action has no terminal receipt")
+            result = await self._transport.lookup_execution_result(
+                action_id=action.action_id,
+                idempotency_key=action.idempotency_key,
+                request_fingerprint=_request_fingerprint_from_receipt(receipt),
+            )
+            if result is None:
+                return None
+            self._verify_result(action=action, receipt=receipt, result=result)
+            if isinstance(result, MediaProviderArtifactResult):
+                if action.kind not in {"media_render", "media_repair"}:
+                    raise MediaExecutionError("inspection Action cannot materialize an artifact result")
+                self._runtime.record_rendered_artifact(
+                    action_id=action.action_id,
+                    receipt_id=receipt.receipt_id,
+                    artifact_payload=result.artifact_payload(),
+                    logical_time=logical_time,
+                )
+                return "artifact_recorded"
+            if action.kind != "media_inspection":
+                raise MediaExecutionError("render Action cannot materialize an inspection result")
+            inspection = self._runtime.record_inspection(
+                action_id=action.action_id,
+                receipt_id=receipt.receipt_id,
+                passed=result.passed,
+                reason_code=result.reason_code,
+                observed_summary=result.observed_summary,
+                inspection_payload=result.inspection_payload(),
+                logical_time=logical_time,
+                repairable=result.repairable,
+                repair_scope=result.repair_scope,
+            )
+            self._runtime.materialize_preview(
+                inspection_id=inspection.inspection_id,
+                logical_time=logical_time,
+                trace_id=action.trace_id,
+                correlation_id=action.correlation_id,
+            )
+            return "inspection_recorded"
+        return None
+
+    @staticmethod
+    def _verify_result(*, action: Action, receipt: ExecutionReceipt, result) -> None:
+        if result.action_id != action.action_id or result.idempotency_key != action.idempotency_key:
+            raise MediaExecutionError("provider media result does not bind delivered Action")
+        request_fingerprint = _request_fingerprint_from_receipt(receipt)
+        if result.request_fingerprint != request_fingerprint:
+            raise MediaExecutionError("provider media result does not bind dispatched request fingerprint")
+        if media_provider_result_hash(result) != receipt.raw_payload_hash:
+            raise MediaExecutionError("provider media result bytes do not bind terminal receipt hash")
+
+
+def _terminal_receipt(receipts: tuple[ExecutionReceipt, ...], action_id: str) -> ExecutionReceipt | None:
+    matches = tuple(item for item in receipts if item.action_id == action_id and item.is_terminal)
+    if len(matches) > 1:
+        raise MediaExecutionError("media Action has ambiguous terminal receipts")
+    return matches[0] if matches else None
+
+
+def _request_fingerprint_from_receipt(receipt: ExecutionReceipt) -> str:
+    """The provider ref is not a request identity; receipts must carry it.
+
+    The generic v2 ``ExecutionReceipt`` intentionally predates the media
+    provider contract and has no fingerprint field.  The provider result
+    transport gets the canonical dispatch fingerprint via this reserved,
+    immutable artifact reference.  Older/non-media receipts have no such
+    value and are rejected rather than guessed.
+    """
+
+    matches = tuple(value.removeprefix("request:") for value in receipt.artifact_refs if value.startswith("request:sha256:"))
+    if len(matches) != 1:
+        raise MediaExecutionError("media terminal receipt lacks one request fingerprint evidence ref")
+    return matches[0]
+
+
+__all__ = ["EventMediaExecutionAdapter", "MediaExecutionAdapter", "MediaExecutionError", "MediaExecutionRuntime", "MediaExecutionWorker"]

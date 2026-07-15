@@ -305,7 +305,11 @@ class ProviderMediaActionExecutor(ActionExecutor):
             provider=self._transport.provider,
             provider_ref=result.provider_ref,
             status=result.status,
-            artifact_refs=result.artifact_refs,
+            # The generic receipt schema has no request fingerprint field.
+            # Preserve the provider's opaque artifact refs and append one
+            # reserved evidence ref so a later MediaExecutionWorker can bind
+            # an idempotency-keyed result sidecar to this exact dispatch.
+            artifact_refs=tuple(dict.fromkeys((*result.artifact_refs, "request:" + request.fingerprint))),
             cost_actual=result.cost_actual,
             error_class=result.error_class,
             received_at=result.received_at,
