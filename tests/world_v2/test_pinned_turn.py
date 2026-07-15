@@ -16,6 +16,7 @@ from companion_daemon.world_v2.deliberation import (
     RouteRequest,
 )
 from companion_daemon.world_v2.ledger import WorldLedger
+from companion_daemon.world_v2.batch_invariants import interaction_appraisal_trigger_identity
 from companion_daemon.world_v2.ledger_context_resolver import (
     context_capsule_compiler_from_ledger,
 )
@@ -348,6 +349,32 @@ async def test_runtime_defers_an_audited_reply_when_the_budget_is_unavailable() 
     assert projection.expression_beats == ()
     assert projection.pending_actions == ()
     assert projection.budget_accounts[0].reserved == 0
+
+
+@pytest.mark.asyncio
+async def test_runtime_opens_and_claims_one_source_bound_interaction_appraisal_trigger() -> None:
+    ledger = WorldLedger.in_memory(world_id=WORLD)
+    ledger.commit((_world_started(),), expected_world_revision=0, expected_deliberation_revision=0)
+    runtime = WorldRuntime(
+        world_id=WORLD,
+        ledger=ledger,
+        interaction_appraisal_owner="worker:interaction-appraisal",
+    )
+
+    first = await runtime.ingest(_observation())
+    duplicate = await runtime.ingest(_observation())
+
+    trigger_id = interaction_appraisal_trigger_identity(WORLD, _observation().observation_id)
+    projection = ledger.project()
+    trigger = next(item for item in projection.trigger_processes if item.trigger_id == trigger_id)
+    assert trigger.process_kind == "interaction_appraisal"
+    assert trigger.source_evidence_ref == _observation().observation_id
+    assert trigger.state == "claimed"
+    assert trigger.claim_lease is not None
+    assert trigger.claim_lease.owner_id == "worker:interaction-appraisal"
+    assert first == duplicate
+    assert projection.world_revision == 2
+    assert projection.deliberation_revision == 2
 
 
 @pytest.mark.asyncio

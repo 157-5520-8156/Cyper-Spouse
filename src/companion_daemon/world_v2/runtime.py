@@ -19,6 +19,8 @@ from .minimal_reply_acceptance import (
 )
 from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .minimal_reply_events import minimal_reply_event_id
+from .appraisal_trigger import interaction_appraisal_trigger_events
+from .batch_invariants import interaction_appraisal_trigger_identity
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -48,6 +50,7 @@ class WorldRuntime:
         pinned_turn: PinnedTurnCompiler | None = None,
         reply_policy: ReplyBudgetPolicy | None = None,
         reply_recorder: MinimalReplyAtomicRecorder | None = None,
+        interaction_appraisal_owner: str | None = None,
     ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
@@ -62,6 +65,9 @@ class WorldRuntime:
             raise ValueError("minimal reply policy and recorder must be configured together")
         self._reply_policy = reply_policy
         self._reply_recorder = reply_recorder
+        if interaction_appraisal_owner is not None and not interaction_appraisal_owner:
+            raise ValueError("interaction appraisal owner must not be empty")
+        self._interaction_appraisal_owner = interaction_appraisal_owner
         self._lock = asyncio.Lock()
 
     @classmethod
@@ -182,6 +188,17 @@ class WorldRuntime:
                 world_revision=before.world_revision,
                 deliberation_revision=before.deliberation_revision,
             )
+            if self._interaction_appraisal_owner is not None:
+                trigger_events = interaction_appraisal_trigger_events(
+                    observation=observation,
+                    observation_event=event,
+                    owner_id=self._interaction_appraisal_owner,
+                )
+                committed = await self._commit(
+                    list(trigger_events),
+                    world_revision=committed.world_revision,
+                    deliberation_revision=committed.deliberation_revision,
+                )
             if self._pinned_turn is not None:
                 audited = await self._pinned_turn.audit_observation(
                     observation=observation,
@@ -295,6 +312,20 @@ class WorldRuntime:
             None,
         )
         if manifest is None:
+            if self._interaction_appraisal_owner is not None and any(
+                item.trigger_id
+                == interaction_appraisal_trigger_identity(self._world_id, observation.observation_id)
+                for item in projection.trigger_processes
+            ):
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:{trigger_id}",
+                    trigger_id=trigger_id,
+                    observation_ref=observation.observation_id,
+                    committed_world_revision=projection.world_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                    status="observed_only",
+                    projection_hint=f"world-revision:{projection.world_revision}",
+                )
             return RuntimeOutcome(
                 outcome_id=f"outcome:{trigger_id}",
                 trigger_id=trigger_id,
