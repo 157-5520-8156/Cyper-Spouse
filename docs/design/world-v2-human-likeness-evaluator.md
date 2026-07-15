@@ -20,7 +20,8 @@ flowchart LR
   C["冻结 scenario corpus\n输入、事实、gold signals"] --> R["bare / archived / v2\n相同 seed 各运行 3 次"]
   R --> B["匿名化输出顺序\n记录 output hash"]
   B --> J["两份独立标注\n固定 judge/rubric"]
-  J --> E["ExperienceEvaluator\n纯汇总、bootstrap CI、门槛"]
+  J --> V["EvaluationArtifactBundle.verify()\n协议、语义 corpus、输出实例、盲测、证据、机械 trace"]
+  V --> E["ExperienceEvaluator\n纯汇总、bootstrap CI、门槛"]
   M["ReplayEvaluator / performance trace"] --> E
   E --> G["可审计报告\npass 或明确 blockers"]
 ```
@@ -36,6 +37,23 @@ flowchart LR
 | `ReviewedRun` | variant、turn、seed、与 `ScenarioTurn` 相等的 input/fact hash、匿名 output hash、评审者、rubric score、观察到的 response tag | 把不同输入或事实条件下的输出伪装成可配对样本 |
 | `EvidenceArtifact` | output/Proposal/AffectEpisode 的 artifact hash、reference、其绑定的 output hash | 用任意字符串/tag 将情绪察觉计为命中 |
 | `MechanicalEvaluation` | replay hash、Action leak、hard invariant、Affect 错误清零、draw consistency、hot latency | 文风好看却有世界事实或延迟回归 |
+
+### 已验证工件 bundle
+
+正式协议不能把上表的 hash 当作彼此无关的字符串传给评估器。边缘 adapter 必须先构造
+`EvaluationArtifactBundle`；`ExperienceEvaluator` 对 `human-likeness-eval-v1` 只接受该
+bundle，并在内部调用唯一的验证 seam `verify()`。调用者不能直接传入可手工构造的
+`VerifiedEvaluationArtifacts`。
+
+- `ProtocolIdentity` 还包含完整评估合同的 hash：variants、重复次数、coverage、judge、温度和两份盲测 manifest；因此不能换 judge 或降低样本要求后沿用旧工件。
+- `ScenarioCorpusEntry` 固定场景 ID/family、emotion-gold、允许 tag、输入与事实 hash；不能仅保留文本输入而改写 recall 的评分语义。
+- `CapturedScenarioOutput` 和 `BlindPresentation` 都以 `(variant, turn, seed)` 为身份，而非仅以文本 hash；不同运行恰好生成同一句话仍是两个独立盲测实例。
+- bundle 同时重算 blinded-order 与 unblinding-map digest，必须与 `EvaluationProtocol` 声明的两个 digest 完全相同。
+- 每个 output/Proposal/Affect 的 `EvidenceArtifactCapture` 同时绑定 source/reference、输出实例、输出 hash 与 artifact hash；评审传入的 evidence manifest 必须与 bundle 精确相等。
+- `MechanicalTraceEvidence` 同时固定六份原始 trace hash 和由 trace 导出的 failure/consistency/latency 数值；`MechanicalEvaluation` 任一数字或 hash 不一致都会成为 blocker。
+
+bundle 证明的是**本地输入工件之间的完整绑定**，不是对外部文件来源的神奇担保。生产
+adapter 仍须从只读 fixture/replay/receipt/performance exports 重算这些 hash，并将其纳入受版本控制的评估产物；不能手工填写 digest 后宣称验收通过。
 
 一个 `(variant, scenario_turn, seed)` 有且仅有一份输出 hash，可有多份独立 reviewer record。两个 reviewer 不一致是数据，不可被最后写入的一条覆盖。所有 variant 的 `(turn, seed)` 集合和每单元 reviewer panel 都必须完全相同；每项指标先聚合到该单元，再做版本比较，不能靠对某个命中样本增加 reviewer 来提高 recall。
 

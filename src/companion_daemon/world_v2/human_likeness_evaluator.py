@@ -13,6 +13,14 @@ from random import Random
 from statistics import fmean
 from typing import Literal, Mapping
 
+from .evaluation_artifacts import (
+    EvaluationArtifactBundle,
+    ProtocolIdentity,
+    ScenarioCorpusEntry,
+    corpus_digest,
+    evaluation_contract_digest,
+)
+
 
 RUBRIC_DIMENSIONS = (
     "current_input_fit",
@@ -104,6 +112,32 @@ class EvaluationProtocol:
                 len(value) != 64 or any(char not in "0123456789abcdef" for char in value)
             ):
                 raise ExperienceEvaluationError(f"{name} must be a lowercase sha256 hex digest")
+
+    @property
+    def artifact_identity(self) -> ProtocolIdentity:
+        """The complete policy contract a verified artifact must reproduce."""
+
+        return ProtocolIdentity(
+            protocol_version=self.protocol_version,
+            scenario_set_version=self.scenario_set_version,
+            rubric_version=self.rubric_version,
+            statistics_version=self.statistics_version,
+            evaluation_contract_hash=evaluation_contract_digest(
+                {
+                    "required_variants": self.required_variants,
+                    "required_repetitions": self.required_repetitions,
+                    "minimum_scenario_turns": self.minimum_scenario_turns,
+                    "minimum_emotion_gold_turns": self.minimum_emotion_gold_turns,
+                    "minimum_independent_reviews": self.minimum_independent_reviews,
+                    "judge_model_id": self.judge_model_id,
+                    "judge_prompt_version": self.judge_prompt_version,
+                    "judge_temperature": self.judge_temperature,
+                    "blinding_scheme_version": self.blinding_scheme_version,
+                    "blinded_order_hash": self.blinded_order_hash,
+                    "unblinding_map_hash": self.unblinding_map_hash,
+                }
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -374,6 +408,7 @@ class ExperienceEvaluator:
         reviewed_runs: tuple[ReviewedRun, ...],
         mechanical_evaluation: MechanicalEvaluation | None = None,
         evidence_artifacts: tuple[EvidenceArtifact, ...] = (),
+        artifact_bundle: EvaluationArtifactBundle | None = None,
     ) -> ExperienceEvaluationReport:
         scenarios = self._index_corpus(corpus)
         grouped = self._index_runs(scenarios, reviewed_runs)
@@ -382,6 +417,16 @@ class ExperienceEvaluator:
         blockers.extend(
             self._official_protocol_blockers(
                 protocol, corpus, reviewed_runs, grouped, evidence_artifacts
+            )
+        )
+        blockers.extend(
+            self._verified_artifact_blockers(
+                protocol=protocol,
+                corpus=corpus,
+                reviewed_runs=reviewed_runs,
+                mechanical_evaluation=mechanical_evaluation,
+                evidence_artifacts=evidence_artifacts,
+                artifact_bundle=artifact_bundle,
             )
         )
         comparisons = self._compare_variants(protocol, grouped)
@@ -415,6 +460,101 @@ class ExperienceEvaluator:
             evidence_by_variant=evidence_by_variant,
             blockers=tuple(blockers),
         )
+
+    @staticmethod
+    def _verified_artifact_blockers(
+        *,
+        protocol: EvaluationProtocol,
+        corpus: tuple[ScenarioTurn, ...],
+        reviewed_runs: tuple[ReviewedRun, ...],
+        mechanical_evaluation: MechanicalEvaluation | None,
+        evidence_artifacts: tuple[EvidenceArtifact, ...],
+        artifact_bundle: EvaluationArtifactBundle | None,
+    ) -> list[str]:
+        if protocol.protocol_version != OFFICIAL_PROTOCOL_VERSION:
+            return []
+        if artifact_bundle is None:
+            return ["missing_verified_evaluation_artifact_bundle"]
+        verified_artifacts = artifact_bundle.verify()
+        expected_protocol = protocol.artifact_identity
+        expected_corpus = tuple(
+            ScenarioCorpusEntry(
+                scenario_turn_id=item.scenario_turn_id,
+                scenario_id=item.scenario_id,
+                scenario_family=item.scenario_family,
+                emotional_gold=item.emotional_gold,
+                acceptable_response_tags=item.acceptable_response_tags,
+                input_hash=item.input_hash,
+                fact_set_hash=item.fact_set_hash,
+            )
+            for item in corpus
+        )
+        if (
+            verified_artifacts.protocol_digest != expected_protocol.digest
+            or verified_artifacts.corpus_hash != corpus_digest(expected_corpus)
+        ):
+            return ["verified_evaluation_artifact_bundle_mismatch"]
+        if (
+            protocol.blinded_order_hash != verified_artifacts.blinded_order_hash
+            or protocol.unblinding_map_hash != verified_artifacts.unblinding_map_hash
+        ):
+            return ["verified_evaluation_artifact_blinding_mismatch"]
+        captured = {item.unit_key: item for item in verified_artifacts.outputs}
+        for run in reviewed_runs:
+            item = captured.get((run.variant_id, run.scenario_turn_id, run.seed))
+            if item is None or item.output_hash != run.output_hash:
+                return ["reviewed_run_not_bound_to_verified_output"]
+            if (
+                verified_artifacts.presentation_for(unit_key=item.unit_key).blind_output_id
+                != run.blind_output_id
+            ):
+                return ["reviewed_run_blind_identity_mismatch"]
+        supplied_evidence = {
+            (
+                item.source,
+                item.reference_id,
+                item.variant_id,
+                item.scenario_turn_id,
+                item.seed,
+                item.output_hash,
+                item.artifact_hash,
+            )
+            for item in evidence_artifacts
+        }
+        verified_evidence = {
+            (
+                item.source,
+                item.reference_id,
+                item.variant_id,
+                item.scenario_turn_id,
+                item.seed,
+                item.output_hash,
+                item.artifact_hash,
+            )
+            for item in verified_artifacts.evidence_artifacts
+        }
+        if supplied_evidence != verified_evidence:
+            return ["review_evidence_not_bound_to_verified_artifact_bundle"]
+        if mechanical_evaluation is not None:
+            trace = verified_artifacts.mechanical_trace
+            if (
+                mechanical_evaluation.fixture_manifest_hash != trace.fixture_manifest_hash
+                or mechanical_evaluation.replay_evidence_hash != trace.replay_evidence_hash
+                or mechanical_evaluation.action_receipt_evidence_hash != trace.action_receipt_evidence_hash
+                or mechanical_evaluation.affect_evidence_hash != trace.affect_evidence_hash
+                or mechanical_evaluation.random_draw_evidence_hash != trace.random_draw_evidence_hash
+                or mechanical_evaluation.performance_trace_hash != trace.performance_trace_hash
+                or mechanical_evaluation.hard_invariant_violations != trace.hard_invariant_violations
+                or mechanical_evaluation.nonterminal_action_leaks != trace.nonterminal_action_leaks
+                or mechanical_evaluation.replay_hash_mismatches != trace.replay_hash_mismatches
+                or mechanical_evaluation.affect_episode_invalid_clears
+                != trace.affect_episode_invalid_clears
+                or mechanical_evaluation.random_draw_replay_consistency
+                != trace.random_draw_replay_consistency
+                or mechanical_evaluation.hot_visible_action_p95_ms != trace.hot_visible_action_p95_ms
+            ):
+                return ["mechanical_evidence_not_bound_to_verified_artifact_bundle"]
+        return []
 
     @staticmethod
     def _official_protocol_blockers(

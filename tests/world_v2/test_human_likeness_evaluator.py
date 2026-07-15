@@ -1,5 +1,13 @@
 import pytest
 
+from companion_daemon.world_v2.evaluation_artifacts import (
+    BlindPresentation,
+    CapturedScenarioOutput,
+    EvaluationArtifactBundle,
+    MechanicalTraceEvidence,
+    ProtocolIdentity,
+    ScenarioCorpusEntry,
+)
 from companion_daemon.world_v2.human_likeness_evaluator import (
     EvaluationProtocol,
     ExperienceEvaluator,
@@ -436,3 +444,129 @@ def test_official_gate_includes_mechanical_world_and_latency_evidence() -> None:
 
     assert "hard_invariant_violation" in report.blockers
     assert "hot_visible_action_p95_exceeds_5s" in report.blockers
+    assert "missing_verified_evaluation_artifact_bundle" in report.blockers
+
+
+def test_official_review_requires_the_exact_verified_protocol_corpus_output_and_blinding() -> None:
+    scenario = ScenarioTurn(
+        scenario_turn_id="share.1",
+        scenario_id="ordinary_share",
+        scenario_family="ordinary_share",
+        emotional_gold=False,
+        acceptable_response_tags=(),
+        input_hash="1" * 64,
+        fact_set_hash="2" * 64,
+    )
+    captured = CapturedScenarioOutput.from_text(
+        variant_id="v2",
+        scenario_turn_id=scenario.scenario_turn_id,
+        seed="seed.1",
+        scenario_input_hash=scenario.input_hash,
+        scenario_fact_set_hash=scenario.fact_set_hash,
+        text="我在。",
+    )
+    presentation = BlindPresentation(
+        *captured.unit_key, "blind.1", captured.output_hash, 0
+    )
+    probe = EvaluationArtifactBundle(
+        protocol=ProtocolIdentity("probe", "probe", "probe", "probe", "0" * 64),
+        corpus=(
+            ScenarioCorpusEntry(
+                scenario_turn_id=scenario.scenario_turn_id,
+                scenario_id=scenario.scenario_id,
+                scenario_family=scenario.scenario_family,
+                emotional_gold=scenario.emotional_gold,
+                acceptable_response_tags=scenario.acceptable_response_tags,
+                input_hash=scenario.input_hash,
+                fact_set_hash=scenario.fact_set_hash,
+            ),
+        ),
+        outputs=(captured,),
+        presentations=(presentation,),
+        mechanical_trace=MechanicalTraceEvidence(
+            fixture_manifest_hash="3" * 64,
+            replay_evidence_hash="4" * 64,
+            action_receipt_evidence_hash="5" * 64,
+            affect_evidence_hash="6" * 64,
+            random_draw_evidence_hash="7" * 64,
+            performance_trace_hash="8" * 64,
+            hard_invariant_violations=0,
+            nonterminal_action_leaks=0,
+            replay_hash_mismatches=0,
+            affect_episode_invalid_clears=0,
+            random_draw_replay_consistency=1.0,
+            hot_visible_action_p95_ms=500.0,
+        ),
+    )
+    protocol = EvaluationProtocol(
+        protocol_version="human-likeness-eval-v1",
+        scenario_set_version="scenarios.1",
+        rubric_version="rubric.1",
+        statistics_version="statistics.1",
+        required_variants=("v2",),
+        required_repetitions=1,
+        minimum_scenario_turns=1,
+        minimum_emotion_gold_turns=0,
+        blinded_order_hash=probe.blinded_order_hash,
+        unblinding_map_hash=probe.unblinding_map_hash,
+        blinding_scheme_version="test.1",
+    )
+    artifact_bundle = EvaluationArtifactBundle(
+        protocol=protocol.artifact_identity,
+        corpus=probe.corpus,
+        outputs=probe.outputs,
+        presentations=probe.presentations,
+        mechanical_trace=probe.mechanical_trace,
+    )
+    review = ReviewedRun(
+        variant_id="v2",
+        scenario_turn_id="share.1",
+        seed="seed.1",
+        output_hash=captured.output_hash,
+        judge_id="judge.1",
+        judge_prompt_version="judge-prompt.1",
+        rubric_scores={dimension: 4 for dimension in RUBRIC_DIMENSIONS},
+        response_tags=(),
+        question_ending=False,
+        fallback_template_hit=False,
+        fallback_smell_confirmed=False,
+        model_failed=False,
+        asserted_alternative_as_fact=False,
+        scenario_input_hash=scenario.input_hash,
+        scenario_fact_set_hash=scenario.fact_set_hash,
+        blind_output_id="blind.1",
+        non_necessary_question_ending=False,
+    )
+
+    report = ExperienceEvaluator().evaluate(
+        protocol=protocol,
+        corpus=(scenario,),
+        reviewed_runs=(review,),
+        artifact_bundle=artifact_bundle,
+    )
+
+    assert "missing_verified_evaluation_artifact_bundle" not in report.blockers
+    assert "verified_evaluation_artifact_bundle_mismatch" not in report.blockers
+    assert "verified_evaluation_artifact_blinding_mismatch" not in report.blockers
+    assert "reviewed_run_not_bound_to_verified_output" not in report.blockers
+    assert "reviewed_run_blind_identity_mismatch" not in report.blockers
+
+    mismatched_evidence_report = ExperienceEvaluator().evaluate(
+        protocol=protocol,
+        corpus=(scenario,),
+        reviewed_runs=(review,),
+        evidence_artifacts=(
+            EvidenceArtifact(
+                source="output",
+                reference_id="output.share.1",
+                variant_id="v2",
+                scenario_turn_id="share.1",
+                seed="seed.1",
+                output_hash=captured.output_hash,
+                artifact_hash="9" * 64,
+            ),
+        ),
+        artifact_bundle=artifact_bundle,
+    )
+
+    assert "review_evidence_not_bound_to_verified_artifact_bundle" in mismatched_evidence_report.blockers

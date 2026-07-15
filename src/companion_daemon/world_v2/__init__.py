@@ -16,6 +16,14 @@ from .human_likeness_evaluator import (
     ScenarioTurn,
 )
 from .platform_action_executor import PlatformActionExecutor
+from .evaluation_artifacts import (
+    BlindPresentation,
+    CapturedScenarioOutput,
+    EvidenceArtifactCapture,
+    EvaluationArtifactBundle,
+    MechanicalTraceEvidence,
+    ScenarioCorpusEntry,
+)
 from .matrix_catalog import (
     CandidateDistribution,
     ClassificationCandidate,
@@ -55,6 +63,8 @@ __all__ = [
     "BudgetAccount",
     "BudgetReservation",
     "BudgetSettlement",
+    "BlindPresentation",
+    "CapturedScenarioOutput",
     "CandidateDistribution",
     "ClassificationCandidate",
     "ClaimLease",
@@ -63,6 +73,8 @@ __all__ = [
     "ExternalObservation",
     "ExecutionReceipt",
     "EvaluationProtocol",
+    "EvaluationArtifactBundle",
+    "EvidenceArtifactCapture",
     "ExperienceEvaluationReport",
     "ExperienceEvaluator",
     "FrequencyBudget",
@@ -72,6 +84,7 @@ __all__ = [
     "MatrixSchemaError",
     "MatrixSelection",
     "MechanicalEvaluation",
+    "MechanicalTraceEvidence",
     "Observation",
     "ProjectionRequest",
     "ProjectionAuthority",
@@ -82,6 +95,7 @@ __all__ = [
     "RuntimeOutcome",
     "TriggerProcess",
     "ScenarioTurn",
+    "ScenarioCorpusEntry",
     "WorldProjection",
     "WorldRuntime",
     "default_matrix_catalog",
