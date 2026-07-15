@@ -26,6 +26,7 @@ from .appraisal_proposal_compiler import AppraisalProposalCompiler
 from .expression_plan_acceptance import derive_expression_plan_material
 from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder
 from .expression_plan_manifest import ExpressionPlanAcceptanceManifest
+from .expression_action_capabilities import production_expression_action_kinds
 from .outcome_acceptance_manifest import OutcomeAcceptanceManifest
 from .outcome_acceptance_runtime import OutcomeAcceptanceRuntime
 from .outcome_proposal_compiler import OutcomeProposalCompiler
@@ -144,7 +145,11 @@ _EXPRESSION = SpecializedProposalCapability(
     manifest_ref="expression-plan-manifest.1",
     reverse_verifier_ref="expression-plan-acceptance.1",
     allows_actions=True,
-    action_kinds=frozenset({"reply", "followup", "proactive_message"}),
+    # Do not infer reachability from the deliberation matrix or from a
+    # platform adapter's low-level request type.  This closes only the action
+    # kinds whose payload, acceptance, concrete transport and recovery are
+    # installed in the current production composition.
+    action_kinds=production_expression_action_kinds(),
 )
 _APPRAISAL = SpecializedProposalCapability(
     change_kind="appraisal_transition",

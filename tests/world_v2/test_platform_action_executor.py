@@ -112,12 +112,46 @@ async def test_platform_executor_dispatches_only_the_authorized_payload_and_bind
 @pytest.mark.asyncio
 async def test_platform_executor_renders_delayed_followup_as_the_same_message_primitive() -> None:
     transport = Transport()
-    executor = PlatformActionExecutor(payloads=Payloads("晚一点再把这句话说完。"), transport=transport)
+    executor = PlatformActionExecutor(
+        payloads=Payloads("晚一点再把这句话说完。"), transport=transport
+    )
 
     receipt = await executor.dispatch(action(text="晚一点再把这句话说完。", kind="followup"))
 
     assert receipt.status == "delivered"
     assert transport.sent[0].kind == "reply"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "content_type", "body"),
+    (
+        ("reaction", "application/vnd.world-v2.reaction+json", '{"reaction":"eyes"}'),
+        ("typing", "application/vnd.world-v2.typing+json", '{"duration_ms":1200}'),
+        ("sticker", "application/vnd.world-v2.sticker+json", '{"sticker_id":"s:wave"}'),
+    ),
+)
+async def test_platform_adapter_keeps_non_text_primitives_typed_and_receipt_bound(
+    kind: str, content_type: str, body: str
+) -> None:
+    class TypedPayloads(Payloads):
+        async def resolve(self, current: Action) -> ResolvedActionPayload:
+            return ResolvedActionPayload(
+                payload_ref=current.payload_ref,
+                payload_hash=current.payload_hash,
+                content_type=content_type,
+                body=body,
+            )
+
+    current = action(text=body, kind=kind)
+    transport = Transport()
+    receipt = await PlatformActionExecutor(
+        payloads=TypedPayloads(body), transport=transport
+    ).dispatch(current)
+
+    assert receipt is not None and receipt.status == "delivered"
+    assert transport.sent[0].kind == kind
+    assert transport.sent[0].content_type == content_type
 
 
 @pytest.mark.asyncio
@@ -148,7 +182,9 @@ async def test_platform_executor_rejects_content_type_that_would_change_reply_se
 
 
 @pytest.mark.asyncio
-async def test_platform_executor_recovers_by_provider_lookup_after_rebuilding_the_authorized_request() -> None:
+async def test_platform_executor_recovers_by_provider_lookup_after_rebuilding_the_authorized_request() -> (
+    None
+):
     payloads = Payloads("我在。")
     transport = Transport()
     executor = PlatformActionExecutor(payloads=payloads, transport=transport)
@@ -161,7 +197,9 @@ async def test_platform_executor_recovers_by_provider_lookup_after_rebuilding_th
 
 
 @pytest.mark.asyncio
-async def test_platform_executor_rejects_a_dispatch_receipt_for_a_different_provider_request() -> None:
+async def test_platform_executor_rejects_a_dispatch_receipt_for_a_different_provider_request() -> (
+    None
+):
     class WrongReceiptTransport(Transport):
         async def send(self, request):
             receipt = await super().send(request)
@@ -175,7 +213,9 @@ async def test_platform_executor_rejects_a_dispatch_receipt_for_a_different_prov
 
 
 @pytest.mark.asyncio
-async def test_platform_executor_rejects_recovery_receipt_with_a_different_request_fingerprint() -> None:
+async def test_platform_executor_rejects_recovery_receipt_with_a_different_request_fingerprint() -> (
+    None
+):
     class WrongLookupTransport(Transport):
         async def lookup(self, *, idempotency_key: str, request_fingerprint: str):
             receipt = await super().lookup(
@@ -221,8 +261,12 @@ async def test_platform_executor_can_only_send_through_runtime_owned_action_pump
     )
     ledger.commit(
         (
-            event("BudgetAccountConfigured", {"account": account.model_dump(mode="json")}, "account"),
-            event("BudgetReserved", {"reservation": reservation.model_dump(mode="json")}, "reserve"),
+            event(
+                "BudgetAccountConfigured", {"account": account.model_dump(mode="json")}, "account"
+            ),
+            event(
+                "BudgetReserved", {"reservation": reservation.model_dump(mode="json")}, "reserve"
+            ),
             event("ActionAuthorized", {"action": current.model_dump(mode="json")}, "action"),
         ),
         expected_world_revision=0,

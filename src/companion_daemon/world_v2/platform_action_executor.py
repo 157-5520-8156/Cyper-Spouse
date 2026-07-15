@@ -19,6 +19,10 @@ from .schema_core import FrozenModel
 from .schemas import Action, DispatchPending, LedgerProjection, ProviderReceipt
 
 
+# These are request shapes the neutral adapter can bind to immutable bytes and
+# receipts.  They are deliberately *not* a production availability claim:
+# production_proposal_grammar consults expression_action_capabilities, which
+# also requires a proposal materializer and a concrete platform transport.
 SUPPORTED_PLATFORM_ACTION_KINDS = frozenset(
     {"reply", "followup", "proactive_message", "reaction", "typing", "sticker", "media_delivery"}
 )
@@ -85,7 +89,9 @@ class AuthorizedPayloadReader(Protocol):
 class PlatformTransport(Protocol):
     provider: str
 
-    async def send(self, request: PlatformDispatchRequest) -> PlatformDispatchReceipt | DispatchPending: ...
+    async def send(
+        self, request: PlatformDispatchRequest
+    ) -> PlatformDispatchReceipt | DispatchPending: ...
 
     async def lookup(
         self, *, idempotency_key: str, request_fingerprint: str
@@ -107,12 +113,15 @@ class PlatformActionExecutor(ActionExecutor):
         self._payloads = payloads
         self._transport = transport
 
-    async def assert_dispatch_authorized(self, *, action: Action, projection: LedgerProjection) -> None:
+    async def assert_dispatch_authorized(
+        self, *, action: Action, projection: LedgerProjection
+    ) -> None:
         """Fail closed for the one platform action that carries media bytes."""
 
         if action.kind == "media_delivery":
             require_current_media_delivery_approval(
-                action=action, projection=projection,
+                action=action,
+                projection=projection,
                 logical_time=projection.logical_time or action.logical_time,
             )
 
@@ -144,7 +153,9 @@ class PlatformActionExecutor(ActionExecutor):
         )
 
     @staticmethod
-    def _kind(action: Action) -> Literal["reply", "reaction", "typing", "sticker", "media_delivery"]:
+    def _kind(
+        action: Action,
+    ) -> Literal["reply", "reaction", "typing", "sticker", "media_delivery"]:
         if action.layer != "external_action" or action.kind not in SUPPORTED_PLATFORM_ACTION_KINDS:
             raise ValueError(f"platform executor does not support action kind {action.kind!r}")
         if action.kind in {"followup", "proactive_message"}:
@@ -171,7 +182,10 @@ class PlatformActionExecutor(ActionExecutor):
         if result is None:
             return None
         if isinstance(result, DispatchPending):
-            if result.action_id != action.action_id or result.idempotency_key != action.idempotency_key:
+            if (
+                result.action_id != action.action_id
+                or result.idempotency_key != action.idempotency_key
+            ):
                 raise ValueError("platform pending result does not bind the Action")
             if result.provider != self._transport.provider:
                 raise ValueError("platform pending result provider mismatch")
@@ -179,7 +193,9 @@ class PlatformActionExecutor(ActionExecutor):
         if result.idempotency_key != action.idempotency_key:
             raise ValueError("platform receipt idempotency key does not bind the Action")
         if request is not None and result.request_fingerprint != request.fingerprint:
-            raise ValueError("platform receipt request fingerprint does not bind dispatched payload")
+            raise ValueError(
+                "platform receipt request fingerprint does not bind dispatched payload"
+            )
         return ProviderReceipt(
             provider_receipt_id=result.provider_receipt_id,
             action_id=action.action_id,
@@ -220,7 +236,9 @@ class MediaProviderDispatchRequest(FrozenModel):
 class MediaProviderTransport(Protocol):
     provider: str
 
-    async def send(self, request: MediaProviderDispatchRequest) -> PlatformDispatchReceipt | DispatchPending: ...
+    async def send(
+        self, request: MediaProviderDispatchRequest
+    ) -> PlatformDispatchReceipt | DispatchPending: ...
 
     async def lookup(
         self, *, idempotency_key: str, request_fingerprint: str
@@ -236,21 +254,23 @@ class ProviderMediaActionExecutor(ActionExecutor):
     its final ledger projection immediately before the external call.
     """
 
-    def __init__(self, *, payloads: AuthorizedPayloadReader, transport: MediaProviderTransport) -> None:
+    def __init__(
+        self, *, payloads: AuthorizedPayloadReader, transport: MediaProviderTransport
+    ) -> None:
         if not transport.provider:
             raise ValueError("media provider transport provider is required")
         self._payloads = payloads
         self._transport = transport
         self._dispatch_authorizations: set[tuple[str, str, int]] = set()
 
-    async def assert_dispatch_authorized(self, *, action: Action, projection: LedgerProjection) -> None:
+    async def assert_dispatch_authorized(
+        self, *, action: Action, projection: LedgerProjection
+    ) -> None:
         logical_time = projection.logical_time or action.logical_time
         grant = require_provider_media_grant(
             action=action, projection=projection, logical_time=logical_time
         )
-        self._dispatch_authorizations.add(
-            (action.action_id, grant.grant_id, grant.entity_revision)
-        )
+        self._dispatch_authorizations.add((action.action_id, grant.grant_id, grant.entity_revision))
 
     async def dispatch(self, action: Action) -> ProviderReceipt | DispatchPending | None:
         request = await self._request_for(action)
@@ -265,7 +285,12 @@ class ProviderMediaActionExecutor(ActionExecutor):
         return self._bind_result(action=action, result=result, request=request)
 
     async def _request_for(self, action: Action) -> MediaProviderDispatchRequest:
-        if action.kind not in {"media_planning", "media_render", "media_inspection", "media_repair"}:
+        if action.kind not in {
+            "media_planning",
+            "media_render",
+            "media_inspection",
+            "media_repair",
+        }:
             raise ValueError("media provider executor does not support this Action kind")
         if action.layer != "media_action" or action.provider_media_grant is None:
             raise ValueError("media provider Action lacks enforcement grant binding")
@@ -309,7 +334,10 @@ class ProviderMediaActionExecutor(ActionExecutor):
         if result is None:
             return None
         if isinstance(result, DispatchPending):
-            if result.action_id != action.action_id or result.idempotency_key != action.idempotency_key:
+            if (
+                result.action_id != action.action_id
+                or result.idempotency_key != action.idempotency_key
+            ):
                 raise ValueError("media provider pending result does not bind the Action")
             if result.provider != self._transport.provider:
                 raise ValueError("media provider pending result provider mismatch")
@@ -317,7 +345,9 @@ class ProviderMediaActionExecutor(ActionExecutor):
         if result.idempotency_key != action.idempotency_key:
             raise ValueError("media provider receipt idempotency key does not bind the Action")
         if result.request_fingerprint != request.fingerprint:
-            raise ValueError("media provider receipt request fingerprint does not bind dispatched payload")
+            raise ValueError(
+                "media provider receipt request fingerprint does not bind dispatched payload"
+            )
         return ProviderReceipt(
             provider_receipt_id=result.provider_receipt_id,
             action_id=action.action_id,
@@ -329,7 +359,9 @@ class ProviderMediaActionExecutor(ActionExecutor):
             # Preserve the provider's opaque artifact refs and append one
             # reserved evidence ref so a later MediaExecutionWorker can bind
             # an idempotency-keyed result sidecar to this exact dispatch.
-            artifact_refs=tuple(dict.fromkeys((*result.artifact_refs, "request:" + request.fingerprint))),
+            artifact_refs=tuple(
+                dict.fromkeys((*result.artifact_refs, "request:" + request.fingerprint))
+            ),
             cost_actual=result.cost_actual,
             error_class=result.error_class,
             received_at=result.received_at,
@@ -344,9 +376,15 @@ class RoutedActionExecutor(ActionExecutor):
         self._platform, self._media = platform, media
 
     def _delegate(self, action: Action) -> ActionExecutor:
-        return self._media if action.kind in {"media_planning", "media_render", "media_inspection", "media_repair"} else self._platform
+        return (
+            self._media
+            if action.kind in {"media_planning", "media_render", "media_inspection", "media_repair"}
+            else self._platform
+        )
 
-    async def assert_dispatch_authorized(self, *, action: Action, projection: LedgerProjection) -> None:
+    async def assert_dispatch_authorized(
+        self, *, action: Action, projection: LedgerProjection
+    ) -> None:
         checker = getattr(self._delegate(action), "assert_dispatch_authorized", None)
         if checker is not None:
             await checker(action=action, projection=projection)
