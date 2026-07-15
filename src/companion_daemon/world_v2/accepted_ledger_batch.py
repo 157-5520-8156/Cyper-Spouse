@@ -22,6 +22,7 @@ from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION
 from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
 from .expression_plan_manifest import EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION
 from .interaction_bid_acceptance_manifest import INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION
+from .media_thread_acceptance_manifest import MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION
 
 
 class AcceptedLedgerBatchError(ValueError):
@@ -128,19 +129,18 @@ class AcceptedLedgerBatchIssuer:
         if any(event.world_id != world_id for event in materialized):
             raise AcceptedLedgerBatchError("accepted batch contains another world")
         acceptance = materialized[0]
-        if (
-            acceptance.event_type != "AcceptanceRecorded"
-            or acceptance.payload().get("manifest_version")
-            not in {
-                "acceptance-manifest.3",
-                MINIMAL_REPLY_MANIFEST_VERSION,
-                APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
-                AFFECT_ACCEPTANCE_MANIFEST_VERSION,
-                OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
-                EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
-                INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
-            }
-        ):
+        if acceptance.event_type != "AcceptanceRecorded" or acceptance.payload().get(
+            "manifest_version"
+        ) not in {
+            "acceptance-manifest.3",
+            MINIMAL_REPLY_MANIFEST_VERSION,
+            APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
+            AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+            OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+            EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
+            INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
+            MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
+        }:
             raise AcceptedLedgerBatchError("accepted batch must begin with an accepted manifest")
         for name, value in {
             "manifest_hash": manifest_hash,

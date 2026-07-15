@@ -9,9 +9,7 @@ from .schemas import ThreadProjection, ThreadTransitionProjection
 from .thread_events import ThreadChangedPayload, ThreadExpiredPayload
 
 
-TERMINAL_THREAD_STATUSES = frozenset(
-    {"resolved", "superseded", "cancelled", "expired"}
-)
+TERMINAL_THREAD_STATUSES = frozenset({"resolved", "superseded", "cancelled", "expired"})
 _EVENT_OPERATION = {
     "ThreadOpened": "open",
     "ThreadUpdated": "update",
@@ -19,6 +17,10 @@ _EVENT_OPERATION = {
     "ThreadCancelled": "cancel",
     "ThreadSuperseded": "supersede",
     "ThreadCompensated": "compensate",
+    # Dedicated delivered-media authority lane.  It shares the pure state
+    # transition reducer, not the generic Thread proposal/acceptance path.
+    "MediaDeliveryThreadOpened": "open",
+    "MediaDeliveryThreadUpdated": "update",
 }
 _PRIVACY_RANK = {"public": 0, "shareable": 1, "personal": 2, "private": 3, "withhold": 4}
 THREAD_EXPIRY_POLICY_VERSION = "thread-expiry-policy.1"
@@ -52,8 +54,7 @@ def reduce_thread(
         ):
             raise ValueError("thread due window cannot precede its opening")
         if any(
-            item.values.status == "open"
-            and item.semantic_fingerprint == after.semantic_fingerprint
+            item.values.status == "open" and item.semantic_fingerprint == after.semantic_fingerprint
             for item in threads
         ):
             raise ValueError("active semantic fingerprint already exists")
@@ -78,9 +79,7 @@ def reduce_thread(
         if payload.operation == "compensate":
             _validate_compensation(history, current, payload)
         else:
-            _validate_forward_transition(
-                threads, current, payload, logical_time=logical_time
-            )
+            _validate_forward_transition(threads, current, payload, logical_time=logical_time)
         _validate_privacy(after)
         if any(
             item.thread_id != after.thread_id
@@ -149,14 +148,14 @@ def _validate_forward_transition(
         if after.status != "resolved":
             raise ValueError("thread resolve requires resolved status")
         _validate_closure_is_narrow(before, after)
-        new_ref_ids = {item.ref_id for item in after.source_evidence_refs[len(old_refs):]}
+        new_ref_ids = {item.ref_id for item in after.source_evidence_refs[len(old_refs) :]}
         if after.resolution_ref not in new_ref_ids:
             raise ValueError("thread resolution must reference newly appended authority evidence")
     elif payload.operation == "cancel":
         if after.status != "cancelled":
             raise ValueError("thread cancel requires cancelled status")
         _validate_closure_is_narrow(before, after)
-        new_ref_ids = {item.ref_id for item in after.source_evidence_refs[len(old_refs):]}
+        new_ref_ids = {item.ref_id for item in after.source_evidence_refs[len(old_refs) :]}
         if after.cancellation_evidence_ref not in new_ref_ids:
             raise ValueError("thread cancellation must reference newly appended authority evidence")
     elif payload.operation == "supersede":
@@ -173,19 +172,25 @@ def _validate_forward_transition(
         if (
             successor.values.subject_ref != before.subject_ref
             or successor.values.conversation_ref != before.conversation_ref
-            or _PRIVACY_RANK[successor.values.privacy_class]
-            < _PRIVACY_RANK[before.privacy_class]
+            or _PRIVACY_RANK[successor.values.privacy_class] < _PRIVACY_RANK[before.privacy_class]
             or current.thread_id not in successor.values.predecessor_thread_refs
         ):
             raise ValueError("thread successor is not structurally linked to its predecessor")
         cursor = successor
         visited: set[str] = set()
         while cursor.values.superseded_by_thread_ref:
-            if cursor.thread_id in visited or cursor.values.superseded_by_thread_ref == current.thread_id:
+            if (
+                cursor.thread_id in visited
+                or cursor.values.superseded_by_thread_ref == current.thread_id
+            ):
                 raise ValueError("thread supersession cycle is forbidden")
             visited.add(cursor.thread_id)
             next_item = next(
-                (item for item in threads if item.thread_id == cursor.values.superseded_by_thread_ref),
+                (
+                    item
+                    for item in threads
+                    if item.thread_id == cursor.values.superseded_by_thread_ref
+                ),
                 None,
             )
             if next_item is None:

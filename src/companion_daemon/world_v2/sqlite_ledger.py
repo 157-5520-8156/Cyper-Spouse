@@ -94,9 +94,7 @@ _V16_ONLY_STATE_KEYS = frozenset(
 )
 _V17_ONLY_STATE_KEYS = frozenset({"model_result_audits", "proposal_audits"})
 _V18_ONLY_STATE_KEYS = frozenset({"acceptance_manifests_v2"})
-_V19_ONLY_STATE_KEYS = frozenset(
-    {"fact_commit_proposal_audits_v2", "acceptance_manifests_v3"}
-)
+_V19_ONLY_STATE_KEYS = frozenset({"fact_commit_proposal_audits_v2", "acceptance_manifests_v3"})
 _V20_ONLY_STATE_KEYS = frozenset(
     {
         "minimal_reply_manifests",
@@ -107,8 +105,12 @@ _V20_ONLY_STATE_KEYS = frozenset(
 )
 _V24_ONLY_STATE_KEYS = frozenset({"expression_plan_manifests"})
 _V25_ONLY_STATE_KEYS = frozenset({"provider_media_grants"})
-_V26_ONLY_STATE_KEYS = frozenset({"photo_candidates", "media_opportunities", "media_plans", "media_unrenderable_opportunity_ids"})
-_V27_ONLY_STATE_KEYS = frozenset({"media_artifacts", "media_inspections", "media_previews", "media_failed_plan_ids"})
+_V26_ONLY_STATE_KEYS = frozenset(
+    {"photo_candidates", "media_opportunities", "media_plans", "media_unrenderable_opportunity_ids"}
+)
+_V27_ONLY_STATE_KEYS = frozenset(
+    {"media_artifacts", "media_inspections", "media_previews", "media_failed_plan_ids"}
+)
 _PREFIX_PROOF_VERSION = "world-v2-prefix-proof.2"
 _PREVIOUS_PREFIX_PROOF_VERSION = "world-v2-prefix-proof.1"
 _PREFIX_BITS_BYTES = 32
@@ -314,7 +316,10 @@ class SQLiteWorldLedger:
     ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
-        if accepted_batch_issuer is not None and type(accepted_batch_issuer) is not AcceptedLedgerBatchIssuer:
+        if (
+            accepted_batch_issuer is not None
+            and type(accepted_batch_issuer) is not AcceptedLedgerBatchIssuer
+        ):
             raise TypeError("accepted batch issuer must use its exact capability type")
         self._world_id = world_id
         self._accepted_batch_issuer = accepted_batch_issuer
@@ -617,7 +622,9 @@ class SQLiteWorldLedger:
                     previous_last_sequence = last_sequence
                     verified_commit_count += 1
                 if verified_commit_count != commit_count:
-                    raise LedgerIntegrityError("prefix proof rebuild found an empty or orphaned commit")
+                    raise LedgerIntegrityError(
+                        "prefix proof rebuild found an empty or orphaned commit"
+                    )
                 connection.commit()
             except sqlite3.DatabaseError as exc:
                 try:
@@ -683,8 +690,7 @@ class SQLiteWorldLedger:
                     or idempotency_key != row["idempotency_key"]
                     or int(row["ledger_sequence"]) > expected_cursor.ledger_sequence
                     or int(row["world_revision"]) > expected_cursor.world_revision
-                    or int(row["deliberation_revision"])
-                    > expected_cursor.deliberation_revision
+                    or int(row["deliberation_revision"]) > expected_cursor.deliberation_revision
                 ):
                     raise LedgerIntegrityError("event envelope does not match its ledger row")
                 if raw_event.get("schema_version") == CURRENT_SCHEMA_VERSION:
@@ -697,7 +703,9 @@ class SQLiteWorldLedger:
                 if raw_event.get("event_type") == "AcceptanceRecorded":
                     payload_json = raw_event.get("payload_json")
                     try:
-                        raw_payload = json.loads(payload_json) if isinstance(payload_json, str) else None
+                        raw_payload = (
+                            json.loads(payload_json) if isinstance(payload_json, str) else None
+                        )
                     except (TypeError, json.JSONDecodeError):
                         raw_payload = None
                     if not isinstance(raw_payload, dict) or "manifest_version" not in raw_payload:
@@ -705,11 +713,14 @@ class SQLiteWorldLedger:
                         # audit records to inert legacy events.  Their old
                         # request hash cannot be checked using v18 bytes.
                         legacy_bytes_present = True
-                if self._connection.execute(
-                    """SELECT 1 FROM world_v2_legacy_plan_events
+                if (
+                    self._connection.execute(
+                        """SELECT 1 FROM world_v2_legacy_plan_events
                        WHERE world_id = ? AND event_id = ?""",
-                    (self._world_id, str(event_id)),
-                ).fetchone() is not None:
+                        (self._world_id, str(event_id)),
+                    ).fetchone()
+                    is not None
+                ):
                     # v15 ownerless plan lifecycle rows are rewritten only by
                     # the documented migration replay policy.  Their source
                     # request hash binds pre-migration event bytes.
@@ -760,7 +771,10 @@ class SQLiteWorldLedger:
                 # historical read path.
                 self._discard_prefix_proof_cache_locked()
                 prefix_head = None
-            elif prefix_head is not None and str(prefix_head["proof_version"]) != _PREFIX_PROOF_VERSION:
+            elif (
+                prefix_head is not None
+                and str(prefix_head["proof_version"]) != _PREFIX_PROOF_VERSION
+            ):
                 raise LedgerIntegrityError("prefix proof version is unsupported")
             event_count = int(
                 connection.execute(
@@ -824,7 +838,9 @@ class SQLiteWorldLedger:
                 locator_map = IncrementalSparseMerkleMapV1()
                 if event_count or commit_count:
                     if not event_count or not commit_count:
-                        raise LedgerIntegrityError("legacy ledger commit/event rows are inconsistent")
+                        raise LedgerIntegrityError(
+                            "legacy ledger commit/event rows are inconsistent"
+                        )
                     self._rebuild_prefix_proof_state_locked(mmr=mmr, locator_map=locator_map)
                 self._write_prefix_head_locked(
                     mmr_leaf_count=mmr.leaf_count,
@@ -943,13 +959,19 @@ class SQLiteWorldLedger:
                 (self._world_id, _prefix_bits_blob(0)),
             ).fetchone()
             expected_locator_root = bytes(prefix_head["locator_root"])
-            if root_row is None and self._connection.execute(
-                """SELECT 1 FROM world_v2_prefix_locator_values
+            if (
+                root_row is None
+                and self._connection.execute(
+                    """SELECT 1 FROM world_v2_prefix_locator_values
                    WHERE world_id = ? LIMIT 1""",
-                (self._world_id,),
-            ).fetchone() is not None:
+                    (self._world_id,),
+                ).fetchone()
+                is not None
+            ):
                 raise LedgerIntegrityError("prefix locator root node is missing")
-            actual_locator_root = expected_locator_root if root_row is None else bytes(root_row["node_hash"])
+            actual_locator_root = (
+                expected_locator_root if root_row is None else bytes(root_row["node_hash"])
+            )
             if not hmac.compare_digest(actual_locator_root, expected_locator_root):
                 raise LedgerIntegrityError("prefix locator root does not match persisted head")
             checkpoint_rows = tuple(
@@ -959,7 +981,10 @@ class SQLiteWorldLedger:
                     (self._world_id,),
                 )
             )
-            if len(checkpoint_rows) != commit_count or int(prefix_head["checkpoint_count"]) != commit_count:
+            if (
+                len(checkpoint_rows) != commit_count
+                or int(prefix_head["checkpoint_count"]) != commit_count
+            ):
                 raise LedgerIntegrityError("prefix checkpoint count does not match ledger")
             head = self._connection.execute(
                 "SELECT world_revision, deliberation_revision, ledger_sequence FROM world_v2_heads WHERE world_id = ?",
@@ -968,7 +993,10 @@ class SQLiteWorldLedger:
             for row in checkpoint_rows:
                 checkpoint = self._prefix_checkpoint_from_row(row)
                 leaf_index = checkpoint.mmr_leaf_count - 1
-                if leaf_index < 0 or self._prefix_mmr_node_lookup_locked(0, leaf_index) != checkpoint.digest():
+                if (
+                    leaf_index < 0
+                    or self._prefix_mmr_node_lookup_locked(0, leaf_index) != checkpoint.digest()
+                ):
                     raise LedgerIntegrityError("prefix checkpoint MMR leaf is invalid")
             if checkpoint_rows:
                 latest = checkpoint_rows[-1]
@@ -976,7 +1004,11 @@ class SQLiteWorldLedger:
                     int(latest["world_revision"]),
                     int(latest["deliberation_revision"]),
                     int(latest["ledger_sequence"]),
-                ) != (int(head["world_revision"]), int(head["deliberation_revision"]), int(head["ledger_sequence"])):
+                ) != (
+                    int(head["world_revision"]),
+                    int(head["deliberation_revision"]),
+                    int(head["ledger_sequence"]),
+                ):
                     raise LedgerIntegrityError("prefix checkpoint does not match ledger head")
             elif event_count:
                 raise LedgerIntegrityError("ledger events are missing prefix checkpoints")
@@ -1010,7 +1042,9 @@ class SQLiteWorldLedger:
             if not hmac.compare_digest(mmr.root, bytes(prefix_head["mmr_root"])):
                 raise LedgerIntegrityError("prefix MMR root does not match persisted head")
             locator_nodes = {
-                (int(row["depth"]), _prefix_bits_int(bytes(row["prefix_bits"]))): bytes(row["node_hash"])
+                (int(row["depth"]), _prefix_bits_int(bytes(row["prefix_bits"]))): bytes(
+                    row["node_hash"]
+                )
                 for row in self._connection.execute(
                     """SELECT depth, prefix_bits, node_hash FROM world_v2_prefix_locator_nodes
                        WHERE world_id = ?""",
@@ -1037,7 +1071,10 @@ class SQLiteWorldLedger:
                     (self._world_id,),
                 )
             )
-            if len(checkpoint_rows) != commit_count or int(prefix_head["checkpoint_count"]) != commit_count:
+            if (
+                len(checkpoint_rows) != commit_count
+                or int(prefix_head["checkpoint_count"]) != commit_count
+            ):
                 raise LedgerIntegrityError("prefix checkpoint count does not match ledger")
             head = self._connection.execute(
                 "SELECT world_revision, deliberation_revision, ledger_sequence FROM world_v2_heads WHERE world_id = ?",
@@ -1054,7 +1091,11 @@ class SQLiteWorldLedger:
                     int(latest["world_revision"]),
                     int(latest["deliberation_revision"]),
                     int(latest["ledger_sequence"]),
-                ) != (int(head["world_revision"]), int(head["deliberation_revision"]), int(head["ledger_sequence"])):
+                ) != (
+                    int(head["world_revision"]),
+                    int(head["deliberation_revision"]),
+                    int(head["ledger_sequence"]),
+                ):
                     raise LedgerIntegrityError("prefix checkpoint does not match ledger head")
             elif event_count:
                 raise LedgerIntegrityError("ledger events are missing prefix checkpoints")
@@ -1092,8 +1133,10 @@ class SQLiteWorldLedger:
         self._connection.executemany(
             """INSERT INTO world_v2_prefix_mmr_nodes
                  (world_id, height, node_index, node_hash) VALUES (?, ?, ?, ?)""",
-            ((self._world_id, node_height, node_index, mmr.nodes[(node_height, node_index)])
-             for node_height, node_index in addresses),
+            (
+                (self._world_id, node_height, node_index, mmr.nodes[(node_height, node_index)])
+                for node_height, node_index in addresses
+            ),
         )
         return leaf_index
 
@@ -1115,8 +1158,15 @@ class SQLiteWorldLedger:
                  (world_id, depth, prefix_bits, node_hash) VALUES (?, ?, ?, ?)
                ON CONFLICT(world_id, depth, prefix_bits) DO UPDATE
                  SET node_hash = excluded.node_hash""",
-            ((self._world_id, depth, _prefix_bits_blob(prefix), locator_map.nodes[(depth, prefix)])
-             for depth, prefix in addresses),
+            (
+                (
+                    self._world_id,
+                    depth,
+                    _prefix_bits_blob(prefix),
+                    locator_map.nodes[(depth, prefix)],
+                )
+                for depth, prefix in addresses
+            ),
         )
         self._connection.execute(
             """INSERT INTO world_v2_prefix_locator_values
@@ -1125,9 +1175,17 @@ class SQLiteWorldLedger:
                   event_leaf_hash)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                self._world_id, key, value.digest(), value.observation_id, value.event_type,
-                value.event_id, value.ledger_sequence, value.world_revision,
-                value.deliberation_revision, value.event_leaf_index, value.event_leaf_hash,
+                self._world_id,
+                key,
+                value.digest(),
+                value.observation_id,
+                value.event_type,
+                value.event_id,
+                value.ledger_sequence,
+                value.world_revision,
+                value.deliberation_revision,
+                value.event_leaf_index,
+                value.event_leaf_hash,
             ),
         )
 
@@ -1181,15 +1239,23 @@ class SQLiteWorldLedger:
                 event = WorldEvent.model_validate_json(event_json)
             except Exception as exc:
                 raise LedgerIntegrityError("legacy event is invalid") from exc
-            if event.world_id != self._world_id or event.event_id != row["event_id"] or event.idempotency_key != row["idempotency_key"]:
+            if (
+                event.world_id != self._world_id
+                or event.event_id != row["event_id"]
+                or event.idempotency_key != row["idempotency_key"]
+            ):
                 raise LedgerIntegrityError("legacy event envelope does not match ledger row")
             if current_commit is None:
                 current_commit = row_commit
             current_commit = row_commit
             leaf_hash = LedgerLeafV1(
-                world_id=self._world_id, ledger_sequence=int(row["ledger_sequence"]),
-                world_revision=int(row["world_revision"]), deliberation_revision=int(row["deliberation_revision"]),
-                commit_id=row_commit, event_id=event.event_id, idempotency_key=event.idempotency_key,
+                world_id=self._world_id,
+                ledger_sequence=int(row["ledger_sequence"]),
+                world_revision=int(row["world_revision"]),
+                deliberation_revision=int(row["deliberation_revision"]),
+                commit_id=row_commit,
+                event_id=event.event_id,
+                idempotency_key=event.idempotency_key,
                 event_envelope_hash=hashlib.sha256(event_json.encode("utf-8")).hexdigest(),
             ).digest()
             staged.append((row, event, leaf_hash, mmr.leaf_count))
@@ -1240,14 +1306,22 @@ class SQLiteWorldLedger:
             observation_id = _observation_id(event)
             if observation_id is not None:
                 value = ObservationLocatorValueV1(
-                    observation_id=observation_id, event_type=event.event_type, event_id=event.event_id,
-                    ledger_sequence=int(row["ledger_sequence"]), world_revision=int(row["world_revision"]),
-                    deliberation_revision=int(row["deliberation_revision"]), event_leaf_index=leaf_index,
+                    observation_id=observation_id,
+                    event_type=event.event_type,
+                    event_id=event.event_id,
+                    ledger_sequence=int(row["ledger_sequence"]),
+                    world_revision=int(row["world_revision"]),
+                    deliberation_revision=int(row["deliberation_revision"]),
+                    event_leaf_index=leaf_index,
                     event_leaf_hash=leaf_hash,
                 )
                 self._persist_prefix_locator_put_locked(
                     locator_map,
-                    key=observation_locator_key(world_id=self._world_id, event_type=event.event_type, idempotency_key=event.idempotency_key),
+                    key=observation_locator_key(
+                        world_id=self._world_id,
+                        event_type=event.event_type,
+                        idempotency_key=event.idempotency_key,
+                    ),
                     value=value,
                 )
                 key_int = int.from_bytes(
@@ -1260,10 +1334,7 @@ class SQLiteWorldLedger:
                 )
                 changed_locator_addresses.update(
                     ((256, key_int),)
-                    + tuple(
-                        (depth, key_int >> (256 - depth))
-                        for depth in range(255, -1, -1)
-                    )
+                    + tuple((depth, key_int >> (256 - depth)) for depth in range(255, -1, -1))
                 )
         # Store the *final* value of every changed address once for this commit.
         # Multiple observation events in a batch therefore authenticate exactly
@@ -1286,14 +1357,22 @@ class SQLiteWorldLedger:
                 ),
             )
         checkpoint = PrefixCheckpointLeafV1(
-            world_id=self._world_id, commit_id=commit_id,
+            world_id=self._world_id,
+            commit_id=commit_id,
             first_ledger_sequence=int(staged[0][0]["ledger_sequence"]),
             last_ledger_sequence=int(staged[-1][0]["ledger_sequence"]),
-            world_revision=result.world_revision, deliberation_revision=result.deliberation_revision,
+            world_revision=result.world_revision,
+            deliberation_revision=result.deliberation_revision,
             request_hash=request_hash,
-            result_hash=commit_result_hash_v1(world_revision=result.world_revision, deliberation_revision=result.deliberation_revision, ledger_sequence=result.ledger_sequence, event_ids=result.event_ids),
+            result_hash=commit_result_hash_v1(
+                world_revision=result.world_revision,
+                deliberation_revision=result.deliberation_revision,
+                ledger_sequence=result.ledger_sequence,
+                event_ids=result.event_ids,
+            ),
             ordered_event_ids_hash=ordered_event_ids_hash_v1(result.event_ids),
-            locator_root=locator_map.root.hex(), mmr_leaf_count=mmr.leaf_count + 1,
+            locator_root=locator_map.root.hex(),
+            mmr_leaf_count=mmr.leaf_count + 1,
         )
         self._persist_prefix_mmr_append_locked(mmr, checkpoint.digest())
         self._connection.execute(
@@ -1303,13 +1382,21 @@ class SQLiteWorldLedger:
                   ordered_event_ids_hash, locator_root, mmr_leaf_count)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                self._world_id, checkpoint.world_revision, checkpoint.deliberation_revision,
-                checkpoint.last_ledger_sequence, checkpoint.commit_id, checkpoint.first_ledger_sequence,
-                checkpoint.last_ledger_sequence, checkpoint.request_hash, checkpoint.result_hash,
-                checkpoint.ordered_event_ids_hash, bytes.fromhex(checkpoint.locator_root),
+                self._world_id,
+                checkpoint.world_revision,
+                checkpoint.deliberation_revision,
+                checkpoint.last_ledger_sequence,
+                checkpoint.commit_id,
+                checkpoint.first_ledger_sequence,
+                checkpoint.last_ledger_sequence,
+                checkpoint.request_hash,
+                checkpoint.result_hash,
+                checkpoint.ordered_event_ids_hash,
+                bytes.fromhex(checkpoint.locator_root),
                 checkpoint.mmr_leaf_count,
             ),
         )
+
     def _migrate_head_bundle(self) -> None:
         """Atomically rebuild a verified legacy checkpoint from immutable events."""
 
@@ -1367,6 +1454,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.22",
                 "world-v2-reducers.23",
                 "world-v2-reducers.30",
+                "world-v2-reducers.31",
                 "world-v2-reducers.24",
                 "world-v2-reducers.25",
                 "world-v2-reducers.26",
@@ -1374,6 +1462,8 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.28",
                 "world-v2-reducers.29",
                 "world-v2-reducers.30",
+                "world-v2-reducers.31",
+                "world-v2-reducers.31",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -1421,10 +1511,12 @@ class SQLiteWorldLedger:
             raise
 
     def _mark_legacy_ownerless_plan_events_locked(self, source_bundle: str) -> None:
-        rows = tuple(self._connection.execute(
-            "SELECT event_id, event_json FROM world_v2_events WHERE world_id = ?",
-            (self._world_id,),
-        ))
+        rows = tuple(
+            self._connection.execute(
+                "SELECT event_id, event_json FROM world_v2_events WHERE world_id = ?",
+                (self._world_id,),
+            )
+        )
         decoded: list[tuple[str, dict[str, object], dict[str, object]]] = []
         ownerless_plan_ids: set[str] = set()
         for row in rows:
@@ -1483,14 +1575,39 @@ class SQLiteWorldLedger:
                 raise ValueError("legacy state is not an object")
             raw_state = dict(raw_state)
             injected_v27_keys = tuple(
-                sorted(key for key in _V27_ONLY_STATE_KEYS.intersection(raw_state) if raw_state.get(key) not in (None, [], {}))
+                sorted(
+                    key
+                    for key in _V27_ONLY_STATE_KEYS.intersection(raw_state)
+                    if raw_state.get(key) not in (None, [], {})
+                )
             )
-            if injected_v27_keys and reducer_bundle_version not in {"world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", "world-v2-reducers.30", REDUCER_BUNDLE_VERSION}:
-                raise ValueError(f"legacy head cannot claim v27 media execution fields {injected_v27_keys!r}")
+            if injected_v27_keys and reducer_bundle_version not in {
+                "world-v2-reducers.27",
+                "world-v2-reducers.28",
+                "world-v2-reducers.29",
+                "world-v2-reducers.30",
+                "world-v2-reducers.31",
+                REDUCER_BUNDLE_VERSION,
+            }:
+                raise ValueError(
+                    f"legacy head cannot claim v27 media execution fields {injected_v27_keys!r}"
+                )
             injected_v26_keys = tuple(
-                sorted(key for key in _V26_ONLY_STATE_KEYS.intersection(raw_state) if raw_state.get(key) not in (None, [], {}))
+                sorted(
+                    key
+                    for key in _V26_ONLY_STATE_KEYS.intersection(raw_state)
+                    if raw_state.get(key) not in (None, [], {})
+                )
             )
-            if injected_v26_keys and reducer_bundle_version not in {"world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", "world-v2-reducers.30", REDUCER_BUNDLE_VERSION}:
+            if injected_v26_keys and reducer_bundle_version not in {
+                "world-v2-reducers.26",
+                "world-v2-reducers.27",
+                "world-v2-reducers.28",
+                "world-v2-reducers.29",
+                "world-v2-reducers.30",
+                "world-v2-reducers.31",
+                REDUCER_BUNDLE_VERSION,
+            }:
                 raise ValueError(f"legacy head cannot claim v26 media fields {injected_v26_keys!r}")
             injected_v25_keys = tuple(
                 sorted(
@@ -1499,7 +1616,16 @@ class SQLiteWorldLedger:
                     if raw_state.get(key) not in (None, [], {})
                 )
             )
-            if injected_v25_keys and reducer_bundle_version not in {"world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", "world-v2-reducers.30", REDUCER_BUNDLE_VERSION}:
+            if injected_v25_keys and reducer_bundle_version not in {
+                "world-v2-reducers.25",
+                "world-v2-reducers.26",
+                "world-v2-reducers.27",
+                "world-v2-reducers.28",
+                "world-v2-reducers.29",
+                "world-v2-reducers.30",
+                "world-v2-reducers.31",
+                REDUCER_BUNDLE_VERSION,
+            }:
                 raise ValueError(
                     f"legacy head cannot claim v25 provider media fields {injected_v25_keys!r}"
                 )
@@ -1510,7 +1636,17 @@ class SQLiteWorldLedger:
                     if raw_state.get(key) not in (None, [], {})
                 )
             )
-            if injected_v24_keys and reducer_bundle_version not in {"world-v2-reducers.24", "world-v2-reducers.25", "world-v2-reducers.26", "world-v2-reducers.27", "world-v2-reducers.28", "world-v2-reducers.29", "world-v2-reducers.30", REDUCER_BUNDLE_VERSION}:
+            if injected_v24_keys and reducer_bundle_version not in {
+                "world-v2-reducers.24",
+                "world-v2-reducers.25",
+                "world-v2-reducers.26",
+                "world-v2-reducers.27",
+                "world-v2-reducers.28",
+                "world-v2-reducers.29",
+                "world-v2-reducers.30",
+                "world-v2-reducers.31",
+                REDUCER_BUNDLE_VERSION,
+            }:
                 raise ValueError(
                     f"legacy head cannot claim v24 expression fields {injected_v24_keys!r}"
                 )
@@ -1527,10 +1663,9 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.22",
                 "world-v2-reducers.23",
                 "world-v2-reducers.30",
+                "world-v2-reducers.31",
             }:
-                raise ValueError(
-                    f"legacy head cannot claim v20 reply fields {injected_v20_keys!r}"
-                )
+                raise ValueError(f"legacy head cannot claim v20 reply fields {injected_v20_keys!r}")
             injected_v19_keys = tuple(
                 sorted(
                     key
@@ -1545,15 +1680,16 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.22",
                 "world-v2-reducers.23",
             }:
-                raise ValueError(
-                    f"legacy head cannot claim v19 Fact fields {injected_v19_keys!r}"
-                )
+                raise ValueError(f"legacy head cannot claim v19 Fact fields {injected_v19_keys!r}")
             injected_v18_keys = tuple(
                 key
                 for key in _V18_ONLY_STATE_KEYS.intersection(raw_state)
                 if raw_state.get(key) not in (None, [], {})
             )
-            if injected_v18_keys and reducer_bundle_version not in {"world-v2-reducers.18", "world-v2-reducers.30"}:
+            if injected_v18_keys and reducer_bundle_version not in {
+                "world-v2-reducers.18",
+                "world-v2-reducers.30",
+            }:
                 raise ValueError("legacy head cannot claim v18 manifest fields")
             injected_v17_keys = tuple(
                 sorted(
@@ -1571,10 +1707,9 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.22",
                 "world-v2-reducers.23",
                 "world-v2-reducers.30",
+                "world-v2-reducers.31",
             }:
-                raise ValueError(
-                    f"legacy head cannot claim v17 audit fields {injected_v17_keys!r}"
-                )
+                raise ValueError(f"legacy head cannot claim v17 audit fields {injected_v17_keys!r}")
             injected_v16_keys = tuple(sorted(_V16_ONLY_STATE_KEYS.intersection(raw_state)))
             if injected_v16_keys and reducer_bundle_version not in {
                 "world-v2-reducers.16",
@@ -1586,6 +1721,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.22",
                 "world-v2-reducers.23",
                 "world-v2-reducers.30",
+                "world-v2-reducers.31",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v16 authority fields {injected_v16_keys!r}"
@@ -1605,15 +1741,15 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.19",
                     "world-v2-reducers.20",
                     "world-v2-reducers.21",
-                "world-v2-reducers.22",
-                "world-v2-reducers.23",
-                "world-v2-reducers.30",
+                    "world-v2-reducers.22",
+                    "world-v2-reducers.23",
+                    "world-v2-reducers.30",
+                    "world-v2-reducers.31",
                 }
                 and isinstance(actor_transitions, list)
                 and any(
-                isinstance(transition, dict)
-                and actor_binding_keys.intersection(transition)
-                for transition in actor_transitions
+                    isinstance(transition, dict) and actor_binding_keys.intersection(transition)
+                    for transition in actor_transitions
                 )
             ):
                 raise ValueError(
@@ -1655,14 +1791,11 @@ class SQLiteWorldLedger:
                 }
                 and isinstance(occurrences, list)
                 and any(
-                    isinstance(occurrence, dict)
-                    and "settled_outcome_ref" in occurrence
+                    isinstance(occurrence, dict) and "settled_outcome_ref" in occurrence
                     for occurrence in occurrences
                 )
             ):
-                raise ValueError(
-                    "legacy world occurrence cannot claim a v16 settled outcome"
-                )
+                raise ValueError("legacy world occurrence cannot claim a v16 settled outcome")
             experiences = raw_state.get("experiences", [])
             if isinstance(experiences, list):
                 raw_state["experiences"] = [
@@ -1794,8 +1927,8 @@ class SQLiteWorldLedger:
             "world-v2-reducers.19",
             "world-v2-reducers.20",
             "world-v2-reducers.21",
-                    "world-v2-reducers.22",
-                    "world-v2-reducers.23",
+            "world-v2-reducers.22",
+            "world-v2-reducers.23",
             REDUCER_BUNDLE_VERSION,
         }:
             payload.pop("commitments", None)
@@ -2219,7 +2352,9 @@ class SQLiteWorldLedger:
                 raise LedgerIntegrityError("prefix commit rows do not match staged events")
             event_json = canonical_event_json(event)
             event_hash = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
-            if event_json != row["event_json"] or not hmac.compare_digest(event_hash, str(row["event_hash"])):
+            if event_json != row["event_json"] or not hmac.compare_digest(
+                event_hash, str(row["event_hash"])
+            ):
                 raise LedgerIntegrityError("prefix commit event envelope mismatch")
             leaf_hash = LedgerLeafV1(
                 world_id=self._world_id,
@@ -2250,11 +2385,14 @@ class SQLiteWorldLedger:
                 event_type=event.event_type,
                 idempotency_key=event.idempotency_key,
             )
-            if self._connection.execute(
-                """SELECT 1 FROM world_v2_prefix_locator_values
+            if (
+                self._connection.execute(
+                    """SELECT 1 FROM world_v2_prefix_locator_values
                    WHERE world_id = ? AND locator_key = ?""",
-                (self._world_id, key),
-            ).fetchone() is not None:
+                    (self._world_id, key),
+                ).fetchone()
+                is not None
+            ):
                 raise LedgerIntegrityError("prefix locator key is not append-only")
             value = ObservationLocatorValueV1(
                 observation_id=observation_id,
@@ -2274,9 +2412,11 @@ class SQLiteWorldLedger:
             SparseMerkleProofV1(
                 key=key, value_hash=None, siblings=plan.prior_siblings
             ).verify_nonmembership(expected_root=locator_root, expected_key=key)
-            self._persist_locator_put_plan_locked(key=key, value=value, node_updates=plan.node_updates)
+            self._persist_locator_put_plan_locked(
+                key=key, value=value, node_updates=plan.node_updates
+            )
             changed_locator_nodes.update(
-                { (depth, prefix): node_hash for depth, prefix, node_hash in plan.node_updates }
+                {(depth, prefix): node_hash for depth, prefix, node_hash in plan.node_updates}
             )
             locator_root = plan.root
 
@@ -2287,7 +2427,13 @@ class SQLiteWorldLedger:
                      (world_id, ledger_sequence, depth, prefix_bits, node_hash)
                    VALUES (?, ?, ?, ?, ?)""",
                 (
-                    (self._world_id, checkpoint_sequence, depth, _prefix_bits_blob(prefix), node_hash)
+                    (
+                        self._world_id,
+                        checkpoint_sequence,
+                        depth,
+                        _prefix_bits_blob(prefix),
+                        node_hash,
+                    )
                     for (depth, prefix), node_hash in sorted(changed_locator_nodes.items())
                 ),
             )
@@ -2323,11 +2469,17 @@ class SQLiteWorldLedger:
                   ordered_event_ids_hash, locator_root, mmr_leaf_count)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                self._world_id, checkpoint.world_revision, checkpoint.deliberation_revision,
-                checkpoint.last_ledger_sequence, checkpoint.commit_id,
-                checkpoint.first_ledger_sequence, checkpoint.last_ledger_sequence,
-                checkpoint.request_hash, checkpoint.result_hash,
-                checkpoint.ordered_event_ids_hash, bytes.fromhex(checkpoint.locator_root),
+                self._world_id,
+                checkpoint.world_revision,
+                checkpoint.deliberation_revision,
+                checkpoint.last_ledger_sequence,
+                checkpoint.commit_id,
+                checkpoint.first_ledger_sequence,
+                checkpoint.last_ledger_sequence,
+                checkpoint.request_hash,
+                checkpoint.result_hash,
+                checkpoint.ordered_event_ids_hash,
+                bytes.fromhex(checkpoint.locator_root),
                 checkpoint.mmr_leaf_count,
             ),
         )
@@ -2344,8 +2496,10 @@ class SQLiteWorldLedger:
         self._connection.executemany(
             """INSERT INTO world_v2_prefix_mmr_nodes
                  (world_id, height, node_index, node_hash) VALUES (?, ?, ?, ?)""",
-            ((self._world_id, height, node_index, node_hash)
-             for height, node_index, node_hash in plan.node_writes),
+            (
+                (self._world_id, height, node_index, node_hash)
+                for height, node_index, node_hash in plan.node_writes
+            ),
         )
 
     def _persist_locator_put_plan_locked(
@@ -2360,8 +2514,10 @@ class SQLiteWorldLedger:
                  (world_id, depth, prefix_bits, node_hash) VALUES (?, ?, ?, ?)
                ON CONFLICT(world_id, depth, prefix_bits) DO UPDATE
                  SET node_hash = excluded.node_hash""",
-            ((self._world_id, depth, _prefix_bits_blob(prefix), node_hash)
-             for depth, prefix, node_hash in node_updates),
+            (
+                (self._world_id, depth, _prefix_bits_blob(prefix), node_hash)
+                for depth, prefix, node_hash in node_updates
+            ),
         )
         self._connection.execute(
             """INSERT INTO world_v2_prefix_locator_values
@@ -2370,9 +2526,17 @@ class SQLiteWorldLedger:
                   event_leaf_hash)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
-                self._world_id, key, value.digest(), value.observation_id, value.event_type,
-                value.event_id, value.ledger_sequence, value.world_revision,
-                value.deliberation_revision, value.event_leaf_index, value.event_leaf_hash,
+                self._world_id,
+                key,
+                value.digest(),
+                value.observation_id,
+                value.event_type,
+                value.event_id,
+                value.ledger_sequence,
+                value.world_revision,
+                value.deliberation_revision,
+                value.event_leaf_index,
+                value.event_leaf_hash,
             ),
         )
 
@@ -2616,9 +2780,7 @@ class SQLiteWorldLedger:
         except Exception as exc:
             raise LedgerIntegrityError("pinned MMR state is invalid") from exc
 
-    def _prefix_mmr_proof_at_leaf_count_locked(
-        self, *, leaf_index: int, leaf_count: int
-    ):
+    def _prefix_mmr_proof_at_leaf_count_locked(self, *, leaf_index: int, leaf_count: int):
         if type(leaf_count) is not int or leaf_count < 0:
             raise LedgerIntegrityError("pinned MMR leaf count is invalid")
         try:
@@ -2701,8 +2863,7 @@ class SQLiteWorldLedger:
         addresses = tuple(
             (
                 depth + 1,
-                (key_int >> (256 - depth) << 1)
-                | (1 - ((key_int >> (255 - depth)) & 1)),
+                (key_int >> (256 - depth) << 1) | (1 - ((key_int >> (255 - depth)) & 1)),
             )
             for depth in range(256)
         )
@@ -2795,11 +2956,11 @@ class SQLiteWorldLedger:
             self._prefix_mmr_proof_at_leaf_count_locked(
                 leaf_index=value.event_leaf_index,
                 leaf_count=anchor_leaf_count,
-            ).verify(
-                leaf_hash=leaf, expected_root=anchor_root
-            )
+            ).verify(leaf_hash=leaf, expected_root=anchor_root)
         except Exception as exc:
-            raise LedgerIntegrityError("proof-backed observation event MMR proof is invalid") from exc
+            raise LedgerIntegrityError(
+                "proof-backed observation event MMR proof is invalid"
+            ) from exc
         return HistoricalLedgerEvent(
             event=event,
             event_cursor=ProjectionCursor(
@@ -2826,9 +2987,7 @@ class SQLiteWorldLedger:
                     connection.rollback()
                 except sqlite3.DatabaseError:
                     pass
-                raise LedgerIntegrityError(
-                    "observation history snapshot read failed"
-                ) from exc
+                raise LedgerIntegrityError("observation history snapshot read failed") from exc
             except Exception:
                 try:
                     connection.rollback()
@@ -2845,9 +3004,7 @@ class SQLiteWorldLedger:
         placeholders = ",".join("?" for _ in validated)
         with self._thread_lock:
             verified_commits: dict[str, tuple[tuple[WorldEvent, ...], CommitResult]] = {}
-            zero = ProjectionCursor(
-                world_revision=0, deliberation_revision=0, ledger_sequence=0
-            )
+            zero = ProjectionCursor(world_revision=0, deliberation_revision=0, ledger_sequence=0)
             if cursor != zero:
                 boundary_row = self._connection.execute(
                     """SELECT commit_id FROM world_v2_events
@@ -2950,9 +3107,7 @@ class SQLiteWorldLedger:
             )
             return tuple(candidate for _, candidate in candidates)
 
-    def _require_observation_commit_budget_locked(
-        self, commit_ids: Sequence[str]
-    ) -> None:
+    def _require_observation_commit_budget_locked(self, commit_ids: Sequence[str]) -> None:
         identities = tuple(sorted(set(commit_ids)))
         if not identities:
             return
@@ -2971,9 +3126,7 @@ class SQLiteWorldLedger:
             raise LedgerIntegrityError("observation history owning commit is unavailable")
         for row in rows:
             if int(row["event_count"]) > OBSERVATION_HISTORY_MAX_COMMIT_EVENTS:
-                raise LedgerIntegrityError(
-                    "observation history commit event budget exceeded"
-                )
+                raise LedgerIntegrityError("observation history commit event budget exceeded")
             if int(row["byte_count"]) > OBSERVATION_HISTORY_MAX_BYTES:
                 raise LedgerIntegrityError("observation history byte budget exceeded")
 
@@ -3078,9 +3231,7 @@ class SQLiteWorldLedger:
                 raise LedgerIntegrityError("event source query returned the wrong identities")
             return resolved
 
-    def resolve_initial_world_event_ref(
-        self, *, at_world_revision: int
-    ) -> CommittedWorldEventRef:
+    def resolve_initial_world_event_ref(self, *, at_world_revision: int) -> CommittedWorldEventRef:
         with self._thread_lock:
             row = self._connection.execute(
                 """SELECT event_id, world_revision, event_json, event_hash
@@ -3091,9 +3242,7 @@ class SQLiteWorldLedger:
             ).fetchone()
             if row is None:
                 raise ValueError("world has no initial event authority")
-            resolved = self._committed_ref_from_row(
-                row, at_world_revision=at_world_revision
-            )
+            resolved = self._committed_ref_from_row(row, at_world_revision=at_world_revision)
             if resolved.event_type != "WorldStarted":
                 raise ValueError("world has no pinned WorldStarted authority")
             return resolved
@@ -3109,10 +3258,7 @@ class SQLiteWorldLedger:
         event = WorldEvent.model_validate_json(event_json)
         validate_event_identity(event)
         world_revision = int(row["world_revision"])
-        if (
-            event.world_id != self._world_id
-            or event.event_id != row["event_id"]
-        ):
+        if event.world_id != self._world_id or event.event_id != row["event_id"]:
             raise LedgerIntegrityError("event source row does not match its authority")
         if world_revision > at_world_revision:
             raise ValueError("committed event source is newer than the pinned projection")
@@ -3180,18 +3326,13 @@ class SQLiteWorldLedger:
                 if verified_prefix_cursor is not None:
                     last_sequence = int(rows[-1]["ledger_sequence"])
                     if (
-                        previous_cursor.ledger_sequence
-                        > verified_prefix_cursor.ledger_sequence
+                        previous_cursor.ledger_sequence > verified_prefix_cursor.ledger_sequence
                         or last_sequence > verified_prefix_cursor.ledger_sequence
                     ):
-                        raise LedgerIntegrityError(
-                            "commit is outside the verified history prefix"
-                        )
+                        raise LedgerIntegrityError("commit is outside the verified history prefix")
                     expected_sequence = previous_cursor.ledger_sequence
                     expected_world_revision = previous_cursor.world_revision
-                    expected_deliberation_revision = (
-                        previous_cursor.deliberation_revision
-                    )
+                    expected_deliberation_revision = previous_cursor.deliberation_revision
                 else:
                     verified_prefix = self._replay_locked(
                         target_cursor=previous_cursor,
@@ -3200,9 +3341,7 @@ class SQLiteWorldLedger:
                     )
                     expected_sequence = verified_prefix.ledger_sequence
                     expected_world_revision = verified_prefix.world_revision
-                    expected_deliberation_revision = (
-                        verified_prefix.deliberation_revision
-                    )
+                    expected_deliberation_revision = verified_prefix.deliberation_revision
             for row in rows:
                 event_json = row["event_json"]
                 if not isinstance(event_json, str):
@@ -3323,17 +3462,21 @@ class SQLiteWorldLedger:
                 zero = ProjectionCursor(
                     world_revision=0, deliberation_revision=0, ledger_sequence=0
                 )
-                if cursor != zero and connection.execute(
-                    """SELECT 1 FROM world_v2_prefix_checkpoints
+                if (
+                    cursor != zero
+                    and connection.execute(
+                        """SELECT 1 FROM world_v2_prefix_checkpoints
                        WHERE world_id = ? AND world_revision = ?
                          AND deliberation_revision = ? AND ledger_sequence = ?""",
-                    (
-                        self._world_id,
-                        cursor.world_revision,
-                        cursor.deliberation_revision,
-                        cursor.ledger_sequence,
-                    ),
-                ).fetchone() is None:
+                        (
+                            self._world_id,
+                            cursor.world_revision,
+                            cursor.deliberation_revision,
+                            cursor.ledger_sequence,
+                        ),
+                    ).fetchone()
+                    is None
+                ):
                     raise ValueError("replay evidence cursor is not a committed batch boundary")
                 if cursor.ledger_sequence > head_cursor.ledger_sequence:
                     raise ValueError("replay evidence cursor is outside the ledger range")
@@ -3427,7 +3570,9 @@ class SQLiteWorldLedger:
                 raise LedgerIntegrityError("replay evidence requires current event envelopes")
             request_hash = str(current_rows[0]["request_hash"])
             if not hmac.compare_digest(commit_request_hash(events), request_hash):
-                raise LedgerIntegrityError("replay evidence commit request hash does not match events")
+                raise LedgerIntegrityError(
+                    "replay evidence commit request hash does not match events"
+                )
             last = current_rows[-1]
             result = CommitResult.model_validate_json(str(last["result_json"]))
             expected_result = CommitResult(
@@ -3586,9 +3731,7 @@ class SQLiteWorldLedger:
                     or event.event_id != row["event_id"]
                     or event.idempotency_key != row["idempotency_key"]
                 ):
-                    raise LedgerIntegrityError(
-                        "event envelope does not match its ledger row"
-                    )
+                    raise LedgerIntegrityError("event envelope does not match its ledger row")
             except LedgerIntegrityError:
                 raise
             except Exception as exc:

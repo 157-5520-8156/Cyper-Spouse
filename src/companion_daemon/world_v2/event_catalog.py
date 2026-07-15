@@ -60,6 +60,8 @@ from .outcome_acceptance_manifest import (
 from .interaction_bid_acceptance_manifest import (
     INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
 )
+from .media_thread_acceptance_manifest import MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION
+from .media_thread_events import MEDIA_DELIVERY_THREAD_PAYLOAD_MODELS
 from .interaction_bid_events import INTERACTION_BID_PAYLOAD_MODELS
 from .fact_accepted_contracts import FactCommitMaterializedPayloadV2
 from .minimal_reply_events import MINIMAL_REPLY_EVENT_PAYLOAD_MODELS
@@ -103,7 +105,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.31"
+    reducer_bundle: str = "world-v2-reducers.32"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -146,6 +148,7 @@ class EventContract:
                 AFFECT_ACCEPTANCE_MANIFEST_VERSION,
                 OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
                 INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
+                MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
                 EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
             }:
                 raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -319,6 +322,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "ProviderMediaGrantRecorded": ProviderMediaGrantRecordedPayload,
         **MEDIA_V2_PAYLOAD_MODELS,
         **INTERACTION_BID_PAYLOAD_MODELS,
+        **MEDIA_DELIVERY_THREAD_PAYLOAD_MODELS,
         "BudgetReserved": _payload_model(
             "BudgetReservedPayload", {"reservation": (BudgetReservation, ...)}
         ),
@@ -431,6 +435,9 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "MediaDeliveryShared": "world_id+delivery_id",
         "InteractionBidProposalRecorded": "world_id+interaction_bid_proposal_id",
         "InteractionBidOpened": "world_id+bid_id",
+        "MediaDeliveryThreadProposalRecorded": "world_id+media_thread_proposal_id",
+        "MediaDeliveryThreadOpened": "world_id+thread_id+transition_id",
+        "MediaDeliveryThreadUpdated": "world_id+thread_id+transition_id",
         "BudgetReserved": "reservation_id",
         "BudgetSettled": "reservation_id+result_id+terminal",
         "BudgetReleased": "reservation_id+result_id+terminal",
@@ -517,8 +524,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
             "world_id+actor_ref+resource_kind+expected_entity_revision+transition_id+input_digest"
         ),
         "V2GoalExpired": (
-            "world_id+operation+goal_id+expected_entity_revision+"
-            "clock_event_ref+policy_digest"
+            "world_id+operation+goal_id+expected_entity_revision+clock_event_ref+policy_digest"
         ),
         "ActorAuthorityBootstrapped": "world_id+authority_id+transition_id",
         "ActorAuthorityRotated": "world_id+authority_id+expected_entity_revision+transition_id",
@@ -587,7 +593,11 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "ActorAuthorityMutationPayload",
                 allowed_predecessors=("ActorAuthorityBootstrapped", "ActorAuthorityRotated"),
                 evidence_types=("deployment_root_signature",),
-                successors=("ActorAuthorityRotated", "ActorAuthorityRevoked", "ActorAuthorityCompensated"),
+                successors=(
+                    "ActorAuthorityRotated",
+                    "ActorAuthorityRevoked",
+                    "ActorAuthorityCompensated",
+                ),
                 compensations=("ActorAuthorityCompensated",),
             ),
             _contract(
@@ -791,22 +801,155 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "enforcement_authorization",
                 "world",
                 "ProviderMediaGrantRecordedPayload",
-                evidence_types=("enforcement_capability", "enforcement_consent", "enforcement_privacy"),
+                evidence_types=(
+                    "enforcement_capability",
+                    "enforcement_consent",
+                    "enforcement_privacy",
+                ),
                 successors=("ActionAuthorized",),
             ),
-            _contract("PhotoCandidateOpened", "media_acceptance", "world", "PhotoCandidateOpenedPayload", evidence_types=("committed_world_event",)),
-            _contract("MediaOpportunityFrozen", "media_acceptance", "world", "MediaOpportunityFrozenPayload", allowed_predecessors=("PhotoCandidateOpened",), evidence_types=("frozen_media_snapshot",)),
-            _contract("MediaPlanRecorded", "media_planning_settlement", "world", "MediaPlanRecordedPayload", allowed_predecessors=("ExecutionReceiptRecorded",), evidence_types=("planning_receipt", "frozen_media_opportunity")),
-            _contract("MediaNotRenderableRecorded", "media_planning_settlement", "world", "MediaNotRenderableRecordedPayload", allowed_predecessors=("ExecutionReceiptRecorded",), evidence_types=("planning_receipt", "frozen_media_opportunity")),
-            _contract("MediaRenderArtifactRecorded", "media_render_settlement", "world", "MediaRenderArtifactRecordedPayload", allowed_predecessors=("ExecutionReceiptRecorded",), evidence_types=("render_receipt", "frozen_media_plan")),
-            _contract("MediaInspectionRecorded", "media_inspection_settlement", "world", "MediaInspectionRecordedPayload", allowed_predecessors=("ExecutionReceiptRecorded",), evidence_types=("inspection_receipt", "media_artifact")),
-            _contract("MediaRepairAuthorized", "media_repair_acceptance", "world", "MediaRepairAuthorizedPayload", allowed_predecessors=("TriggerProcessClaimed",), evidence_types=("failed_repairable_media_inspection", "frozen_media_plan", "media_repair_deliberation"), successors=("BudgetReserved", "ActionAuthorized", "TriggerProcessCompleted")),
-            _contract("MediaPreviewGenerated", "media_preview_materializer", "world", "MediaPreviewGeneratedPayload", allowed_predecessors=("MediaInspectionRecorded",), evidence_types=("passed_media_inspection",)),
-            _contract("MediaPreviewFailed", "media_preview_materializer", "world", "MediaPreviewFailedPayload", allowed_predecessors=("MediaInspectionRecorded",), evidence_types=("failed_media_inspection",)),
-            _contract("MediaAutomaticDeliveryApproved", "operator", "world", "MediaAutomaticDeliveryApprovedPayload", evidence_types=("passed_media_inspection", "operator_media_approval"), successors=("BudgetReserved", "ActionAuthorized")),
-            _contract("MediaDeliveryShared", "media_delivery_settlement", "world", "MediaDeliverySharedPayload", allowed_predecessors=("ExecutionReceiptRecorded",), evidence_types=("delivered_media_action", "operator_media_approval")),
-            _contract("InteractionBidProposalRecorded", "interaction_bid_proposal_compiler", "deliberation", "InteractionBidProposalRecordedPayload", allowed_predecessors=("ProposalRecorded", "TriggerProcessClaimed", "TriggerProcessReclaimed"), evidence_types=("media_delivery_shared", "claimed_media_delivery_interaction"), successors=("AcceptanceRecorded",)),
-            _contract("InteractionBidOpened", "interaction_bid_atomic_recorder", "world", "InteractionBidOpenedPayload", allowed_predecessors=("AcceptanceRecorded",), evidence_types=("accepted_interaction_bid_manifest", "media_delivery_shared")),
+            _contract(
+                "PhotoCandidateOpened",
+                "media_acceptance",
+                "world",
+                "PhotoCandidateOpenedPayload",
+                evidence_types=("committed_world_event",),
+            ),
+            _contract(
+                "MediaOpportunityFrozen",
+                "media_acceptance",
+                "world",
+                "MediaOpportunityFrozenPayload",
+                allowed_predecessors=("PhotoCandidateOpened",),
+                evidence_types=("frozen_media_snapshot",),
+            ),
+            _contract(
+                "MediaPlanRecorded",
+                "media_planning_settlement",
+                "world",
+                "MediaPlanRecordedPayload",
+                allowed_predecessors=("ExecutionReceiptRecorded",),
+                evidence_types=("planning_receipt", "frozen_media_opportunity"),
+            ),
+            _contract(
+                "MediaNotRenderableRecorded",
+                "media_planning_settlement",
+                "world",
+                "MediaNotRenderableRecordedPayload",
+                allowed_predecessors=("ExecutionReceiptRecorded",),
+                evidence_types=("planning_receipt", "frozen_media_opportunity"),
+            ),
+            _contract(
+                "MediaRenderArtifactRecorded",
+                "media_render_settlement",
+                "world",
+                "MediaRenderArtifactRecordedPayload",
+                allowed_predecessors=("ExecutionReceiptRecorded",),
+                evidence_types=("render_receipt", "frozen_media_plan"),
+            ),
+            _contract(
+                "MediaInspectionRecorded",
+                "media_inspection_settlement",
+                "world",
+                "MediaInspectionRecordedPayload",
+                allowed_predecessors=("ExecutionReceiptRecorded",),
+                evidence_types=("inspection_receipt", "media_artifact"),
+            ),
+            _contract(
+                "MediaRepairAuthorized",
+                "media_repair_acceptance",
+                "world",
+                "MediaRepairAuthorizedPayload",
+                allowed_predecessors=("TriggerProcessClaimed",),
+                evidence_types=(
+                    "failed_repairable_media_inspection",
+                    "frozen_media_plan",
+                    "media_repair_deliberation",
+                ),
+                successors=("BudgetReserved", "ActionAuthorized", "TriggerProcessCompleted"),
+            ),
+            _contract(
+                "MediaPreviewGenerated",
+                "media_preview_materializer",
+                "world",
+                "MediaPreviewGeneratedPayload",
+                allowed_predecessors=("MediaInspectionRecorded",),
+                evidence_types=("passed_media_inspection",),
+            ),
+            _contract(
+                "MediaPreviewFailed",
+                "media_preview_materializer",
+                "world",
+                "MediaPreviewFailedPayload",
+                allowed_predecessors=("MediaInspectionRecorded",),
+                evidence_types=("failed_media_inspection",),
+            ),
+            _contract(
+                "MediaAutomaticDeliveryApproved",
+                "operator",
+                "world",
+                "MediaAutomaticDeliveryApprovedPayload",
+                evidence_types=("passed_media_inspection", "operator_media_approval"),
+                successors=("BudgetReserved", "ActionAuthorized"),
+            ),
+            _contract(
+                "MediaDeliveryShared",
+                "media_delivery_settlement",
+                "world",
+                "MediaDeliverySharedPayload",
+                allowed_predecessors=("ExecutionReceiptRecorded",),
+                evidence_types=("delivered_media_action", "operator_media_approval"),
+            ),
+            _contract(
+                "InteractionBidProposalRecorded",
+                "interaction_bid_proposal_compiler",
+                "deliberation",
+                "InteractionBidProposalRecordedPayload",
+                allowed_predecessors=(
+                    "ProposalRecorded",
+                    "TriggerProcessClaimed",
+                    "TriggerProcessReclaimed",
+                ),
+                evidence_types=("media_delivery_shared", "claimed_media_delivery_interaction"),
+                successors=("AcceptanceRecorded",),
+            ),
+            _contract(
+                "InteractionBidOpened",
+                "interaction_bid_atomic_recorder",
+                "world",
+                "InteractionBidOpenedPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=("accepted_interaction_bid_manifest", "media_delivery_shared"),
+            ),
+            _contract(
+                "MediaDeliveryThreadProposalRecorded",
+                "media_thread_proposal_compiler",
+                "deliberation",
+                "MediaDeliveryThreadProposalRecordedPayload",
+                allowed_predecessors=(
+                    "ProposalRecorded",
+                    "TriggerProcessClaimed",
+                    "TriggerProcessReclaimed",
+                ),
+                evidence_types=("media_delivery_shared", "claimed_media_delivery_interaction"),
+                successors=("AcceptanceRecorded",),
+            ),
+            _contract(
+                "MediaDeliveryThreadOpened",
+                "media_thread_atomic_recorder",
+                "world",
+                "MediaDeliveryThreadChangedPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=("accepted_media_thread_manifest", "media_delivery_shared"),
+            ),
+            _contract(
+                "MediaDeliveryThreadUpdated",
+                "media_thread_atomic_recorder",
+                "world",
+                "MediaDeliveryThreadChangedPayload",
+                allowed_predecessors=("AcceptanceRecorded",),
+                evidence_types=("accepted_media_thread_manifest", "media_delivery_shared"),
+            ),
             _contract(
                 "MessagePayloadStored",
                 "expression_plan_recorder",
@@ -821,7 +964,11 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "expression_plan_recorder",
                 "world",
                 "ExpressionPayloadDescriptorRecordedPayload",
-                allowed_predecessors=("AcceptanceRecorded", "MessagePayloadStored", "ExpressionPayloadDescriptorRecorded"),
+                allowed_predecessors=(
+                    "AcceptanceRecorded",
+                    "MessagePayloadStored",
+                    "ExpressionPayloadDescriptorRecorded",
+                ),
                 evidence_types=("expression_plan_manifest", "immutable_expression_payload"),
                 successors=("ExpressionPlanAccepted", "ExpressionBeatAuthorized"),
             ),
@@ -1474,9 +1621,7 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     payload_model.__name__,
                     allowed_predecessors=("AcceptanceRecorded",),
                     evidence_types=_RELATIONSHIP_EVIDENCE_TYPES,
-                    compensations=(
-                        ("ThreadCompensated",) if event_type == "ThreadUpdated" else ()
-                    ),
+                    compensations=(("ThreadCompensated",) if event_type == "ThreadUpdated" else ()),
                 )
                 for event_type, payload_model in THREAD_PAYLOAD_MODELS.items()
             ),
@@ -1485,7 +1630,8 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     event_type,
                     (
                         "logical_clock"
-                        if event_type in {
+                        if event_type
+                        in {
                             "PrivateCommitmentDue",
                             "PrivateCommitmentDeadlineBroken",
                         }
@@ -1521,9 +1667,7 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                         "committed_fact",
                     ),
                     compensations=(
-                        ("FactCorrectionCompensated",)
-                        if event_type == "FactCorrected"
-                        else ()
+                        ("FactCorrectionCompensated",) if event_type == "FactCorrected" else ()
                     ),
                 )
                 for event_type, payload_model in FACT_PAYLOAD_MODELS.items()

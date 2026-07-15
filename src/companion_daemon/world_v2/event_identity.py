@@ -14,6 +14,7 @@ from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION
 from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
 from .expression_plan_manifest import EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION
 from .interaction_bid_acceptance_manifest import INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION
+from .media_thread_acceptance_manifest import MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION
 
 
 def domain_idempotency_key(
@@ -54,7 +55,8 @@ def _life_identity_components(
     if (
         event_type == "AcceptanceRecorded"
         and "manifest_version" in payload
-        and payload.get("manifest_version") not in {
+        and payload.get("manifest_version")
+        not in {
             "acceptance-manifest.2",
             "acceptance-manifest.3",
             MINIMAL_REPLY_MANIFEST_VERSION,
@@ -62,6 +64,7 @@ def _life_identity_components(
             AFFECT_ACCEPTANCE_MANIFEST_VERSION,
             OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
+            MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
         }
     ):
@@ -87,7 +90,11 @@ def _life_identity_components(
     if event_type == "MediaOpportunityFrozen":
         return world_id, _nested(payload, "opportunity", "opportunity_id")
     if event_type == "MediaPlanRecorded":
-        return world_id, _nested(payload, "plan", "planning_request_id"), _nested(payload, "plan", "plan_id")
+        return (
+            world_id,
+            _nested(payload, "plan", "planning_request_id"),
+            _nested(payload, "plan", "plan_id"),
+        )
     if event_type == "MediaNotRenderableRecorded":
         return world_id, _nested(payload, "result", "planning_request_id"), "not_renderable"
     if event_type == "MediaRenderArtifactRecorded":
@@ -101,9 +108,18 @@ def _life_identity_components(
     if event_type == "MediaPreviewFailed":
         return world_id, payload.get("plan_id"), "preview_failed"
     if event_type == "MediaAutomaticDeliveryApproved":
-        return world_id, _nested(payload, "approval", "approval_id"), _nested(payload, "approval", "entity_revision")
+        return (
+            world_id,
+            _nested(payload, "approval", "approval_id"),
+            _nested(payload, "approval", "entity_revision"),
+        )
     if event_type == "MediaDeliveryShared":
         return world_id, _nested(payload, "delivery", "delivery_id")
+    if event_type == "MediaDeliveryThreadProposalRecorded":
+        return world_id, payload.get("media_thread_proposal_id"), payload.get("change_id")
+    if event_type in {"MediaDeliveryThreadOpened", "MediaDeliveryThreadUpdated"}:
+        after = payload.get("thread_after")
+        return world_id, _nested({"x": after}, "x", "thread_id"), payload.get("transition_id")
     if event_type == "ActorAuthorityBootstrapped":
         return world_id, payload.get("authority_id"), payload.get("transition_id")
     if event_type in {

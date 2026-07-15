@@ -75,6 +75,7 @@ CHANGE_TRANSITION_REGISTRY: dict[str, frozenset[str]] = {
     "boundary_transition": frozenset({"open", "revise", "close"}),
     "thread_transition": frozenset({"open", "update", "resolve", "cancel", "expire"}),
     "interaction_bid_transition": frozenset({"open", "update", "resolve", "withdraw", "expire"}),
+    "media_delivery_thread_transition": frozenset({"open", "update"}),
     "commitment_transition": frozenset({"open", "due", "fulfill", "break", "release"}),
     "memory_candidate_transition": frozenset(
         {
@@ -263,6 +264,18 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
             "audience": str,
             "due": (str, type(None)),
         }
+    ),
+    "media_delivery_thread_transition": _PayloadContract(
+        {
+            "thread_id": str,
+            "thread_kind": str,
+            "subject_ref": str,
+            "conversation_ref": str,
+            "importance": int,
+            "resolution_contract_ref": str,
+            "expires_at": (str, type(None)),
+        },
+        {"privacy_class": str},
     ),
     "commitment_transition": _PayloadContract(
         {
@@ -690,6 +703,17 @@ class InteractionBidPayload(FrozenModel):
     due: datetime | None
 
 
+class MediaDeliveryThreadPayload(FrozenModel):
+    thread_id: BoundedRef
+    thread_kind: BoundedLabel
+    subject_ref: BoundedRef
+    conversation_ref: BoundedRef
+    importance: int = Field(ge=0, le=10_000)
+    resolution_contract_ref: BoundedRef
+    expires_at: datetime | None
+    privacy_class: PrivacyClass = "private"
+
+
 class CommitmentPayload(FrozenModel):
     commitment_id: BoundedRef
     content_ref: BoundedRef
@@ -789,6 +813,7 @@ PAYLOAD_MODEL_REGISTRY: dict[str, type[FrozenModel]] = {
     "boundary_transition": BoundaryPayload,
     "thread_transition": ThreadPayload,
     "interaction_bid_transition": InteractionBidPayload,
+    "media_delivery_thread_transition": MediaDeliveryThreadPayload,
     "commitment_transition": CommitmentPayload,
     "memory_candidate_transition": MemoryCandidatePayload,
     "expression_plan_transition": ExpressionPlanPayload,

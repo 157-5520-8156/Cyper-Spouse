@@ -28,6 +28,12 @@ from .interaction_bid_acceptance_manifest import (
     canonical_interaction_bid_value_hash,
 )
 from .interaction_bid_events import InteractionBidOpenedPayload
+from .media_thread_acceptance_manifest import (
+    MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
+    MediaDeliveryThreadAcceptanceManifest,
+    canonical_media_thread_value_hash,
+)
+from .media_thread_events import MediaDeliveryThreadChangedPayload
 from .event_identity import domain_idempotency_key
 from .experience_events import ExperienceCommittedPayload
 from .fact_accepted_contracts import (
@@ -60,7 +66,10 @@ from .expression_plan_manifest import (
     ExpressionPlanAcceptanceManifest,
     canonical_expression_plan_value_hash,
 )
-from .expression_plan_atomic_recorder import expression_plan_event_id, expression_plan_idempotency_key
+from .expression_plan_atomic_recorder import (
+    expression_plan_event_id,
+    expression_plan_idempotency_key,
+)
 from .appraisal_events import (
     AppraisalAcceptedPayload,
     AppraisalContradictedPayload,
@@ -102,6 +111,7 @@ def validate_commit_batch(
         reject_affect_acceptance_manifest_without_recorder(events)
         reject_outcome_acceptance_manifest_without_recorder(events)
         reject_interaction_bid_acceptance_manifest_without_recorder(events)
+        reject_media_thread_acceptance_manifest_without_recorder(events)
         reject_expression_plan_manifest_without_recorder(events)
     _validate_deliberation_audit_transaction(events)
     _validate_acceptance_manifest_v2_batch(events)
@@ -136,7 +146,13 @@ def validate_commit_batch(
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_authorized_interaction_bid_acceptance_manifest_batch(
-        events, expected_world_revision=expected_world_revision,
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_media_thread_acceptance_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_expression_receipt_lifecycle_batch(events)
@@ -228,6 +244,10 @@ def validate_commit_batch(
         if len(completions) != 1:
             raise ValueError("AppraisalAccepted must complete its trigger in the same commit")
     for acceptance_index, acceptance in acceptances:
+        if acceptance.get("manifest_version") == MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION:
+            # Dedicated source-bound lane is validated above; it is not a
+            # member of the generic typed Thread mutation family.
+            continue
         if acceptance.get("status") != "accepted" or not isinstance(
             acceptance.get("proposal_id"), str
         ):
@@ -238,8 +258,7 @@ def validate_commit_batch(
             if mutation_index > acceptance_index
             and binding.proposal_id == acceptance.get("proposal_id")
             and binding.acceptance_id == acceptance.get("acceptance_id")
-            and binding.evaluated_world_revision
-            == acceptance.get("evaluated_world_revision")
+            and binding.evaluated_world_revision == acceptance.get("evaluated_world_revision")
             and binding.change_id == acceptance.get("accepted_change_id")
             and binding.accepted_change_hash == acceptance.get("accepted_change_hash")
         ]
@@ -319,10 +338,14 @@ def validate_commit_batch(
     settlement_pairs = {(item.occurrence_id, item.result_id) for item in settlements}
     for experience in experiences:
         for binding in experience.experience.values.source_bindings:
-            if isinstance(binding, ExperienceOccurrenceSettlementBinding) and (
-                binding.occurrence_id,
-                binding.result_id,
-            ) not in settlement_pairs:
+            if (
+                isinstance(binding, ExperienceOccurrenceSettlementBinding)
+                and (
+                    binding.occurrence_id,
+                    binding.result_id,
+                )
+                not in settlement_pairs
+            ):
                 raise ValueError("occurrence-backed experience must accompany its settlement")
 
     for mutation_index, binding in typed_mutations:
@@ -333,15 +356,13 @@ def validate_commit_batch(
             and acceptance.get("status") == "accepted"
             and acceptance.get("acceptance_id") == binding.acceptance_id
             and acceptance.get("proposal_id") == binding.proposal_id
-            and acceptance.get("evaluated_world_revision")
-            == binding.evaluated_world_revision
+            and acceptance.get("evaluated_world_revision") == binding.evaluated_world_revision
             and acceptance.get("accepted_change_id") == binding.change_id
             and acceptance.get("accepted_change_hash") == binding.accepted_change_hash
         ]
         if binding.evaluated_world_revision != expected_world_revision or len(matching) != 1:
             raise ValueError(
-                "typed proposal mutation requires one adjacent revision-pinned "
-                "AcceptanceRecorded"
+                "typed proposal mutation requires one adjacent revision-pinned AcceptanceRecorded"
             )
 
 
@@ -456,14 +477,15 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
         and "manifest_version" in event.payload()
         and event.payload().get("manifest_version")
         not in {
-                "acceptance-manifest.2",
-                "acceptance-manifest.3",
-                MINIMAL_REPLY_MANIFEST_VERSION,
-                APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
-                AFFECT_ACCEPTANCE_MANIFEST_VERSION,
-                OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
-                INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
-                EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
+            "acceptance-manifest.2",
+            "acceptance-manifest.3",
+            MINIMAL_REPLY_MANIFEST_VERSION,
+            APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
+            AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+            OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+            INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
+            MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
+            EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
         }
     ]
     if unknown:
@@ -724,7 +746,8 @@ def _validate_authorized_minimal_reply_manifest_batch(
         or reservation.category != "chat"
         or reservation.state != "reserved"
         or action.action_id != manifest.action_id
-        or canonical_minimal_reply_value_hash(action.model_dump(mode="json")) != manifest.action_hash
+        or canonical_minimal_reply_value_hash(action.model_dump(mode="json"))
+        != manifest.action_hash
         or action.kind != "reply"
         or action.layer != "external_action"
         or action.world_id != action_event.world_id
@@ -790,7 +813,8 @@ def _validate_authorized_expression_plan_manifest_batch(
     events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
 ) -> None:
     manifests = [
-        event for event in events
+        event
+        for event in events
         if event.event_type == "AcceptanceRecorded"
         and event.payload().get("manifest_version") == EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION
     ]
@@ -808,7 +832,8 @@ def _validate_authorized_expression_plan_manifest_batch(
     if manifest.evaluated_world_revision != expected_world_revision:
         raise ValueError("expression_plan.accepted_batch_authority_is_not_pinned")
     payload_types = tuple(
-        "MessagePayloadStored" if item.beat.payload.storage_kind == "inline_text"
+        "MessagePayloadStored"
+        if item.beat.payload.storage_kind == "inline_text"
         else "ExpressionPayloadDescriptorRecorded"
         for item in manifest.beats
     )
@@ -816,7 +841,13 @@ def _validate_authorized_expression_plan_manifest_batch(
         ("AcceptanceRecorded",)
         + payload_types
         + ("ExpressionPlanAccepted",)
-        + sum((("ExpressionBeatAuthorized", "BudgetReserved", "ActionAuthorized") for _ in manifest.beats), ())
+        + sum(
+            (
+                ("ExpressionBeatAuthorized", "BudgetReserved", "ActionAuthorized")
+                for _ in manifest.beats
+            ),
+            (),
+        )
     )
     if tuple(event.event_type for event in events) != expected_types:
         raise ValueError("expression_plan.accepted_batch_shape_is_not_exact")
@@ -839,21 +870,42 @@ def _validate_authorized_expression_plan_manifest_batch(
     payload_events = events[1 : 1 + len(manifest.beats)]
     plan_event = events[1 + len(manifest.beats)]
     tails = events[2 + len(manifest.beats) :]
-    _validate_expression_plan_identity(acceptance, manifest=manifest, role="acceptance", stable_id=manifest.acceptance_id, domain_identity=True)
+    _validate_expression_plan_identity(
+        acceptance,
+        manifest=manifest,
+        role="acceptance",
+        stable_id=manifest.acceptance_id,
+        domain_identity=True,
+    )
     for payload_event, item in zip(payload_events, manifest.beats, strict=True):
         if item.beat.payload.storage_kind == "inline_text":
-            _validate_expression_plan_identity(payload_event, manifest=manifest, role="message", stable_id=item.beat.payload.payload_ref, domain_identity=True)
+            _validate_expression_plan_identity(
+                payload_event,
+                manifest=manifest,
+                role="message",
+                stable_id=item.beat.payload.payload_ref,
+                domain_identity=True,
+            )
             message = MessagePayloadStoredPayload.model_validate_json(payload_event.payload_json)
             if (
                 message.acceptance_id != manifest.acceptance_id
                 or message.proposal_id != manifest.proposal_id
                 or message.message != item.beat.payload
-                or canonical_expression_plan_value_hash(message.message.model_dump(mode="json")) != item.message_hash
+                or canonical_expression_plan_value_hash(message.message.model_dump(mode="json"))
+                != item.message_hash
             ):
                 raise ValueError("expression_plan.message_does_not_match_manifest")
         else:
-            _validate_expression_plan_identity(payload_event, manifest=manifest, role="payload-descriptor", stable_id=item.beat.payload.payload_ref, domain_identity=True)
-            descriptor = ExpressionPayloadDescriptorRecordedPayload.model_validate_json(payload_event.payload_json)
+            _validate_expression_plan_identity(
+                payload_event,
+                manifest=manifest,
+                role="payload-descriptor",
+                stable_id=item.beat.payload.payload_ref,
+                domain_identity=True,
+            )
+            descriptor = ExpressionPayloadDescriptorRecordedPayload.model_validate_json(
+                payload_event.payload_json
+            )
             if (
                 descriptor.acceptance_id != manifest.acceptance_id
                 or descriptor.proposal_id != manifest.proposal_id
@@ -864,40 +916,82 @@ def _validate_authorized_expression_plan_manifest_batch(
                 or descriptor.payload_kind != item.beat.payload.sidecar_kind
             ):
                 raise ValueError("expression_plan.payload_descriptor_does_not_match_manifest")
-    _validate_expression_plan_identity(plan_event, manifest=manifest, role="plan", stable_id=manifest.plan_id, domain_identity=True)
+    _validate_expression_plan_identity(
+        plan_event, manifest=manifest, role="plan", stable_id=manifest.plan_id, domain_identity=True
+    )
     plan = ExpressionPlanAcceptedPayload.model_validate_json(plan_event.payload_json)
     if (
-        plan.acceptance_id != manifest.acceptance_id or plan.proposal_id != manifest.proposal_id
-        or plan.expression_change_id != manifest.expression_change_id or plan.plan_id != manifest.plan_id
+        plan.acceptance_id != manifest.acceptance_id
+        or plan.proposal_id != manifest.proposal_id
+        or plan.expression_change_id != manifest.expression_change_id
+        or plan.plan_id != manifest.plan_id
     ):
         raise ValueError("expression_plan.plan_does_not_match_manifest")
     for offset, item in enumerate(manifest.beats):
         beat_event, reservation_event, action_event = tails[offset * 3 : offset * 3 + 3]
-        _validate_expression_plan_identity(beat_event, manifest=manifest, role="beat", stable_id=item.beat.beat_id, domain_identity=True)
-        _validate_expression_plan_identity(reservation_event, manifest=manifest, role="reservation", stable_id=item.reservation.reservation_id)
-        _validate_expression_plan_identity(action_event, manifest=manifest, role="action", stable_id=item.action.action_id)
+        _validate_expression_plan_identity(
+            beat_event,
+            manifest=manifest,
+            role="beat",
+            stable_id=item.beat.beat_id,
+            domain_identity=True,
+        )
+        _validate_expression_plan_identity(
+            reservation_event,
+            manifest=manifest,
+            role="reservation",
+            stable_id=item.reservation.reservation_id,
+        )
+        _validate_expression_plan_identity(
+            action_event, manifest=manifest, role="action", stable_id=item.action.action_id
+        )
         beat = ExpressionBeatAuthorizedPayload.model_validate_json(beat_event.payload_json)
-        reservation = BudgetReservation.model_validate_json(json.dumps(reservation_event.payload()["reservation"], ensure_ascii=False))
-        action = Action.model_validate_json(json.dumps(action_event.payload()["action"], ensure_ascii=False))
+        reservation = BudgetReservation.model_validate_json(
+            json.dumps(reservation_event.payload()["reservation"], ensure_ascii=False)
+        )
+        action = Action.model_validate_json(
+            json.dumps(action_event.payload()["action"], ensure_ascii=False)
+        )
         if (
-            beat.acceptance_id != manifest.acceptance_id or beat.proposal_id != manifest.proposal_id
-            or beat.expression_change_id != manifest.expression_change_id or beat.beat != item.beat
-            or canonical_expression_plan_value_hash(beat.beat.model_dump(mode="json")) != item.beat_hash
-            or reservation != item.reservation or action != item.action
-            or canonical_expression_plan_value_hash(reservation.model_dump(mode="json")) != item.reservation_hash
-            or canonical_expression_plan_value_hash(action.model_dump(mode="json")) != item.action_hash
+            beat.acceptance_id != manifest.acceptance_id
+            or beat.proposal_id != manifest.proposal_id
+            or beat.expression_change_id != manifest.expression_change_id
+            or beat.beat != item.beat
+            or canonical_expression_plan_value_hash(beat.beat.model_dump(mode="json"))
+            != item.beat_hash
+            or reservation != item.reservation
+            or action != item.action
+            or canonical_expression_plan_value_hash(reservation.model_dump(mode="json"))
+            != item.reservation_hash
+            or canonical_expression_plan_value_hash(action.model_dump(mode="json"))
+            != item.action_hash
         ):
             raise ValueError("expression_plan.effect_does_not_match_manifest")
 
 
 def _validate_expression_plan_identity(
-    event: WorldEvent, *, manifest: ExpressionPlanAcceptanceManifest, role: str, stable_id: str, domain_identity: bool = False
+    event: WorldEvent,
+    *,
+    manifest: ExpressionPlanAcceptanceManifest,
+    role: str,
+    stable_id: str,
+    domain_identity: bool = False,
 ) -> None:
-    if event.event_id != expression_plan_event_id(manifest_hash=manifest.manifest_hash, role=role, stable_id=stable_id):
+    if event.event_id != expression_plan_event_id(
+        manifest_hash=manifest.manifest_hash, role=role, stable_id=stable_id
+    ):
         raise ValueError("expression_plan.event_id_is_not_deterministic")
     expected = (
-        domain_idempotency_key(event_type=event.event_type, world_id=event.world_id, payload=event.payload())
-        if domain_identity else expression_plan_idempotency_key(world_id=event.world_id, manifest_hash=manifest.manifest_hash, role=role, stable_id=stable_id)
+        domain_idempotency_key(
+            event_type=event.event_type, world_id=event.world_id, payload=event.payload()
+        )
+        if domain_identity
+        else expression_plan_idempotency_key(
+            world_id=event.world_id,
+            manifest_hash=manifest.manifest_hash,
+            role=role,
+            stable_id=stable_id,
+        )
     )
     if expected is None or event.idempotency_key != expected:
         raise ValueError("expression_plan.idempotency_key_is_not_deterministic")
@@ -1079,7 +1173,9 @@ def reject_outcome_acceptance_manifest_without_recorder(events: Sequence[WorldEv
         raise ValueError("outcome_acceptance.recorder_capability_required")
 
 
-def reject_interaction_bid_acceptance_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:
+def reject_interaction_bid_acceptance_manifest_without_recorder(
+    events: Sequence[WorldEvent],
+) -> None:
     if any(
         event.event_type == "AcceptanceRecorded"
         and event.payload().get("manifest_version") == INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION
@@ -1088,11 +1184,75 @@ def reject_interaction_bid_acceptance_manifest_without_recorder(events: Sequence
         raise ValueError("interaction_bid_acceptance.recorder_capability_required")
 
 
+def reject_media_thread_acceptance_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("media_thread_acceptance.recorder_capability_required")
+
+
+def _validate_authorized_media_thread_acceptance_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("media_thread_acceptance.recorder_capability_required")
+    if len(manifests) != 1 or len(events) != 2:
+        raise ValueError("media_thread_acceptance.accepted_batch_must_be_exact")
+    acceptance, changed = events
+    try:
+        manifest = MediaDeliveryThreadAcceptanceManifest.model_validate_json(
+            acceptance.payload_json
+        )
+        payload = MediaDeliveryThreadChangedPayload.model_validate_json(changed.payload_json)
+    except Exception as exc:
+        raise ValueError("media_thread_acceptance.accepted_batch_payload_is_invalid") from exc
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or tuple(event.event_type for event in events)
+        != ("AcceptanceRecorded", manifest.thread_event_type)
+        or acceptance.causation_id != manifest.proposal_event_ref
+        or changed.causation_id != acceptance.event_id
+        or changed.event_id != manifest.thread_event_id
+        or changed.payload_hash != manifest.thread_payload_hash
+        or payload.acceptance_id != manifest.acceptance_id
+        or payload.proposal_id != manifest.proposal_id
+        or payload.change_id != manifest.accepted_change_id
+        or payload.accepted_change_hash != manifest.accepted_change_hash
+        or payload.evaluated_world_revision != manifest.evaluated_world_revision
+        or canonical_media_thread_value_hash(changed.payload()) != manifest.thread_payload_hash
+    ):
+        raise ValueError("media_thread_acceptance.batch_does_not_match_manifest")
+    if any(
+        getattr(changed, field) != getattr(acceptance, field)
+        for field in (
+            "world_id",
+            "logical_time",
+            "created_at",
+            "actor",
+            "source",
+            "trace_id",
+            "correlation_id",
+        )
+    ):
+        raise ValueError("media_thread_acceptance.envelope_metadata_mismatch")
+
+
 def _validate_authorized_interaction_bid_acceptance_manifest_batch(
     events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
 ) -> None:
     manifests = [
-        event for event in events
+        event
+        for event in events
         if event.event_type == "AcceptanceRecorded"
         and event.payload().get("manifest_version") == INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION
     ]
@@ -1110,7 +1270,8 @@ def _validate_authorized_interaction_bid_acceptance_manifest_batch(
         raise ValueError("interaction_bid_acceptance.accepted_batch_payload_is_invalid") from exc
     if (
         manifest.evaluated_world_revision != expected_world_revision
-        or tuple(event.event_type for event in events) != ("AcceptanceRecorded", "InteractionBidOpened")
+        or tuple(event.event_type for event in events)
+        != ("AcceptanceRecorded", "InteractionBidOpened")
         or acceptance.causation_id != manifest.proposal_event_ref
         or opened.causation_id != acceptance.event_id
         or opened.event_id != manifest.bid_event_id
@@ -1130,7 +1291,15 @@ def _validate_authorized_interaction_bid_acceptance_manifest_batch(
     if any(
         getattr(event, field) != getattr(acceptance, field)
         for event in (opened,)
-        for field in ("world_id", "logical_time", "created_at", "actor", "source", "trace_id", "correlation_id")
+        for field in (
+            "world_id",
+            "logical_time",
+            "created_at",
+            "actor",
+            "source",
+            "trace_id",
+            "correlation_id",
+        )
     ):
         raise ValueError("interaction_bid_acceptance.envelope_metadata_mismatch")
 
@@ -1153,7 +1322,9 @@ def _validate_authorized_outcome_acceptance_manifest_batch(
     acceptance, settlement, trigger_event = events
     try:
         manifest = OutcomeAcceptanceManifest.model_validate_json(acceptance.payload_json)
-        settlement_payload = WorldOccurrenceSettledPayload.model_validate_json(settlement.payload_json)
+        settlement_payload = WorldOccurrenceSettledPayload.model_validate_json(
+            settlement.payload_json
+        )
         process = trigger_event.payload().get("process")
         trigger = TriggerProcess.model_validate_json(
             json.dumps(process, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -1235,7 +1406,8 @@ def _validate_media_planning_settlement_batch(events: Sequence[WorldEvent]) -> N
     """
 
     indices = [
-        index for index, event in enumerate(events)
+        index
+        for index, event in enumerate(events)
         if event.event_type in {"MediaPlanRecorded", "MediaNotRenderableRecorded"}
     ]
     for index in indices:
@@ -1243,7 +1415,9 @@ def _validate_media_planning_settlement_batch(events: Sequence[WorldEvent]) -> N
             raise ValueError("media planning result lacks terminal action/receipt/budget prefix")
         delivered, receipt_event, budget_event, result_event = events[index - 3 : index + 1]
         if tuple(item.event_type for item in (delivered, receipt_event, budget_event)) != (
-            "ActionDelivered", "ExecutionReceiptRecorded", "BudgetSettled",
+            "ActionDelivered",
+            "ExecutionReceiptRecorded",
+            "BudgetSettled",
         ):
             raise ValueError("media planning result requires adjacent terminal settlement events")
         action_id = result_event.payload().get("action_id")
@@ -1289,10 +1463,18 @@ def _validate_media_repair_acceptance_batch(events: Sequence[WorldEvent]) -> Non
         if event.event_type != "MediaRepairAuthorized":
             continue
         if index < 1 or index + 3 >= len(events):
-            raise ValueError("media repair acceptance must be one atomic trigger/budget/action batch")
+            raise ValueError(
+                "media repair acceptance must be one atomic trigger/budget/action batch"
+            )
         claimed, authorized, reserved, action_event, completed = events[index - 1 : index + 4]
-        if tuple(item.event_type for item in (claimed, authorized, reserved, action_event, completed)) != (
-            "TriggerProcessClaimed", "MediaRepairAuthorized", "BudgetReserved", "ActionAuthorized", "TriggerProcessCompleted",
+        if tuple(
+            item.event_type for item in (claimed, authorized, reserved, action_event, completed)
+        ) != (
+            "TriggerProcessClaimed",
+            "MediaRepairAuthorized",
+            "BudgetReserved",
+            "ActionAuthorized",
+            "TriggerProcessCompleted",
         ):
             raise ValueError("media repair acceptance event order is invalid")
         repair = MediaRepairAuthorizedPayload.model_validate_json(authorized.payload_json).repair
@@ -1301,10 +1483,14 @@ def _validate_media_repair_acceptance_batch(events: Sequence[WorldEvent]) -> Non
         action = Action.model_validate(action_event.payload().get("action"))
         completed_payload = completed.payload()
         if (
-            process.trigger_id != repair.trigger_id or process.state != "claimed"
-            or action.action_id != repair.action_id or action.idempotency_key != repair.repair_attempt_id
-            or reservation.reservation_id != repair.reservation_id or reservation.action_id != action.action_id
-            or action.budget_reservation_id != repair.reservation_id or reservation.category != "repair"
+            process.trigger_id != repair.trigger_id
+            or process.state != "claimed"
+            or action.action_id != repair.action_id
+            or action.idempotency_key != repair.repair_attempt_id
+            or reservation.reservation_id != repair.reservation_id
+            or reservation.action_id != action.action_id
+            or action.budget_reservation_id != repair.reservation_id
+            or reservation.category != "repair"
             or completed_payload.get("trigger_id") != repair.trigger_id
             or completed_payload.get("attempt_id") != process.claim_lease.attempt_id
             or completed_payload.get("owner_id") != process.claim_lease.owner_id

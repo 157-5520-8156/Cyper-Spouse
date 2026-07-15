@@ -43,15 +43,20 @@ from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditPro
 from .acceptance_manifest import AcceptanceManifestRefV2
 from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
 from .media_v2 import (
-    MediaArtifact, MediaAutomaticDeliveryApproval, MediaDeliveryShared,
-    MediaInspectionRecord, MediaOpportunity, MediaPlan, MediaPreview, PhotoCandidate,
+    MediaArtifact,
+    MediaAutomaticDeliveryApproval,
+    MediaDeliveryShared,
+    MediaInspectionRecord,
+    MediaOpportunity,
+    MediaPlan,
+    MediaPreview,
+    PhotoCandidate,
 )
 
 
 SchemaVersion = Literal["world-v2.1"]
 _LEGACY_WITHOUT_SETTLED_OUTCOME = frozenset(
-    f"world-v2-reducers.{version}"
-    for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
+    f"world-v2-reducers.{version}" for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
 )
 RuntimeStatus = Literal[
     "observed_only",
@@ -428,7 +433,12 @@ class Action(FrozenModel):
     def claimed_action_has_a_lease(self) -> Action:
         if (self.expression_plan_id is None) != (self.expression_beat_id is None):
             raise ValueError("expression Action must bind both plan and beat")
-        provider_media_kinds = {"media_planning", "media_render", "media_inspection", "media_repair"}
+        provider_media_kinds = {
+            "media_planning",
+            "media_render",
+            "media_inspection",
+            "media_repair",
+        }
         if self.kind in provider_media_kinds:
             if self.layer != "media_action" or self.provider_media_grant is None:
                 raise ValueError("provider media Action requires an exact provider media grant")
@@ -788,19 +798,21 @@ class AcceptanceDecisionRef(FrozenModel):
     status: Literal["accepted", "rejected", "stale"]
     accepted_change_id: str | None = None
     accepted_change_hash: str | None = Field(default=None, min_length=64, max_length=64)
-    manifest_version: Literal[
-        "acceptance-manifest.2",
-        "acceptance-manifest.3",
-        "appraisal-acceptance.1",
-        "affect-acceptance.1",
-        "outcome-acceptance.1",
-        "interaction-bid-acceptance.1",
-    ] | None = None
+    manifest_version: (
+        Literal[
+            "acceptance-manifest.2",
+            "acceptance-manifest.3",
+            "appraisal-acceptance.1",
+            "affect-acceptance.1",
+            "outcome-acceptance.1",
+            "interaction-bid-acceptance.1",
+            "media-delivery-thread-acceptance.1",
+        ]
+        | None
+    ) = None
     manifest_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     acceptance_event_ref: str | None = None
-    acceptance_event_payload_hash: str | None = Field(
-        default=None, pattern=r"^[0-9a-f]{64}$"
-    )
+    acceptance_event_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def accepted_decision_has_a_complete_change(self) -> AcceptanceDecisionRef:
@@ -969,7 +981,9 @@ class ExpressionPlanLifecycleEntry(FrozenModel):
     event_ref: str = Field(min_length=1)
     event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     receipt_id: str | None = Field(default=None, min_length=1)
-    terminal_action_state: Literal["delivered", "failed", "unknown", "cancelled", "expired"] | None = None
+    terminal_action_state: (
+        Literal["delivered", "failed", "unknown", "cancelled", "expired"] | None
+    ) = None
 
     @model_validator(mode="after")
     def completed_entry_has_terminal_receipt(self) -> "ExpressionPlanLifecycleEntry":
@@ -1010,7 +1024,9 @@ class ExpressionBeatLifecycleEntry(FrozenModel):
     event_ref: str = Field(min_length=1)
     event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     receipt_id: str | None = Field(default=None, min_length=1)
-    terminal_action_state: Literal["delivered", "failed", "unknown", "cancelled", "expired"] | None = None
+    terminal_action_state: (
+        Literal["delivered", "failed", "unknown", "cancelled", "expired"] | None
+    ) = None
 
     @model_validator(mode="after")
     def settled_entry_has_terminal_receipt(self) -> "ExpressionBeatLifecycleEntry":
@@ -1474,9 +1490,9 @@ class FactValues(FrozenModel):
     confidence_bp: int = Field(ge=1, le=10_000)
     privacy_class: PrivacyClass
     status: Literal["active", "withdrawn"] = "active"
-    withdrawal_reason_code: Literal[
-        "user_request", "source_retracted", "privacy_revoked", "invalid"
-    ] | None = None
+    withdrawal_reason_code: (
+        Literal["user_request", "source_retracted", "privacy_revoked", "invalid"] | None
+    ) = None
     withdrawal_evidence_ref: str | None = None
 
     @model_validator(mode="after")
@@ -1512,34 +1528,48 @@ class FactOrigin(FrozenModel):
 def fact_conflict_key(*, subject_ref: str, predicate_code: str) -> str:
     material = json.dumps(
         {"subject_ref": subject_ref, "predicate_code": predicate_code},
-        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
     return f"fact-slot:{hashlib.sha256(material.encode()).hexdigest()}"
 
 
 def fact_semantic_fingerprint(
-    *, subject_ref: str, predicate_code: str, cardinality: FactCardinality,
-    conflict_key: str, value_hash: str,
+    *,
+    subject_ref: str,
+    predicate_code: str,
+    cardinality: FactCardinality,
+    conflict_key: str,
+    value_hash: str,
     assertion_binding: FactAssertionBinding,
-    anchor_evidence_refs: tuple[EvidenceRef, ...], policy_refs: tuple[str, ...],
+    anchor_evidence_refs: tuple[EvidenceRef, ...],
+    policy_refs: tuple[str, ...],
 ) -> str:
     material = {
-        "subject_ref": subject_ref, "predicate_code": predicate_code,
-        "cardinality": cardinality, "conflict_key": conflict_key,
+        "subject_ref": subject_ref,
+        "predicate_code": predicate_code,
+        "cardinality": cardinality,
+        "conflict_key": conflict_key,
         "value_hash": value_hash,
         "assertion_binding": assertion_binding.model_dump(mode="json"),
         "anchors": sorted(
-            ({"ref_id": item.ref_id, "evidence_type": item.evidence_type,
-              "source_world_revision": item.source_world_revision,
-              "immutable_hash": item.immutable_hash}
-             for item in anchor_evidence_refs),
+            (
+                {
+                    "ref_id": item.ref_id,
+                    "evidence_type": item.evidence_type,
+                    "source_world_revision": item.source_world_revision,
+                    "immutable_hash": item.immutable_hash,
+                }
+                for item in anchor_evidence_refs
+            ),
             key=lambda item: (str(item["evidence_type"]), str(item["ref_id"])),
         ),
         "policy_refs": sorted(policy_refs),
     }
-    return hashlib.sha256(json.dumps(
-        material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-    ).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 class FactProjection(FrozenModel):
@@ -1602,7 +1632,10 @@ class FactProposedMutation(FrozenModel):
         decoded = json.loads(self.payload_json)
         if not isinstance(decoded, dict):
             raise ValueError("fact mutation payload must be an object")
-        if json.dumps(decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":")) != self.payload_json:
+        if (
+            json.dumps(decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            != self.payload_json
+        ):
             raise ValueError("fact mutation payload must use canonical JSON")
         return self
 
@@ -1624,9 +1657,12 @@ class FactProposalProjection(FrozenModel):
 
     @model_validator(mode="after")
     def transition_matches_event(self) -> FactProposalProjection:
-        expected = {"commit": "FactCommitted", "correct": "FactCorrected",
-                    "withdraw": "FactWithdrawn",
-                    "compensate": "FactCorrectionCompensated"}[self.transition_kind]
+        expected = {
+            "commit": "FactCommitted",
+            "correct": "FactCorrected",
+            "withdraw": "FactWithdrawn",
+            "compensate": "FactCorrectionCompensated",
+        }[self.transition_kind]
         if self.proposed_mutation.event_type != expected:
             raise ValueError("fact proposal transition does not match event")
         return self
@@ -1718,9 +1754,7 @@ class ExperienceExecutionReceiptBinding(FrozenModel):
     raw_payload_hash: str = Field(min_length=1)
 
 
-ExperienceSourceBinding = (
-    ExperienceOccurrenceSettlementBinding | ExperienceExecutionReceiptBinding
-)
+ExperienceSourceBinding = ExperienceOccurrenceSettlementBinding | ExperienceExecutionReceiptBinding
 
 
 class ExperienceValues(FrozenModel):
@@ -1733,9 +1767,7 @@ class ExperienceValues(FrozenModel):
     # multi-source shape would be misleading because occurrence settlements
     # are committed one at a time and the acceptance bridge cannot authorize
     # several future settlement revisions atomically yet.
-    source_bindings: tuple[ExperienceSourceBinding, ...] = Field(
-        min_length=1, max_length=1
-    )
+    source_bindings: tuple[ExperienceSourceBinding, ...] = Field(min_length=1, max_length=1)
     privacy_class: PrivacyClass
 
     @model_validator(mode="after")
@@ -1818,9 +1850,7 @@ class ExperienceProposedMutation(FrozenModel):
         decoded = json.loads(self.payload_json)
         if not isinstance(decoded, dict):
             raise ValueError("experience mutation payload must be an object")
-        canonical = json.dumps(
-            decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
+        canonical = json.dumps(decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         if canonical != self.payload_json:
             raise ValueError("experience mutation payload must use canonical JSON")
         return self
@@ -2152,6 +2182,34 @@ class InteractionBidProposalProjection(FrozenModel):
     proposed_change_hash: str = Field(min_length=64, max_length=64)
 
 
+class MediaDeliveryThreadProposalProjection(FrozenModel):
+    """A private Thread mutation whose only social source is a delivered image.
+
+    This deliberately does not share ``ThreadProposalProjection``: the latter
+    is the older generic typed-proposal authority lane.  Keeping the source
+    binding first-class makes it impossible for a preview or a raw receipt to
+    be substituted during acceptance/replay.
+    """
+
+    media_thread_proposal_id: str = Field(min_length=1)
+    decision_proposal_id: str = Field(min_length=1)
+    change_id: str = Field(min_length=1)
+    transition_id: str = Field(min_length=1)
+    operation: Literal["open", "update"]
+    evaluated_world_revision: int = Field(ge=0)
+    expected_entity_revision: int = Field(ge=0)
+    delivery_id: str = Field(min_length=1)
+    delivery_event_ref: str = Field(min_length=1)
+    delivery_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    deliberation_trigger_id: str = Field(min_length=1)
+    thread_before: "ThreadProjection | None"
+    thread_after: "ThreadProjection"
+    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=1)
+    policy_refs: tuple[str, ...] = Field(min_length=1)
+    confidence_bp: int = Field(ge=0, le=10_000)
+    proposed_change_hash: str = Field(min_length=64, max_length=64)
+
+
 class OutcomeCandidateDescriptor(FrozenModel):
     """A frozen, model-selectable result candidate for one occurrence.
 
@@ -2204,14 +2262,11 @@ class WorldOccurrenceProjection(FrozenModel):
     terminal_reason_ref: str | None = None
 
     @model_validator(mode="after")
-    def settled_outcome_matches_lifecycle(
-        self, info: ValidationInfo
-    ) -> WorldOccurrenceProjection:
+    def settled_outcome_matches_lifecycle(self, info: ValidationInfo) -> WorldOccurrenceProjection:
         if self.status == "settled":
             if self.settled_outcome_ref is None and (
                 info.context is not None
-                and info.context.get("source_reducer_bundle")
-                in _LEGACY_WITHOUT_SETTLED_OUTCOME
+                and info.context.get("source_reducer_bundle") in _LEGACY_WITHOUT_SETTLED_OUTCOME
             ):
                 return self
             if (
@@ -2220,12 +2275,14 @@ class WorldOccurrenceProjection(FrozenModel):
             ):
                 raise ValueError("settled occurrence requires one candidate outcome")
         elif self.settled_outcome_ref is not None:
-                raise ValueError("non-settled occurrence cannot retain a settled outcome")
+            raise ValueError("non-settled occurrence cannot retain a settled outcome")
         if self.candidate_outcomes:
             refs = tuple(item.candidate_result_ref for item in self.candidate_outcomes)
             if refs != self.candidate_outcome_refs or len(set(refs)) != len(refs):
                 raise ValueError("outcome candidate descriptors must exactly match frozen refs")
-            if len({item.result_id for item in self.candidate_outcomes}) != len(self.candidate_outcomes):
+            if len({item.result_id for item in self.candidate_outcomes}) != len(
+                self.candidate_outcomes
+            ):
                 raise ValueError("outcome candidate result ids must be unique")
         return self
 
@@ -2475,25 +2532,25 @@ class CommitmentValues(FrozenModel):
     privacy_class: PrivacyClass = "private"
     status: CommitmentStatus = "open"
     settlement_evidence_ref: str | None = None
-    settlement_reason_code: Literal[
-        "evidence_satisfied",
-        "deadline_elapsed",
-        "authoritative_failure",
-        "user_withdrew",
-        "obsolete",
-        "precondition_failed",
-        "boundary_or_safety_conflict",
-        "operator_correction",
-    ] | None = None
+    settlement_reason_code: (
+        Literal[
+            "evidence_satisfied",
+            "deadline_elapsed",
+            "authoritative_failure",
+            "user_withdrew",
+            "obsolete",
+            "precondition_failed",
+            "boundary_or_safety_conflict",
+            "operator_correction",
+        ]
+        | None
+    ) = None
     predecessor_commitment_ref: str | None = None
     lineage_kind: Literal["correction", "replacement", "renewal"] | None = None
 
     @model_validator(mode="after")
     def lifecycle_and_sources_are_complete(self) -> CommitmentValues:
-        if (
-            self.due_window.opens_at.tzinfo is None
-            or self.due_window.closes_at.tzinfo is None
-        ):
+        if self.due_window.opens_at.tzinfo is None or self.due_window.closes_at.tzinfo is None:
             raise ValueError("commitment due window must be timezone-aware")
         if len(self.source_evidence_refs) != len(
             {(item.evidence_type, item.ref_id) for item in self.source_evidence_refs}
@@ -2971,8 +3028,7 @@ class RelationshipHysteresisProjection(FrozenModel):
         if self.candidate_stage is not None and self.confirming_adjustment_count < 1:
             raise ValueError("relationship hysteresis candidate requires confirmation")
         if self.candidate_since is not None and (
-            self.candidate_since.tzinfo is None
-            or self.candidate_since.utcoffset() is None
+            self.candidate_since.tzinfo is None or self.candidate_since.utcoffset() is None
         ):
             raise ValueError("relationship hysteresis time must be timezone-aware")
         return self
@@ -3261,7 +3317,9 @@ class ThreadValues(FrozenModel):
     status: ThreadStatus = "open"
     resolution_kind: Literal["answered", "skipped"] | None = None
     resolution_ref: str | None = None
-    cancellation_reason_code: Literal["user_withdrew", "obsolete", "invalid", "duplicate"] | None = None
+    cancellation_reason_code: (
+        Literal["user_withdrew", "obsolete", "invalid", "duplicate"] | None
+    ) = None
     cancellation_evidence_ref: str | None = None
     superseded_by_thread_ref: str | None = None
     predecessor_thread_refs: tuple[str, ...] = ()
@@ -3291,9 +3349,7 @@ class ThreadValues(FrozenModel):
             or self.superseded_by_thread_ref is not None
         ):
             raise ValueError("open thread cannot carry terminal resolution")
-        if self.status == "resolved" and (
-            not self.resolution_ref or self.resolution_kind is None
-        ):
+        if self.status == "resolved" and (not self.resolution_ref or self.resolution_kind is None):
             raise ValueError("resolved thread requires a resolution ref")
         if self.status == "cancelled" and (
             self.cancellation_reason_code is None or not self.cancellation_evidence_ref
@@ -3308,8 +3364,7 @@ class ThreadValues(FrozenModel):
         ):
             raise ValueError("only resolved thread may carry a resolution")
         if self.status != "cancelled" and (
-            self.cancellation_reason_code is not None
-            or self.cancellation_evidence_ref is not None
+            self.cancellation_reason_code is not None or self.cancellation_evidence_ref is not None
         ):
             raise ValueError("only cancelled thread may carry a cancellation reason")
         return self
@@ -3351,9 +3406,7 @@ class ThreadTransitionProjection(FrozenModel):
     transition_id: str = Field(min_length=1)
     thread_id: str = Field(min_length=1)
     entity_revision: int = Field(ge=1)
-    operation: Literal[
-        "open", "update", "resolve", "cancel", "supersede", "compensate", "expire"
-    ]
+    operation: Literal["open", "update", "resolve", "cancel", "supersede", "compensate", "expire"]
     values_before: ThreadValues | None
     values_after: ThreadValues
     change_id: str = Field(min_length=1)
@@ -3493,9 +3546,7 @@ class MemorySalienceVector(FrozenModel):
     novelty_bp: int = Field(ge=0, le=10_000)
     future_utility_bp: int = Field(ge=0, le=10_000)
     world_continuity_bp: int = Field(ge=0, le=10_000)
-    matrix_version: Literal["memory-salience-matrix.1"] = (
-        MEMORY_SALIENCE_MATRIX_VERSION
-    )
+    matrix_version: Literal["memory-salience-matrix.1"] = MEMORY_SALIENCE_MATRIX_VERSION
     matrix_digest: str = Field(min_length=64, max_length=64)
 
     @model_validator(mode="after")
@@ -3507,8 +3558,7 @@ class MemorySalienceVector(FrozenModel):
 
 def memory_retrieval_strength_bp(salience: MemorySalienceVector) -> int:
     weighted = sum(
-        getattr(salience, field) * weight
-        for field, weight in _MEMORY_SALIENCE_WEIGHTS.items()
+        getattr(salience, field) * weight for field, weight in _MEMORY_SALIENCE_WEIGHTS.items()
     )
     return weighted // sum(_MEMORY_SALIENCE_WEIGHTS.values())
 
@@ -3539,13 +3589,9 @@ class MemoryCandidateValues(FrozenModel):
         event_refs = tuple(item.authority_event_ref for item in self.source_bindings)
         if len(event_refs) != len(set(event_refs)):
             raise ValueError("memory source authority events must not be aliased")
-        if len(self.consumed_source_authority_ids) != len(
-            set(self.consumed_source_authority_ids)
-        ):
+        if len(self.consumed_source_authority_ids) != len(set(self.consumed_source_authority_ids)):
             raise ValueError("memory consumed source authority ids must be unique")
-        current_authorities = {
-            memory_source_authority_id(item) for item in self.source_bindings
-        }
+        current_authorities = {memory_source_authority_id(item) for item in self.source_bindings}
         if not current_authorities.issubset(set(self.consumed_source_authority_ids)):
             raise ValueError("memory current sources must remain in consumed authority lineage")
         if len(self.retention_rationales) != len(set(self.retention_rationales)):
@@ -3560,9 +3606,7 @@ class MemoryCandidateValues(FrozenModel):
             self.reviewed_at is not None or self.forgotten_at is not None
         ):
             raise ValueError("pending memory cannot be reviewed or forgotten")
-        if self.status == "active" and (
-            self.reviewed_at is None or self.forgotten_at is not None
-        ):
+        if self.status == "active" and (self.reviewed_at is None or self.forgotten_at is not None):
             raise ValueError("active memory requires review and cannot be forgotten")
         if self.status == "active" and self.retrieval_strength_bp == 0:
             raise ValueError("active memory requires nonzero retrieval strength")
@@ -3577,9 +3621,7 @@ class MemoryCandidateValues(FrozenModel):
         ):
             raise ValueError("rejected memory must be reviewed and inactive")
         if self.status == "forgotten" and (
-            self.reviewed_at is None
-            or self.forgotten_at is None
-            or self.retrieval_strength_bp != 0
+            self.reviewed_at is None or self.forgotten_at is None or self.retrieval_strength_bp != 0
         ):
             raise ValueError("forgotten memory must retain explicit terminal timing")
         return self
@@ -3592,22 +3634,16 @@ def memory_candidate_semantic_fingerprint(
         "summary_ref": values.summary_ref,
         "summary_payload_hash": values.summary_payload_hash,
         "cue_kind": values.cue_kind,
-        "source_bindings": tuple(
-            item.model_dump(mode="json") for item in values.source_bindings
-        ),
+        "source_bindings": tuple(item.model_dump(mode="json") for item in values.source_bindings),
         "retention_rationales": sorted(values.retention_rationales),
         "future_use_refs": sorted(values.future_use_refs),
         "privacy_ceiling": values.privacy_ceiling,
         "salience": values.salience.model_dump(mode="json"),
-        "review_due_at": (
-            values.review_due_at.isoformat() if values.review_due_at else None
-        ),
+        "review_due_at": (values.review_due_at.isoformat() if values.review_due_at else None),
         "policy_refs": sorted(policy_refs),
     }
     return hashlib.sha256(
-        json.dumps(
-            material, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode()
+        json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
 
 
@@ -3671,8 +3707,7 @@ class MemoryCandidateProjection(FrozenModel):
             if instant is not None and not (self.opened_at <= instant <= self.updated_at):
                 raise ValueError("memory lifecycle time is outside candidate chronology")
         if any(
-            instant is not None
-            and (instant.tzinfo is None or instant.utcoffset() is None)
+            instant is not None and (instant.tzinfo is None or instant.utcoffset() is None)
             for instant in (
                 self.opened_at,
                 self.updated_at,
@@ -3699,20 +3734,26 @@ class MemoryCandidateTransitionProjection(FrozenModel):
     accepted_at: datetime
     revise_kind: Literal["pending_edit", "compress", "clarify", "correct"] | None = None
     reinforcement_reason: MemoryRetentionRationale | None = None
-    rejection_reason: Literal[
-        "duplicate",
-        "insufficient_future_utility",
-        "operator_decision",
-    ] | None = None
-    forget_reason: Literal[
-        "scheduled_decay",
-        "obsolete_review",
-        "privacy_request",
-        "source_invalidated",
-        "compressed_into",
-        "explicit_suppression",
-        "low_future_utility",
-    ] | None = None
+    rejection_reason: (
+        Literal[
+            "duplicate",
+            "insufficient_future_utility",
+            "operator_decision",
+        ]
+        | None
+    ) = None
+    forget_reason: (
+        Literal[
+            "scheduled_decay",
+            "obsolete_review",
+            "privacy_request",
+            "source_invalidated",
+            "compressed_into",
+            "explicit_suppression",
+            "low_future_utility",
+        ]
+        | None
+    ) = None
 
 
 class MemoryRetrievalDecision(FrozenModel):
@@ -3720,9 +3761,7 @@ class MemoryRetrievalDecision(FrozenModel):
     eligible: bool
     source_ids: tuple[str, ...] = ()
     stale_source_ids: tuple[str, ...] = ()
-    suppression_reasons: tuple[
-        Literal["not_active", "stale_source", "privacy_ceiling"] , ...
-    ] = ()
+    suppression_reasons: tuple[Literal["not_active", "stale_source", "privacy_ceiling"], ...] = ()
     review_required: bool = False
 
 
@@ -3742,9 +3781,7 @@ class MemoryCandidateProposedMutation(FrozenModel):
         decoded = json.loads(self.payload_json)
         if not isinstance(decoded, dict):
             raise ValueError("memory candidate mutation payload must be an object")
-        canonical = json.dumps(
-            decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        )
+        canonical = json.dumps(decoded, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         if canonical != self.payload_json:
             raise ValueError("memory candidate mutation payload must use canonical JSON")
         return self
@@ -3752,14 +3789,10 @@ class MemoryCandidateProposedMutation(FrozenModel):
 
 class MemoryCandidateProposalProjection(FrozenModel):
     proposal_id: str = Field(min_length=1)
-    proposal_kind: Literal["memory_candidate_transition"] = (
-        "memory_candidate_transition"
-    )
+    proposal_kind: Literal["memory_candidate_transition"] = "memory_candidate_transition"
     proposal_encoding: Literal["typed-authority-v1"]
     authority_contract_ref: Literal["proposal-contract:memory-candidate.1"]
-    transition_kind: Literal[
-        "open", "accept", "reject", "revise", "reinforce", "forget"
-    ]
+    transition_kind: Literal["open", "accept", "reject", "revise", "reinforce", "forget"]
     change_id: str = Field(min_length=1)
     transition_id: str = Field(min_length=1)
     evaluated_world_revision: int = Field(ge=0)
@@ -3828,7 +3861,9 @@ class AuthorizationOrigin(FrozenModel):
     def enforcement_origin_is_closed(self) -> AuthorizationOrigin:
         is_enforcement = self.attestation_environment == "enforcement"
         if is_enforcement != self.enforcement_eligible:
-            raise ValueError("authorization enforcement eligibility must match attestation environment")
+            raise ValueError(
+                "authorization enforcement eligibility must match attestation environment"
+            )
         if is_enforcement and self.principal_possession_status != "verified":
             raise ValueError("enforcement authorization requires verified principal possession")
         if not is_enforcement and self.principal_possession_status != "not_evaluated":
@@ -3838,8 +3873,14 @@ class AuthorizationOrigin(FrozenModel):
 
 class CapabilityGrantValues(FrozenModel):
     capability_kind: Literal[
-        "message_send", "media_send", "reaction_send", "read_only_tool",
-        "media_planning", "media_render", "media_inspection", "media_repair",
+        "message_send",
+        "media_send",
+        "reaction_send",
+        "read_only_tool",
+        "media_planning",
+        "media_render",
+        "media_inspection",
+        "media_repair",
     ]
     actor_ref: str = Field(min_length=1)
     target_scope_refs: tuple[
@@ -4004,10 +4045,7 @@ def validate_actor_authority_event_bindings(
                 continue
             raise ValueError("ActorAuthority transition lacks accepted event binding")
         event = next(
-            (
-                item for item in committed_events
-                if item.event_id == transition.accepted_event_ref
-            ),
+            (item for item in committed_events if item.event_id == transition.accepted_event_ref),
             None,
         )
         if (
@@ -4025,18 +4063,13 @@ def validate_actor_authority_event_bindings(
     if len(accepted_refs) != len(set(accepted_refs)):
         raise ValueError("ActorAuthority accepted event refs must be unique")
     for authority in authorities:
-        lineage = tuple(
-            item for item in transitions if item.authority_id == authority.authority_id
-        )
+        lineage = tuple(item for item in transitions if item.authority_id == authority.authority_id)
         if not lineage:
             continue
         latest = lineage[-1]
-        if (
-            latest.accepted_event_ref is not None
-            and (
-                authority.origin.event_ref != latest.accepted_event_ref
-                or authority.updated_at != latest.changed_at
-            )
+        if latest.accepted_event_ref is not None and (
+            authority.origin.event_ref != latest.accepted_event_ref
+            or authority.updated_at != latest.changed_at
         ):
             raise ValueError("ActorAuthority head origin does not match latest accepted event")
 
@@ -4046,17 +4079,22 @@ class ConsentGrantValues(FrozenModel):
     grantee_ref: str = Field(min_length=1)
     action_scope_refs: tuple[
         Literal[
-            "message_send", "media_send", "reaction_send", "read_only_tool",
-            "media_planning", "media_render", "media_inspection", "media_repair",
-        ], ...
+            "message_send",
+            "media_send",
+            "reaction_send",
+            "read_only_tool",
+            "media_planning",
+            "media_render",
+            "media_inspection",
+            "media_repair",
+        ],
+        ...,
     ] = Field(min_length=1)
     data_scope_refs: tuple[
         Literal["data:message_content", "data:user_profile", "data:attachment", "data:location"],
         ...,
     ] = ()
-    channel_scope_refs: tuple[
-        Literal["channel:qq", "channel:wechat", "channel:http"], ...
-    ] = ()
+    channel_scope_refs: tuple[Literal["channel:qq", "channel:wechat", "channel:http"], ...] = ()
     valid_from: datetime
     expires_at: datetime | None = None
     revocable: bool
@@ -4098,8 +4136,11 @@ class PrivacyPolicyValues(FrozenModel):
     ] = ()
     viewer_rule_refs: tuple[
         Literal[
-            "viewer:companion", "viewer:operator", "viewer:room_renderer",
-            "viewer:platform_adapter", "viewer:media_provider",
+            "viewer:companion",
+            "viewer:operator",
+            "viewer:room_renderer",
+            "viewer:platform_adapter",
+            "viewer:media_provider",
         ],
         ...,
     ] = ()
@@ -4328,7 +4369,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.31"
+    reducer_bundle_version: str = "world-v2-reducers.32"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)
@@ -4382,6 +4423,7 @@ class LedgerProjection(FrozenModel):
     media_deliveries: tuple[MediaDeliveryShared, ...] = ()
     interaction_bids: tuple[InteractionBidProjection, ...] = ()
     interaction_bid_proposals: tuple[InteractionBidProposalProjection, ...] = ()
+    media_thread_proposals: tuple[MediaDeliveryThreadProposalProjection, ...] = ()
     budget_accounts: tuple[BudgetAccount, ...] = ()
     budget_reservations: tuple[BudgetReservation, ...] = ()
     trigger_processes: tuple[TriggerProcess, ...] = ()

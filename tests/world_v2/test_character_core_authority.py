@@ -1717,7 +1717,7 @@ def test_sqlite_migrates_nonempty_v14_to_v15_replays_and_rejects_tamper(
     downgrade(tamper=False)
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
     projected = migrated.project()
-    assert projected.reducer_bundle_version == "world-v2-reducers.31"
+    assert projected.reducer_bundle_version == "world-v2-reducers.32"
     assert projected.world_revision == 2
     assert projected.logical_time == NOW
     assert projected.character_core is None

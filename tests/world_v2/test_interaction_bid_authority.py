@@ -125,6 +125,6 @@ def test_sqlite_migrates_v30_head_without_fabricating_interaction_bids(tmp_path)
         legacy_hash = hashlib.sha256(json.dumps(semantic, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
         connection.execute("UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ?, state_hash = '' WHERE world_id = ?", (legacy_hash, "world-v2-reducers.30", WORLD))
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.31"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.32"
     assert migrated.project().interaction_bids == ()
     assert migrated.rebuild() == migrated.project()
