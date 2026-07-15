@@ -35,6 +35,7 @@ from companion_daemon.world_v2.fact_v2_reducers import (
     materialized_fact_v2_as_projection_change,
 )
 from companion_daemon.world_v2.fact_v2_atomic_recorder import FactV2AtomicRecorder
+from companion_daemon.world_v2.fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.batch_invariants import validate_commit_batch
 from companion_daemon.world_v2.event_catalog import event_contract
@@ -163,8 +164,13 @@ def _cursor(ledger: SQLiteWorldLedger) -> ProjectionCursor:
     )
 
 
-def _bound(tmp_path, *, accepted_batch_issuer: AcceptedLedgerBatchIssuer | None = None):
-    ledger = SQLiteWorldLedger(
+def _bound(
+    tmp_path,
+    *,
+    accepted_batch_issuer: AcceptedLedgerBatchIssuer | None = None,
+    ledger: SQLiteWorldLedger | None = None,
+):
+    ledger = ledger or SQLiteWorldLedger(
         path=tmp_path / "fact-candidate.sqlite3",
         world_id=WORLD_ID,
         accepted_batch_issuer=accepted_batch_issuer,
@@ -524,3 +530,60 @@ def test_atomic_recorder_materializes_exact_acceptance_then_fact_batch(tmp_path)
     )
     assert len(ledger.rebuild().facts) == 1
     ledger.close()
+
+
+def test_fact_v2_production_composition_root_commits_and_reopens(tmp_path) -> None:
+    path = tmp_path / "fact-v2-production.sqlite3"
+    runtime = FactV2AcceptanceRuntime.open(path=path, world_id=WORLD_ID)
+    ledger, _, _, _, _, _, _, proposal = _bound(tmp_path, ledger=runtime.ledger)
+    cursor = _cursor(ledger)
+    proposal_handle = runtime.pin_proposal(cursor=cursor, proposal_id=proposal.proposal_id)
+    intent = proposal.proposed_changes[0].payload
+    from companion_daemon.world_v2.fact_accepted_contracts import rehydrate_fact_commit_intent_v2_json
+
+    sources = runtime.resolve_sources(
+        cursor=cursor,
+        intent=rehydrate_fact_commit_intent_v2_json(intent.canonical_json),
+        locators=(
+            ObservationEventLocator.for_message(
+                world_id=WORLD_ID,
+                observation_id="observation:message:1",
+                source="test",
+                source_event_id="source:fact-candidate",
+            ),
+        ),
+    )
+    prepared = runtime.prepare(
+        proposal_handle=proposal_handle,
+        change_id=proposal.proposed_changes[0].change_id,
+        policy=FactCommitPolicyResolutionV2(
+            cardinality="single", policy_refs=("policy:fact-commit.2",)
+        ),
+    )
+    request = FactV2AcceptanceEnvelopeRequestV2(
+        acceptance_id="acceptance:fact-v2:production",
+        acceptance_event_id="event:acceptance:fact-v2:production",
+        acceptance_causation_id=runtime.proposal_audit_event_ref(
+            proposal_handle=proposal_handle
+        ),
+        cursor=cursor,
+        world_id=WORLD_ID,
+        logical_time=NOW,
+        created_at=NOW,
+        actor="agent:companion",
+        source="test",
+        trace_id="trace:fact-v2:production",
+        correlation_id="correlation:fact-v2:production",
+    )
+    assert runtime.accept(
+        request=request,
+        proposal_handle=proposal_handle,
+        prepared=prepared,
+        sources=sources,
+    ).world_revision == 3
+    runtime.close()
+
+    reopened = FactV2AcceptanceRuntime.open(path=path, world_id=WORLD_ID)
+    assert len(reopened.ledger.project().facts) == 1
+    assert reopened.ledger.rebuild() == reopened.ledger.project()
+    reopened.close()
