@@ -751,6 +751,10 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
         return tuple(sorted(set(item.source_refs)))
     if slice_name == "advisories":
         return tuple(sorted(set(item.source_refs)))
+    if slice_name == "relevant_facts" and isinstance(item, FactProjection):
+        # The accepted Fact event is the whole immutable authority for the
+        # projection.  Its observation id stays an internal Fact anchor.
+        return (item.origin.accepted_event_ref,)
     if slice_name == "active_memory_candidates" and isinstance(item, MemoryRetrievalItem):
         return tuple(sorted({source.authority_event_ref for source in item.source_excerpts}))
 
@@ -775,6 +779,11 @@ def _typed_source_refs(slice_name: SliceName, item: BaseModel) -> tuple[str, ...
 
 
 def _typed_source_authorities(item: BaseModel) -> tuple[tuple[str, str, int, str], ...]:
+    if isinstance(item, FactProjection):
+        # The Fact reducer validates its immutable evidence closure.  Context
+        # pins the resulting accepted Fact event, while the retained evidence
+        # uses durable observation identities rather than committed event ids.
+        return ()
     authorities: set[tuple[str, str, int, str]] = set()
     values = getattr(item, "values", None)
     for evidence in (

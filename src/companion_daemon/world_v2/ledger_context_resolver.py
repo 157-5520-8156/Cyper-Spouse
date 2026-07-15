@@ -49,7 +49,7 @@ from .context_resolver import (
 from .ledger import LedgerPort
 from .memory_retrieval import MemoryRetrievalCompiler, MemoryRetrievalItem
 from .schema_core import PrivacyClass
-from .schemas import CommittedWorldEventRef, LedgerProjection
+from .schemas import CommittedWorldEventRef, FactProjection, LedgerProjection
 from .situation_compiler import SituationCompiler, request_from_ledger_projection
 
 
@@ -172,6 +172,11 @@ def _observation_event_aliases(projection: LedgerProjection) -> dict[str, str]:
 def _typed_refs(item: BaseModel, *, observation_aliases: dict[str, str]) -> tuple[str, ...] | None:
     if isinstance(item, MemoryRetrievalItem):
         return tuple(sorted({source.authority_event_ref for source in item.source_excerpts}))
+    if isinstance(item, FactProjection):
+        # A Fact's full assertion/evidence structure is committed by this
+        # exact Fact event. Its retained observation id is an internal anchor,
+        # not a second event authority that Context must resolve as an event.
+        return (item.origin.accepted_event_ref,)
     refs: set[str] = set()
     origin = getattr(item, "origin", None)
     for field in ("accepted_event_ref", "event_ref"):
@@ -179,7 +184,7 @@ def _typed_refs(item: BaseModel, *, observation_aliases: dict[str, str]) -> tupl
             refs.add(value)
     values = getattr(item, "values", None)
     for evidence in getattr(values, "source_evidence_refs", ()):
-        refs.add(evidence.ref_id)
+        refs.add(observation_aliases.get(evidence.ref_id, evidence.ref_id))
     for binding in getattr(values, "source_bindings", ()):
         # Receipt authority has a typed immutable hash but no committed world
         # revision.  It cannot satisfy a committed-event-only ledger resolver.
@@ -222,6 +227,12 @@ def _typed_authority_claims(
 ) -> tuple[tuple[str, int, str], ...] | None:
     """Return exact embedded event claims, or None for an incomplete claim."""
 
+    if isinstance(item, FactProjection):
+        # The source evidence remains immutable inside the Fact event payload
+        # and was verified by the Fact reducer. Context binds that complete
+        # payload through ``origin.accepted_event_ref`` instead of attempting
+        # to reinterpret its durable observation identifier as an event id.
+        return ()
     values = getattr(item, "values", None)
     claims: set[tuple[str, int, str]] = set()
     evidence_values = (

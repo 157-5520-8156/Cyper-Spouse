@@ -76,6 +76,17 @@ class _DraftChatModel:
         )
 
 
+class _CapturingDraftChatModel(_DraftChatModel):
+    """Keep the exact model request so a production turn can assert Context."""
+
+    def __init__(self) -> None:
+        self.requests: list[list[dict[str, str]]] = []
+
+    async def complete(self, messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        self.requests.append(messages)
+        return await super().complete(messages, temperature=temperature)
+
+
 class _DeliveredTransport:
     provider = "platform:test"
 
@@ -426,6 +437,64 @@ async def test_production_application_accepts_a_fact_outside_the_visible_reply_l
     assert len(projection.memory_candidates) == 1
     assert projection.memory_candidates[0].values.status == "active"
     assert retrieval.items[0].source_excerpts[0].text == "我最近很喜欢喝乌龙茶。"
+
+
+@pytest.mark.asyncio
+async def test_production_application_exposes_accepted_fact_memory_to_the_next_turn(
+    tmp_path: Path,
+) -> None:
+    """The next deliberation must see source text, not only a candidate identifier."""
+
+    chat = _CapturingDraftChatModel()
+    reply_model = ChatModelDeliberationAdapter(model=chat)
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "world-v2-next-turn-fact-memory.sqlite",
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=reply_model,
+        quick_recovery=reply_model,
+        fact_model=_FactChat(),
+        memory_model=_MemoryChat(),
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    try:
+        first = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:next-turn-fact-source",
+                text="我最近很喜欢喝乌龙茶。",
+                observed_at=NOW,
+                trace_id="trace:next-turn-fact-source",
+            )
+        )
+        background = await app.drain_background_once()
+        second = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:next-turn-memory-consumer",
+                text="你还记得我刚才说的偏好吗？",
+                observed_at=NOW,
+                trace_id="trace:next-turn-memory-consumer",
+            )
+        )
+    finally:
+        app.close()
+
+    assert first.status == "action_authorized"
+    assert background is not None and background.work_status == "accepted"
+    assert second.status == "action_authorized"
+    assert len(chat.requests) == 2
+
+    next_request = json.loads(chat.requests[1][1]["content"])["request"]
+    context = json.loads(next_request["model_content_json"])
+    memories = context["slices"]["active_memory_candidates"]
+    assert len(memories["items"]) == 1
+    memory = memories["items"][0]["value"]
+    assert memory["source_excerpts"][0]["text"] == "我最近很喜欢喝乌龙茶。"
 
 
 @pytest.mark.asyncio
