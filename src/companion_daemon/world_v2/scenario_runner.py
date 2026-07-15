@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 import json
 from pathlib import Path
@@ -26,7 +26,12 @@ from .production_turn_application import (
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
+from .occurrence_content_coordinator import (
+    OccurrenceContentCommitRequest,
+    OutcomeCandidateContent,
+)
 from .replay_evaluator import ReplayEvaluator
+from .room_projection import RoomProjectionMaterializer
 from .scenario_corpus import (
     SCENARIO_CORPUS_VERSION,
     TEST_ECONOMY_PROFILE_VERSION,
@@ -35,6 +40,7 @@ from .scenario_corpus import (
     verify_frozen_scenario_corpus,
 )
 from .simulator_adapters import SimulatorIdentityResolver
+from .schemas import DueWindow, EvidenceRef, OutcomeObservation, WorldOccurrenceProjection
 
 
 class ScenarioVerificationError(AssertionError):
@@ -44,7 +50,7 @@ class ScenarioVerificationError(AssertionError):
 # Filled after the complete, fixed fake suite has been run.  A change to this
 # value is a new offline mechanism baseline, not evidence of a human-likeness
 # improvement.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "236f49cb889f21cdb78fbd4ef1575094a64a661f4d714a51e9f2c9966637cad3"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "da4780e374ddbcf36eef7f4fa98d538098fc93b06f893f15cbdacd60c091f969"
 
 
 class _FixedScenarioRouter:
@@ -122,6 +128,8 @@ class ScenarioRunResult:
     replay_passed: bool
     model_calls: int
     observation_count: int
+    trigger_kinds: tuple[str, ...]
+    room_view_hash: str
     verification_errors: tuple[str, ...]
 
     @property
@@ -142,6 +150,8 @@ class ScenarioRunResult:
             "replay_passed": self.replay_passed,
             "model_calls": self.model_calls,
             "observation_count": self.observation_count,
+            "trigger_kinds": self.trigger_kinds,
+            "room_view_hash": self.room_view_hash,
             "verification_errors": self.verification_errors,
         }
 
@@ -219,22 +229,37 @@ class ScenarioRunner:
 
         app = build_application()
         try:
-            inbound = dict(
-                platform="simulator",
-                platform_user_id="scenario",
-                platform_message_id=case.entry.scenario_turn_id,
-                text=case.user_text,
-                observed_at=now,
-                trace_id=f"trace:phase8:{case.entry.scenario_turn_id}",
-                coalescing_metadata={"scenario_family": case.entry.scenario_family},
-            )
-            await app.inbound(**inbound)
-            if case.fault == "duplicate_ingress":
+            if case.execution == "seeded_world_outcome":
+                await self._seed_world_outcome(app=app, case=case, now=now)
+            for index, turn in enumerate(case.turns, start=1):
+                inbound = dict(
+                    platform="simulator",
+                    platform_user_id="scenario",
+                    platform_message_id=f"{case.entry.scenario_turn_id}:{turn.step_id}",
+                    text=turn.text,
+                    # The scripted sequence is causal order, not a claim that
+                    # logical time advanced.  Advancing time has to travel
+                    # through ``app.tick`` with its clock authority.
+                    observed_at=now,
+                    trace_id=f"trace:phase8:{case.entry.scenario_turn_id}:{turn.step_id}",
+                    coalescing_metadata={
+                        "scenario_family": case.entry.scenario_family,
+                        "scenario_step": turn.step_id,
+                    },
+                )
                 await app.inbound(**inbound)
+                if case.fault == "duplicate_ingress" and index == 1:
+                    await app.inbound(**inbound)
+                # An interruption deliberately arrives before the old action is
+                # dispatched.  Every other scripted turn reaches the same
+                # application-owned ActionPump before the next ingress.
+                if case.execution != "interruption":
+                    await app.drain_actions_once()
             if case.fault == "restart_before_dispatch":
                 app.close()
                 app = build_application()
-            await app.drain_actions_once()
+            if case.execution == "interruption":
+                await app.drain_actions_once()
             evidence = app.export_replay_evidence()
         finally:
             app.close()
@@ -243,6 +268,8 @@ class ScenarioRunner:
         projection = evidence.projection
         action_states = tuple(item.state for item in projection.actions)
         observation_count = sum(item == "ObservationRecorded" for item in event_types)
+        trigger_kinds = tuple(sorted({item.process_kind for item in projection.trigger_processes}))
+        room_view_json = RoomProjectionMaterializer.materialize(projection).model_dump_json()
         replay = ReplayEvaluator().evaluate(evidence=evidence)
         errors = self._verify(
             case=case,
@@ -251,6 +278,8 @@ class ScenarioRunner:
             replay_passed=replay.passed,
             model_calls=len(model.calls),
             observation_count=observation_count,
+            trigger_kinds=trigger_kinds,
+            room_view_json=room_view_json,
         )
         output_hash = (
             hashlib.sha256(transport.bodies[-1].encode("utf-8")).hexdigest()
@@ -270,8 +299,113 @@ class ScenarioRunner:
             replay_passed=replay.passed,
             model_calls=len(model.calls),
             observation_count=observation_count,
+            trigger_kinds=trigger_kinds,
+            room_view_hash=hashlib.sha256(room_view_json.encode("utf-8")).hexdigest(),
             verification_errors=errors,
         )
+
+    @staticmethod
+    async def _seed_world_outcome(
+        *, app, case: ScenarioCase, now: datetime
+    ) -> None:
+        """Seed one durable, private occurrence through application commands.
+
+        This intentionally stops at the open outcome deliberation trigger.
+        Outcome → NPC appraisal → Affect is separately exercised with
+        deliberation models by the production recovery suite; this corpus must
+        not pretend that a chat-only fake model settled a world outcome.
+        """
+
+        world_id = f"world:phase8-scenario:{case.entry.scenario_turn_id}"
+        first_tick = now + timedelta(minutes=1)
+        second_tick = now + timedelta(minutes=2)
+        occurrence_id = f"occurrence:phase8:{case.entry.scenario_turn_id}"
+        candidate_ref = f"candidate:phase8:{case.entry.scenario_turn_id}:settled"
+        result_id = f"result:phase8:{case.entry.scenario_turn_id}:settled"
+        await app.tick(
+            tick_id=f"{case.entry.scenario_turn_id}:seed",
+            logical_time_from=now,
+            logical_time_to=first_tick,
+            observed_at=first_tick,
+            trace_id=f"trace:phase8:{case.entry.scenario_turn_id}:seed",
+            causation_id=f"scheduler:phase8:{case.entry.scenario_turn_id}:seed",
+            correlation_id=f"correlation:phase8:{case.entry.scenario_turn_id}",
+            reason="phase8_seeded_outcome",
+        )
+        candidate = OutcomeCandidateContent(
+            candidate_result_ref=candidate_ref,
+            result_id=result_id,
+            result_payload_ref=f"payload:phase8:{case.entry.scenario_turn_id}:settled",
+            result_payload_hash="sha256:" + "e" * 64,
+            privacy_class="private",
+            content_ref=f"content:phase8:{case.entry.scenario_turn_id}:settled",
+            text="这件小事有了一个可验证的结果，但仍然只属于角色自己的生活。",
+        )
+        await app.commit_occurrence(
+            OccurrenceContentCommitRequest(
+                world_id=world_id,
+                occurrence=WorldOccurrenceProjection(
+                    occurrence_id=occurrence_id,
+                    entity_revision=1,
+                    trigger_ref=f"trigger:phase8:{case.entry.scenario_turn_id}",
+                    participant_refs=("agent:companion",),
+                    location_ref="room:scenario-private",
+                    time_window=DueWindow(
+                        opens_at=first_tick, closes_at=first_tick + timedelta(minutes=10)
+                    ),
+                    candidate_outcome_refs=(candidate_ref,),
+                    visibility="private",
+                    status="committed",
+                ),
+                candidate_contents=(candidate,),
+                change_id=f"change:phase8:{case.entry.scenario_turn_id}:occurrence",
+                transition_id=f"transition:phase8:{case.entry.scenario_turn_id}:occurrence",
+                evidence_refs=(
+                    EvidenceRef(
+                        ref_id=f"clock:{first_tick.isoformat()}",
+                        evidence_type="clock_observation",
+                        claim_purpose="current_fact",
+                    ),
+                ),
+                logical_time=first_tick,
+                created_at=first_tick,
+                actor="system:phase8-scenario",
+                source="phase8-scenario",
+                trace_id=f"trace:phase8:{case.entry.scenario_turn_id}:occurrence",
+                causation_id=f"cause:phase8:{case.entry.scenario_turn_id}:occurrence",
+                correlation_id=f"correlation:phase8:{case.entry.scenario_turn_id}",
+            )
+        )
+        await app.tick(
+            tick_id=f"{case.entry.scenario_turn_id}:activate",
+            logical_time_from=first_tick,
+            logical_time_to=second_tick,
+            observed_at=second_tick,
+            trace_id=f"trace:phase8:{case.entry.scenario_turn_id}:activate",
+            causation_id=f"scheduler:phase8:{case.entry.scenario_turn_id}:activate",
+            correlation_id=f"correlation:phase8:{case.entry.scenario_turn_id}",
+            reason="phase8_activate_seeded_outcome",
+        )
+        observation = OutcomeObservation(
+            schema_version="world-v2.1",
+            observation_id=f"observation:phase8:{case.entry.scenario_turn_id}:settled",
+            world_id=world_id,
+            logical_time=second_tick,
+            created_at=second_tick,
+            trace_id=f"trace:phase8:{case.entry.scenario_turn_id}:outcome",
+            causation_id=f"sensor:phase8:{case.entry.scenario_turn_id}",
+            correlation_id=f"correlation:phase8:{case.entry.scenario_turn_id}",
+            occurrence_id=occurrence_id,
+            source_kind="committed_world_event",
+            source_refs=(f"event:trigger:clock:{case.entry.scenario_turn_id}:activate",),
+            observed_payload_ref=f"sensor:phase8:{case.entry.scenario_turn_id}:settled",
+            observed_payload_hash="a" * 64,
+            observed_at=second_tick,
+            confidence_bp=9200,
+        )
+        recorded = await app.record_outcome_observation(observation)
+        if await app.record_outcome_observation(observation) != recorded:
+            raise ScenarioVerificationError("outcome observation ingress was not effect-once")
 
     async def run_frozen_suite(self, *, limit: int | None = None) -> ScenarioSuiteResult:
         cases = verify_frozen_scenario_corpus()
@@ -303,6 +437,8 @@ class ScenarioRunner:
         replay_passed: bool,
         model_calls: int,
         observation_count: int,
+        trigger_kinds: tuple[str, ...],
+        room_view_json: str,
     ) -> tuple[str, ...]:
         errors: list[str] = []
         required = {
@@ -311,6 +447,7 @@ class ScenarioRunner:
             "ExternalObservationRecorded",
             "ExternalObservationProcessed",
         }
+        required.update(case.required_event_types)
         missing = sorted(required.difference(event_types))
         if missing:
             errors.append("missing_required_events:" + ",".join(missing))
@@ -318,7 +455,16 @@ class ScenarioRunner:
             "provider_failed": "failed",
             "provider_unknown": "unknown",
         }.get(case.fault, "delivered")
-        if action_states != (expected_terminal,):
+        if case.execution == "interruption":
+            # The fixture's first action belongs to the pre-interruption
+            # ingress and the second to the interrupting ingress.  A mere
+            # unordered "one delivered, one authorized" check would accept
+            # the exact regression this scenario is meant to catch: sending
+            # stale content, then stranding the new response.
+            expected_interruption_states = ("authorized", "delivered")
+            if action_states != expected_interruption_states:
+                errors.append("interruption_old_action_was_not_gated")
+        elif action_states != (expected_terminal,) * len(case.turns):
             errors.append("terminal_action_state_mismatch")
         required_terminal_event = {
             "provider_failed": "ActionFailed",
@@ -330,11 +476,22 @@ class ScenarioRunner:
             errors.append("replay_evaluator_failed")
         # test-economy-v1: regular chat has exactly one main fake call; this
         # runner deliberately does not configure background audit models.
-        if model_calls != 1:
+        if model_calls != len(case.turns):
             errors.append("test_economy_model_call_budget_exceeded")
-        expected_observations = 1
+        expected_observations = len(case.turns)
         if observation_count != expected_observations:
             errors.append("ingress_idempotency_failed")
+        forbidden = sorted(set(case.forbidden_event_types).intersection(event_types))
+        if forbidden:
+            errors.append("forbidden_events_present:" + ",".join(forbidden))
+        missing_triggers = sorted(set(case.required_trigger_kinds).difference(trigger_kinds))
+        if missing_triggers:
+            errors.append("missing_required_triggers:" + ",".join(missing_triggers))
+        leaked_values = tuple(
+            value for value in case.forbidden_room_view_values if value in room_view_json
+        )
+        if leaked_values:
+            errors.append("room_projection_redaction_failed:" + ",".join(leaked_values))
         return tuple(errors)
 
 

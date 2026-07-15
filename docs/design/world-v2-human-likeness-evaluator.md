@@ -81,9 +81,11 @@ adapter 仍须从只读 fixture/replay/receipt/performance exports 重算这些 
 
 ### 离线机制回归（不是盲评）
 
-`world-v2-scenario-corpus.1` 冻结 120 个独立 scenario-turn（49 个 emotion-gold），每项都绑定输入与无前置事实 fixture 的 hash。`ScenarioRunner` 用固定 fake Flash 模型和固定 fake provider，为每项建立独立 SQLite World v2，再且只再经 `WorldV2TurnApplication.inbound → drain_actions_once → export_replay_evidence` 执行。它验证 Observation/Proposal/Action/receipt 的事件谓词、重复 ingress 的 effect-once、provider failure/unknown、dispatch 前重启恢复、replay hash 和 `test-economy-v1` 的一次主模型调用上限；完整套件还与版本化 manifest hash 精确比对。
+`world-v2-scenario-corpus.2` 冻结 120 个 scenario-turn（49 个 emotion-gold）和其可执行脚本 hash。所有条目绑定输入、事实和脚本；其中 `npc_world_impact.01` 经应用层 `tick → commit_occurrence → record_outcome_observation` 建立 sidecar-backed 私有 occurrence、结果候选、外部 observation 和**打开的** outcome trigger；它尚未结算 outcome、运行 NPC appraisal 或证明该 appraisal 改变 reply。`plan_change.01` / `reply_later.01` 是连续两轮的 Context/表达连续性 control，尚不等同于 domain Plan transition 或真正延迟的 scheduled reply。`interruption.01` 与 `media_opportunity.01` 在旧 Action dispatch 前插话，`projection_gap.01` 则明确断言 preview 不会越权出现在普通聊天路径。其余条目仍是小型单轮 control，避免为了凑“多回合”把不必要的历史强加给每一个 gold 输入。
 
-CI 通过 `scripts/verify_world_v2_scenarios.py` 导出哈希 manifest。当前首纵切的 120 条均为**无前置事实的独立 ingress**：family/emotion 标签冻结了后续多回合 fixture 的覆盖目标，但尚不证明 NPC 前置、计划/拖延、`reply_later`、插话重审、媒体和 projection gap 的特定世界闭环。该产物只能作为机制回归证据，**绝不**代替 bare/archive/v2 的三 seed 输出、匿名化、两份独立评审或正式 `human-likeness-eval-v1` baseline；没有后者仍必须是评估 blocker。
+`ScenarioRunner` 用固定 fake Flash 模型和固定 fake provider，为每项建立独立 SQLite World v2，只通过 `WorldV2TurnApplication` 的 ingress、clock、occurrence、outcome、ActionPump 和 replay-export seam 执行；它不会直接调用 reducer 或写 ledger。每个 fixture 同时冻结 required/forbidden event 谓词、required trigger kind、输入/事实/script hash，并验证 effect-once、provider failure/unknown、dispatch 前重启恢复、replay hash 及 `test-economy-v1` 的每个用户 turn 一次主模型调用上限。插话 fixture 进一步要求 Action 顺序精确为“旧 action 仍 gated、新 action delivered”，避免旧内容先发、再把新内容挂起的伪通过。runner 还会从 application 导出的不可变 projection 编译只读 Room view，断言 seeded private occurrence/result/location 和 preview/recipient 字符串都不泄露。`media_opportunity.01` 的**当前**断言是“插话不会自动交付 preview”；完整 render/inspection/preview 的 provider contract 仍由 Media v2 lifecycle suite 覆盖，不能把这个 chat fixture 误报为图片生成闭环。
+
+CI 通过 `scripts/verify_world_v2_scenarios.py` 导出版本化 manifest。该产物只能作为机制回归证据，**绝不**代替 bare/archive/v2 的三 seed 输出、匿名化、两份独立评审或正式 `human-likeness-eval-v1` baseline；没有后者仍必须是评估 blocker。
 
 ## 评分与门槛
 

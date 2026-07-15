@@ -16,13 +16,31 @@ from typing import Literal
 from .evaluation_artifacts import ScenarioCorpusEntry, corpus_digest
 
 
-SCENARIO_CORPUS_VERSION = "world-v2-scenario-corpus.1"
+SCENARIO_CORPUS_VERSION = "world-v2-scenario-corpus.2"
 TEST_ECONOMY_PROFILE_VERSION = "test-economy-v1"
 SCENARIO_CORPUS_SIZE = 120
 MINIMUM_EMOTION_GOLD_SIZE = 40
 ScenarioFault = Literal[
     "none", "provider_failed", "provider_unknown", "duplicate_ingress", "restart_before_dispatch"
 ]
+ScenarioExecution = Literal["chat", "interruption", "seeded_world_outcome"]
+
+
+@dataclass(frozen=True, slots=True)
+class ScenarioTurnStep:
+    """One immutable user turn in a seeded offline fixture.
+
+    The corpus deliberately stores the whole script instead of using a family
+    label as a proxy for history.  A runner therefore cannot silently turn a
+    plan/interruption/world scenario back into an isolated chat ingress.
+    """
+
+    step_id: str
+    text: str
+
+    def __post_init__(self) -> None:
+        if not self.step_id.strip() or not self.text.strip():
+            raise ValueError("scenario turn step requires an id and text")
 
 
 def _hash(value: object) -> str:
@@ -32,7 +50,7 @@ def _hash(value: object) -> str:
 
 @dataclass(frozen=True, slots=True)
 class ScenarioCase:
-    """One independently runnable World v2 scenario-turn.
+    """One independently runnable World v2 scenario fixture.
 
     ``fact_set`` is deliberately a bounded, immutable fixture rather than a
     synthetic claim that the runner has authored those facts into the world.
@@ -44,6 +62,12 @@ class ScenarioCase:
     user_text: str
     fact_set: tuple[tuple[str, str], ...]
     fault: ScenarioFault = "none"
+    turns: tuple[ScenarioTurnStep, ...] = ()
+    execution: ScenarioExecution = "chat"
+    required_event_types: tuple[str, ...] = ()
+    forbidden_event_types: tuple[str, ...] = ()
+    required_trigger_kinds: tuple[str, ...] = ()
+    forbidden_room_view_values: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.user_text.strip():
@@ -52,6 +76,20 @@ class ScenarioCase:
             raise ValueError("scenario text does not match its frozen input hash")
         if _hash(self.fact_set) != self.entry.fact_set_hash:
             raise ValueError("scenario fact set does not match its frozen fact hash")
+        turns = self.turns or (ScenarioTurnStep(step_id="turn.01", text=self.user_text),)
+        if turns[0].text != self.user_text:
+            raise ValueError("first scripted scenario turn must bind entry input text")
+        if len({item.step_id for item in turns}) != len(turns):
+            raise ValueError("scenario turn step ids must be unique")
+        if self.execution == "interruption" and len(turns) < 2:
+            raise ValueError("interruption fixture requires at least two turns")
+        if self.execution == "seeded_world_outcome" and len(turns) < 2:
+            raise ValueError("seeded outcome fixture requires a follow-up turn")
+        if set(self.required_event_types).intersection(self.forbidden_event_types):
+            raise ValueError("scenario cannot require and forbid the same event")
+        if any(not value for value in self.forbidden_room_view_values):
+            raise ValueError("forbidden room view values must be non-empty")
+        object.__setattr__(self, "turns", turns)
 
 
 _FAMILY_PROMPTS: tuple[tuple[str, str, bool, tuple[str, ...]], ...] = (
@@ -75,6 +113,93 @@ _FAMILY_PROMPTS: tuple[tuple[str, str, bool, tuple[str, ...]], ...] = (
 )
 
 
+def _script_for(
+    *, family: str, ordinal: int, prompt: str
+) -> tuple[
+    tuple[ScenarioTurnStep, ...],
+    ScenarioExecution,
+    tuple[str, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+]:
+    """Return the explicit mechanism script for the non-chat seed of a family.
+
+    Remaining corpus members stay intentionally small one-turn controls.  The
+    first member of these families is a *real*, multi-turn regression fixture,
+    not a wording variant carrying an aspirational label.
+    """
+
+    if ordinal != 1:
+        return (), "chat", (), (), ()
+    if family == "npc_world_impact":
+        return (
+            (
+                ScenarioTurnStep("turn.01", prompt),
+                ScenarioTurnStep("turn.02", "那件事后来有变化吗？你还会在意吗？"),
+            ),
+            "seeded_world_outcome",
+            ("WorldOccurrenceCommitted", "OutcomeObservationRecorded", "ActionAuthorized"),
+            (),
+            ("outcome_deliberation",),
+        )
+    if family == "plan_change":
+        return (
+            (
+                ScenarioTurnStep("turn.01", "我们原本说好明天一起去看展。"),
+                ScenarioTurnStep("turn.02", prompt),
+            ),
+            "chat",
+            ("ExpressionPlanAccepted", "ExpressionBeatAuthorized"),
+            (),
+            (),
+        )
+    if family == "reply_later":
+        return (
+            (
+                ScenarioTurnStep("turn.01", prompt),
+                ScenarioTurnStep("turn.02", "我回来啦，刚才那件事你还记得吗？"),
+            ),
+            "chat",
+            ("ExpressionPlanAccepted", "ExpressionPlanCompleted"),
+            (),
+            (),
+        )
+    if family == "interruption":
+        return (
+            (
+                ScenarioTurnStep("turn.01", "我本来想慢慢和你说今天的事。"),
+                ScenarioTurnStep("turn.02", prompt),
+            ),
+            "interruption",
+            ("TriggerProcessOpened", "ActionAuthorized"),
+            (),
+            ("expression_reconsideration",),
+        )
+    if family == "media_opportunity":
+        return (
+            (
+                ScenarioTurnStep("turn.01", prompt),
+                ScenarioTurnStep("turn.02", "先别急着发图，你先接住我刚刚的话。"),
+            ),
+            "interruption",
+            ("ObservationRecorded", "ActionAuthorized"),
+            ("MediaPreviewGenerated",),
+            ("expression_reconsideration",),
+        )
+    if family == "projection_gap":
+        return (
+            (
+                ScenarioTurnStep("turn.01", prompt),
+                ScenarioTurnStep("turn.02", "如果不能公开就直接说不能公开，不要编一个状态。"),
+            ),
+            "chat",
+            ("ObservationRecorded", "ActionDelivered"),
+            ("MediaPreviewGenerated",),
+            (),
+        )
+    return (), "chat", (), (), ()
+
+
 def _fault_for(*, family: str, ordinal: int) -> ScenarioFault:
     if family == "provider_timeout":
         return {
@@ -85,6 +210,20 @@ def _fault_for(*, family: str, ordinal: int) -> ScenarioFault:
     if family == "interruption" and ordinal == 1:
         return "duplicate_ingress"
     return "none"
+
+
+def _room_redactions_for(*, family: str, ordinal: int, turn_id: str) -> tuple[str, ...]:
+    """Private fixture authority that may never become a room-view string."""
+
+    if family == "npc_world_impact" and ordinal == 1:
+        return (
+            f"occurrence:phase8:{turn_id}",
+            f"result:phase8:{turn_id}:settled",
+            "room:scenario-private",
+        )
+    if family == "projection_gap" and ordinal == 1:
+        return ("preview:", "user:scenario")
+    return ()
 
 
 def _build_cases() -> tuple[ScenarioCase, ...]:
@@ -99,7 +238,22 @@ def _build_cases() -> tuple[ScenarioCase, ...]:
             scenario_id = f"{family}.scenario"
             turn_id = f"{family}.{ordinal:02d}"
             text = prompt if ordinal == 1 else f"{prompt}（场景固定变体 {ordinal}）"
-            facts: tuple[tuple[str, str], ...] = (("preconditions", "none"),)
+            turns, execution, required, forbidden, trigger_kinds = _script_for(
+                family=family, ordinal=ordinal, prompt=text
+            )
+            if turns:
+                text = turns[0].text
+            effective_turns = turns or (ScenarioTurnStep(step_id="turn.01", text=text),)
+            facts: tuple[tuple[str, str], ...] = (
+                ("preconditions", "seeded" if execution == "seeded_world_outcome" else "none"),
+                ("execution", execution),
+                # Bind the exact script that the runner will execute, including
+                # a one-turn control's otherwise implicit default step.
+                ("turn_script", _hash(tuple((item.step_id, item.text) for item in effective_turns))),
+                ("required_events", ",".join(required)),
+                ("forbidden_events", ",".join(forbidden)),
+                ("required_triggers", ",".join(trigger_kinds)),
+            )
             entry = ScenarioCorpusEntry(
                 scenario_turn_id=turn_id,
                 scenario_id=scenario_id,
@@ -115,6 +269,14 @@ def _build_cases() -> tuple[ScenarioCase, ...]:
                     user_text=text,
                     fact_set=facts,
                     fault=_fault_for(family=family, ordinal=ordinal),
+                    turns=effective_turns,
+                    execution=execution,
+                    required_event_types=required,
+                    forbidden_event_types=forbidden,
+                    required_trigger_kinds=trigger_kinds,
+                    forbidden_room_view_values=_room_redactions_for(
+                        family=family, ordinal=ordinal, turn_id=turn_id
+                    ),
                 )
             )
     if len(cases) != SCENARIO_CORPUS_SIZE:
@@ -128,7 +290,29 @@ SCENARIO_CASES = _build_cases()
 SCENARIO_CORPUS = tuple(case.entry for case in SCENARIO_CASES)
 # This is intentionally checked by ``verify_frozen_scenario_corpus``.  Update
 # it only with an explicit corpus-version bump and new evaluation baseline.
-FROZEN_SCENARIO_CORPUS_HASH = "b8ab6c3cc22b4c5e43223a1b79d0d70a7b0191c00db568fafc68b9cd933b4000"
+FROZEN_SCENARIO_CORPUS_HASH = "1bae561555e134708ac6572eb82062d3f63f46e3d22c64bd274419a3793ae65f"
+FROZEN_SCENARIO_CASES_HASH = "d5618a2c82deb2b3f9b327d9d5f849e79216927ae47568a7203ebd1bfd76e4b5"
+
+
+def scenario_cases_digest(cases: tuple[ScenarioCase, ...]) -> str:
+    """Hash the executable scripts and assertions, not merely their labels."""
+
+    return _hash(
+        [
+            {
+                "entry": item.entry.scenario_turn_id,
+                "turns": tuple((turn.step_id, turn.text) for turn in item.turns),
+                "execution": item.execution,
+                "fault": item.fault,
+                "required_event_types": item.required_event_types,
+                "forbidden_event_types": item.forbidden_event_types,
+                "required_trigger_kinds": item.required_trigger_kinds,
+                "forbidden_room_view_values": item.forbidden_room_view_values,
+                "fact_set": item.fact_set,
+            }
+            for item in cases
+        ]
+    )
 
 
 def verify_frozen_scenario_corpus() -> tuple[ScenarioCase, ...]:
@@ -139,11 +323,16 @@ def verify_frozen_scenario_corpus() -> tuple[ScenarioCase, ...]:
         raise RuntimeError(
             "scenario corpus digest drifted; bump its version and establish a new evaluation baseline"
         )
+    if scenario_cases_digest(SCENARIO_CASES) != FROZEN_SCENARIO_CASES_HASH:
+        raise RuntimeError(
+            "scenario fixture script digest drifted; bump its version and establish a new evaluation baseline"
+        )
     return SCENARIO_CASES
 
 
 __all__ = [
     "FROZEN_SCENARIO_CORPUS_HASH",
+    "FROZEN_SCENARIO_CASES_HASH",
     "MINIMUM_EMOTION_GOLD_SIZE",
     "SCENARIO_CASES",
     "SCENARIO_CORPUS",
@@ -151,6 +340,9 @@ __all__ = [
     "SCENARIO_CORPUS_VERSION",
     "ScenarioFault",
     "ScenarioCase",
+    "ScenarioExecution",
+    "ScenarioTurnStep",
     "TEST_ECONOMY_PROFILE_VERSION",
     "verify_frozen_scenario_corpus",
+    "scenario_cases_digest",
 ]

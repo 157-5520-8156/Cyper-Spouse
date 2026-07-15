@@ -6,11 +6,13 @@ import pytest
 
 from companion_daemon.world_v2.evaluation_artifacts import corpus_digest
 from companion_daemon.world_v2.scenario_corpus import (
+    FROZEN_SCENARIO_CASES_HASH,
     FROZEN_SCENARIO_CORPUS_HASH,
     MINIMUM_EMOTION_GOLD_SIZE,
     SCENARIO_CASES,
     SCENARIO_CORPUS,
     SCENARIO_CORPUS_SIZE,
+    scenario_cases_digest,
     verify_frozen_scenario_corpus,
 )
 from companion_daemon.world_v2.scenario_runner import ScenarioRunner
@@ -22,6 +24,7 @@ def test_frozen_phase8_corpus_has_required_family_emotion_and_hash_coverage() ->
     assert len(cases) == SCENARIO_CORPUS_SIZE == 120
     assert sum(item.entry.emotional_gold for item in cases) >= MINIMUM_EMOTION_GOLD_SIZE == 40
     assert corpus_digest(SCENARIO_CORPUS) == FROZEN_SCENARIO_CORPUS_HASH
+    assert scenario_cases_digest(SCENARIO_CASES) == FROZEN_SCENARIO_CASES_HASH
     assert len({item.entry.scenario_family for item in cases}) == 17
     assert all(item.entry.input_hash and item.entry.fact_set_hash for item in cases)
 
@@ -58,7 +61,27 @@ async def test_runner_fault_injection_covers_failed_receipt_and_duplicate_ingres
     assert restarted_result.passed
     assert restarted_result.terminal_action_states == ("delivered",)
     assert duplicate_result.passed
-    assert duplicate_result.observation_count == 1
+    assert duplicate_result.observation_count == len(duplicate.turns)
+
+
+@pytest.mark.asyncio
+async def test_seeded_multiturn_mechanism_cases_use_the_public_app_and_assert_predicates(tmp_path) -> None:
+    runner = ScenarioRunner(workdir=tmp_path)
+    by_family = {item.entry.scenario_family: item for item in SCENARIO_CASES if item.entry.scenario_turn_id.endswith(".01")}
+
+    outcome = await runner.run_case(by_family["npc_world_impact"])
+    reply_later = await runner.run_case(by_family["reply_later"])
+    interruption = await runner.run_case(by_family["interruption"])
+    media = await runner.run_case(by_family["media_opportunity"])
+    projection = await runner.run_case(by_family["projection_gap"])
+
+    assert all(item.passed for item in (outcome, reply_later, interruption, media, projection))
+    assert "OutcomeObservationRecorded" in outcome.event_types
+    assert "outcome_deliberation" in outcome.trigger_kinds
+    assert reply_later.observation_count == 2
+    assert "expression_reconsideration" in interruption.trigger_kinds
+    assert "MediaPreviewGenerated" not in media.event_types
+    assert "MediaPreviewGenerated" not in projection.event_types
 
 
 @pytest.mark.asyncio
