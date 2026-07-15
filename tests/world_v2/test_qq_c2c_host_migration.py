@@ -161,6 +161,83 @@ def test_qq_c2c_identity_is_one_recipient_to_one_explicit_reply_target() -> None
         resolver.resolve(platform="qq", platform_user_id="20002")
 
 
+def test_cli_defaults_a_compatible_private_text_deployment_to_world_v2(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import companion_daemon.napcat_cli as napcat_cli
+
+    monkeypatch.delenv("WORLD_V2_QQ_C2C_ENABLED", raising=False)
+    monkeypatch.delenv("WORLD_V2_QQ_C2C_MODE", raising=False)
+
+    assert napcat_cli.resolve_cli_world_v2_c2c_selection(
+        settings=Settings(
+            QQ_ADAPTER="napcat",
+            NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001",
+            NAPCAT_ALLOW_GROUP_MESSAGES="false",
+        ),
+        requested=None,
+    ) is True
+
+
+@pytest.mark.parametrize(
+    ("settings", "mode", "expected"),
+    (
+        (
+            Settings(QQ_ADAPTER="napcat", NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001,10002"),
+            "auto",
+            False,
+        ),
+        (
+            Settings(
+                QQ_ADAPTER="napcat",
+                NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001",
+                NAPCAT_ALLOW_GROUP_MESSAGES="true",
+            ),
+            "auto",
+            False,
+        ),
+        (
+            Settings(QQ_ADAPTER="napcat", NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001"),
+            "archive",
+            False,
+        ),
+    ),
+)
+def test_cli_migration_gate_archives_unsupported_or_explicitly_archived_qq_shapes(
+    monkeypatch: pytest.MonkeyPatch,
+    settings: Settings,
+    mode: str,
+    expected: bool,
+) -> None:
+    import companion_daemon.napcat_cli as napcat_cli
+
+    monkeypatch.delenv("WORLD_V2_QQ_C2C_ENABLED", raising=False)
+    monkeypatch.setenv("WORLD_V2_QQ_C2C_MODE", mode)
+
+    assert (
+        napcat_cli.resolve_cli_world_v2_c2c_selection(settings=settings, requested=None)
+        is expected
+    )
+
+
+def test_cli_forced_v2_rejects_an_unsupported_qq_shape(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import companion_daemon.napcat_cli as napcat_cli
+
+    monkeypatch.delenv("WORLD_V2_QQ_C2C_ENABLED", raising=False)
+    monkeypatch.setenv("WORLD_V2_QQ_C2C_MODE", "v2")
+
+    with pytest.raises(ValueError, match="requires exactly one"):
+        napcat_cli.resolve_cli_world_v2_c2c_selection(
+            settings=Settings(
+                QQ_ADAPTER="napcat",
+                NAPCAT_ALLOWED_PRIVATE_USER_IDS="10001,10002",
+            ),
+            requested=None,
+        )
+
+
 def test_qq_c2c_v2_host_has_no_legacy_chat_or_coalescer_imports() -> None:
     path = Path(__file__).parents[2] / "src/companion_daemon/world_v2/qq_c2c_host.py"
     tree = ast.parse(path.read_text(encoding="utf-8"))

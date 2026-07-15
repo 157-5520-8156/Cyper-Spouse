@@ -1,10 +1,13 @@
 """NapCat (OneBot v11) adapter CLI.
 
 The archive/compatibility lane below still uses the historical Engine and QQ
-coalescer.  When ``WORLD_V2_QQ_C2C_ENABLED`` (or ``--world-v2-c2c``) selects
-the dedicated C2C text lane, ``create_app`` returns before constructing either
-legacy authority.  The reverse-architecture guard enforces that boundary; it
-does not claim that the archive lane has itself migrated.
+coalescer.  The CLI defaults a *compatible*, single-recipient private-text
+configuration to the dedicated World v2 C2C lane.  ``--world-v2-c2c`` and
+``--archive-qq`` remain explicit overrides.  Unsupported shapes (groups,
+multiple private recipients, and non-text content) must remain on the chosen
+archive service or be rejected by the V2 service; an inbound event never
+crosses both authorities.  The reverse-architecture guard enforces that
+boundary; it does not claim that the archive lane has itself migrated.
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ import uvicorn
 from fastapi import FastAPI, Header, Request
 from fastapi.responses import JSONResponse
 
-from companion_daemon.config import get_settings
+from companion_daemon.config import Settings, get_settings
 from companion_daemon.emotion_reactions import qq_emoji_id
 from companion_daemon.models import CompanionReply, IncomingMessage
 from companion_daemon.onebot_adapter import (
@@ -52,6 +55,77 @@ from companion_daemon.world_clock import WorldClockDriver
 logger = logging.getLogger(__name__)
 
 NAPCAT_SCHEDULED_BUDGET = ResponseBudget(first_visible_by_ms=12_000, complete_by_ms=15_000)
+
+
+_TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
+_FALSE_VALUES = frozenset({"0", "false", "no", "off"})
+
+
+def _parse_optional_boolean(value: str | None, *, name: str) -> bool | None:
+    """Parse an unset/explicit migration switch without guessing its intent."""
+
+    if value is None or not value.strip():
+        return None
+    normalized = value.strip().lower()
+    if normalized in _TRUE_VALUES:
+        return True
+    if normalized in _FALSE_VALUES:
+        return False
+    raise ValueError(f"{name} must be one of true/false, not {value!r}")
+
+
+def _qq_c2c_v2_is_compatible(settings: Settings) -> bool:
+    """Whether this process can select the narrow V2 C2C adapter by default.
+
+    The V2 adapter deliberately has one relationship and supports private
+    text only.  Choosing it for a group-enabled or multi-recipient deployment
+    would turn otherwise valid traffic into ambiguous world ownership.  Those
+    deployments stay on the explicit archive route until their own V2 adapter
+    exists.
+    """
+
+    return (
+        not settings.napcat_allow_group_messages
+        and len(_parse_id_list(settings.napcat_allowed_private_user_ids)) == 1
+    )
+
+
+def resolve_cli_world_v2_c2c_selection(
+    *, settings: Settings, requested: bool | None
+) -> bool:
+    """Select exactly one QQ authority for the documented CLI entry point.
+
+    Precedence is intentionally simple: an argument wins; the legacy boolean
+    environment override remains supported; otherwise a compatible C2C-only
+    deployment defaults to World v2.  ``WORLD_V2_QQ_C2C_MODE=archive`` is the
+    explicit migration escape hatch, while ``=v2`` verifies that the current
+    deployment is actually compatible instead of silently narrowing it.
+    """
+
+    if requested is not None:
+        return requested
+
+    legacy_override = _parse_optional_boolean(
+        os.getenv("WORLD_V2_QQ_C2C_ENABLED"), name="WORLD_V2_QQ_C2C_ENABLED"
+    )
+    if legacy_override is not None:
+        return legacy_override
+
+    mode = os.getenv("WORLD_V2_QQ_C2C_MODE", "auto").strip().lower() or "auto"
+    if mode == "archive":
+        return False
+    compatible = _qq_c2c_v2_is_compatible(settings)
+    if mode == "v2":
+        if not compatible:
+            raise ValueError(
+                "WORLD_V2_QQ_C2C_MODE=v2 requires exactly one "
+                "NAPCAT_ALLOWED_PRIVATE_USER_IDS entry and "
+                "NAPCAT_ALLOW_GROUP_MESSAGES=false"
+            )
+        return True
+    if mode != "auto":
+        raise ValueError("WORLD_V2_QQ_C2C_MODE must be one of auto/v2/archive")
+    return compatible
 
 
 def onebot_image_dispatch_acceptance(result: object | None) -> DispatchAcceptance:
@@ -152,9 +226,13 @@ def create_app(
     else:
         raise ValueError(f"unsupported OneBot adapter: {adapter}")
     if world_v2_c2c is None:
-        world_v2_c2c = os.getenv("WORLD_V2_QQ_C2C_ENABLED", "").strip().lower() in {
-            "1", "true", "yes", "on"
-        }
+        # Direct programmatic construction retains the historical opt-in
+        # behavior.  The documented CLI entry point below calls
+        # ``resolve_cli_world_v2_c2c_selection`` to make a compatible C2C
+        # deployment V2-by-default without surprising embedded callers.
+        world_v2_c2c = _parse_optional_boolean(
+            os.getenv("WORLD_V2_QQ_C2C_ENABLED"), name="WORLD_V2_QQ_C2C_ENABLED"
+        ) or False
     if world_v2_c2c:
         # This is a separate, text-only v2 lane.  It intentionally returns
         # before building CompanionEngine, QQMessageCoalescer, or legacy
@@ -460,8 +538,18 @@ def _run_cli(*, default_adapter: str) -> None:
     parser.add_argument("--fake", action="store_true", help="Use the local fake model.")
     parser.add_argument(
         "--world-v2-c2c",
-        action="store_true",
-        help="Use the opt-in World v2 C2C text-only lane (no groups/media/stickers).",
+        action="store_const",
+        const=True,
+        default=None,
+        dest="world_v2_c2c",
+        help="Force the World v2 C2C text-only lane (no groups/media/stickers).",
+    )
+    parser.add_argument(
+        "--archive-qq",
+        action="store_const",
+        const=False,
+        dest="world_v2_c2c",
+        help="Force the archived QQ Engine/coalescer lane for this process.",
     )
     args = parser.parse_args()
 
@@ -474,7 +562,9 @@ def _run_cli(*, default_adapter: str) -> None:
                 create_app(
                     adapter=args.adapter,
                     use_fake_model=args.fake,
-                    world_v2_c2c=args.world_v2_c2c,
+                    world_v2_c2c=resolve_cli_world_v2_c2c_selection(
+                        settings=settings, requested=args.world_v2_c2c
+                    ),
                 ),
                 host=args.host,
                 port=args.port,

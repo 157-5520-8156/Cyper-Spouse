@@ -42,6 +42,19 @@ uses a public domain or leaves the machine.
    scripts/run_napcat_adapter.sh
    ```
 
+   The CLI now selects World v2 by default only when this is an unambiguous
+   private-text deployment: `NAPCAT_ALLOW_GROUP_MESSAGES=false` and exactly
+   one `NAPCAT_ALLOWED_PRIVATE_USER_IDS` entry.  In that mode groups,
+   attachments, stickers, and a second private recipient are intentionally
+   unsupported and are rejected by the V2 adapter; they never fall back into
+   the archived Engine in the same process.
+
+   Use `--archive-qq` (or `WORLD_V2_QQ_C2C_MODE=archive`) only to run the
+   archived compatibility lane deliberately.  `WORLD_V2_QQ_C2C_MODE=v2`
+   forces the selection but fails startup when the configuration is not the
+   one-recipient private-text shape.  `WORLD_V2_QQ_C2C_ENABLED=true|false`
+   remains a legacy explicit override while existing deployments are moved.
+
 5. Verify NapCat and the adapter independently:
 
    ```bash
