@@ -455,6 +455,36 @@ class AppraisalAcceptanceRuntime:
         )
         return self.ledger.commit_accepted(batch, expected_cursor=cursor)
 
+    def accept_runtime_owned(
+        self,
+        *,
+        handle: PinnedAppraisalProposalAuthorityHandle,
+        actor: str,
+        source: str,
+    ) -> CommitResult:
+        """Accept with provenance copied only from the pinned proposal event.
+
+        Runtime needs no caller-supplied timestamps or trace identifiers for a
+        persisted proposal.  Those values are already immutable authority on
+        the event that recorded it.  Completion occurs at the same logical
+        instant as the proposal, which is within the claimed lease by the
+        proposal reducer's own invariant.
+        """
+
+        proposal_event = object.__getattribute__(
+            handle, "_PinnedAppraisalProposalAuthorityHandle__proposal_event"
+        )
+        return self.accept(
+            handle=handle,
+            actor=actor,
+            source=source,
+            logical_time=proposal_event.logical_time,
+            created_at=proposal_event.created_at,
+            trace_id=proposal_event.trace_id,
+            correlation_id=proposal_event.correlation_id,
+            completed_at=proposal_event.logical_time,
+        )
+
 
 __all__ = [
     "APPRAISAL_ACCEPTANCE_POLICY_DIGEST",

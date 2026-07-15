@@ -21,6 +21,10 @@ from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .minimal_reply_events import minimal_reply_event_id
 from .appraisal_trigger import interaction_appraisal_trigger_events
 from .batch_invariants import interaction_appraisal_trigger_identity
+from .appraisal_acceptance_runtime import (
+    AppraisalAcceptanceError,
+    AppraisalAcceptanceRuntime,
+)
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -51,6 +55,8 @@ class WorldRuntime:
         reply_policy: ReplyBudgetPolicy | None = None,
         reply_recorder: MinimalReplyAtomicRecorder | None = None,
         interaction_appraisal_owner: str | None = None,
+        appraisal_acceptance: AppraisalAcceptanceRuntime | None = None,
+        appraisal_acceptance_actor: str | None = None,
     ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
@@ -68,6 +74,12 @@ class WorldRuntime:
         if interaction_appraisal_owner is not None and not interaction_appraisal_owner:
             raise ValueError("interaction appraisal owner must not be empty")
         self._interaction_appraisal_owner = interaction_appraisal_owner
+        if (appraisal_acceptance is None) != (appraisal_acceptance_actor is None):
+            raise ValueError("appraisal acceptance runtime and actor must be configured together")
+        if appraisal_acceptance is not None and appraisal_acceptance.ledger is not self._ledger:
+            raise ValueError("appraisal acceptance runtime must own this exact ledger")
+        self._appraisal_acceptance = appraisal_acceptance
+        self._appraisal_acceptance_actor = appraisal_acceptance_actor
         self._lock = asyncio.Lock()
 
     @classmethod
@@ -136,6 +148,108 @@ class WorldRuntime:
         else:
             projection, replay = self._ledger.project(), rebuild()
         return (evaluator or ReplayEvaluator()).evaluate(projection=projection, replay=replay)
+
+    async def accept_appraisal_proposal(self, proposal_id: str) -> RuntimeOutcome:
+        """Atomically consume one already-persisted appraisal proposal.
+
+        Proposal production remains outside this method; it may use an LLM or
+        a deterministic continuation, but it cannot materialize an accepted
+        effect.  This Runtime seam pins the exact current cursor and delegates
+        only to the opaque Appraisal acceptance recorder.
+        """
+
+        if self._appraisal_acceptance is None or self._appraisal_acceptance_actor is None:
+            raise ValueError("appraisal acceptance is not configured")
+        if not proposal_id:
+            raise ValueError("appraisal proposal id must not be empty")
+        async with self._lock:
+            projection = await self._project_for_write()
+            existing = next(
+                (item for item in projection.acceptance_decisions if item.proposal_id == proposal_id),
+                None,
+            )
+            if existing is not None:
+                located = await self._lookup_event_commit(existing.acceptance_event_ref or "")
+                if located is None:
+                    raise RuntimeError("accepted appraisal decision has no durable manifest")
+                manifest = located[0].payload()
+                trigger_id = manifest.get("trigger_id")
+                if not isinstance(trigger_id, str) or not trigger_id:
+                    raise RuntimeError("accepted appraisal manifest has no trigger identity")
+                proposal_event_ref = manifest.get("proposal_event_ref")
+                proposal_payload_hash = manifest.get("proposal_event_payload_hash")
+                if not isinstance(proposal_event_ref, str) or not isinstance(proposal_payload_hash, str):
+                    raise RuntimeError("accepted appraisal manifest has no proposal provenance")
+                proposal_located = await self._lookup_event_commit(proposal_event_ref)
+                if proposal_located is None or proposal_located[0].payload_hash != proposal_payload_hash:
+                    raise RuntimeError("accepted appraisal proposal provenance is not durable")
+                source_evidence_ref = proposal_located[0].payload().get("source_evidence_ref")
+                if not isinstance(source_evidence_ref, str) or not source_evidence_ref:
+                    raise RuntimeError("accepted appraisal proposal has no source evidence")
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:appraisal:{proposal_id}",
+                    trigger_id=trigger_id,
+                    observation_ref=source_evidence_ref,
+                    committed_world_revision=projection.world_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                    status="observed_only",
+                    projection_hint=f"world-revision:{projection.world_revision}",
+                )
+            proposal = next(
+                (item for item in projection.appraisal_proposals if item.proposal_id == proposal_id),
+                None,
+            )
+            if proposal is None:
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:appraisal:{proposal_id}",
+                    trigger_id=f"trigger:appraisal:{proposal_id}",
+                    committed_world_revision=projection.world_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                    status="deferred",
+                    deferred_refs=("appraisal.proposal_unavailable",),
+                    projection_hint=f"world-revision:{projection.world_revision}",
+                )
+            cursor = ProjectionCursor(
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                ledger_sequence=projection.ledger_sequence,
+            )
+            try:
+                handle = self._appraisal_acceptance.pin_proposal(cursor=cursor, proposal_id=proposal_id)
+                if self._ledger.blocks_event_loop:
+                    committed = await asyncio.to_thread(
+                        self._appraisal_acceptance.accept_runtime_owned,
+                        handle=handle,
+                        actor=self._appraisal_acceptance_actor,
+                        source="world-runtime:appraisal-acceptance",
+                    )
+                else:
+                    committed = self._appraisal_acceptance.accept_runtime_owned(
+                        handle=handle,
+                        actor=self._appraisal_acceptance_actor,
+                        source="world-runtime:appraisal-acceptance",
+                    )
+            except (AppraisalAcceptanceError, ConcurrencyConflict) as exc:
+                code = exc.code if isinstance(exc, AppraisalAcceptanceError) else "appraisal.stale_cursor"
+                return RuntimeOutcome(
+                    outcome_id=f"outcome:appraisal:{proposal_id}",
+                    trigger_id=proposal.trigger_id,
+                    observation_ref=proposal.source_evidence_ref,
+                    committed_world_revision=projection.world_revision,
+                    ledger_sequence=projection.ledger_sequence,
+                    status="deferred",
+                    deferred_refs=(code,),
+                    projection_hint=f"world-revision:{projection.world_revision}",
+                )
+        return RuntimeOutcome(
+            outcome_id=f"outcome:appraisal:{proposal_id}",
+            trigger_id=proposal.trigger_id,
+            observation_ref=proposal.source_evidence_ref,
+            committed_world_revision=committed.world_revision,
+            ledger_sequence=committed.ledger_sequence,
+            status="observed_only",
+            projection_hint=f"world-revision:{committed.world_revision}",
+        )
 
     async def ingest(self, observation: Observation) -> RuntimeOutcome:
         if observation.world_id != self._world_id:

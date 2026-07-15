@@ -10,6 +10,9 @@ from companion_daemon.world_v2.appraisal_acceptance_runtime import (
     appraisal_mutation_event_id,
 )
 from companion_daemon.world_v2.appraisal_events import appraisal_mutation_hash
+from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
+from companion_daemon.world_v2.ledger import WorldLedger
+from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import ProjectionCursor
 
 from test_appraisal_authority import (
@@ -127,3 +130,29 @@ def test_production_appraisal_runtime_replays_from_sqlite(tmp_path) -> None:
     assert reopened.ledger.project() == expected
     assert reopened.ledger.rebuild() == expected
     reopened.close()
+
+
+@pytest.mark.asyncio
+async def test_world_runtime_consumes_an_appraisal_proposal_idempotently() -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=WORLD_ID, accepted_batch_issuer=issuer)
+    acceptance = AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
+    runtime = WorldRuntime(
+        world_id=WORLD_ID,
+        ledger=ledger,
+        appraisal_acceptance=acceptance,
+        appraisal_acceptance_actor="worker:interaction-appraisal",
+    )
+    trigger, payload = _record_ready_proposal(acceptance)
+
+    first = await runtime.accept_appraisal_proposal(str(payload["proposal_id"]))
+    second = await runtime.accept_appraisal_proposal(str(payload["proposal_id"]))
+
+    projection = ledger.project()
+    assert first == second
+    assert first.trigger_id == trigger.trigger_id
+    assert first.status == "observed_only"
+    assert projection.appraisal_proposals == ()
+    assert projection.trigger_processes[0].state == "terminal"
+    assert len(projection.appraisals) == 1
+    assert len(projection.acceptance_decisions) == 1
