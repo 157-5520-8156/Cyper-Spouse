@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -8,7 +8,11 @@ from pydantic import BaseModel
 
 import companion_daemon.world_v2.ledger as ledger_module
 import companion_daemon.world_v2.sqlite_ledger as sqlite_ledger_module
-from companion_daemon.world_v2.context_capsule import ContextCapsuleCompiler
+from companion_daemon.world_v2.context_capsule import (
+    ContextCapsuleCompiler,
+    InnerAdvisoryCandidate,
+    InnerAdvisoryProjection,
+)
 from companion_daemon.world_v2.context_resolver import query_from_projection
 from companion_daemon.world_v2.ledger import LedgerPort, WorldLedger
 from companion_daemon.world_v2.ledger_context_resolver import (
@@ -17,7 +21,7 @@ from companion_daemon.world_v2.ledger_context_resolver import (
     _bounded_domain_items,
     context_capsule_compiler_from_ledger,
 )
-from companion_daemon.world_v2.schemas import WorldEvent
+from companion_daemon.world_v2.schemas import BudgetAccount, BudgetReservation, WorldEvent
 from companion_daemon.world_v2.situation_compiler import SituationCompiler
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from test_appraisal_authority import (
@@ -183,11 +187,155 @@ def test_real_ledger_resolves_situation_core_and_authoritative_empty_domains(
     assert first.open_threads.availability == "available"
     assert first.active_memory_candidates.availability == "available"
     assert first.relationship_slice.availability == "unavailable"
+    # These are deliberately not "empty".  No PrivateImpression reducer is
+    # installed yet, and advisories exist only as a source-bound per-turn
+    # overlay below; neither absence may be mistaken for an authority result.
     assert first.private_impressions.availability == "unavailable"
+    assert first.advisories.availability == "unavailable"
     assert counted.project_at_calls == 2
     # Situation and CharacterCore request only their consumed refs; no full replay API exists.
     assert all(len(batch) <= 1 for batch in counted.resolved_batches)
     assert set(counted.lookups) == {core.origin.accepted_event_ref}
+
+
+def test_budget_accounts_are_source_bound_to_their_complete_event_lineage() -> None:
+    world_id = "world:context-budget-authority"
+    ledger = WorldLedger.in_memory(world_id=world_id)
+    account = BudgetAccount(
+        account_id="account:chat",
+        category="chat",
+        window_id="window:day",
+        limit=100,
+    )
+    reservation = BudgetReservation(
+        reservation_id="reservation:chat",
+        account_id=account.account_id,
+        action_id="action:chat",
+        category="chat",
+        amount_limit=7,
+    )
+    ledger.commit(
+        [
+            _event(world_id),
+            WorldEvent.from_payload(
+                schema_version="world-v2.1",
+                event_id="event:budget-account",
+                world_id=world_id,
+                event_type="BudgetAccountConfigured",
+                logical_time=NOW,
+                created_at=NOW,
+                actor="system:test",
+                source="test",
+                trace_id="trace:budget",
+                causation_id="cause:budget-account",
+                correlation_id="correlation:budget",
+                idempotency_key="identity:budget-account",
+                payload={"account": account.model_dump(mode="json")},
+            ),
+        ],
+        expected_world_revision=0,
+        expected_deliberation_revision=0,
+    )
+    ledger.commit(
+        [
+            WorldEvent.from_payload(
+                schema_version="world-v2.1",
+                event_id="event:budget-reserved",
+                world_id=world_id,
+                event_type="BudgetReserved",
+                logical_time=NOW,
+                created_at=NOW,
+                actor="system:test",
+                source="test",
+                trace_id="trace:budget",
+                causation_id="cause:budget-reserved",
+                correlation_id="correlation:budget",
+                idempotency_key="identity:budget-reserved",
+                payload={"reservation": reservation.model_dump(mode="json")},
+            )
+        ],
+        expected_world_revision=2,
+        expected_deliberation_revision=0,
+    )
+
+    projection = ledger.project()
+    query = query_from_projection(
+        projection, actor_ref="actor:companion", trigger_ref="event:budget-reserved"
+    )
+    capsule = _compiler(ledger).compile(query)
+    replay = _compiler(ledger).compile(query)
+
+    assert replay.model_dump_json() == capsule.model_dump_json()
+    assert capsule.action_budget.availability == "available"
+    assert len(capsule.action_budget.items) == 1
+    item = capsule.action_budget.items[0]
+    assert '"reserved":7' in item.payload_json
+    assert {binding.ref for binding in item.source_bindings} == {
+        "event:budget-account",
+        "event:budget-reserved",
+    }
+
+
+def test_advisory_overlay_is_available_only_after_same_cursor_source_binding() -> None:
+    world_id = "world:context-advisory-overlay"
+    ledger = _empty_ledger(world_id=world_id)
+    ledger.commit(
+        [
+            WorldEvent.from_payload(
+                schema_version="world-v2.1",
+                event_id="event:clock",
+                world_id=world_id,
+                event_type="ClockAdvanced",
+                logical_time=NOW,
+                created_at=NOW,
+                actor="system:test",
+                source="test",
+                trace_id="trace:advisory",
+                causation_id="cause:clock",
+                correlation_id="correlation:advisory",
+                idempotency_key="identity:clock",
+                payload={
+                    "logical_time_from": (NOW - timedelta(minutes=1)).isoformat(),
+                    "logical_time_to": NOW.isoformat(),
+                },
+            )
+        ],
+        expected_world_revision=1,
+        expected_deliberation_revision=0,
+    )
+    projection = ledger.project()
+    query = query_from_projection(
+        projection, actor_ref="actor:companion", trigger_ref="event:start"
+    )
+    assert query.logical_time is not None
+    advisory = InnerAdvisoryProjection(
+        advisory_id="advisory:1",
+        kind="appraisal.negative",
+        source_refs=("event:start",),
+        candidate_refs=("advisory:1:candidate:1",),
+        candidates=(
+            InnerAdvisoryCandidate(
+                candidate_ref="advisory:1:candidate:1",
+                value="disappointment",
+                weight_bp=7000,
+                confidence_bp=7000,
+            ),
+        ),
+        confidence_bp=7000,
+        # Advisory expiry is compared to the pinned logical clock, never the
+        # process wall clock.  Derive it from that same query to keep this
+        # contract stable when the full suite runs with a different date.
+        expiry=query.logical_time + timedelta(minutes=1),
+        producer_version="test-classifier.1",
+    )
+
+    capsule = _compiler(ledger).compile_for_deliberation_with_advisories(
+        query, (advisory,)
+    ).capsule
+
+    assert capsule.advisories.availability == "available"
+    assert capsule.advisories.source_refs == ("event:start",)
+    assert capsule.advisories.items[0].item_ref == advisory.advisory_id
 
 
 def test_active_appraisal_hypotheses_are_source_bound_into_the_next_capsule() -> None:

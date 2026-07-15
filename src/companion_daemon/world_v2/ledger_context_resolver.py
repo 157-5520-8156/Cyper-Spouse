@@ -22,6 +22,7 @@ from .context_capsule import (
     InnerAdvisoryProjection,
     MAX_INPUT_ITEMS_PER_SLICE,
     MAX_RESOLVER_DOMAIN_SCAN_ITEMS,
+    MAX_SOURCE_REFS_PER_ITEM,
     RANK_DOMAIN_IMPORTANCE_BP,
     RANK_RECENCY_WINDOW_SECONDS,
     RANK_WEIGHT_BP,
@@ -51,7 +52,7 @@ from .memory_retrieval import MemoryRetrievalCompiler, MemoryRetrievalItem
 from .life_content import LifeContentCompiler
 from .life_content_store import ImmutableLifeContentStore
 from .schema_core import PrivacyClass
-from .schemas import CommittedWorldEventRef, FactProjection, LedgerProjection
+from .schemas import BudgetAccount, CommittedWorldEventRef, FactProjection, LedgerProjection
 from .situation_compiler import SituationCompiler, request_from_ledger_projection
 from .world_life_context import WorldLifeContextCompiler, WorldLifeContextItem
 
@@ -434,6 +435,80 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             actor_ref=query.actor_ref, related_subject_refs=(event.actor,)
         )
 
+    def _budget_authority_refs(
+        self, projection: LedgerProjection
+    ) -> dict[str, tuple[str, ...] | None]:
+        """Return the finite event closure for each projected budget account.
+
+        ``BudgetAccount`` is a reducer aggregate: its live balances are changed
+        by reservation and settlement events, so a configuration event alone
+        cannot authoritatively describe it.  The account schema deliberately
+        has no mutable ``origin`` field.  Instead Context binds the closed
+        event lineage which the reducer uses to arrive at the pinned balance.
+
+        This is intentionally bounded.  A long-lived account whose complete
+        lineage no longer fits in the Context source envelope is unavailable,
+        rather than being presented with an incomplete balance history.
+        """
+
+        accounts = {account.account_id for account in projection.budget_accounts}
+        refs_by_account: dict[str, list[str]] = {account_id: [] for account_id in accounts}
+        configuration_count: dict[str, int] = {account_id: 0 for account_id in accounts}
+        reservation_accounts = {
+            reservation.reservation_id: reservation.account_id
+            for reservation in projection.budget_reservations
+        }
+        budget_event_types = {
+            "BudgetAccountConfigured",
+            "BudgetReserved",
+            "BudgetSettled",
+            "BudgetReleased",
+            "BudgetAdjusted",
+        }
+
+        for ref in projection.committed_world_event_refs:
+            if ref.event_type not in budget_event_types:
+                continue
+            located = self._ledger.lookup_event_commit(ref.event_id)
+            if located is None:
+                # The projection claims this event exists; missing storage is
+                # a broken authority chain for every potentially affected
+                # account, not an invitation to infer a balance.
+                return {account_id: None for account_id in accounts}
+            event, commit = located
+            if (
+                event.event_id != ref.event_id
+                or event.event_type != ref.event_type
+                or event.payload_hash != ref.payload_hash
+                or commit.world_revision < ref.world_revision
+                or commit.world_revision > projection.world_revision
+            ):
+                return {account_id: None for account_id in accounts}
+            payload = event.payload()
+            account_id: str | None
+            if ref.event_type == "BudgetAccountConfigured":
+                raw = payload.get("account")
+                account_id = raw.get("account_id") if isinstance(raw, dict) else None
+                if account_id in configuration_count:
+                    configuration_count[account_id] += 1
+            elif ref.event_type == "BudgetReserved":
+                raw = payload.get("reservation")
+                account_id = raw.get("account_id") if isinstance(raw, dict) else None
+            else:
+                raw = payload.get("settlement")
+                reservation_id = raw.get("reservation_id") if isinstance(raw, dict) else None
+                account_id = reservation_accounts.get(reservation_id)
+            if account_id in refs_by_account:
+                refs_by_account[account_id].append(ref.event_id)
+
+        result: dict[str, tuple[str, ...] | None] = {}
+        for account_id, refs in refs_by_account.items():
+            if configuration_count[account_id] != 1 or len(refs) > MAX_SOURCE_REFS_PER_ITEM:
+                result[account_id] = None
+            else:
+                result[account_id] = tuple(sorted(refs))
+        return result
+
     def resolve(self, query: ContextCompileQuery) -> ResolvedContextResult:
         head = self._ledger.project()
         if (
@@ -529,6 +604,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             for item in projection.relationship_states
             if item.subject_ref in subject_refs and item.origin is not None
         )
+        budget_authority_refs = self._budget_authority_refs(projection)
 
         domains: dict[SliceName, tuple[BaseModel, ...] | None] = {
             "character_core": (
@@ -550,8 +626,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 for item in projection.capability_grants
                 if item.values.actor_ref == query.actor_ref and item.values.state == "active"
             ),
-            # Budget state lacks immutable per-account origin in the current schema.
-            "action_budget": () if not projection.budget_accounts else None,
+            "action_budget": tuple(projection.budget_accounts),
             # Private impressions are not installed in LedgerProjection yet.
             "private_impressions": None,
             "advisories": None,
@@ -571,7 +646,11 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             if items is None:
                 continue
             for item in items:
-                refs = _typed_refs(item, observation_aliases=observation_aliases)
+                refs = (
+                    budget_authority_refs.get(item.account_id)
+                    if isinstance(item, BudgetAccount)
+                    else _typed_refs(item, observation_aliases=observation_aliases)
+                )
                 refs_by_item[(slice_name, _item_ref(slice_name, item))] = refs
                 if refs is not None:
                     required_refs.update(refs)
