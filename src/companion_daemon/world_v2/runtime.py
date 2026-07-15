@@ -11,6 +11,7 @@ from .goal_expiry_runtime import build_due_goal_expiry_events
 from .pinned_turn import PinnedTurnCompiler
 from .projection import ProjectionAuthority, ProjectionCompiler
 from .settlement import SettlementPlanner
+from .replay_evaluator import ReplayEvaluation, ReplayEvaluator
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -91,6 +92,20 @@ class WorldRuntime:
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(self._ledger.lookup_event_commit, event_id)
         return self._ledger.lookup_event_commit(event_id)
+
+    async def evaluate_replay(self, *, evaluator: ReplayEvaluator | None = None) -> ReplayEvaluation:
+        """Run deterministic diagnostics without model calls or side effects."""
+
+        rebuild = getattr(self._ledger, "rebuild", None)
+        if not callable(rebuild):
+            raise ValueError("configured ledger does not expose deterministic replay")
+        if self._ledger.blocks_event_loop:
+            projection, replay = await asyncio.gather(
+                asyncio.to_thread(self._ledger.project), asyncio.to_thread(rebuild)
+            )
+        else:
+            projection, replay = self._ledger.project(), rebuild()
+        return (evaluator or ReplayEvaluator()).evaluate(projection=projection, replay=replay)
 
     async def ingest(self, observation: Observation) -> RuntimeOutcome:
         if observation.world_id != self._world_id:

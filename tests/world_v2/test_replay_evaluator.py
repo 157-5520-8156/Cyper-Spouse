@@ -1,7 +1,10 @@
 from datetime import UTC, datetime
 
+import pytest
+
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.replay_evaluator import ReplayEvaluator
+from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import WorldEvent
 
 
@@ -30,3 +33,10 @@ def test_replay_evaluator_reports_semantic_divergence() -> None:
     result = ReplayEvaluator().evaluate(projection=projection, replay=replay)
     assert not result.passed
     assert result.findings[0].code == "replay_hash_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_runtime_exposes_read_only_replay_evaluation() -> None:
+    runtime = WorldRuntime.in_memory(world_id="world:runtime-replay-evaluator")
+    result = await runtime.evaluate_replay()
+    assert result.passed
