@@ -25,10 +25,16 @@ from .typed_proposal_families import (
 )
 
 
-def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revision: int) -> None:
+def validate_commit_batch(
+    events: Sequence[WorldEvent],
+    *,
+    expected_world_revision: int,
+    accepted_manifest_v3_authorized: bool = False,
+) -> None:
     """Require every settled lived-world occurrence to schedule its appraisal."""
 
-    reject_accepted_manifest_v3_without_recorder(events)
+    if not accepted_manifest_v3_authorized:
+        reject_accepted_manifest_v3_without_recorder(events)
     _validate_deliberation_audit_transaction(events)
     _validate_acceptance_manifest_v2_batch(events)
 

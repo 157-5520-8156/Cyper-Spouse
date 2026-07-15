@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchHandle
 from companion_daemon.world_v2.ledger import LedgerPort, WorldLedger
 from companion_daemon.world_v2.schemas import ProjectionCursor, WorldEvent
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
@@ -64,3 +65,13 @@ def test_normal_ledger_paths_reject_v3_accepted_manifest_without_recorder_capabi
     assert projection.world_revision == 0
     assert projection.deliberation_revision == 0
     assert projection.ledger_sequence == 0
+
+
+def test_accepted_commit_requires_a_configured_batch_issuer(ledger: LedgerPort) -> None:
+    with pytest.raises(ValueError, match="accepted_manifest.recorder_capability_required"):
+        ledger.commit_accepted(
+            AcceptedLedgerBatchHandle(),
+            expected_cursor=ProjectionCursor(
+                world_revision=0, deliberation_revision=0, ledger_sequence=0
+            ),
+        )

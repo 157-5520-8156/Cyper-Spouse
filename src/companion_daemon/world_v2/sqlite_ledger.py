@@ -11,6 +11,10 @@ from threading import RLock
 from typing import Literal
 from weakref import WeakKeyDictionary
 
+from .accepted_ledger_batch import (
+    AcceptedLedgerBatchHandle,
+    AcceptedLedgerBatchIssuer,
+)
 from .batch_invariants import (
     reject_accepted_manifest_v3_without_recorder,
     validate_commit_batch,
@@ -285,10 +289,19 @@ def _upcast_legacy_experience(raw_event: dict[str, object]) -> dict[str, object]
 class SQLiteWorldLedger:
     """Independent crash-consistent persistence adapter for a single World v2 world."""
 
-    def __init__(self, *, path: str | Path, world_id: str) -> None:
+    def __init__(
+        self,
+        *,
+        path: str | Path,
+        world_id: str,
+        accepted_batch_issuer: AcceptedLedgerBatchIssuer | None = None,
+    ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
+        if accepted_batch_issuer is not None and type(accepted_batch_issuer) is not AcceptedLedgerBatchIssuer:
+            raise TypeError("accepted batch issuer must use its exact capability type")
         self._world_id = world_id
+        self._accepted_batch_issuer = accepted_batch_issuer
         self._thread_lock = RLock()
         connection = sqlite3.connect(
             path, isolation_level=None, timeout=10, check_same_thread=False
@@ -1780,6 +1793,29 @@ class SQLiteWorldLedger:
                 commit_id=commit_id,
             )
 
+    def commit_accepted(
+        self,
+        batch: AcceptedLedgerBatchHandle,
+        *,
+        expected_cursor: ProjectionCursor,
+    ) -> CommitResult:
+        issuer = self._accepted_batch_issuer
+        if issuer is None:
+            raise ValueError("accepted_manifest.recorder_capability_required")
+        events, commit_id = issuer.verify(
+            handle=batch, world_id=self._world_id, expected_cursor=expected_cursor
+        )
+        events = _preflight_commit_events(events)
+        with self._thread_lock:
+            return self._commit_locked(
+                events,
+                expected_world_revision=expected_cursor.world_revision,
+                expected_deliberation_revision=expected_cursor.deliberation_revision,
+                expected_ledger_sequence=expected_cursor.ledger_sequence,
+                accepted_manifest_v3_authorized=True,
+                commit_id=commit_id,
+            )
+
     def _commit_locked(
         self,
         events: Sequence[WorldEvent],
@@ -1787,6 +1823,7 @@ class SQLiteWorldLedger:
         expected_world_revision: int,
         expected_deliberation_revision: int,
         expected_ledger_sequence: int | None = None,
+        accepted_manifest_v3_authorized: bool = False,
         commit_id: str | None = None,
     ) -> CommitResult:
         if not events:
@@ -1801,7 +1838,8 @@ class SQLiteWorldLedger:
             raise IdempotencyConflict("duplicate event_id inside one commit")
         if len(set(idempotency_keys)) != len(idempotency_keys):
             raise IdempotencyConflict("duplicate idempotency key inside one commit")
-        reject_accepted_manifest_v3_without_recorder(events)
+        if not accepted_manifest_v3_authorized:
+            reject_accepted_manifest_v3_without_recorder(events)
         for event in events:
             if event.world_id != self._world_id:
                 raise ValueError("event belongs to another world")
@@ -1822,7 +1860,11 @@ class SQLiteWorldLedger:
                 connection.commit()
                 return result
 
-            validate_commit_batch(events, expected_world_revision=expected_world_revision)
+            validate_commit_batch(
+                events,
+                expected_world_revision=expected_world_revision,
+                accepted_manifest_v3_authorized=accepted_manifest_v3_authorized,
+            )
 
             placeholders = ",".join("?" for _ in events)
             duplicate = connection.execute(

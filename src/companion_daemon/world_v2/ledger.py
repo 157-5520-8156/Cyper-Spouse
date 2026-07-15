@@ -10,6 +10,10 @@ import math
 from threading import RLock
 from typing import Protocol
 
+from .accepted_ledger_batch import (
+    AcceptedLedgerBatchHandle,
+    AcceptedLedgerBatchIssuer,
+)
 from .batch_invariants import validate_commit_batch
 from .errors import ConcurrencyConflict, IdempotencyConflict, LedgerIntegrityError
 from .event_identity import domain_idempotency_key, validate_event_identity
@@ -81,6 +85,13 @@ class LedgerPort(Protocol):
         than merely an informational result field.
         """
         ...
+
+    def commit_accepted(
+        self,
+        batch: AcceptedLedgerBatchHandle,
+        *,
+        expected_cursor: ProjectionCursor,
+    ) -> CommitResult: ...
 
     def project(self) -> LedgerProjection: ...
 
@@ -398,8 +409,16 @@ def derived_commit_id(events: Sequence[WorldEvent]) -> str:
 class WorldLedger:
     """Append-only World v2 ledger with separated revision streams."""
 
-    def __init__(self, *, world_id: str) -> None:
+    def __init__(
+        self,
+        *,
+        world_id: str,
+        accepted_batch_issuer: AcceptedLedgerBatchIssuer | None = None,
+    ) -> None:
         self._world_id = world_id
+        if accepted_batch_issuer is not None and type(accepted_batch_issuer) is not AcceptedLedgerBatchIssuer:
+            raise TypeError("accepted batch issuer must use its exact capability type")
+        self._accepted_batch_issuer = accepted_batch_issuer
         self._events: list[_StoredEvent] = []
         self._thread_lock = RLock()
         self._by_idempotency: dict[str, _StoredEvent] = {}
@@ -416,8 +435,13 @@ class WorldLedger:
         self._state = ReducerState()
 
     @classmethod
-    def in_memory(cls, *, world_id: str) -> WorldLedger:
-        return cls(world_id=world_id)
+    def in_memory(
+        cls,
+        *,
+        world_id: str,
+        accepted_batch_issuer: AcceptedLedgerBatchIssuer | None = None,
+    ) -> WorldLedger:
+        return cls(world_id=world_id, accepted_batch_issuer=accepted_batch_issuer)
 
     @property
     def world_id(self) -> str:
@@ -461,6 +485,29 @@ class WorldLedger:
                 commit_id=commit_id,
             )
 
+    def commit_accepted(
+        self,
+        batch: AcceptedLedgerBatchHandle,
+        *,
+        expected_cursor: ProjectionCursor,
+    ) -> CommitResult:
+        issuer = self._accepted_batch_issuer
+        if issuer is None:
+            raise ValueError("accepted_manifest.recorder_capability_required")
+        events, commit_id = issuer.verify(
+            handle=batch, world_id=self._world_id, expected_cursor=expected_cursor
+        )
+        events = _preflight_commit_events(events)
+        with self._thread_lock:
+            return self._commit_locked(
+                events,
+                expected_world_revision=expected_cursor.world_revision,
+                expected_deliberation_revision=expected_cursor.deliberation_revision,
+                expected_ledger_sequence=expected_cursor.ledger_sequence,
+                accepted_manifest_v3_authorized=True,
+                commit_id=commit_id,
+            )
+
     def _commit_locked(
         self,
         events: Sequence[WorldEvent],
@@ -469,6 +516,7 @@ class WorldLedger:
         expected_world_revision: int,
         expected_deliberation_revision: int,
         expected_ledger_sequence: int | None = None,
+        accepted_manifest_v3_authorized: bool = False,
     ) -> CommitResult:
         commit_id = commit_id or derived_commit_id(events)
         if not commit_id:
@@ -480,7 +528,11 @@ class WorldLedger:
                 raise IdempotencyConflict(f"commit_id {commit_id!r} has different content")
             return existing_commit.result
 
-        validate_commit_batch(events, expected_world_revision=expected_world_revision)
+        validate_commit_batch(
+            events,
+            expected_world_revision=expected_world_revision,
+            accepted_manifest_v3_authorized=accepted_manifest_v3_authorized,
+        )
 
         event_ids = [event.event_id for event in events]
         idempotency_keys = [event.idempotency_key for event in events]
