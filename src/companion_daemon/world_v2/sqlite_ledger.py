@@ -11,7 +11,10 @@ from threading import RLock
 from typing import Literal
 from weakref import WeakKeyDictionary
 
-from .batch_invariants import validate_commit_batch
+from .batch_invariants import (
+    reject_accepted_manifest_v3_without_recorder,
+    validate_commit_batch,
+)
 from .errors import ConcurrencyConflict, IdempotencyConflict, LedgerIntegrityError
 from .event_identity import validate_event_identity
 from .ledger import (
@@ -1798,6 +1801,7 @@ class SQLiteWorldLedger:
             raise IdempotencyConflict("duplicate event_id inside one commit")
         if len(set(idempotency_keys)) != len(idempotency_keys):
             raise IdempotencyConflict("duplicate idempotency key inside one commit")
+        reject_accepted_manifest_v3_without_recorder(events)
         for event in events:
             if event.world_id != self._world_id:
                 raise ValueError("event belongs to another world")

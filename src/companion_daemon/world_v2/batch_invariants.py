@@ -28,6 +28,7 @@ from .typed_proposal_families import (
 def validate_commit_batch(events: Sequence[WorldEvent], *, expected_world_revision: int) -> None:
     """Require every settled lived-world occurrence to schedule its appraisal."""
 
+    reject_accepted_manifest_v3_without_recorder(events)
     _validate_deliberation_audit_transaction(events)
     _validate_acceptance_manifest_v2_batch(events)
 
@@ -319,6 +320,26 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
     manifest = parse_acceptance_manifest_v2(manifests[0].payload())
     if manifest.status != "accepted" and manifest.authorized_effects:
         raise ValueError("non-accepted manifest cannot carry effects")
+
+
+def reject_accepted_manifest_v3_without_recorder(events: Sequence[WorldEvent]) -> None:
+    """Keep v3 accepted effects off every ordinary ledger write seam.
+
+    This small, explicit gate is intentionally callable before event identity
+    validation by both ledger adapters.  The future opaque accepted-batch
+    capability will use a distinct invariant context; it must not weaken the
+    default path merely because it needs to admit version 3.
+    """
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == "acceptance-manifest.3"
+        for event in events
+    ):
+        # A v3 manifest is valid only through the opaque accepted-batch
+        # capability.  In particular, a complete cursor CAS is not itself an
+        # authorization to record one: callers must not be able to forge an
+        # accepted effect by using ``commit_at_cursor`` directly.
+        raise ValueError("accepted_manifest.recorder_capability_required")
 
 
 def appraisal_trigger_identity(occurrence_id: str, result_id: str) -> str:
