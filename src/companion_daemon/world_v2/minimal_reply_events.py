@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from typing import Literal
 
 from pydantic import Field
 
@@ -73,15 +74,46 @@ class ExpressionBeatAuthorizedPayload(FrozenModel):
     beat: ExpressionBeatMaterial
 
 
+class ExpressionBeatSettledPayload(FrozenModel):
+    """A terminal provider receipt has settled one authorized expression beat."""
+
+    acceptance_id: str = Field(min_length=1, max_length=256)
+    proposal_id: str = Field(min_length=1, max_length=256)
+    plan_id: str = Field(min_length=1, max_length=512)
+    beat_id: str = Field(min_length=1, max_length=512)
+    action_id: str = Field(min_length=1, max_length=512)
+    receipt_id: str = Field(min_length=1, max_length=512)
+    receipt_event_ref: str = Field(min_length=1, max_length=512)
+    receipt_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    terminal_action_state: Literal["delivered", "failed", "unknown", "cancelled", "expired"]
+
+
+class ExpressionPlanCompletedPayload(FrozenModel):
+    """The current minimal-reply plan has no remaining authorized beats."""
+
+    acceptance_id: str = Field(min_length=1, max_length=256)
+    proposal_id: str = Field(min_length=1, max_length=256)
+    plan_id: str = Field(min_length=1, max_length=512)
+    terminal_beat_id: str = Field(min_length=1, max_length=512)
+    receipt_id: str = Field(min_length=1, max_length=512)
+    receipt_event_ref: str = Field(min_length=1, max_length=512)
+    receipt_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    terminal_action_state: Literal["delivered", "failed", "unknown", "cancelled", "expired"]
+
+
 MINIMAL_REPLY_EVENT_PAYLOAD_MODELS = {
     "MessagePayloadStored": MessagePayloadStoredPayload,
     "ExpressionPlanAccepted": ExpressionPlanAcceptedPayload,
     "ExpressionBeatAuthorized": ExpressionBeatAuthorizedPayload,
+    "ExpressionBeatSettled": ExpressionBeatSettledPayload,
+    "ExpressionPlanCompleted": ExpressionPlanCompletedPayload,
 }
 
 
 __all__ = [
     "ExpressionBeatAuthorizedPayload",
+    "ExpressionBeatSettledPayload",
+    "ExpressionPlanCompletedPayload",
     "ExpressionPlanAcceptedPayload",
     "MINIMAL_REPLY_EVENT_PAYLOAD_MODELS",
     "MessagePayloadStoredPayload",

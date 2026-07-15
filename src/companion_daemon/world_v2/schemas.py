@@ -382,6 +382,12 @@ class Action(FrozenModel):
     target: str = Field(min_length=1)
     payload_ref: str = Field(min_length=1)
     payload_hash: str = Field(min_length=1)
+    # A reply/expression Action is not merely text-shaped: it is the sole
+    # external effect for a particular durable beat.  Both fields stay
+    # optional for pre-lifecycle records, but must travel as a pair for all
+    # new expression work.
+    expression_plan_id: str | None = Field(default=None, min_length=1)
+    expression_beat_id: str | None = Field(default=None, min_length=1)
     idempotency_key: str = Field(min_length=1)
     not_before: datetime | None = None
     expires_at: datetime | None = None
@@ -394,6 +400,8 @@ class Action(FrozenModel):
 
     @model_validator(mode="after")
     def claimed_action_has_a_lease(self) -> Action:
+        if (self.expression_plan_id is None) != (self.expression_beat_id is None):
+            raise ValueError("expression Action must bind both plan and beat")
         lease_required_states: frozenset[ActionState] = frozenset(
             {
                 "claimed",
@@ -843,6 +851,28 @@ class ExpressionPlanProjection(FrozenModel):
     plan_id: str = Field(min_length=1)
     event_ref: str = Field(min_length=1)
     event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    state: Literal["authorized", "completed"] = "authorized"
+    history: tuple["ExpressionPlanLifecycleEntry", ...] = ()
+
+
+class ExpressionPlanLifecycleEntry(FrozenModel):
+    state: Literal["authorized", "completed"]
+    event_ref: str = Field(min_length=1)
+    event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_id: str | None = Field(default=None, min_length=1)
+    terminal_action_state: Literal["delivered", "failed", "unknown", "cancelled", "expired"] | None = None
+
+    @model_validator(mode="after")
+    def completed_entry_has_terminal_receipt(self) -> "ExpressionPlanLifecycleEntry":
+        if self.state == "completed" and (
+            self.receipt_id is None or self.terminal_action_state is None
+        ):
+            raise ValueError("completed expression plan history requires terminal receipt")
+        if self.state == "authorized" and (
+            self.receipt_id is not None or self.terminal_action_state is not None
+        ):
+            raise ValueError("authorized expression plan history cannot carry a receipt")
+        return self
 
 
 class ExpressionBeatProjection(FrozenModel):
@@ -853,12 +883,35 @@ class ExpressionBeatProjection(FrozenModel):
     beat_id: str = Field(min_length=1)
     payload_ref: str = Field(min_length=1)
     payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    action_id: str | None = Field(default=None, min_length=1)
     dependency_beat_ids: tuple[str, ...] = ()
     cancel_policy: str = Field(min_length=1, max_length=128)
     reconsider_policy: str = Field(min_length=1, max_length=128)
     merge_policy: str = Field(min_length=1, max_length=128)
     event_ref: str = Field(min_length=1)
     event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    state: Literal["authorized", "settled"] = "authorized"
+    history: tuple["ExpressionBeatLifecycleEntry", ...] = ()
+
+
+class ExpressionBeatLifecycleEntry(FrozenModel):
+    state: Literal["authorized", "settled"]
+    event_ref: str = Field(min_length=1)
+    event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    receipt_id: str | None = Field(default=None, min_length=1)
+    terminal_action_state: Literal["delivered", "failed", "unknown", "cancelled", "expired"] | None = None
+
+    @model_validator(mode="after")
+    def settled_entry_has_terminal_receipt(self) -> "ExpressionBeatLifecycleEntry":
+        if self.state == "settled" and (
+            self.receipt_id is None or self.terminal_action_state is None
+        ):
+            raise ValueError("settled expression beat history requires terminal receipt")
+        if self.state == "authorized" and (
+            self.receipt_id is not None or self.terminal_action_state is not None
+        ):
+            raise ValueError("authorized expression beat history cannot carry a receipt")
+        return self
 
 
 class ProposalRevisionRef(FrozenModel):
@@ -4038,7 +4091,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2  # noqa: E402
 
 class LedgerProjection(FrozenModel):
     schema_version: SchemaVersion = "world-v2.1"
-    reducer_bundle_version: str = "world-v2-reducers.21"
+    reducer_bundle_version: str = "world-v2-reducers.22"
     world_id: str
     world_revision: int = Field(ge=0)
     deliberation_revision: int = Field(ge=0)

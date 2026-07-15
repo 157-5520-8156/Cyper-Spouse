@@ -25,7 +25,8 @@ from companion_daemon.world_v2.proposal_envelope import (
     TypedChange,
 )
 from companion_daemon.world_v2.runtime import WorldRuntime
-from companion_daemon.world_v2.schemas import BudgetAccount, WorldEvent
+from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
+from companion_daemon.world_v2.schemas import BudgetAccount, ExternalObservation, WorldEvent
 from companion_daemon.world_v2.platform_action_executor import (
     PlatformActionExecutor,
     PlatformDispatchReceipt,
@@ -168,9 +169,13 @@ def _event(event_type: str, payload: dict[str, object], suffix: str) -> WorldEve
     )
 
 
-def _configured_runtime() -> tuple[WorldRuntime, WorldLedger, _Transport, _MinimalReplyModel]:
-    issuer = AcceptedLedgerBatchIssuer()
-    ledger = WorldLedger.in_memory(world_id="world:turn-runtime", accepted_batch_issuer=issuer)
+def _configured_runtime(
+    *, ledger: WorldLedger | SQLiteWorldLedger | None = None, issuer: AcceptedLedgerBatchIssuer | None = None
+) -> tuple[WorldRuntime, WorldLedger | SQLiteWorldLedger, _Transport, _MinimalReplyModel]:
+    issuer = issuer or AcceptedLedgerBatchIssuer()
+    ledger = ledger or WorldLedger.in_memory(
+        world_id="world:turn-runtime", accepted_batch_issuer=issuer
+    )
     account = BudgetAccount(
         account_id="account:turn-runtime:chat", category="chat", window_id="test", limit=100
     )
@@ -265,6 +270,32 @@ async def test_platform_neutral_turn_runs_authorize_dispatch_and_settle_without_
     assert len(projection.proposal_audits) == 1
     assert len(projection.stored_message_payloads) == 1
     assert projection.actions[0].state == "delivered"
+    assert projection.expression_beats[0].state == "settled"
+    assert projection.expression_plans[0].state == "completed"
+
+    terminal = ExternalObservation(
+        schema_version="world-v2.1",
+        result_id="result:platform:test:provider-receipt:turn-runtime:1",
+        world_id="world:turn-runtime",
+        logical_time=datetime(2026, 7, 15, tzinfo=UTC),
+        created_at=datetime(2026, 7, 15, tzinfo=UTC),
+        trace_id=projection.actions[0].trace_id,
+        causation_id=projection.actions[0].action_id,
+        correlation_id=projection.actions[0].correlation_id,
+        kind="execution_receipt",
+        source="platform:test",
+        source_event_id="provider-message:turn-runtime:1",
+        action_id=projection.actions[0].action_id,
+        idempotency_key=projection.actions[0].idempotency_key,
+        status="delivered",
+        provider_ref="provider-message:turn-runtime:1",
+        cost_actual=0,
+        observed_at=datetime(2026, 7, 15, tzinfo=UTC),
+        raw_payload_hash="sha256:" + "a" * 64,
+    )
+    duplicate_settlement = await runtime.settle(terminal)
+    assert duplicate_settlement.status == "action_executed"
+    assert ledger.project().expression_plans[0].state == "completed"
 
 
 @pytest.mark.asyncio
@@ -287,3 +318,38 @@ async def test_authorized_payload_reader_rejects_an_action_with_substituted_payl
 
     with pytest.raises(ValueError, match="authorization manifest"):
         await LedgerAuthorizedPayloadReader(ledger=ledger).resolve(action)
+
+
+@pytest.mark.asyncio
+async def test_sqlite_replays_settled_expression_lifecycle_after_restart(tmp_path) -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    path = tmp_path / "expression-lifecycle.sqlite3"
+    sqlite = SQLiteWorldLedger(
+        path=path, world_id="world:turn-runtime", accepted_batch_issuer=issuer
+    )
+    runtime, ledger, _transport, _model = _configured_runtime(ledger=sqlite, issuer=issuer)
+    turn = WorldTurnRuntime(runtime=runtime, identities=_Identities())
+
+    await turn.respond(
+        InboundTurn(
+            platform="test",
+            platform_user_id="user.1",
+            platform_message_id="message:sqlite-expression",
+            text="我有点失望，感觉你没接住。",
+            observed_at=datetime(2026, 7, 15, tzinfo=UTC),
+            trace_id="trace:sqlite-expression",
+        )
+    )
+    settled = await turn.drain_actions_once()
+    assert settled is not None and settled.status == "settled"
+    expected = ledger.project()
+    assert expected.expression_beats[0].state == "settled"
+    assert expected.expression_plans[0].state == "completed"
+    sqlite.close()
+
+    reopened = SQLiteWorldLedger(
+        path=path, world_id="world:turn-runtime", accepted_batch_issuer=issuer
+    )
+    assert reopened.project() == expected
+    assert reopened.rebuild() == expected
+    reopened.close()

@@ -100,7 +100,9 @@ from .fact_reducers import reduce_fact
 from .fact_v2_reducers import materialized_fact_v2_as_projection_change
 from .minimal_reply_events import (
     ExpressionBeatAuthorizedPayload,
+    ExpressionBeatSettledPayload,
     ExpressionPlanAcceptedPayload,
+    ExpressionPlanCompletedPayload,
     MessagePayloadStoredPayload,
 )
 from .life_content_events import LifeContentRecordedPayload
@@ -270,6 +272,8 @@ from .schemas import (
     StoredMessagePayloadProjection,
     ExpressionPlanProjection,
     ExpressionBeatProjection,
+    ExpressionPlanLifecycleEntry,
+    ExpressionBeatLifecycleEntry,
     FactProjection,
     FactProposalProjection,
     FactTransitionProjection,
@@ -302,7 +306,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.21"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.22"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -340,6 +344,7 @@ def _experience_semantic_dump(
             "world-v2-reducers.18",
             "world-v2-reducers.19",
             "world-v2-reducers.20",
+            "world-v2-reducers.21",
             REDUCER_BUNDLE_VERSION,
         }
         and isinstance(experience, LegacyExperienceProjection)
@@ -361,11 +366,41 @@ def _actor_authority_transition_semantic_dump(
         "world-v2-reducers.18",
         "world-v2-reducers.19",
         "world-v2-reducers.20",
+        "world-v2-reducers.21",
         REDUCER_BUNDLE_VERSION,
     }:
         dumped.pop("accepted_event_ref", None)
         dumped.pop("accepted_world_revision", None)
         dumped.pop("accepted_payload_hash", None)
+    return dumped
+
+
+def _action_semantic_dump(action: Action, *, reducer_bundle_version: str) -> dict[str, Any]:
+    dumped = action.model_dump(mode="json")
+    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+        dumped.pop("expression_plan_id", None)
+        dumped.pop("expression_beat_id", None)
+    return dumped
+
+
+def _expression_plan_semantic_dump(
+    plan: ExpressionPlanProjection, *, reducer_bundle_version: str
+) -> dict[str, Any]:
+    dumped = plan.model_dump(mode="json")
+    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+        dumped.pop("state", None)
+        dumped.pop("history", None)
+    return dumped
+
+
+def _expression_beat_semantic_dump(
+    beat: ExpressionBeatProjection, *, reducer_bundle_version: str
+) -> dict[str, Any]:
+    dumped = beat.model_dump(mode="json")
+    if reducer_bundle_version != REDUCER_BUNDLE_VERSION:
+        dumped.pop("action_id", None)
+        dumped.pop("state", None)
+        dumped.pop("history", None)
     return dumped
 
 
@@ -1057,6 +1092,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.18",
                         "world-v2-reducers.19",
                         "world-v2-reducers.20",
+                        "world-v2-reducers.21",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else item.model_dump(
@@ -1072,9 +1108,13 @@ class ReducerState(FrozenModel):
                 ref.model_dump(mode="json") for ref in self.committed_world_event_refs
             ),
             "logical_time": self.logical_time.isoformat() if self.logical_time else None,
-            "actions": tuple(action.model_dump(mode="json") for action in self.actions),
+            "actions": tuple(
+                _action_semantic_dump(action, reducer_bundle_version=reducer_bundle_version)
+                for action in self.actions
+            ),
             "pending_actions": tuple(
-                action.model_dump(mode="json") for action in self.pending_actions
+                _action_semantic_dump(action, reducer_bundle_version=reducer_bundle_version)
+                for action in self.pending_actions
             ),
             "budget_reservations": tuple(
                 reservation.model_dump(mode="json") for reservation in self.budget_reservations
@@ -1102,6 +1142,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.18",
                         "world-v2-reducers.19",
                         "world-v2-reducers.20",
+                        "world-v2-reducers.21",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else plan.model_dump(
@@ -1113,7 +1154,7 @@ class ReducerState(FrozenModel):
             "world_occurrences": tuple(
                 (
                     occurrence.model_dump(mode="json")
-                    if reducer_bundle_version == REDUCER_BUNDLE_VERSION
+                    if reducer_bundle_version in {"world-v2-reducers.21", REDUCER_BUNDLE_VERSION}
                     else occurrence.model_dump(mode="json", exclude={"candidate_outcomes"})
                     if reducer_bundle_version
                     in {
@@ -1183,6 +1224,8 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.17",
             "world-v2-reducers.18",
             "world-v2-reducers.19",
+            "world-v2-reducers.20",
+            "world-v2-reducers.21",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["threads"] = tuple(item.model_dump(mode="json") for item in self.threads)
@@ -1199,6 +1242,8 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.17",
             "world-v2-reducers.18",
             "world-v2-reducers.19",
+            "world-v2-reducers.20",
+            "world-v2-reducers.21",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["commitments"] = tuple(
@@ -1216,6 +1261,8 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.17",
             "world-v2-reducers.18",
             "world-v2-reducers.19",
+            "world-v2-reducers.20",
+            "world-v2-reducers.21",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["facts"] = tuple(item.model_dump(mode="json") for item in self.facts)
@@ -1230,6 +1277,8 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.17",
             "world-v2-reducers.18",
             "world-v2-reducers.19",
+            "world-v2-reducers.20",
+            "world-v2-reducers.21",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["experience_transitions"] = tuple(
@@ -1242,6 +1291,8 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.17",
             "world-v2-reducers.18",
             "world-v2-reducers.19",
+            "world-v2-reducers.20",
+            "world-v2-reducers.21",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["memory_candidates"] = tuple(
@@ -1257,6 +1308,8 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.17",
             "world-v2-reducers.18",
             "world-v2-reducers.19",
+            "world-v2-reducers.20",
+            "world-v2-reducers.21",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["character_core"] = (
@@ -1272,6 +1325,8 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.17",
             "world-v2-reducers.18",
             "world-v2-reducers.19",
+            "world-v2-reducers.20",
+            "world-v2-reducers.21",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["clock_transition_history"] = tuple(
@@ -1301,7 +1356,10 @@ class ReducerState(FrozenModel):
                 item.model_dump(mode="json") for item in self.attention_transitions
             )
         if reducer_bundle_version in {
-            "world-v2-reducers.19", "world-v2-reducers.20", REDUCER_BUNDLE_VERSION
+            "world-v2-reducers.19",
+            "world-v2-reducers.20",
+            "world-v2-reducers.21",
+            REDUCER_BUNDLE_VERSION,
         }:
             payload["fact_commit_proposal_audits_v2"] = tuple(
                 item.model_dump(mode="json") for item in self.fact_commit_proposal_audits_v2
@@ -1309,7 +1367,7 @@ class ReducerState(FrozenModel):
             payload["acceptance_manifests_v3"] = tuple(
                 item.model_dump(mode="json") for item in self.acceptance_manifests_v3
             )
-        if reducer_bundle_version == REDUCER_BUNDLE_VERSION:
+        if reducer_bundle_version in {"world-v2-reducers.21", REDUCER_BUNDLE_VERSION}:
             payload["life_content_descriptors"] = tuple(
                 item.model_dump(mode="json") for item in self.life_content_descriptors
             )
@@ -1320,10 +1378,16 @@ class ReducerState(FrozenModel):
                 item.model_dump(mode="json") for item in self.stored_message_payloads
             )
             payload["expression_plans"] = tuple(
-                item.model_dump(mode="json") for item in self.expression_plans
+                _expression_plan_semantic_dump(
+                    item, reducer_bundle_version=reducer_bundle_version
+                )
+                for item in self.expression_plans
             )
             payload["expression_beats"] = tuple(
-                item.model_dump(mode="json") for item in self.expression_beats
+                _expression_beat_semantic_dump(
+                    item, reducer_bundle_version=reducer_bundle_version
+                )
+                for item in self.expression_beats
             )
         return payload
 
@@ -3481,6 +3545,13 @@ def _expression_plan_accepted(state: ReducerState, event: WorldEvent) -> Reducer
                     plan_id=payload.plan_id,
                     event_ref=event.event_id,
                     event_payload_hash=event.payload_hash,
+                    history=(
+                        ExpressionPlanLifecycleEntry(
+                            state="authorized",
+                            event_ref=event.event_id,
+                            event_payload_hash=event.payload_hash,
+                        ),
+                    ),
                 ),
             )
         }
@@ -3520,13 +3591,153 @@ def _expression_beat_authorized(state: ReducerState, event: WorldEvent) -> Reduc
                     beat_id=payload.beat.beat_id,
                     payload_ref=payload.beat.payload.payload_ref,
                     payload_hash=payload.beat.payload.payload_hash,
+                    action_id=manifest.action_id,
                     dependency_beat_ids=payload.beat.dependency_beat_ids,
                     cancel_policy=payload.beat.cancel_policy,
                     reconsider_policy=payload.beat.reconsider_policy,
                     merge_policy=payload.beat.merge_policy,
                     event_ref=event.event_id,
                     event_payload_hash=event.payload_hash,
+                    history=(
+                        ExpressionBeatLifecycleEntry(
+                            state="authorized",
+                            event_ref=event.event_id,
+                            event_payload_hash=event.payload_hash,
+                        ),
+                    ),
                 ),
+            )
+        }
+    )
+
+
+def _expression_beat_settled(state: ReducerState, event: WorldEvent) -> ReducerState:
+    """Advance the beat head only from its adjacent terminal receipt authority."""
+
+    payload = ExpressionBeatSettledPayload.model_validate_json(event.payload_json)
+    _require_previous_event(state, "ExecutionReceiptRecorded", payload.receipt_event_ref)
+    manifest = _minimal_reply_manifest(state, payload.acceptance_id)
+    receipt = next(
+        (item for item in state.execution_receipts if item.receipt_id == payload.receipt_id), None
+    )
+    action = next((item for item in state.actions if item.action_id == payload.action_id), None)
+    beat_index = next(
+        (index for index, item in enumerate(state.expression_beats) if item.beat_id == payload.beat_id),
+        None,
+    )
+    if (
+        receipt is None
+        or action is None
+        or beat_index is None
+        or payload.proposal_id != manifest.proposal_id
+        or payload.plan_id != manifest.plan_id
+        or payload.beat_id != manifest.beat_id
+        or payload.action_id != manifest.action_id
+        or receipt.action_id != payload.action_id
+        or not receipt.is_terminal
+        or receipt.observed_state != payload.terminal_action_state
+        or action.state != payload.terminal_action_state
+        or action.expression_plan_id != payload.plan_id
+        or action.expression_beat_id != payload.beat_id
+        or state.committed_world_event_refs[-1].payload_hash
+        != payload.receipt_event_payload_hash
+    ):
+        raise ValueError("expression beat settlement is not bound to terminal receipt authority")
+    beat = state.expression_beats[beat_index]
+    if (
+        beat.state != "authorized"
+        or beat.acceptance_id != payload.acceptance_id
+        or beat.proposal_id != payload.proposal_id
+        or beat.plan_id != payload.plan_id
+        or beat.action_id != payload.action_id
+    ):
+        raise ValueError("expression beat is not currently authorized for settlement")
+    settled = beat.model_copy(
+        update={
+            "state": "settled",
+            "history": (
+                *beat.history,
+                ExpressionBeatLifecycleEntry(
+                    state="settled",
+                    event_ref=event.event_id,
+                    event_payload_hash=event.payload_hash,
+                    receipt_id=receipt.receipt_id,
+                    terminal_action_state=receipt.observed_state,
+                ),
+            ),
+        }
+    )
+    return state.model_copy(
+        update={
+            "expression_beats": (
+                *state.expression_beats[:beat_index],
+                settled,
+                *state.expression_beats[beat_index + 1 :],
+            )
+        }
+    )
+
+
+def _expression_plan_completed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    """Close a plan only after every one of its durable beats has settled."""
+
+    payload = ExpressionPlanCompletedPayload.model_validate_json(event.payload_json)
+    _require_previous_event(state, "ExpressionBeatSettled")
+    manifest = _minimal_reply_manifest(state, payload.acceptance_id)
+    plan_index = next(
+        (index for index, item in enumerate(state.expression_plans) if item.plan_id == payload.plan_id),
+        None,
+    )
+    receipt = next(
+        (item for item in state.execution_receipts if item.receipt_id == payload.receipt_id), None
+    )
+    terminal_beat = next(
+        (item for item in state.expression_beats if item.beat_id == payload.terminal_beat_id), None
+    )
+    if (
+        plan_index is None
+        or receipt is None
+        or terminal_beat is None
+        or payload.proposal_id != manifest.proposal_id
+        or payload.plan_id != manifest.plan_id
+        or payload.terminal_beat_id != manifest.beat_id
+        or terminal_beat.plan_id != payload.plan_id
+        or terminal_beat.state != "settled"
+        or receipt.action_id != terminal_beat.action_id
+        or receipt.observed_state != payload.terminal_action_state
+        or state.committed_world_event_refs[-2].event_id != payload.receipt_event_ref
+        or state.committed_world_event_refs[-2].payload_hash != payload.receipt_event_payload_hash
+    ):
+        raise ValueError("expression plan completion is not bound to settled beat authority")
+    plan = state.expression_plans[plan_index]
+    if (
+        plan.state != "authorized"
+        or plan.acceptance_id != payload.acceptance_id
+        or plan.proposal_id != payload.proposal_id
+        or any(beat.state != "settled" for beat in state.expression_beats if beat.plan_id == plan.plan_id)
+    ):
+        raise ValueError("expression plan still has un-settled beats")
+    completed = plan.model_copy(
+        update={
+            "state": "completed",
+            "history": (
+                *plan.history,
+                ExpressionPlanLifecycleEntry(
+                    state="completed",
+                    event_ref=event.event_id,
+                    event_payload_hash=event.payload_hash,
+                    receipt_id=receipt.receipt_id,
+                    terminal_action_state=receipt.observed_state,
+                ),
+            ),
+        }
+    )
+    return state.model_copy(
+        update={
+            "expression_plans": (
+                *state.expression_plans[:plan_index],
+                completed,
+                *state.expression_plans[plan_index + 1 :],
             )
         }
     )
@@ -3715,6 +3926,8 @@ def _action_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
             or action.payload_ref != minimal.message_payload_ref
             or action.payload_hash != minimal.message_payload_hash
             or action.intent_ref != f"{minimal.proposal_id}:{minimal.intent_id}"
+            or action.expression_plan_id != minimal.plan_id
+            or action.expression_beat_id != minimal.beat_id
             or canonical_minimal_reply_value_hash(action.model_dump(mode="json"))
             != minimal.action_hash
             or not any(
@@ -6202,6 +6415,8 @@ _EVENTS = {
         EventDefinition("MessagePayloadStored", RevisionClass.WORLD, _message_payload_stored),
         EventDefinition("ExpressionPlanAccepted", RevisionClass.WORLD, _expression_plan_accepted),
         EventDefinition("ExpressionBeatAuthorized", RevisionClass.WORLD, _expression_beat_authorized),
+        EventDefinition("ExpressionBeatSettled", RevisionClass.WORLD, _expression_beat_settled),
+        EventDefinition("ExpressionPlanCompleted", RevisionClass.WORLD, _expression_plan_completed),
         EventDefinition("BudgetReserved", RevisionClass.WORLD, _budget_reserved),
         EventDefinition(
             "ExecutionReceiptRecorded",

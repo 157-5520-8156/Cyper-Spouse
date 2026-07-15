@@ -6,6 +6,8 @@ from typing import Literal
 
 from .action_lifecycle import settlement_event_type, transition_action
 from .errors import InvalidActionTransition
+from .event_identity import domain_idempotency_key
+from .expression_lifecycle_runtime import ExpressionReceiptLifecycle
 from .schemas import (
     Action,
     ActionReconciliation,
@@ -38,6 +40,7 @@ class SettlementPlanner:
 
     def __init__(self, *, world_id: str) -> None:
         self._world_id = world_id
+        self._expression_lifecycle = ExpressionReceiptLifecycle()
 
     def recording_events(
         self, result: ExternalObservation, *, trigger_id: str
@@ -159,6 +162,8 @@ class SettlementPlanner:
                 result,
                 trigger_id=trigger_id,
                 receipt=receipt,
+                action=action,
+                projection=projection,
                 budget_reservation_id=action.budget_reservation_id,
             )
             deferred_ref = None
@@ -239,8 +244,11 @@ class SettlementPlanner:
         *,
         trigger_id: str,
         receipt: ExecutionReceipt,
+        action: Action,
+        projection: LedgerProjection,
         budget_reservation_id: str,
     ) -> tuple[WorldEvent, ...]:
+        receipt_event = self._receipt_event(result, trigger_id=trigger_id, receipt=receipt)
         events = [
             self._event(
                 result,
@@ -249,17 +257,30 @@ class SettlementPlanner:
                 suffix="action-state",
                 payload=result.model_dump(mode="json"),
             ),
-            self._receipt_event(result, trigger_id=trigger_id, receipt=receipt),
+            receipt_event,
         ]
+        events.extend(
+            self._event(
+                result,
+                trigger_id=trigger_id,
+                event_type=event.event_type,
+                suffix=event.suffix,
+                payload=event.payload,
+            )
+            for event in self._expression_lifecycle.events_for_terminal_receipt(
+                projection=projection,
+                action=action,
+                receipt=receipt,
+                receipt_event=receipt_event,
+            )
+        )
         if receipt.is_terminal:
             budget = BudgetSettlement(
                 settlement_id=f"budget-settlement:{result.source}:{result.source_event_id}",
                 reservation_id=budget_reservation_id,
                 action_id=result.action_id,
                 result_id=result.result_id,
-                state=(
-                    "released" if result.status in {"cancelled", "expired"} else "settled"
-                ),
+                state=("released" if result.status in {"cancelled", "expired"} else "settled"),
                 previous_cost=0,
                 cost_actual=result.cost_actual,
                 cost_delta=result.cost_actual,
@@ -289,9 +310,7 @@ class SettlementPlanner:
         budget_reservation_id: str | None,
     ) -> tuple[WorldEvent, ...]:
         reconciliation = ActionReconciliation(
-            reconciliation_id=(
-                f"reconciliation:{result.source}:{result.source_event_id}"
-            ),
+            reconciliation_id=(f"reconciliation:{result.source}:{result.source_event_id}"),
             result_id=result.result_id,
             action_id=result.action_id,
             reason=reason,
@@ -472,7 +491,10 @@ class SettlementPlanner:
             causation_id=result.causation_id,
             correlation_id=result.correlation_id,
             idempotency_key=(
-                f"settlement:{result.source}:{result.source_event_id}:{suffix}"
+                domain_idempotency_key(
+                    event_type=event_type, world_id=self._world_id, payload=payload
+                )
+                or f"settlement:{result.source}:{result.source_event_id}:{suffix}"
             ),
             payload=payload,
         )

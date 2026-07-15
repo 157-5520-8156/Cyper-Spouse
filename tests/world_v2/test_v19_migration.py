@@ -85,7 +85,7 @@ def test_sqlite_migrates_verified_v18_head_without_fabricating_v19_fields(tmp_pa
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
     projection = migrated.project()
     assert projection == expected
-    assert projection.reducer_bundle_version == "world-v2-reducers.21"
+    assert projection.reducer_bundle_version == "world-v2-reducers.22"
     assert projection.fact_commit_proposal_audits_v2 == ()
     assert projection.acceptance_manifests_v3 == ()
     assert migrated.rebuild() == projection
@@ -152,7 +152,7 @@ def test_sqlite_migrates_verified_v19_head_without_fabricating_reply_state(tmp_p
         )
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.21"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.22"
     assert migrated.project().minimal_reply_manifests == ()
     assert migrated.project().stored_message_payloads == ()
     migrated.close()
@@ -169,3 +169,51 @@ def test_v19_legacy_hash_rejects_nonempty_v20_reply_state(tmp_path) -> None:
             reducer_bundle_version="world-v2-reducers.19",
         )
     ledger.close()
+
+
+def test_sqlite_migrates_verified_v21_head_to_expression_lifecycle_bundle(tmp_path) -> None:
+    path = tmp_path / "v21-to-v22.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
+    ledger.commit(
+        [_observation_event()], expected_world_revision=0, expected_deliberation_revision=0
+    )
+    ledger.close()
+    with sqlite3.connect(path) as connection:
+        row = connection.execute(
+            "SELECT state_json FROM world_v2_heads WHERE world_id = ?", (WORLD_ID,)
+        ).fetchone()
+        assert row is not None
+        state_json = json.loads(row[0])
+        state = ReducerState.model_validate_json(json.dumps(state_json, separators=(",", ":")))
+        legacy_payload = state.semantic_payload(
+            world_id=WORLD_ID,
+            world_revision=1,
+            reducer_bundle_version="world-v2-reducers.21",
+        )
+        # .21 was the immediately preceding current bundle: even empty
+        # established domain heads remain semantic fields, rather than being
+        # retroactively omitted by the .22 migration code.
+        assert {
+            "threads",
+            "commitments",
+            "facts",
+            "clock_transition_history",
+            "minimal_reply_manifests",
+        }.issubset(legacy_payload)
+        legacy_hash = hashlib.sha256(
+            json.dumps(
+                legacy_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        connection.execute(
+            "UPDATE world_v2_heads SET semantic_hash = ?, reducer_bundle_version = ?, "
+            "state_hash = ? WHERE world_id = ?",
+            (legacy_hash, "world-v2-reducers.21", "0" * 64, WORLD_ID),
+        )
+
+    migrated = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.22"
+    migrated.close()

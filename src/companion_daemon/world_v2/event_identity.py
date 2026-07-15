@@ -230,6 +230,20 @@ def _life_identity_components(
             _mapping_value(beat, "beat_id"),
             _mapping_value(_mapping_value(beat, "payload"), "payload_hash"),
         )
+    if event_type == "ExpressionBeatSettled":
+        return (
+            world_id,
+            payload.get("beat_id"),
+            payload.get("receipt_id"),
+            payload.get("terminal_action_state"),
+        )
+    if event_type == "ExpressionPlanCompleted":
+        return (
+            world_id,
+            payload.get("plan_id"),
+            payload.get("receipt_id"),
+            payload.get("terminal_beat_id"),
+        )
     if event_type == "FactCommittedV2":
         return (
             world_id,

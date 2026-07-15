@@ -36,7 +36,9 @@ from .proposal_audit_schemas import (
 from .acceptance_manifest import parse_acceptance_manifest_v2
 from .minimal_reply_events import (
     ExpressionBeatAuthorizedPayload,
+    ExpressionBeatSettledPayload,
     ExpressionPlanAcceptedPayload,
+    ExpressionPlanCompletedPayload,
     MessagePayloadStoredPayload,
     minimal_reply_event_id,
     minimal_reply_idempotency_key,
@@ -108,6 +110,7 @@ def validate_commit_batch(
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
     )
+    _validate_expression_receipt_lifecycle_batch(events)
 
     appraisal_triggers: dict[str, list[tuple[str, str, str | None]]] = {}
     experiences: list[ExperienceCommittedPayload] = []
@@ -309,6 +312,46 @@ def validate_commit_batch(
                 "typed proposal mutation requires one adjacent revision-pinned "
                 "AcceptanceRecorded"
             )
+
+
+def _validate_expression_receipt_lifecycle_batch(events: Sequence[WorldEvent]) -> None:
+    """Receipt-derived expression heads are one atomic, deterministic suffix."""
+
+    for index, event in enumerate(events):
+        if event.event_type != "ExpressionBeatSettled":
+            continue
+        if index == 0 or events[index - 1].event_type != "ExecutionReceiptRecorded":
+            raise ValueError("expression_lifecycle.beat_requires_adjacent_receipt")
+        beat = ExpressionBeatSettledPayload.model_validate_json(event.payload_json)
+        receipt_event = events[index - 1]
+        receipt = receipt_event.payload().get("receipt")
+        if not isinstance(receipt, dict) or (
+            beat.receipt_event_ref != receipt_event.event_id
+            or beat.receipt_event_payload_hash != receipt_event.payload_hash
+            or beat.receipt_id != receipt.get("receipt_id")
+            or beat.action_id != receipt.get("action_id")
+            or beat.terminal_action_state != receipt.get("observed_state")
+            or receipt.get("is_terminal") is not True
+        ):
+            raise ValueError("expression_lifecycle.beat_receipt_binding_invalid")
+    for index, event in enumerate(events):
+        if event.event_type != "ExpressionPlanCompleted":
+            continue
+        if index == 0 or events[index - 1].event_type != "ExpressionBeatSettled":
+            raise ValueError("expression_lifecycle.plan_requires_adjacent_settled_beat")
+        plan = ExpressionPlanCompletedPayload.model_validate_json(event.payload_json)
+        beat = ExpressionBeatSettledPayload.model_validate_json(events[index - 1].payload_json)
+        if (
+            plan.acceptance_id != beat.acceptance_id
+            or plan.proposal_id != beat.proposal_id
+            or plan.plan_id != beat.plan_id
+            or plan.terminal_beat_id != beat.beat_id
+            or plan.receipt_id != beat.receipt_id
+            or plan.receipt_event_ref != beat.receipt_event_ref
+            or plan.receipt_event_payload_hash != beat.receipt_event_payload_hash
+            or plan.terminal_action_state != beat.terminal_action_state
+        ):
+            raise ValueError("expression_lifecycle.plan_beat_binding_invalid")
 
 
 def _validate_deliberation_audit_transaction(events: Sequence[WorldEvent]) -> None:

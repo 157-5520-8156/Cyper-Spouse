@@ -92,7 +92,7 @@ class EventContract:
     evidence_types: tuple[str, ...] = ()
     successors: tuple[str, ...] = ()
     compensations: tuple[str, ...] = ()
-    reducer_bundle: str = "world-v2-reducers.21"
+    reducer_bundle: str = "world-v2-reducers.22"
     upcaster: str = "world-v2-upcasters.1"
 
     @property
@@ -380,6 +380,8 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "MessagePayloadStored": "world_id+acceptance_id+payload_ref+payload_hash",
         "ExpressionPlanAccepted": "world_id+acceptance_id+plan_id+expression_change_id",
         "ExpressionBeatAuthorized": "world_id+acceptance_id+plan_id+beat_id+payload_hash",
+        "ExpressionBeatSettled": "world_id+beat_id+receipt_id+terminal_state",
+        "ExpressionPlanCompleted": "world_id+plan_id+receipt_id+terminal_beat_id",
         "LegacyAcceptanceAuditRecorded": "migration-only:original-event-id",
         "AffectEpisodeOpened": "world_id+episode_id+transition_id",
         "AffectEpisodeUpdated": "episode_id+transition_id",
@@ -769,6 +771,23 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 allowed_predecessors=("ExpressionPlanAccepted",),
                 evidence_types=("stored_message_payload", "minimal_reply_manifest"),
                 successors=("BudgetReserved",),
+            ),
+            _contract(
+                "ExpressionBeatSettled",
+                "expression_lifecycle_runtime",
+                "world",
+                "ExpressionBeatSettledPayload",
+                allowed_predecessors=("ExecutionReceiptRecorded",),
+                evidence_types=("terminal_execution_receipt", "expression_beat"),
+                successors=("ExpressionPlanCompleted",),
+            ),
+            _contract(
+                "ExpressionPlanCompleted",
+                "expression_lifecycle_runtime",
+                "world",
+                "ExpressionPlanCompletedPayload",
+                allowed_predecessors=("ExpressionBeatSettled",),
+                evidence_types=("settled_expression_beat",),
             ),
             _contract(
                 "BudgetReserved",

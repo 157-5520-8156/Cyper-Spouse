@@ -1359,6 +1359,7 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.18",
                 "world-v2-reducers.19",
                 "world-v2-reducers.20",
+                "world-v2-reducers.21",
                 REDUCER_BUNDLE_VERSION,
             }:
                 raise LedgerIntegrityError(
@@ -1474,7 +1475,10 @@ class SQLiteWorldLedger:
                     if raw_state.get(key) not in (None, [], {})
                 )
             )
-            if injected_v20_keys:
+            if injected_v20_keys and reducer_bundle_version not in {
+                "world-v2-reducers.20",
+                "world-v2-reducers.21",
+            }:
                 raise ValueError(
                     f"legacy head cannot claim v20 reply fields {injected_v20_keys!r}"
                 )
@@ -1485,7 +1489,11 @@ class SQLiteWorldLedger:
                     if raw_state.get(key) not in (None, [], {})
                 )
             )
-            if injected_v19_keys and reducer_bundle_version != "world-v2-reducers.19":
+            if injected_v19_keys and reducer_bundle_version not in {
+                "world-v2-reducers.19",
+                "world-v2-reducers.20",
+                "world-v2-reducers.21",
+            }:
                 raise ValueError(
                     f"legacy head cannot claim v19 Fact fields {injected_v19_keys!r}"
                 )
@@ -1507,6 +1515,8 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.17",
                 "world-v2-reducers.18",
                 "world-v2-reducers.19",
+                "world-v2-reducers.20",
+                "world-v2-reducers.21",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v17 audit fields {injected_v17_keys!r}"
@@ -1517,6 +1527,8 @@ class SQLiteWorldLedger:
                 "world-v2-reducers.17",
                 "world-v2-reducers.18",
                 "world-v2-reducers.19",
+                "world-v2-reducers.20",
+                "world-v2-reducers.21",
             }:
                 raise ValueError(
                     f"legacy head cannot claim v16 authority fields {injected_v16_keys!r}"
@@ -1534,6 +1546,8 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.17",
                     "world-v2-reducers.18",
                     "world-v2-reducers.19",
+                    "world-v2-reducers.20",
+                    "world-v2-reducers.21",
                 }
                 and isinstance(actor_transitions, list)
                 and any(
@@ -1554,6 +1568,8 @@ class SQLiteWorldLedger:
                     "world-v2-reducers.17",
                     "world-v2-reducers.18",
                     "world-v2-reducers.19",
+                    "world-v2-reducers.20",
+                    "world-v2-reducers.21",
                 }
                 and isinstance(plans, list)
                 and any(
@@ -1565,7 +1581,14 @@ class SQLiteWorldLedger:
             occurrences = raw_state.get("world_occurrences", [])
             if (
                 reducer_bundle_version
-                not in {"world-v2-reducers.16", "world-v2-reducers.17"}
+                not in {
+                    "world-v2-reducers.16",
+                    "world-v2-reducers.17",
+                    "world-v2-reducers.18",
+                    "world-v2-reducers.19",
+                    "world-v2-reducers.20",
+                    "world-v2-reducers.21",
+                }
                 and isinstance(occurrences, list)
                 and any(
                     isinstance(occurrence, dict)
@@ -1705,6 +1728,8 @@ class SQLiteWorldLedger:
             "world-v2-reducers.17",
             "world-v2-reducers.18",
             "world-v2-reducers.19",
+            "world-v2-reducers.20",
+            "world-v2-reducers.21",
             REDUCER_BUNDLE_VERSION,
         }:
             payload.pop("commitments", None)

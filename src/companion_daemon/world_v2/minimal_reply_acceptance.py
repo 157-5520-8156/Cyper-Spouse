@@ -206,6 +206,8 @@ def derive_minimal_reply_material(
         target=policy.target,
         payload_ref=payload_ref,
         payload_hash=payload_hash,
+        expression_plan_id=plan_id,
+        expression_beat_id=beat_id,
         idempotency_key=f"minimal-reply:{_digest({**identity, 'role': 'action'})}",
         not_before=None,
         expires_at=None,
