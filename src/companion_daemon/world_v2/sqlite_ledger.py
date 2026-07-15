@@ -715,6 +715,12 @@ class SQLiteWorldLedger:
                 (self._world_id,),
             )
         )
+        expected_commit_count = int(
+            self._connection.execute(
+                "SELECT COUNT(*) FROM world_v2_commits WHERE world_id = ?",
+                (self._world_id,),
+            ).fetchone()[0]
+        )
         current_commit: str | None = None
         staged: list[tuple[sqlite3.Row, WorldEvent, bytes, int]] = []
         completed: set[str] = set()
@@ -758,7 +764,19 @@ class SQLiteWorldLedger:
             ).digest()
             staged.append((row, event, leaf_hash, mmr.leaf_count))
         if not rows:
+            if expected_commit_count:
+                raise LedgerIntegrityError("legacy ledger contains an empty commit")
             return
+        if len(completed) != expected_commit_count:
+            raise LedgerIntegrityError("legacy ledger contains an empty or orphaned commit")
+        durable_commit_count = int(
+            self._connection.execute(
+                "SELECT COUNT(*) FROM world_v2_commits WHERE world_id = ?",
+                (self._world_id,),
+            ).fetchone()[0]
+        )
+        if len(completed) != durable_commit_count:
+            raise LedgerIntegrityError("legacy ledger contains an empty or orphaned commit")
 
     def _persist_prefix_commit_locked(
         self,

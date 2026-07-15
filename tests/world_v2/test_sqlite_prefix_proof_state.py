@@ -114,3 +114,29 @@ def test_sqlite_prefix_state_fails_closed_when_persisted_peak_is_tampered(tmp_pa
         )
     with pytest.raises(LedgerIntegrityError, match="MMR root"):
         SQLiteWorldLedger(path=path, world_id=WORLD)
+
+
+def test_legacy_prefix_backfill_rejects_an_orphan_commit(tmp_path) -> None:
+    path = tmp_path / "orphan-prefix.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    _commit(ledger, _observation("event:orphan-source", "obs:orphan-source"), 1)
+    ledger.close()
+    with sqlite3.connect(path) as connection:
+        request_hash, result_json = connection.execute(
+            "SELECT request_hash, result_json FROM world_v2_commits WHERE world_id = ?",
+            (WORLD,),
+        ).fetchone()
+        connection.execute(
+            "INSERT INTO world_v2_commits (world_id, commit_id, request_hash, result_json) VALUES (?, ?, ?, ?)",
+            (WORLD, "commit:orphan", request_hash, result_json),
+        )
+        for table in (
+            "world_v2_prefix_mmr_nodes",
+            "world_v2_prefix_locator_nodes",
+            "world_v2_prefix_locator_values",
+            "world_v2_prefix_checkpoints",
+            "world_v2_prefix_heads",
+        ):
+            connection.execute(f"DELETE FROM {table}")
+    with pytest.raises(LedgerIntegrityError, match="empty or orphaned commit"):
+        SQLiteWorldLedger(path=path, world_id=WORLD)
