@@ -235,6 +235,20 @@ class PreparedFactCommitMaterializationV2:
         raise TypeError("prepared Fact capabilities cannot be copied")
 
 
+class FactPinnedCompilationCandidateV2(FrozenModel):
+    """Inert result of compiling one audit-bound Fact change.
+
+    It is intentionally a value, not a plan capability.  Only the registry can
+    produce it from a preparation that was itself bound to a reader-issued
+    proposal pin; a candidate-manifest builder must invoke that registry method
+    rather than accept this DTO from its caller.
+    """
+
+    payload: FactCommitMaterializedPayloadV2
+    durable_authority: DurableEffectCompilerAuthorityV1
+    proposal_audit: FactCommitProposalAuditProjectionV2
+
+
 @dataclass(frozen=True, slots=True)
 class _PreparedFactMaterializationV2:
     adapter_handle: SealedFactCommitCompilationHandleV2
@@ -417,6 +431,49 @@ class SealedProductionFactPreparationRegistryV2:
         except SealedFactCommitAdapterError as exc:
             raise SealedProductionFactRegistryErrorV2(str(exc)) from exc
 
+    def compile_from_pinned_audit(
+        self,
+        *,
+        prepared: PreparedFactCommitMaterializationV2,
+        proposal_reader: FactCommitProposalAuthorityReaderV2,
+        proposal_handle: PinnedFactCommitProposalAuthorityHandleV2,
+        acceptance_id: str,
+        sources: ResolvedFactCommitSourcesV2,
+    ) -> FactPinnedCompilationCandidateV2:
+        """Compile only when preparation and current pin are the same audit."""
+
+        material = self.__prepared_material(prepared)
+        if material.proposal_audit is None or material.proposal_reader is None:
+            raise SealedProductionFactRegistryErrorV2(
+                "Fact candidate compilation requires a preparation bound to a proposal audit"
+            )
+        if type(proposal_reader) is not FactCommitProposalAuthorityReaderV2 or (
+            material.proposal_reader is not proposal_reader
+        ):
+            raise SealedProductionFactRegistryErrorV2(
+                "Fact candidate compilation proposal reader does not match preparation"
+            )
+        try:
+            current_audit = proposal_reader.audit(handle=proposal_handle)
+        except Exception as exc:
+            raise SealedProductionFactRegistryErrorV2(
+                "Fact candidate compilation requires a reader-owned proposal pin"
+            ) from exc
+        if current_audit != material.proposal_audit:
+            raise SealedProductionFactRegistryErrorV2(
+                "Fact candidate compilation proposal audit does not match preparation"
+            )
+        payload = self.compile(
+            prepared=prepared, acceptance_id=acceptance_id, sources=sources
+        )
+        return FactPinnedCompilationCandidateV2(
+            payload=payload,
+            durable_authority=_durable_authority_from_audit(
+                descriptor=sealed_fact_commit_install_descriptor_v2(), audit=current_audit
+            ),
+            proposal_audit=current_audit,
+        )
+
     def reverse_verify(
         self,
         *,
@@ -507,6 +564,7 @@ def _durable_authority_from_audit(
 
 
 __all__ = [
+    "FactPinnedCompilationCandidateV2",
     "PreparedFactCommitMaterializationV2",
     "SEALED_FACT_COMMIT_REGISTRY_REF_V2",
     "SEALED_FACT_COMMIT_REGISTRY_VERSION_V2",
