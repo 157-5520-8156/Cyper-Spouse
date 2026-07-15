@@ -114,13 +114,19 @@ class WorldRuntime:
     async def evaluate_replay(self, *, evaluator: ReplayEvaluator | None = None) -> ReplayEvaluation:
         """Run deterministic diagnostics without model calls or side effects."""
 
+        evidence_export = getattr(self._ledger, "export_replay_evidence", None)
+        if callable(evidence_export):
+            if self._ledger.blocks_event_loop:
+                evidence = await asyncio.to_thread(evidence_export)
+            else:
+                evidence = evidence_export()
+            return (evaluator or ReplayEvaluator()).evaluate(evidence=evidence)
         rebuild = getattr(self._ledger, "rebuild", None)
         if not callable(rebuild):
             raise ValueError("configured ledger does not expose deterministic replay")
         if self._ledger.blocks_event_loop:
-            projection, replay = await asyncio.gather(
-                asyncio.to_thread(self._ledger.project), asyncio.to_thread(rebuild)
-            )
+            projection = await asyncio.to_thread(self._ledger.project)
+            replay = await asyncio.to_thread(rebuild)
         else:
             projection, replay = self._ledger.project(), rebuild()
         return (evaluator or ReplayEvaluator()).evaluate(projection=projection, replay=replay)

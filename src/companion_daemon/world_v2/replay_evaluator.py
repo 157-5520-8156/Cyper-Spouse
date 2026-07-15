@@ -7,8 +7,12 @@ observable causal promises that make long-term companion behaviour testable.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 
-from .schemas import LedgerProjection
+from .ledger import canonical_event_json, commit_request_hash
+from .replay_evidence import ReplayEvidence, ReplayEventEvidence
+
+from .schemas import CommitResult, LedgerProjection, ProjectionCursor
 
 
 @dataclass(frozen=True, slots=True)
@@ -38,8 +42,18 @@ class ReplayEvaluator:
     version = "world-v2-replay-evaluator.1"
 
     def evaluate(
-        self, *, projection: LedgerProjection, replay: LedgerProjection
+        self,
+        *,
+        projection: LedgerProjection | None = None,
+        replay: LedgerProjection | None = None,
+        evidence: ReplayEvidence | None = None,
     ) -> ReplayEvaluation:
+        if evidence is not None:
+            if projection is not None or replay is not None:
+                raise ValueError("replay evidence cannot be combined with separate projections")
+            projection, replay = evidence.projection, evidence.replay
+        elif projection is None or replay is None:
+            raise ValueError("projection and replay are required without replay evidence")
         findings: list[ReplayFinding] = []
         if projection.world_id != replay.world_id:
             findings.append(ReplayFinding("world_mismatch", "error", "replay belongs to another world"))
@@ -58,11 +72,13 @@ class ReplayEvaluator:
             reservation = reservations.get(action.budget_reservation_id)
             if reservation is None or reservation.action_id != action.action_id:
                 findings.append(ReplayFinding("reply_budget_missing", "error", action.action_id))
+        if evidence is not None:
+            self._check_evidence(evidence, findings)
         checks = (
+            *(("same_cursor_replay_evidence",) if evidence is not None else ()),
             "replay_semantic_hash",
             "reply_expression_payload_binding",
             "reply_budget_action_binding",
-            "affect_relationship_memory_npc_projection_visibility",
         )
         return ReplayEvaluation(
             evaluator_version=self.version,
@@ -72,6 +88,56 @@ class ReplayEvaluator:
             mechanism_checks=checks,
             findings=tuple(findings),
         )
+
+    @staticmethod
+    def _check_evidence(evidence: ReplayEvidence, findings: list[ReplayFinding]) -> None:
+        projection = evidence.projection
+        if evidence.world_id != projection.world_id:
+            findings.append(ReplayFinding("evidence_world_mismatch", "error", evidence.world_id))
+        projection_cursor = ProjectionCursor(
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            ledger_sequence=projection.ledger_sequence,
+        )
+        if evidence.cursor != projection_cursor:
+            findings.append(ReplayFinding("evidence_cursor_mismatch", "error", "projection cursor"))
+        if evidence.replay.world_id != evidence.world_id:
+            findings.append(ReplayFinding("replay_evidence_world_mismatch", "error", "replay world"))
+
+        events_by_commit: dict[str, list[ReplayEventEvidence]] = {}
+        last_sequence = 0
+        for item in evidence.events:
+            if item.cursor.ledger_sequence != last_sequence + 1:
+                findings.append(ReplayFinding("evidence_event_sequence", "error", item.event.event_id))
+            last_sequence = item.cursor.ledger_sequence
+            expected_hash = hashlib.sha256(
+                canonical_event_json(item.event).encode("utf-8")
+            ).hexdigest()
+            if item.event_envelope_hash != expected_hash:
+                findings.append(ReplayFinding("evidence_event_hash", "error", item.event.event_id))
+            events_by_commit.setdefault(item.commit_id, []).append(item)
+        if last_sequence != evidence.cursor.ledger_sequence:
+            findings.append(ReplayFinding("evidence_event_tail", "error", str(last_sequence)))
+
+        if tuple(events_by_commit) != tuple(item.commit_id for item in evidence.commits):
+            findings.append(ReplayFinding("evidence_commit_order", "error", "commit/event ordering"))
+        for commit in evidence.commits:
+            events = events_by_commit.get(commit.commit_id)
+            if not events:
+                findings.append(ReplayFinding("evidence_empty_commit", "error", commit.commit_id))
+                continue
+            commit_events = tuple(item.event for item in events)
+            if commit.request_hash != commit_request_hash(commit_events):
+                findings.append(ReplayFinding("evidence_commit_request_hash", "error", commit.commit_id))
+            last = events[-1]
+            expected_result = CommitResult(
+                world_revision=last.cursor.world_revision,
+                deliberation_revision=last.cursor.deliberation_revision,
+                ledger_sequence=last.cursor.ledger_sequence,
+                event_ids=tuple(item.event.event_id for item in events),
+            )
+            if commit.result != expected_result:
+                findings.append(ReplayFinding("evidence_commit_result", "error", commit.commit_id))
 
 
 __all__ = ["ReplayEvaluation", "ReplayEvaluator", "ReplayFinding"]

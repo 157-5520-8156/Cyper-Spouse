@@ -36,6 +36,7 @@ from .reducers import (
     reduce_event,
     require_reducer_bundle,
 )
+from .replay_evidence import ReplayCommitEvidence, ReplayEvidence, ReplayEventEvidence
 from .schemas import (
     CommitResult,
     CommittedWorldEventRef,
@@ -781,6 +782,26 @@ class WorldLedger:
                 return stored.event, commit.result
         raise RuntimeError(f"event {event_id!r} has no owning commit")
 
+    def _find_appraisal_proposal_event(self, *, proposal_id: str) -> WorldEvent | None:
+        """Internal exact lookup used by the Appraisal acceptance reader.
+
+        Typed Appraisal proposals predate the generic proposal-audit projection,
+        so this narrow read preserves their original immutable envelope without
+        adding a public unbounded-history query to ``LedgerPort``.
+        """
+
+        with self._thread_lock:
+            candidates = tuple(
+                stored.event
+                for stored in self._events
+                if stored.event.event_type == "ProposalRecorded"
+                and stored.event.payload().get("proposal_id") == proposal_id
+                and stored.event.payload().get("proposal_kind") == "appraisal_transition"
+            )
+        if len(candidates) > 1:
+            raise LedgerIntegrityError("Appraisal proposal identity has multiple envelopes")
+        return candidates[0] if candidates else None
+
     def resolve_committed_event_refs(
         self, event_ids: Sequence[str], *, at_world_revision: int
     ) -> dict[str, CommittedWorldEventRef]:
@@ -813,10 +834,127 @@ class WorldLedger:
 
     def rebuild(self, *, reducer_bundle_version: str = REDUCER_BUNDLE_VERSION) -> LedgerProjection:
         require_reducer_bundle(reducer_bundle_version)
+        with self._thread_lock:
+            return self._rebuild_at_locked(
+                ledger_sequence=len(self._events), reducer_bundle_version=reducer_bundle_version
+            )
+
+    def export_replay_evidence(
+        self, *, at_cursor: ProjectionCursor | None = None
+    ) -> ReplayEvidence:
+        """Export head, replay, commits and events from one lock-held cursor.
+
+        The caller receives immutable values only.  This avoids the previous
+        ``project()``/``rebuild()`` race while keeping storage and locking
+        mechanics inside this adapter.
+        """
+
+        with self._thread_lock:
+            head_cursor = ProjectionCursor(
+                world_revision=self._world_revision,
+                deliberation_revision=self._deliberation_revision,
+                ledger_sequence=len(self._events),
+            )
+            cursor = at_cursor or head_cursor
+            cursor_key = (
+                cursor.world_revision,
+                cursor.deliberation_revision,
+                cursor.ledger_sequence,
+            )
+            if cursor_key not in self._commit_cursors:
+                raise ValueError("replay evidence cursor is not a committed batch boundary")
+            if cursor.ledger_sequence > len(self._events):
+                raise ValueError("replay evidence cursor is outside the ledger range")
+
+            if cursor == head_cursor:
+                projection = make_projection(
+                    world_id=self._world_id,
+                    world_revision=self._world_revision,
+                    deliberation_revision=self._deliberation_revision,
+                    ledger_sequence=len(self._events),
+                    state=self._state,
+                )
+            else:
+                projection = self.project_at(cursor)
+            replay = self._rebuild_at_locked(
+                ledger_sequence=cursor.ledger_sequence,
+                reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+            )
+            if replay != projection:
+                raise LedgerIntegrityError("replay evidence does not match projection")
+
+            selected = tuple(
+                stored for stored in self._events if stored.ledger_sequence <= cursor.ledger_sequence
+            )
+            event_evidence: list[ReplayEventEvidence] = []
+            commit_ids: list[str] = []
+            for stored in selected:
+                commit_id = self._event_commit_ids.get(stored.event.event_id)
+                if commit_id is None:
+                    raise LedgerIntegrityError("replay event has no owning commit")
+                if not commit_ids or commit_ids[-1] != commit_id:
+                    commit_ids.append(commit_id)
+                event_evidence.append(
+                    ReplayEventEvidence(
+                        event=stored.event,
+                        commit_id=commit_id,
+                        cursor=ProjectionCursor(
+                            world_revision=stored.world_revision,
+                            deliberation_revision=stored.deliberation_revision,
+                            ledger_sequence=stored.ledger_sequence,
+                        ),
+                        event_envelope_hash=hashlib.sha256(
+                            canonical_event_json(stored.event).encode("utf-8")
+                        ).hexdigest(),
+                    )
+                )
+
+            commit_evidence: list[ReplayCommitEvidence] = []
+            for commit_id in commit_ids:
+                stored_commit = self._commits.get(commit_id)
+                stored_events = self._commit_events.get(commit_id)
+                if stored_commit is None or stored_events is None:
+                    raise LedgerIntegrityError("replay commit is unavailable")
+                if any(item.ledger_sequence > cursor.ledger_sequence for item in stored_events):
+                    raise LedgerIntegrityError("replay cursor split an immutable commit")
+                commit_events = tuple(item.event for item in stored_events)
+                if commit_request_hash(commit_events) != stored_commit.request_hash:
+                    raise LedgerIntegrityError("replay commit request hash does not match events")
+                expected_result = CommitResult(
+                    world_revision=stored_events[-1].world_revision,
+                    deliberation_revision=stored_events[-1].deliberation_revision,
+                    ledger_sequence=stored_events[-1].ledger_sequence,
+                    event_ids=tuple(item.event.event_id for item in stored_events),
+                )
+                if stored_commit.result != expected_result:
+                    raise LedgerIntegrityError("replay commit result does not match events")
+                commit_evidence.append(
+                    ReplayCommitEvidence(
+                        commit_id=commit_id,
+                        request_hash=stored_commit.request_hash,
+                        result=stored_commit.result,
+                    )
+                )
+            return ReplayEvidence(
+                world_id=self._world_id,
+                cursor=cursor,
+                reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+                projection=projection,
+                replay=replay,
+                events=tuple(event_evidence),
+                commits=tuple(commit_evidence),
+            )
+
+    def _rebuild_at_locked(
+        self, *, ledger_sequence: int, reducer_bundle_version: str
+    ) -> LedgerProjection:
+        require_reducer_bundle(reducer_bundle_version)
         state = ReducerState()
         world_revision = 0
         deliberation_revision = 0
         for stored in self._events:
+            if stored.ledger_sequence > ledger_sequence:
+                break
             definition = event_definition(stored.event.event_type)
             if definition.revision_class is RevisionClass.WORLD:
                 world_revision += 1
@@ -827,7 +965,7 @@ class WorldLedger:
             world_id=self._world_id,
             world_revision=world_revision,
             deliberation_revision=deliberation_revision,
-            ledger_sequence=len(self._events),
+            ledger_sequence=ledger_sequence,
             state=state,
             reducer_bundle_version=reducer_bundle_version,
         )

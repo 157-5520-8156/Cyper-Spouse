@@ -51,6 +51,7 @@ from .ledger_prefix_proof import (
     sparse_merkle_put_from_node_lookup_v1,
     verify_checkpoint_in_prefix,
 )
+from .replay_evidence import ReplayCommitEvidence, ReplayEvidence, ReplayEventEvidence
 from .reducers import (
     REDUCER_BUNDLE_VERSION,
     ReducerState,
@@ -2894,6 +2895,29 @@ class SQLiteWorldLedger:
                 raise LedgerIntegrityError("event is absent from its owning commit")
             return event, result
 
+    def _find_appraisal_proposal_event(self, *, proposal_id: str) -> WorldEvent | None:
+        """Internal exact lookup used by the Appraisal acceptance reader."""
+
+        with self._thread_lock:
+            rows = tuple(
+                self._connection.execute(
+                    """SELECT event_id FROM world_v2_events
+                       WHERE world_id = ?
+                         AND json_extract(event_json, '$.event_type') = 'ProposalRecorded'
+                         AND json_extract(json_extract(event_json, '$.payload_json'), '$.proposal_id') = ?
+                         AND json_extract(json_extract(event_json, '$.payload_json'), '$.proposal_kind') = 'appraisal_transition'""",
+                    (self._world_id, proposal_id),
+                )
+            )
+            if len(rows) > 1:
+                raise LedgerIntegrityError("Appraisal proposal identity has multiple envelopes")
+            if not rows:
+                return None
+            located = self.lookup_event_commit(str(rows[0]["event_id"]))
+            if located is None:
+                raise LedgerIntegrityError("Appraisal proposal event disappeared")
+            return located[0]
+
     def resolve_committed_event_refs(
         self, event_ids: Sequence[str], *, at_world_revision: int
     ) -> dict[str, CommittedWorldEventRef]:
@@ -3145,6 +3169,200 @@ class SQLiteWorldLedger:
                 target_schema_version=target_schema_version,
                 reducer_bundle_version=reducer_bundle_version,
             )
+
+    def export_replay_evidence(
+        self, *, at_cursor: ProjectionCursor | None = None
+    ) -> ReplayEvidence:
+        """Export one transactionally consistent replay-evaluation snapshot.
+
+        The read transaction binds persisted head state, independent reducer
+        replay, immutable event envelopes and their commit records to one
+        cursor.  The evaluator need not make further adapter calls, so a
+        writer cannot produce a mixed-head diagnostic.
+        """
+
+        with self._thread_lock:
+            connection = self._connection
+            try:
+                connection.execute("BEGIN")
+                head = self._project_locked()
+                head_cursor = ProjectionCursor(
+                    world_revision=head.world_revision,
+                    deliberation_revision=head.deliberation_revision,
+                    ledger_sequence=head.ledger_sequence,
+                )
+                cursor = at_cursor or head_cursor
+                zero = ProjectionCursor(
+                    world_revision=0, deliberation_revision=0, ledger_sequence=0
+                )
+                if cursor != zero and connection.execute(
+                    """SELECT 1 FROM world_v2_prefix_checkpoints
+                       WHERE world_id = ? AND world_revision = ?
+                         AND deliberation_revision = ? AND ledger_sequence = ?""",
+                    (
+                        self._world_id,
+                        cursor.world_revision,
+                        cursor.deliberation_revision,
+                        cursor.ledger_sequence,
+                    ),
+                ).fetchone() is None:
+                    raise ValueError("replay evidence cursor is not a committed batch boundary")
+                if cursor.ledger_sequence > head_cursor.ledger_sequence:
+                    raise ValueError("replay evidence cursor is outside the ledger range")
+
+                projection = (
+                    head
+                    if cursor == head_cursor
+                    else self._replay_locked(
+                        target_cursor=cursor,
+                        target_schema_version=CURRENT_SCHEMA_VERSION,
+                        reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+                    )
+                )
+                replay = self._replay_locked(
+                    target_cursor=cursor,
+                    target_schema_version=CURRENT_SCHEMA_VERSION,
+                    reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+                )
+                if replay != projection:
+                    raise LedgerIntegrityError("replay evidence does not match projection")
+                events, commits = self._replay_evidence_rows_locked(cursor=cursor)
+                connection.commit()
+                return ReplayEvidence(
+                    world_id=self._world_id,
+                    cursor=cursor,
+                    reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+                    projection=projection,
+                    replay=replay,
+                    events=events,
+                    commits=commits,
+                )
+            except sqlite3.DatabaseError as exc:
+                try:
+                    connection.rollback()
+                except sqlite3.DatabaseError:
+                    pass
+                raise LedgerIntegrityError("replay evidence export failed") from exc
+            except Exception:
+                try:
+                    connection.rollback()
+                except sqlite3.DatabaseError:
+                    pass
+                raise
+
+    def _replay_evidence_rows_locked(
+        self, *, cursor: ProjectionCursor
+    ) -> tuple[tuple[ReplayEventEvidence, ...], tuple[ReplayCommitEvidence, ...]]:
+        """Materialize current-format event/commit evidence inside an open read transaction."""
+
+        commit_count = int(
+            self._connection.execute(
+                "SELECT COUNT(*) FROM world_v2_commits WHERE world_id = ?", (self._world_id,)
+            ).fetchone()[0]
+        )
+        event_commit_count = int(
+            self._connection.execute(
+                """SELECT COUNT(DISTINCT commit_id) FROM world_v2_events
+                   WHERE world_id = ?""",
+                (self._world_id,),
+            ).fetchone()[0]
+        )
+        if commit_count != event_commit_count:
+            raise LedgerIntegrityError("replay evidence ledger has an empty or orphaned commit")
+        rows = tuple(
+            self._connection.execute(
+                """SELECT e.*, c.request_hash, c.result_json
+                   FROM world_v2_events AS e JOIN world_v2_commits AS c
+                     ON c.world_id = e.world_id AND c.commit_id = e.commit_id
+                   WHERE e.world_id = ? AND e.ledger_sequence <= ?
+                   ORDER BY e.ledger_sequence""",
+                (self._world_id, cursor.ledger_sequence),
+            )
+        )
+        event_evidence: list[ReplayEventEvidence] = []
+        commit_evidence: list[ReplayCommitEvidence] = []
+        current_commit_id: str | None = None
+        current_rows: list[sqlite3.Row] = []
+        completed_commits: set[str] = set()
+
+        def finish_commit() -> None:
+            nonlocal current_commit_id, current_rows
+            if current_commit_id is None:
+                return
+            if current_commit_id in completed_commits or not current_rows:
+                raise LedgerIntegrityError("replay evidence commit rows are not contiguous")
+            completed_commits.add(current_commit_id)
+            events = tuple(
+                WorldEvent.model_validate_json(str(row["event_json"])) for row in current_rows
+            )
+            if any(event.schema_version != CURRENT_SCHEMA_VERSION for event in events):
+                raise LedgerIntegrityError("replay evidence requires current event envelopes")
+            request_hash = str(current_rows[0]["request_hash"])
+            if not hmac.compare_digest(commit_request_hash(events), request_hash):
+                raise LedgerIntegrityError("replay evidence commit request hash does not match events")
+            last = current_rows[-1]
+            result = CommitResult.model_validate_json(str(last["result_json"]))
+            expected_result = CommitResult(
+                world_revision=int(last["world_revision"]),
+                deliberation_revision=int(last["deliberation_revision"]),
+                ledger_sequence=int(last["ledger_sequence"]),
+                event_ids=tuple(event.event_id for event in events),
+            )
+            if result != expected_result:
+                raise LedgerIntegrityError("replay evidence commit result does not match events")
+            commit_evidence.append(
+                ReplayCommitEvidence(
+                    commit_id=current_commit_id,
+                    request_hash=request_hash,
+                    result=result,
+                )
+            )
+            current_commit_id = None
+            current_rows = []
+
+        expected_sequence = 0
+        for row in rows:
+            sequence = int(row["ledger_sequence"])
+            if sequence != expected_sequence + 1:
+                raise LedgerIntegrityError("replay evidence event sequence is discontinuous")
+            expected_sequence = sequence
+            commit_id = str(row["commit_id"])
+            if current_commit_id is not None and commit_id != current_commit_id:
+                finish_commit()
+            if current_commit_id is None:
+                current_commit_id = commit_id
+            event_json = row["event_json"]
+            if not isinstance(event_json, str):
+                raise LedgerIntegrityError("replay evidence event bytes are invalid")
+            event_hash = hashlib.sha256(event_json.encode("utf-8")).hexdigest()
+            if not hmac.compare_digest(event_hash, str(row["event_hash"])):
+                raise LedgerIntegrityError("replay evidence event envelope hash mismatch")
+            event = WorldEvent.model_validate_json(event_json)
+            if (
+                event.schema_version != CURRENT_SCHEMA_VERSION
+                or canonical_event_json(event) != event_json
+                or event.world_id != self._world_id
+                or event.event_id != row["event_id"]
+                or event.idempotency_key != row["idempotency_key"]
+            ):
+                raise LedgerIntegrityError("replay evidence event envelope does not match row")
+            event_evidence.append(
+                ReplayEventEvidence(
+                    event=event,
+                    commit_id=commit_id,
+                    cursor=ProjectionCursor(
+                        world_revision=int(row["world_revision"]),
+                        deliberation_revision=int(row["deliberation_revision"]),
+                        ledger_sequence=sequence,
+                    ),
+                    event_envelope_hash=event_hash,
+                )
+            )
+            current_rows.append(row)
+        finish_commit()
+        if expected_sequence != cursor.ledger_sequence:
+            raise LedgerIntegrityError("replay evidence event tail does not match cursor")
+        return tuple(event_evidence), tuple(commit_evidence)
 
     def _rebuild_locked(
         self,
