@@ -14,6 +14,7 @@ from .proposal_audit_schemas import (
     ModelResultRecordedPayload,
     ProposalRecordedV2Payload,
     canonical_json,
+    model_audit_json,
     sha256,
 )
 from .proposal_envelope import validate_proposal_envelope
@@ -126,8 +127,11 @@ class ProposalAuditRecorder:
         model_events: list[WorldEvent] = []
         previous_cause = context.causation_id
         for index, audit in enumerate(result.attempt_audits):
-            audit_json = canonical_json(audit.model_dump(mode="json"))
+            audit_json = model_audit_json(audit)  # type: ignore[arg-type]
             model_payload = ModelResultRecordedPayload(
+                audit_contract=(
+                    "model-result-audit.2" if audit.usage is not None else "model-result-audit.1"
+                ),
                 model_result_ref=audit.model_result_ref,
                 deliberation_result_id=result.result_id,
                 proposal_hash=proposal.proposal_hash if proposal is not None else None,
@@ -220,6 +224,7 @@ def _strict_audit(value: ModelResultAudit) -> ModelResultAudit:
         failure_code=value.failure_code,
         input_tokens=value.input_tokens,
         output_tokens=value.output_tokens,
+        usage=value.usage,
     )
 
 

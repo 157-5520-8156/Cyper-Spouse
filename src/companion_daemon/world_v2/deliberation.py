@@ -121,6 +121,7 @@ def _checked_output(value: object) -> ModelOutput:
             "raw_proposal": raw,
             "input_tokens": getattr(value, "input_tokens", None),
             "output_tokens": getattr(value, "output_tokens", None),
+            "usage": getattr(value, "usage", None),
         }
     else:
         material = value
@@ -188,12 +189,46 @@ class ModelInput(_FrozenModel):
     recorded_draw_refs: tuple[str, ...] = ()
 
 
+class ModelUsageProvenance(_FrozenModel):
+    """Bounded provider usage material returned by one model adapter call."""
+
+    usage_contract: Literal["model-usage.1"] = "model-usage.1"
+    route_class: Literal[
+        "chat", "expressive", "world_action", "deep_deliberation", "quick_recovery"
+    ]
+    input_tokens: int = Field(ge=0, le=MAX_REPORTED_TOKENS)
+    output_tokens: int = Field(ge=0, le=MAX_REPORTED_TOKENS)
+    thinking_tokens: int = Field(ge=0, le=MAX_REPORTED_TOKENS)
+    token_provenance: Literal["provider_reported", "offline_estimated"]
+    transport: Literal["provider_api", "offline_fixture"]
+    provider: str = Field(min_length=1, max_length=128)
+    provider_usage_ref: str = Field(min_length=1, max_length=256)
+    provider_usage_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def provider_usage_hash_binds_metering_fields(self) -> "ModelUsageProvenance":
+        material = self.model_dump(mode="json", exclude={"provider_usage_hash"})
+        if self.provider_usage_hash != _digest(material):
+            raise ValueError("provider usage hash is not bound to metering fields")
+        return self
+
+
 class ModelOutput(_FrozenModel):
     model_id: str = Field(min_length=1, max_length=256)
     model_version: str = Field(min_length=1, max_length=256)
     raw_proposal: dict[str, Any]
     input_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
     output_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
+    usage: ModelUsageProvenance | None = Field(default=None, exclude_if=lambda value: value is None)
+
+    @model_validator(mode="after")
+    def usage_matches_legacy_token_fields(self) -> "ModelOutput":
+        if self.usage is not None and (self.input_tokens, self.output_tokens) != (
+            self.usage.input_tokens,
+            self.usage.output_tokens,
+        ):
+            raise ValueError("model output usage tokens do not match token fields")
+        return self
 
 
 class ModelRouterAdapter(Protocol):
@@ -233,6 +268,7 @@ class ModelResultAudit(_FrozenModel):
     failure_code: str | None = Field(default=None, max_length=64)
     input_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
     output_tokens: int | None = Field(default=None, ge=0, le=MAX_REPORTED_TOKENS)
+    usage: ModelUsageProvenance | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def result_ref_is_orchestrator_derived(self) -> ModelResultAudit:
@@ -244,6 +280,16 @@ class ModelResultAudit(_FrozenModel):
             raise ValueError("model output audit identity is partial")
         if not has_output and (self.input_tokens is not None or self.output_tokens is not None):
             raise ValueError("model token counts require an output identity")
+        if self.usage is not None:
+            if not has_output:
+                raise ValueError("model usage requires an output identity")
+            if (self.input_tokens, self.output_tokens) != (
+                self.usage.input_tokens,
+                self.usage.output_tokens,
+            ):
+                raise ValueError("model usage tokens do not match audit tokens")
+            if self.route.tier == "flash" and self.usage.thinking_tokens:
+                raise ValueError("flash audit cannot report thinking tokens")
         required_failure = {
             "main_timeout": "main_timeout",
             "main_invalid": "main_invalid_output",
@@ -736,6 +782,7 @@ class Deliberation:
             failure_code=failure_code,
             input_tokens=output.input_tokens if output is not None else None,
             output_tokens=output.output_tokens if output is not None else None,
+            usage=output.usage if output is not None else None,
         )
 
     @staticmethod
@@ -766,6 +813,7 @@ __all__ = [
     "DeliberationResult",
     "ModelInput",
     "ModelOutput",
+    "ModelUsageProvenance",
     "ModelResultAudit",
     "ModelRoute",
     "TriggerMessage",

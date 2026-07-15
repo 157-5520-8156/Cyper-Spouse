@@ -479,13 +479,10 @@ def default_route_classifier(
 ) -> RouteClass:
     """Conservative classifier for existing audit schema.
 
-    The current immutable audit has tier but no semantic route-class field.
-    The current audit does not persist the semantic route class.  A model ID
-    is not authority for one, so all Flash calls remain unclassified. A
-    thinking tier is the one safe classification because the frozen profile
-    permits thinking only for deep deliberation. Production callers must pass
-    a classifier backed by a persisted route-class sidecar; otherwise the gate
-    fails closed rather than treating an unknown call as cheap chat.
+    Legacy audit.1 records have tier but no semantic route-class field.  A
+    model ID is not authority for one, so all Flash calls remain unclassified.
+    audit.2 persists route_class in the provider-bound usage material and is
+    read directly by ``model_traces_from_replay`` below.
     """
 
     if audit.route.tier == "thinking":
@@ -502,19 +499,19 @@ def model_traces_from_replay(
 ) -> tuple[ModelCallTrace, ...]:
     """Extract exactly persisted model call audits from one replay snapshot.
 
-    A caller must explicitly provide the token provenance.  The ledger's
-    currently frozen audit contract cannot prove a provider usage provenance,
-    so the default is ``unknown`` and every profile rejects it.  It also lacks
-    thinking usage, so a thinking route is represented as ``None`` and
-    rejected by the gate rather than silently reported as zero.
+    audit.2 usage material is authoritative for route, token provenance and
+    thinking usage.  audit.1 remains replayable, but is deliberately emitted
+    as unknown/unclassified so every profile fails closed.  The optional
+    arguments exist only for legacy diagnostic tooling and never upgrade an
+    audit.1 record into provider-provenance.
     """
 
     thinking = dict(thinking_tokens_by_call or {})
     traces: list[ModelCallTrace] = []
     for projection in evidence.projection.model_result_audits:
         audit = RecordedModelResultAudit.model_validate_json(projection.audit_json)
-        route_class = classifier(audit, projection)
-        has_usage = audit.input_tokens is not None and audit.output_tokens is not None
+        usage = audit.usage
+        route_class = usage.route_class if usage is not None else classifier(audit, projection)
         traces.append(
             ModelCallTrace(
                 turn_id=projection.trigger_ref,
@@ -527,14 +524,22 @@ def model_traces_from_replay(
                 model_tier=audit.route.tier,
                 route_reason_code=audit.route.reason_code,
                 router_version=audit.route.router_version,
-                input_tokens=audit.input_tokens,
-                output_tokens=audit.output_tokens,
+                input_tokens=usage.input_tokens if usage is not None else audit.input_tokens,
+                output_tokens=usage.output_tokens if usage is not None else audit.output_tokens,
                 thinking_tokens=(
-                    0
-                    if audit.route.tier == "flash" and has_usage
+                    usage.thinking_tokens
+                    if usage is not None
+                    else 0
+                    if audit.route.tier == "flash" and audit.input_tokens is not None and audit.output_tokens is not None
                     else thinking.get(audit.model_call_id)
                 ),
-                token_provenance=token_provenance if has_usage else None,
+                token_provenance=(
+                    usage.token_provenance
+                    if usage is not None
+                    else token_provenance
+                    if audit.input_tokens is not None and audit.output_tokens is not None
+                    else None
+                ),
                 status=audit.status,
             )
         )

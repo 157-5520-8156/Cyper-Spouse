@@ -10,9 +10,9 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Protocol
+from typing import Any, Protocol
 
-from .deliberation import ModelInput, ModelOutput
+from .deliberation import ModelInput, ModelOutput, ModelUsageProvenance
 from .proposal_envelope import (
     CanonicalTypedPayload,
     MinimalProposal,
@@ -30,6 +30,20 @@ def _digest(value: object) -> str:
 
 class ChatCompletionModel(Protocol):
     async def complete(self, messages: list[dict[str, str]], *, temperature: float = 0.8) -> str: ...
+
+
+class MeteredChatCompletionModel(ChatCompletionModel, Protocol):
+    """Optional provider seam for a response plus immutable usage evidence.
+
+    Existing string-only providers remain valid for conversation handling, but
+    produce audit.1 records which Phase-8 cost gates reject.  A production
+    provider opts in by returning the exact response text and the provider
+    usage object from the same request, never by filling a later metrics map.
+    """
+
+    async def complete_with_usage(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> tuple[str, ModelUsageProvenance | dict[str, Any]]: ...
 
 
 class ChatModelDeliberationAdapter:
@@ -75,16 +89,27 @@ class ChatModelDeliberationAdapter:
         quick_recovery: bool,
         failure_code: str | None,
     ) -> ModelOutput:
-        raw = await self._model.complete(
-            self._messages(
-                request=request, quick_recovery=quick_recovery, failure_code=failure_code
-            ),
-            temperature=0.25 if quick_recovery else self._temperature,
+        messages = self._messages(
+            request=request, quick_recovery=quick_recovery, failure_code=failure_code
         )
+        temperature = 0.25 if quick_recovery else self._temperature
+        metered = getattr(self._model, "complete_with_usage", None)
+        usage: ModelUsageProvenance | None = None
+        if callable(metered):
+            result = await metered(messages, temperature=temperature)
+            if not isinstance(result, tuple) or len(result) != 2 or not isinstance(result[0], str):
+                raise ValueError("metered provider result must be (text, usage)")
+            raw, usage_raw = result
+            usage = ModelUsageProvenance.model_validate(usage_raw)
+        else:
+            raw = await self._model.complete(messages, temperature=temperature)
         return ModelOutput(
             model_id=self._model_id,
             model_version=self.VERSION,
             raw_proposal=_proposal_from_model_text(raw=raw, request=request),
+            input_tokens=usage.input_tokens if usage is not None else None,
+            output_tokens=usage.output_tokens if usage is not None else None,
+            usage=usage,
         )
 
     @staticmethod

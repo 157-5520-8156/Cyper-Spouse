@@ -346,7 +346,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.28"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.29"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)

@@ -29,6 +29,36 @@ class RecordedModelRoute(FrozenModel):
     router_version: str = Field(min_length=1, max_length=128)
 
 
+class RecordedModelUsage(FrozenModel):
+    """Provider-attested metering bound to one recorded model result.
+
+    This deliberately lives in the immutable model-result audit rather than a
+    mutable metrics table.  A replay can therefore distinguish an old audit
+    with no metering authority from a provider-reported call without relying
+    on deployment configuration at read time.
+    """
+
+    usage_contract: Literal["model-usage.1"] = "model-usage.1"
+    route_class: Literal[
+        "chat", "expressive", "world_action", "deep_deliberation", "quick_recovery"
+    ]
+    input_tokens: int = Field(ge=0, le=10_000_000)
+    output_tokens: int = Field(ge=0, le=10_000_000)
+    thinking_tokens: int = Field(ge=0, le=10_000_000)
+    token_provenance: Literal["provider_reported", "offline_estimated"]
+    transport: Literal["provider_api", "offline_fixture"]
+    provider: str = Field(min_length=1, max_length=128)
+    provider_usage_ref: str = Field(min_length=1, max_length=256)
+    provider_usage_hash: str = Field(pattern=_HASH)
+
+    @model_validator(mode="after")
+    def provider_usage_hash_binds_metering_fields(self) -> Self:
+        material = self.model_dump(mode="json", exclude={"provider_usage_hash"})
+        if self.provider_usage_hash != sha256(canonical_json(material)):
+            raise ValueError("provider usage hash is not bound to metering fields")
+        return self
+
+
 class RecordedModelResultAudit(FrozenModel):
     model_call_id: str = Field(min_length=1, max_length=256)
     model_result_ref: str = Field(min_length=1, max_length=256)
@@ -51,6 +81,7 @@ class RecordedModelResultAudit(FrozenModel):
     failure_code: str | None = Field(default=None, max_length=64)
     input_tokens: int | None = Field(default=None, ge=0, le=10_000_000)
     output_tokens: int | None = Field(default=None, ge=0, le=10_000_000)
+    usage: RecordedModelUsage | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def output_and_failure_are_consistent(self) -> Self:
@@ -66,6 +97,16 @@ class RecordedModelResultAudit(FrozenModel):
             raise ValueError("model output audit identity is partial")
         if not has_output and (self.input_tokens is not None or self.output_tokens is not None):
             raise ValueError("model token counts require an output identity")
+        if self.usage is not None:
+            if not has_output:
+                raise ValueError("model usage requires an output identity")
+            if (self.input_tokens, self.output_tokens) != (
+                self.usage.input_tokens,
+                self.usage.output_tokens,
+            ):
+                raise ValueError("model usage tokens do not match audit tokens")
+            if self.route.tier == "flash" and self.usage.thinking_tokens:
+                raise ValueError("flash audit cannot report thinking tokens")
         required = {
             "main_timeout": "main_timeout",
             "main_invalid": "main_invalid_output",
@@ -105,8 +146,22 @@ def sha256(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def model_audit_json(audit: RecordedModelResultAudit) -> str:
+    """Canonical bytes while preserving v1 audit bytes exactly.
+
+    ``usage`` was added after audit.1.  Omitting it when absent keeps old
+    ledger events replayable; new metered records contain it and are bound by
+    the same audit hash.
+    """
+
+    payload = audit.model_dump(mode="json")
+    if audit.usage is None:
+        payload.pop("usage", None)
+    return canonical_json(payload)
+
+
 class ModelResultRecordedPayload(FrozenModel):
-    audit_contract: Literal["model-result-audit.1"] = "model-result-audit.1"
+    audit_contract: Literal["model-result-audit.1", "model-result-audit.2"] = "model-result-audit.1"
     model_result_ref: str = Field(min_length=1, max_length=256)
     deliberation_result_id: str = Field(min_length=1, max_length=256)
     proposal_hash: str | None = Field(default=None, pattern=_PROPOSAL_HASH)
@@ -127,7 +182,7 @@ class ModelResultRecordedPayload(FrozenModel):
         if len(self.audit_json.encode("utf-8")) > _MAX_AUDIT_BYTES:
             raise ValueError("model result audit exceeds byte limit")
         audit = RecordedModelResultAudit.model_validate_json(self.audit_json)
-        canonical = canonical_json(audit.model_dump(mode="json"))
+        canonical = model_audit_json(audit)
         if canonical != self.audit_json or sha256(canonical) != self.audit_hash:
             raise ValueError("model result audit bytes/hash are not canonical")
         if (
@@ -136,6 +191,10 @@ class ModelResultRecordedPayload(FrozenModel):
             or audit.attempt_id != self.attempt_id
         ):
             raise ValueError("model result lineage does not match its audit bytes")
+        if self.audit_contract == "model-result-audit.2" and audit.usage is None:
+            raise ValueError("metered model result requires usage provenance")
+        if self.audit_contract == "model-result-audit.1" and audit.usage is not None:
+            raise ValueError("usage provenance requires model-result-audit.2")
         return self
 
 
@@ -176,7 +235,9 @@ def validate_recorded_attempt_lineage(
     identity = {
         "capsule_id": capsule_id,
         "proposal_hash": proposal_hash,
-        "attempt_audits": [audit.model_dump(mode="json") for audit in audits],
+        "attempt_audits": [
+            json.loads(model_audit_json(audit)) for audit in audits
+        ],
     }
     if deliberation_result_id != f"deliberation:{sha256(canonical_json(identity))}":
         raise ValueError("deliberation result identity is invalid")
@@ -234,10 +295,12 @@ class ProposalAuditProjection(ProposalRecordedV2Payload):
 
 __all__ = [
     "ModelResultAuditProjection",
+    "RecordedModelUsage",
     "ModelResultRecordedPayload",
     "ProposalAuditProjection",
     "ProposalRecordedV2Payload",
     "canonical_json",
+    "model_audit_json",
     "sha256",
     "validate_recorded_attempt_lineage",
 ]

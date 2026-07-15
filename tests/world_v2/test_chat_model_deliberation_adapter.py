@@ -9,7 +9,12 @@ from companion_daemon.world_v2.chat_model_deliberation_adapter import (
     ChatModelDeliberationAdapter,
     RoutedChatModelDeliberationAdapter,
 )
-from companion_daemon.world_v2.deliberation import ModelInput, ModelRoute, TriggerMessage
+from companion_daemon.world_v2.deliberation import (
+    ModelInput,
+    ModelRoute,
+    ModelUsageProvenance,
+    TriggerMessage,
+)
 
 
 def _request() -> ModelInput:
@@ -36,6 +41,28 @@ class _Model:
         return self._reply
 
 
+class _MeteredModel(_Model):
+    async def complete_with_usage(
+        self, messages: list[dict[str, str]], *, temperature: float = 0.8
+    ) -> tuple[str, ModelUsageProvenance]:
+        self.calls.append((messages, temperature))
+        material = {
+            "usage_contract": "model-usage.1",
+            "route_class": "chat",
+            "input_tokens": 12,
+            "output_tokens": 3,
+            "thinking_tokens": 0,
+            "token_provenance": "provider_reported",
+            "transport": "provider_api",
+            "provider": "fake-provider",
+            "provider_usage_ref": "usage:fake:1",
+        }
+        digest = sha256(
+            json.dumps(material, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
+        return self._reply, ModelUsageProvenance(**material, provider_usage_hash=digest)
+
+
 @pytest.mark.asyncio
 async def test_adapter_keeps_chat_model_output_inert_and_binds_request_to_prompt() -> None:
     model = _Model('{"proposal_id":"proposal:1"}')
@@ -51,6 +78,19 @@ async def test_adapter_keeps_chat_model_output_inert_and_binds_request_to_prompt
     supplied = json.loads(messages[1]["content"])
     assert supplied["request"]["trigger_ref"] == "trigger:1"
     assert supplied["request"]["evaluated_world_revision"] == 3
+
+
+@pytest.mark.asyncio
+async def test_adapter_composes_provider_usage_with_the_same_completion() -> None:
+    adapter = ChatModelDeliberationAdapter(model=_MeteredModel('{"proposal_id":"proposal:metered"}'))
+
+    output = await adapter.propose(_request())
+
+    assert output.input_tokens == 12
+    assert output.output_tokens == 3
+    assert output.usage is not None
+    assert output.usage.route_class == "chat"
+    assert output.usage.token_provenance == "provider_reported"
 
 
 @pytest.mark.asyncio

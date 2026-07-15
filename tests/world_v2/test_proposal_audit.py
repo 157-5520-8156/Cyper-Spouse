@@ -11,6 +11,7 @@ from companion_daemon.world_v2.deliberation import (
     DeliberationResult,
     ModelResultAudit,
     ModelRoute,
+    ModelUsageProvenance,
 )
 from companion_daemon.world_v2.acceptance_manifest import (
     AcceptanceManifestV2,
@@ -26,6 +27,11 @@ from companion_daemon.world_v2.proposal_envelope import DecisionProposal
 from companion_daemon.world_v2.reducers import ReducerState
 from companion_daemon.world_v2.schemas import WorldEvent
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
+from companion_daemon.world_v2.test_economy import (
+    CostProfileGate,
+    TEST_ECONOMY_V1,
+    model_traces_from_replay,
+)
 
 
 NOW = datetime(2026, 7, 15, 12, 0, tzinfo=UTC)
@@ -58,7 +64,7 @@ def _event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldE
     )
 
 
-def _result() -> DeliberationResult:
+def _result(*, metered: bool = False) -> DeliberationResult:
     proposal = DecisionProposal(
         proposal_id="proposal:audit:1",
         trigger_ref="trigger:audit:1",
@@ -87,6 +93,33 @@ def _result() -> DeliberationResult:
         status="proposal_validated",
         input_tokens=10,
         output_tokens=20,
+        usage=(
+            ModelUsageProvenance(
+                route_class="chat",
+                input_tokens=10,
+                output_tokens=20,
+                thinking_tokens=0,
+                token_provenance="offline_estimated",
+                transport="offline_fixture",
+                provider="fixture-provider",
+                provider_usage_ref="usage:fixture:audit:1",
+                provider_usage_hash=_digest(
+                    {
+                        "usage_contract": "model-usage.1",
+                        "route_class": "chat",
+                        "input_tokens": 10,
+                        "output_tokens": 20,
+                        "thinking_tokens": 0,
+                        "token_provenance": "offline_estimated",
+                        "transport": "offline_fixture",
+                        "provider": "fixture-provider",
+                        "provider_usage_ref": "usage:fixture:audit:1",
+                    }
+                ),
+            )
+            if metered
+            else None
+        ),
     )
     capsule_id = _hash("capsule")
     attempt_audits = (audit,)
@@ -316,6 +349,27 @@ def test_audit_record_is_commit_idempotent_and_replays_after_sqlite_reopen(tmp_p
     assert reader.proposal_audit_by_id(
         world_id=WORLD, cursor=first.cursor, proposal_id="proposal:audit:1"
     ) is not None
+
+
+def test_metered_model_usage_is_bound_through_sqlite_replay_and_cost_gate(tmp_path) -> None:
+    path = tmp_path / "audit-metered.sqlite3"
+    ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    _started(ledger)
+    committed = ProposalAuditRecorder(ledger=ledger).record(_result(metered=True), _context())
+    projection = ledger.project()
+    assert projection.model_result_audits[0].audit_contract == "model-result-audit.2"
+    assert '"route_class":"chat"' in projection.model_result_audits[0].audit_json
+    ledger.close()
+
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    evidence = reopened.export_replay_evidence(at_cursor=committed.cursor)
+    traces = model_traces_from_replay(evidence=evidence)
+    assert len(traces) == 1
+    assert traces[0].route_class == "chat"
+    assert traces[0].token_provenance == "offline_estimated"
+    assert traces[0].thinking_tokens == 0
+    assert CostProfileGate().evaluate(profile=TEST_ECONOMY_V1, traces=traces).passed
+    assert reopened.rebuild().semantic_hash == reopened.project().semantic_hash
 
 
 def test_recovery_records_every_provider_call_then_final_proposal() -> None:
@@ -681,7 +735,7 @@ def test_v16_sqlite_head_migrates_to_v18_without_forged_audit_indexes(tmp_path) 
     connection.close()
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.28"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.29"
     assert migrated.project().semantic_hash == before.semantic_hash
     assert migrated.project().model_result_audits == ()
 
@@ -724,7 +778,7 @@ def test_v17_sqlite_head_migrates_to_v18_preserving_proposal_audit(tmp_path) -> 
             ),
         )
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated.project().reducer_bundle_version == "world-v2-reducers.28"
+    assert migrated.project().reducer_bundle_version == "world-v2-reducers.29"
     assert migrated.project().proposal_audits == before.proposal_audits
     assert migrated.project().acceptance_manifests_v2 == ()
 

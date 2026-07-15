@@ -25,6 +25,7 @@ from companion_daemon.world_v2.media_execution_runtime import MediaExecutionRunt
 from companion_daemon.world_v2.proposal_audit_schemas import (
     ModelResultAuditProjection,
     RecordedModelResultAudit,
+    RecordedModelUsage,
     canonical_json,
     sha256,
 )
@@ -323,3 +324,47 @@ def test_replay_extraction_uses_persisted_audit_and_never_invents_thinking_usage
     assert traces[0].route_reason_code == "high_ambiguity"
     assert traces[0].thinking_tokens is None
     assert CostProfileGate().evaluate(profile=TEST_ECONOMY_V1, traces=traces).passed is False
+
+
+def test_usage_provenance_must_match_the_recorded_audit_tokens() -> None:
+    call_id = "call:usage-mismatch"
+    response_hash = "b" * 64
+    with pytest.raises(ValueError, match="usage tokens do not match"):
+        RecordedModelResultAudit(
+            model_call_id=call_id,
+            model_result_ref=f"model-result:{sha256(canonical_json({'model_call_id': call_id, 'response_hash': response_hash}))}",
+            attempt_id="attempt:usage-mismatch",
+            route={"tier": "flash", "reason_code": "ordinary", "router_version": "test.1"},
+            model_id="flash",
+            model_version="v1",
+            request_hash="a" * 64,
+            response_hash=response_hash,
+            status="proposal_validated",
+            input_tokens=10,
+            output_tokens=2,
+            usage=RecordedModelUsage(
+                route_class="chat",
+                input_tokens=9,
+                output_tokens=2,
+                thinking_tokens=0,
+                token_provenance="provider_reported",
+                transport="provider_api",
+                provider="provider",
+                provider_usage_ref="usage:mismatch",
+                provider_usage_hash=sha256(
+                    canonical_json(
+                        {
+                            "usage_contract": "model-usage.1",
+                            "route_class": "chat",
+                            "input_tokens": 9,
+                            "output_tokens": 2,
+                            "thinking_tokens": 0,
+                            "token_provenance": "provider_reported",
+                            "transport": "provider_api",
+                            "provider": "provider",
+                            "provider_usage_ref": "usage:mismatch",
+                        }
+                    )
+                ),
+            ),
+        )
