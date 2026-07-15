@@ -561,6 +561,9 @@ def test_public_validation_seam_revalidates_model_construct_instances() -> None:
         response_text="One moment.",
         stance="defer",
     )
+    # Model adapters expose decoded JSON arrays, while immutable contracts
+    # intentionally use tuples.  The public seam must accept that wire form.
+    assert validate_proposal_envelope(valid.model_dump(mode="json")) == valid
     raw_fields = {name: getattr(valid, name) for name in type(valid).model_fields}
     raw_fields["fact_claims"] = ("fact:smuggled",)
     bypassed = MinimalProposal.model_construct(**raw_fields)

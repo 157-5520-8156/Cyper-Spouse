@@ -88,7 +88,11 @@ from .minimal_reply_events import (
     ExpressionPlanAcceptedPayload,
     MessagePayloadStoredPayload,
 )
-from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION, MinimalReplyManifest
+from .minimal_reply_manifest import (
+    MINIMAL_REPLY_MANIFEST_VERSION,
+    MinimalReplyManifest,
+    canonical_minimal_reply_value_hash,
+)
 from .proposal_envelope import MinimalProposal, validate_proposal_envelope
 from .proposal_envelope_v2 import (
     canonical_full_change_authority_hash_v2,
@@ -3218,6 +3222,8 @@ def _expression_beat_authorized(state: ReducerState, event: WorldEvent) -> Reduc
         or payload.beat.beat_id != manifest.beat_id
         or payload.beat.payload.payload_ref != manifest.message_payload_ref
         or payload.beat.payload.payload_hash != manifest.message_payload_hash
+        or canonical_minimal_reply_value_hash(payload.beat.model_dump(mode="json"))
+        != manifest.beat_hash
         or not any(
             item.payload_ref == manifest.message_payload_ref
             and item.payload_hash == manifest.message_payload_hash
@@ -3433,6 +3439,8 @@ def _action_authorized(state: ReducerState, event: WorldEvent) -> ReducerState:
             or action.payload_ref != minimal.message_payload_ref
             or action.payload_hash != minimal.message_payload_hash
             or action.intent_ref != f"{minimal.proposal_id}:{minimal.intent_id}"
+            or canonical_minimal_reply_value_hash(action.model_dump(mode="json"))
+            != minimal.action_hash
             or not any(
                 beat.acceptance_id == minimal.acceptance_id
                 and beat.beat_id == minimal.beat_id
@@ -3461,7 +3469,12 @@ def _budget_reserved(state: ReducerState, event: WorldEvent) -> ReducerState:
     )
     if minimal is not None:
         _require_previous_event(state, "ExpressionBeatAuthorized")
-        if reservation.action_id != minimal.action_id or reservation.category != "chat":
+        if (
+            reservation.action_id != minimal.action_id
+            or reservation.category != "chat"
+            or canonical_minimal_reply_value_hash(reservation.model_dump(mode="json"))
+            != minimal.reservation_hash
+        ):
             raise ValueError("minimal reply reservation is not bound to its manifest")
     account_index = next(
         (

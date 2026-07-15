@@ -26,7 +26,11 @@ from .minimal_reply_events import (
     minimal_reply_event_id,
     minimal_reply_idempotency_key,
 )
-from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION, MinimalReplyManifest
+from .minimal_reply_manifest import (
+    MINIMAL_REPLY_MANIFEST_VERSION,
+    MinimalReplyManifest,
+    canonical_minimal_reply_value_hash,
+)
 from .appraisal_events import (
     AppraisalAcceptedPayload,
     AppraisalContradictedPayload,
@@ -595,10 +599,16 @@ def _validate_authorized_minimal_reply_manifest_batch(
         raise ValueError("minimal_reply.beat_does_not_match_manifest")
     if (
         reservation.reservation_id != manifest.reservation_id
+        or canonical_minimal_reply_value_hash(reservation.model_dump(mode="json"))
+        != manifest.reservation_hash
         or reservation.action_id != manifest.action_id
         or reservation.category != "chat"
         or reservation.state != "reserved"
         or action.action_id != manifest.action_id
+        or canonical_minimal_reply_value_hash(action.model_dump(mode="json")) != manifest.action_hash
+        or action.kind != "reply"
+        or action.layer != "external_action"
+        or action.world_id != action_event.world_id
         or action.budget_reservation_id != manifest.reservation_id
         or action.intent_ref != f"{manifest.proposal_id}:{manifest.intent_id}"
         or action.payload_ref != manifest.message_payload_ref
@@ -607,6 +617,8 @@ def _validate_authorized_minimal_reply_manifest_batch(
         or action.state != "authorized"
     ):
         raise ValueError("minimal_reply.action_or_budget_does_not_match_manifest")
+    if canonical_minimal_reply_value_hash(beat.beat.model_dump(mode="json")) != manifest.beat_hash:
+        raise ValueError("minimal_reply.beat_does_not_match_manifest")
 
 
 def _validate_minimal_reply_event_identity(

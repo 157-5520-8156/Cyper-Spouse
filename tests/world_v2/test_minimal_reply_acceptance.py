@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from hashlib import sha256
+import json
 
 import pytest
 
@@ -30,6 +31,7 @@ from companion_daemon.world_v2.schemas import (
     BudgetAccount,
     CommittedWorldEventRef,
     ProjectionCursor,
+    WorldEvent,
 )
 
 
@@ -138,6 +140,47 @@ def _account(*, limit: int = 1_000) -> BudgetAccount:
     )
 
 
+def _replace_event_payload(event: WorldEvent, payload: dict[str, object]) -> WorldEvent:
+    return WorldEvent.from_payload(
+        schema_version=event.schema_version,
+        event_id=event.event_id,
+        world_id=event.world_id,
+        event_type=event.event_type,
+        logical_time=event.logical_time,
+        created_at=event.created_at,
+        actor=event.actor,
+        source=event.source,
+        trace_id=event.trace_id,
+        causation_id=event.causation_id,
+        correlation_id=event.correlation_id,
+        idempotency_key=event.idempotency_key,
+        payload=payload,
+    )
+
+
+def _closed_reply_events() -> tuple[WorldEvent, ...]:
+    material = derive_minimal_reply_material(
+        audit=_audit(),
+        cursor=ProjectionCursor(world_revision=4, deliberation_revision=2, ledger_sequence=7),
+        world_id=WORLD,
+        policy=_policy(),
+        account=_account(),
+        logical_time=NOW,
+        created_at=NOW,
+        trace_id="trace:1",
+        correlation_id="correlation:1",
+    )
+    issuer = AcceptedLedgerBatchIssuer()
+    handle = MinimalReplyAtomicRecorder(batch_issuer=issuer).prepare_batch(
+        acceptance_id="acceptance:reply:1",
+        material=material,
+        actor="agent:companion",
+        source="minimal-reply-test",
+    )
+    events, _ = issuer.verify(handle=handle, world_id=WORLD, expected_cursor=material.cursor)
+    return events
+
+
 def test_derives_reply_action_and_reservation_only_from_audited_minimal_proposal() -> None:
     material = derive_minimal_reply_material(
         audit=_audit(),
@@ -223,6 +266,38 @@ def test_rejects_a_model_selected_target_that_conflicts_with_composition_policy(
             trace_id="trace:1",
             correlation_id="correlation:1",
         )
+
+
+@pytest.mark.parametrize(
+    ("event_index", "mutate", "error"),
+    (
+        (
+            3,
+            lambda payload: payload["beat"].__setitem__("cancel_policy", "never-cancel"),
+            "minimal_reply.beat_does_not_match_manifest",
+        ),
+        (
+            4,
+            lambda payload: payload["reservation"].__setitem__("amount_limit", 1),
+            "minimal_reply.action_or_budget_does_not_match_manifest",
+        ),
+        (
+            5,
+            lambda payload: payload["action"].__setitem__("target", "user:other"),
+            "minimal_reply.action_or_budget_does_not_match_manifest",
+        ),
+    ),
+)
+def test_closed_reply_batch_rejects_tampered_full_side_effect_values(
+    event_index: int, mutate, error: str
+) -> None:
+    events = list(_closed_reply_events())
+    payload = json.loads(events[event_index].payload_json)
+    mutate(payload)
+    events[event_index] = _replace_event_payload(events[event_index], payload)
+
+    with pytest.raises(ValueError, match=error):
+        validate_commit_batch(events, expected_world_revision=4, accepted_manifest_v3_authorized=True)
 
 
 def test_recorder_materializes_a_closed_reply_batch_that_reduces_to_dispatchable_state() -> None:

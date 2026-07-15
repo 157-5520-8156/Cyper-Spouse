@@ -11,13 +11,19 @@ from .minimal_reply_acceptance import MinimalReplyAcceptanceMaterial
 from .schema_core import FrozenModel
 
 
-MINIMAL_REPLY_MANIFEST_VERSION = "minimal-reply-acceptance.1"
+MINIMAL_REPLY_MANIFEST_VERSION = "minimal-reply-acceptance.2"
 
 
 def _canonical_json(value: object) -> str:
     return json.dumps(
         value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":")
     )
+
+
+def canonical_minimal_reply_value_hash(value: object) -> str:
+    """Hash one fully materialized reply value, never merely its identifier."""
+
+    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
 
 
 def canonical_minimal_reply_manifest_hash(value: dict[str, object]) -> str:
@@ -43,8 +49,11 @@ class MinimalReplyManifest(FrozenModel):
     beat_id: str = Field(min_length=1)
     message_payload_ref: str = Field(min_length=1)
     message_payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    beat_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     reservation_id: str = Field(min_length=1)
+    reservation_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     action_id: str = Field(min_length=1)
+    action_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     manifest_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
@@ -76,8 +85,13 @@ def build_minimal_reply_manifest(
         "beat_id": material.beat.beat_id,
         "message_payload_ref": material.beat.payload.payload_ref,
         "message_payload_hash": material.beat.payload.payload_hash,
+        "beat_hash": canonical_minimal_reply_value_hash(material.beat.model_dump(mode="json")),
         "reservation_id": material.reservation.reservation_id,
+        "reservation_hash": canonical_minimal_reply_value_hash(
+            material.reservation.model_dump(mode="json")
+        ),
         "action_id": material.action.action_id,
+        "action_hash": canonical_minimal_reply_value_hash(material.action.model_dump(mode="json")),
     }
     values["manifest_hash"] = canonical_minimal_reply_manifest_hash(values)
     return MinimalReplyManifest.model_validate(values, strict=True)
@@ -88,4 +102,5 @@ __all__ = [
     "MinimalReplyManifest",
     "build_minimal_reply_manifest",
     "canonical_minimal_reply_manifest_hash",
+    "canonical_minimal_reply_value_hash",
 ]
