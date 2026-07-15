@@ -7,6 +7,11 @@ import hashlib
 import json
 
 from .accepted_effect_contracts import rehydrate_acceptance_manifest_v3
+from .appraisal_acceptance_manifest import (
+    APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
+    AppraisalAcceptanceManifest,
+    canonical_appraisal_acceptance_value_hash,
+)
 from .event_identity import domain_idempotency_key
 from .experience_events import ExperienceCommittedPayload
 from .fact_accepted_contracts import (
@@ -56,6 +61,7 @@ def validate_commit_batch(
     if not accepted_manifest_v3_authorized:
         reject_accepted_manifest_v3_without_recorder(events)
         reject_minimal_reply_manifest_without_recorder(events)
+        reject_appraisal_acceptance_manifest_without_recorder(events)
     _validate_deliberation_audit_transaction(events)
     _validate_acceptance_manifest_v2_batch(events)
     _validate_authorized_fact_manifest_v3_batch(
@@ -64,6 +70,11 @@ def validate_commit_batch(
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_authorized_minimal_reply_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_appraisal_acceptance_manifest_batch(
         events,
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
@@ -342,9 +353,10 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
         and "manifest_version" in event.payload()
         and event.payload().get("manifest_version")
         not in {
-            "acceptance-manifest.2",
-            "acceptance-manifest.3",
-            MINIMAL_REPLY_MANIFEST_VERSION,
+                "acceptance-manifest.2",
+                "acceptance-manifest.3",
+                MINIMAL_REPLY_MANIFEST_VERSION,
+                APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
         }
     ]
     if unknown:
@@ -656,6 +668,94 @@ def reject_minimal_reply_manifest_without_recorder(events: Sequence[WorldEvent])
         for event in events
     ):
         raise ValueError("minimal_reply.recorder_capability_required")
+
+
+def _validate_authorized_appraisal_acceptance_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("appraisal_acceptance.recorder_capability_required")
+    if len(manifests) != 1 or len(events) != 3:
+        raise ValueError("appraisal_acceptance.accepted_batch_must_be_exact")
+    acceptance, mutation, completion = events
+    try:
+        manifest = AppraisalAcceptanceManifest.model_validate_json(acceptance.payload_json)
+        mutation_model = {
+            "AppraisalAccepted": AppraisalAcceptedPayload,
+            "AppraisalContradicted": AppraisalContradictedPayload,
+            "AppraisalSuperseded": AppraisalSupersededPayload,
+        }[manifest.mutation_event_type]
+        payload = mutation_model.model_validate_json(mutation.payload_json)
+    except Exception as exc:
+        raise ValueError("appraisal_acceptance.accepted_batch_payload_is_invalid") from exc
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or tuple(event.event_type for event in events)
+        != ("AcceptanceRecorded", manifest.mutation_event_type, "TriggerProcessCompleted")
+        or acceptance.causation_id != manifest.proposal_event_ref
+        or mutation.causation_id != acceptance.event_id
+        or completion.causation_id != mutation.event_id
+        or mutation.event_id != manifest.mutation_event_id
+        or completion.event_id != manifest.completion_event_id
+        or mutation.payload_hash != manifest.mutation_payload_hash
+        or completion.payload_hash != manifest.completion_payload_hash
+    ):
+        raise ValueError("appraisal_acceptance.batch_does_not_match_manifest")
+    first = acceptance
+    if any(
+        (
+            item.world_id != first.world_id
+            or item.logical_time != first.logical_time
+            or item.created_at != first.created_at
+            or item.actor != first.actor
+            or item.source != first.source
+            or item.trace_id != first.trace_id
+            or item.correlation_id != first.correlation_id
+        )
+        for item in (mutation, completion)
+    ):
+        raise ValueError("appraisal_acceptance.envelope_metadata_mismatch")
+    if (
+        payload.acceptance_id != manifest.acceptance_id
+        or payload.proposal_id != manifest.proposal_id
+        or payload.change_id != manifest.accepted_change_id
+        or payload.accepted_change_hash != manifest.accepted_change_hash
+        or payload.evaluated_world_revision != manifest.evaluated_world_revision
+        or payload.trigger_id != manifest.trigger_id
+        or canonical_appraisal_acceptance_value_hash(payload.model_dump(mode="json"))
+        != manifest.mutation_payload_hash
+    ):
+        raise ValueError("appraisal_acceptance.mutation_does_not_match_manifest")
+    completion_payload = completion.payload()
+    if (
+        completion_payload.get("trigger_id") != manifest.trigger_id
+        or canonical_appraisal_acceptance_value_hash(completion_payload)
+        != manifest.completion_payload_hash
+    ):
+        raise ValueError("appraisal_acceptance.trigger_completion_does_not_match_manifest")
+    for event in (acceptance, mutation):
+        expected = domain_idempotency_key(
+            event_type=event.event_type, world_id=event.world_id, payload=event.payload()
+        )
+        if expected is None or event.idempotency_key != expected:
+            raise ValueError("appraisal_acceptance.event_identity_is_not_deterministic")
+
+
+def reject_appraisal_acceptance_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version") == APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("appraisal_acceptance.recorder_capability_required")
 
 
 def appraisal_trigger_identity(occurrence_id: str, result_id: str) -> str:

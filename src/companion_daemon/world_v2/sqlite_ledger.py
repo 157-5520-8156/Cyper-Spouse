@@ -2895,7 +2895,9 @@ class SQLiteWorldLedger:
                 raise LedgerIntegrityError("event is absent from its owning commit")
             return event, result
 
-    def _find_appraisal_proposal_event(self, *, proposal_id: str) -> WorldEvent | None:
+    def _find_appraisal_proposal_event(
+        self, *, proposal_id: str, cursor: ProjectionCursor
+    ) -> WorldEvent | None:
         """Internal exact lookup used by the Appraisal acceptance reader."""
 
         with self._thread_lock:
@@ -2903,10 +2905,11 @@ class SQLiteWorldLedger:
                 self._connection.execute(
                     """SELECT event_id FROM world_v2_events
                        WHERE world_id = ?
+                         AND ledger_sequence <= ?
                          AND json_extract(event_json, '$.event_type') = 'ProposalRecorded'
                          AND json_extract(json_extract(event_json, '$.payload_json'), '$.proposal_id') = ?
                          AND json_extract(json_extract(event_json, '$.payload_json'), '$.proposal_kind') = 'appraisal_transition'""",
-                    (self._world_id, proposal_id),
+                    (self._world_id, cursor.ledger_sequence, proposal_id),
                 )
             )
             if len(rows) > 1:

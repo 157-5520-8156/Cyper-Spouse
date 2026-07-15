@@ -782,7 +782,9 @@ class WorldLedger:
                 return stored.event, commit.result
         raise RuntimeError(f"event {event_id!r} has no owning commit")
 
-    def _find_appraisal_proposal_event(self, *, proposal_id: str) -> WorldEvent | None:
+    def _find_appraisal_proposal_event(
+        self, *, proposal_id: str, cursor: ProjectionCursor
+    ) -> WorldEvent | None:
         """Internal exact lookup used by the Appraisal acceptance reader.
 
         Typed Appraisal proposals predate the generic proposal-audit projection,
@@ -794,7 +796,8 @@ class WorldLedger:
             candidates = tuple(
                 stored.event
                 for stored in self._events
-                if stored.event.event_type == "ProposalRecorded"
+                if stored.ledger_sequence <= cursor.ledger_sequence
+                and stored.event.event_type == "ProposalRecorded"
                 and stored.event.payload().get("proposal_id") == proposal_id
                 and stored.event.payload().get("proposal_kind") == "appraisal_transition"
             )

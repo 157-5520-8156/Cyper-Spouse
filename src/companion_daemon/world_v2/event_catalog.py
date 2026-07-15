@@ -43,6 +43,10 @@ from .memory_events import MEMORY_CANDIDATE_PAYLOAD_MODELS
 from .proposal_audit_schemas import ModelResultRecordedPayload, ProposalRecordedV2Payload
 from .acceptance_manifest import parse_acceptance_manifest_v2
 from .accepted_effect_contracts import rehydrate_acceptance_manifest_v3
+from .appraisal_acceptance_manifest import (
+    APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
+    AppraisalAcceptanceManifest,
+)
 from .fact_accepted_contracts import FactCommitMaterializedPayloadV2
 from .minimal_reply_events import MINIMAL_REPLY_EVENT_PAYLOAD_MODELS
 from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION, MinimalReplyManifest
@@ -117,6 +121,7 @@ class EventContract:
                 "acceptance-manifest.2",
                 "acceptance-manifest.3",
                 MINIMAL_REPLY_MANIFEST_VERSION,
+                APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
             }:
                 raise ValueError("acceptance_manifest.unsupported_manifest_version")
         model = (
@@ -148,6 +153,12 @@ class EventContract:
             and payload.get("manifest_version") == MINIMAL_REPLY_MANIFEST_VERSION
         ):
             MinimalReplyManifest.model_validate(dict(payload), strict=True)
+            return
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version") == APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
+        ):
+            AppraisalAcceptanceManifest.model_validate(dict(payload), strict=True)
             return
         model.model_validate_json(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))

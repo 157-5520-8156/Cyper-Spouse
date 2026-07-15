@@ -8,6 +8,7 @@ from typing import Any
 
 from .schemas import WorldEvent
 from .typed_proposal_families import family_for_mutation, family_for_record
+from .appraisal_acceptance_manifest import APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
 from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION
 
 
@@ -53,6 +54,7 @@ def _life_identity_components(
             "acceptance-manifest.2",
             "acceptance-manifest.3",
             MINIMAL_REPLY_MANIFEST_VERSION,
+            APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
         }
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
@@ -163,6 +165,16 @@ def _life_identity_components(
     if (
         event_type == "AcceptanceRecorded"
         and payload.get("manifest_version") == MINIMAL_REPLY_MANIFEST_VERSION
+    ):
+        return (
+            world_id,
+            payload.get("manifest_version"),
+            payload.get("acceptance_id"),
+            payload.get("manifest_hash"),
+        )
+    if (
+        event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version") == APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
     ):
         return (
             world_id,

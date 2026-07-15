@@ -2727,9 +2727,10 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         "manifest_version" in raw
         and raw.get("manifest_version")
         not in {
-            "acceptance-manifest.2",
-            "acceptance-manifest.3",
-            MINIMAL_REPLY_MANIFEST_VERSION,
+                "acceptance-manifest.2",
+                "acceptance-manifest.3",
+                MINIMAL_REPLY_MANIFEST_VERSION,
+                APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
         }
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")

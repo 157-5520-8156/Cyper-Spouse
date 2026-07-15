@@ -16,6 +16,7 @@ import json
 from weakref import WeakKeyDictionary
 
 from .schemas import ProjectionCursor, WorldEvent
+from .appraisal_acceptance_manifest import APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
 from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION
 
 
@@ -126,7 +127,11 @@ class AcceptedLedgerBatchIssuer:
         if (
             acceptance.event_type != "AcceptanceRecorded"
             or acceptance.payload().get("manifest_version")
-            not in {"acceptance-manifest.3", MINIMAL_REPLY_MANIFEST_VERSION}
+            not in {
+                "acceptance-manifest.3",
+                MINIMAL_REPLY_MANIFEST_VERSION,
+                APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
+            }
         ):
             raise AcceptedLedgerBatchError("accepted batch must begin with an accepted manifest")
         for name, value in {
