@@ -28,7 +28,11 @@ from .affect_chat_model_adapter import AffectDraftDeliberationAdapter
 from .appraisal_chat_model_adapter import AppraisalDraftDeliberationAdapter
 from .chat_model_deliberation_adapter import ChatCompletionModel, RoutedChatModelDeliberationAdapter
 from .deliberation import ModelRoute, RouteRequest
-from .platform_action_executor import PlatformDispatchReceipt, PlatformDispatchRequest
+from .platform_action_executor import (
+    MediaProviderTransport,
+    PlatformDispatchReceipt,
+    PlatformDispatchRequest,
+)
 from .platform_host import PlatformClockTick, PlatformInbound, WorldV2PlatformHost
 from .dashboard_projection_adapter import (
     DashboardProjectionAdapter,
@@ -307,6 +311,16 @@ class HttpV2CaptureHost:
                     break
                 actions.append(result.status)
             background: list[str] = []
+            # Provider result materialization deliberately follows ActionPump
+            # settlement.  It is bounded with the same operator-requested
+            # work budget and only ever records receipt-bound preview state.
+            logical_time = await self._host.current_logical_time()
+            if logical_time is not None:
+                for _ in range(max_action_units):
+                    result = await self._host.drain_media_results_once(logical_time=logical_time)
+                    if result is None:
+                        break
+                    background.append("media:" + result)
             for _ in range(max_background_units):
                 result = await self._host.drain_background_once()
                 if result is None:
@@ -342,8 +356,19 @@ def build_http_v2_capture_host(
     settings: Settings,
     bootstrap_at: datetime | None = None,
     model: ChatCompletionModel | None = None,
+    media_transport: MediaProviderTransport | None = None,
 ) -> HttpV2CaptureHost:
-    """Compose the first real HTTP migration without touching the legacy Engine."""
+    """Compose the HTTP v2 lane without granting it legacy media authority.
+
+    ``media_transport`` is intentionally an explicit deployment-owned
+    dependency.  A provider transport must persist idempotency-keyed result
+    bytes and implement ``lookup_execution_result`` for render/inspection
+    recovery before it is supplied here.  The legacy image-machine bridge is
+    not such a transport: its in-process inspection cache cannot prove a
+    result after restart.  Leaving this argument unset therefore preserves
+    preview safety by making media provider Actions undispatchable instead of
+    silently falling back to the legacy image path.
+    """
 
     owned_model: DeepSeekChatModel | None = None
     if model is None:
@@ -397,6 +422,7 @@ def build_http_v2_capture_host(
         main_model=adapter,
         quick_recovery=adapter,
         transport=transport,
+        media_transport=media_transport,
         appraisal_model=AppraisalDraftDeliberationAdapter(model=model),
         affect_model=AffectDraftDeliberationAdapter(model=model),
         projection_authority=projection_authority,

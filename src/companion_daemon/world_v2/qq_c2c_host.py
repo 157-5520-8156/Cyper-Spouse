@@ -28,6 +28,7 @@ from .production_turn_application import (
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
+from .platform_action_executor import MediaProviderTransport
 from .qq_c2c_transport import QQC2CDelivery, QQC2CPlatformTransport
 
 
@@ -180,6 +181,13 @@ class QQC2CHost:
                     break
                 actions.append(result.status)
             background: list[str] = []
+            logical_time = await self._host.current_logical_time()
+            if logical_time is not None:
+                for _ in range(max_action_units):
+                    result = await self._host.drain_media_results_once(logical_time=logical_time)
+                    if result is None:
+                        break
+                    background.append("media:" + result)
             for _ in range(max_background_units):
                 result = await self._host.drain_background_once()
                 if result is None:
@@ -233,6 +241,13 @@ class QQC2CHost:
                     break
                 actions.append(result.status)
             background: list[str] = []
+            logical_time = await self._host.current_logical_time()
+            if logical_time is not None:
+                for _ in range(max_action_units):
+                    result = await self._host.drain_media_results_once(logical_time=logical_time)
+                    if result is None:
+                        break
+                    background.append("media:" + result)
             for _ in range(max_background_units):
                 result = await self._host.drain_background_once()
                 if result is None:
@@ -258,8 +273,15 @@ def build_qq_c2c_host(
     bootstrap_at: datetime | None = None,
     model: ChatCompletionModel | None = None,
     delivery: QQC2CDelivery | None = None,
+    media_transport: MediaProviderTransport | None = None,
 ) -> QQC2CHost:
-    """Compose the C2C text lane without importing legacy chat/runtime code."""
+    """Compose the C2C lane without importing legacy chat/runtime code.
+
+    Media remains opt-in: a caller may provide only a transport that durably
+    binds result bytes to idempotency keys and supports recovery lookup.  QQ
+    delivery itself is deliberately text-only and is never used as an image
+    provider fallback.
+    """
 
     if not recipient_id:
         raise ValueError("QQ C2C v2 requires one configured private recipient")
@@ -300,6 +322,7 @@ def build_qq_c2c_host(
         main_model=adapter,
         quick_recovery=adapter,
         transport=transport,
+        media_transport=media_transport,
         appraisal_model=AppraisalDraftDeliberationAdapter(model=model),
         affect_model=AffectDraftDeliberationAdapter(model=model),
         now=bootstrap_at or datetime.now(UTC),

@@ -14,6 +14,10 @@ from companion_daemon.world_v2.qq_c2c_host import (
     build_qq_c2c_host,
     qq_c2c_target,
 )
+from companion_daemon.world_v2.platform_action_executor import (
+    MediaProviderDispatchRequest,
+    PlatformDispatchReceipt,
+)
 
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
@@ -26,6 +30,23 @@ class _Delivery:
     async def send_text(self, recipient_id: str, text: str) -> dict[str, object]:
         self.sent.append((recipient_id, text))
         return {"status": "ok", "data": {"message_id": f"qq-{len(self.sent)}"}}
+
+
+class _DurableMediaTransport:
+    provider = "media:durable-test"
+
+    async def send(self, request: MediaProviderDispatchRequest) -> PlatformDispatchReceipt:
+        raise AssertionError(f"unexpected provider call for {request.action_id}")
+
+    async def lookup(
+        self, *, idempotency_key: str, request_fingerprint: str
+    ) -> PlatformDispatchReceipt | None:
+        return None
+
+    async def lookup_execution_result(
+        self, *, action_id: str, idempotency_key: str, request_fingerprint: str
+    ) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -105,6 +126,24 @@ async def test_qq_c2c_host_rejects_an_unconfigured_user_before_it_can_enter_the_
                 text="不应被映射到默认用户",
                 observed_at=NOW,
             )
+    finally:
+        await host.aclose()
+
+
+@pytest.mark.asyncio
+async def test_qq_c2c_host_composes_only_an_explicit_durable_media_transport(
+    tmp_path: Path,
+) -> None:
+    host = build_qq_c2c_host(
+        settings=Settings(database_path=tmp_path / "qq-c2c-v2-media.sqlite"),
+        recipient_id="10001",
+        bootstrap_at=NOW,
+        model=FakeCompanionModel(),
+        delivery=_Delivery(),
+        media_transport=_DurableMediaTransport(),
+    )
+    try:
+        assert host._host._application._media_execution_worker is not None
     finally:
         await host.aclose()
 

@@ -269,6 +269,17 @@ class WorldV2PlatformHost:
 
         return await self._application.drain_action(action_id)
 
+    async def drain_media_results_once(self, *, logical_time: datetime) -> str | None:
+        """Materialize one receipt-bound media result after provider dispatch.
+
+        This is intentionally a distinct scheduler phase.  It cannot send an
+        image, invent a plan, or use a platform transport as a provider
+        fallback; the composition-owned application verifies the terminal
+        media receipt before it writes a preview/inspection continuation.
+        """
+
+        return await self._application.drain_media_results_once(logical_time=logical_time)
+
     async def drain_background_once(self):
         """Advance one separately scheduled, non-visible World v2 work unit."""
 

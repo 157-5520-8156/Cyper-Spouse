@@ -19,10 +19,33 @@ from companion_daemon.world_v2.http_capture_host import (
     HttpV2CaptureHost,
     build_http_v2_capture_host,
 )
-from companion_daemon.world_v2.platform_action_executor import PlatformDispatchRequest
+from companion_daemon.world_v2.platform_action_executor import (
+    MediaProviderDispatchRequest,
+    PlatformDispatchReceipt,
+    PlatformDispatchRequest,
+)
 
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
+
+
+class _DurableMediaTransport:
+    """Composition fake; no image call is possible without an authorized Action."""
+
+    provider = "media:durable-test"
+
+    async def send(self, request: MediaProviderDispatchRequest) -> PlatformDispatchReceipt:
+        raise AssertionError(f"unexpected provider call for {request.action_id}")
+
+    async def lookup(
+        self, *, idempotency_key: str, request_fingerprint: str
+    ) -> PlatformDispatchReceipt | None:
+        return None
+
+    async def lookup_execution_result(
+        self, *, action_id: str, idempotency_key: str, request_fingerprint: str
+    ) -> None:
+        return None
 
 
 @pytest.mark.asyncio
@@ -73,6 +96,24 @@ async def test_http_capture_host_runs_one_v2_ingress_action_tick_and_duplicate_w
     assert tick_status == "observed_only"
     assert isinstance(drained.action_statuses, tuple)
     assert isinstance(drained.background_statuses, tuple)
+
+
+def test_http_capture_host_composes_only_an_explicit_durable_media_transport(
+    tmp_path: Path,
+) -> None:
+    host = build_http_v2_capture_host(
+        settings=Settings(database_path=tmp_path / "http-v2-media.sqlite"),
+        bootstrap_at=NOW,
+        model=FakeCompanionModel(),
+        media_transport=_DurableMediaTransport(),
+    )
+    try:
+        # The worker exists only when composition receives a recovery-capable
+        # provider; it is not constructed from the HTTP capture transport or
+        # the legacy image-machine bridge.
+        assert host._host._application._media_execution_worker is not None
+    finally:
+        host._host.close()
 
 
 def test_http_messages_route_uses_the_injected_v2_capture_host_only(
