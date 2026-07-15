@@ -55,6 +55,10 @@ from .actor_authority_events import ActorAuthorityMutationPayload
 from .actor_authority_reducers import reduce_actor_authority
 from .authorization_events import AUTHORIZATION_PAYLOAD_MODELS, authorization_domain
 from .authorization_reducers import reduce_authorization
+from .accepted_effect_contracts import (
+    AcceptanceManifestRefV3,
+    rehydrate_acceptance_manifest_v3,
+)
 from .acceptance_manifest import (
     AcceptanceManifestRefV2,
     derive_acceptance_manifest_proposal_v2,
@@ -75,7 +79,14 @@ from .clock_authority import (
     validate_clock_history,
 )
 from .fact_events import FACT_PAYLOAD_MODELS, FactAuthorizedMutationPayload, FactChangedPayload
+from .fact_proposal_audit_v2 import FactCommitProposalAuditRefV2
+from .fact_accepted_contracts import rehydrate_fact_commit_materialized_v2_json
 from .fact_reducers import reduce_fact
+from .fact_v2_reducers import materialized_fact_v2_as_projection_change
+from .proposal_envelope_v2 import (
+    canonical_full_change_authority_hash_v2,
+    validate_fact_commit_proposal_v2,
+)
 from .goal_authority_events import (
     V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
     V2_GOAL_PAYLOAD_MODELS,
@@ -258,7 +269,7 @@ from .schemas import (
 )
 
 
-REDUCER_BUNDLE_VERSION = "world-v2-reducers.18"
+REDUCER_BUNDLE_VERSION = "world-v2-reducers.19"
 _LEGACY_ACTOR_BINDING_BUNDLES = frozenset(
     f"world-v2-reducers.{version}"
     for version in (1, 2, 3, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15)
@@ -293,6 +304,7 @@ def _experience_semantic_dump(
             "world-v2-reducers.15",
             "world-v2-reducers.16",
             "world-v2-reducers.17",
+            "world-v2-reducers.18",
             REDUCER_BUNDLE_VERSION,
         }
         and isinstance(experience, LegacyExperienceProjection)
@@ -311,6 +323,7 @@ def _actor_authority_transition_semantic_dump(
     if reducer_bundle_version not in {
         "world-v2-reducers.16",
         "world-v2-reducers.17",
+        "world-v2-reducers.18",
         REDUCER_BUNDLE_VERSION,
     }:
         dumped.pop("accepted_event_ref", None)
@@ -416,6 +429,8 @@ class ReducerState(FrozenModel):
     model_result_audits: tuple[ModelResultAuditProjection, ...] = ()
     proposal_audits: tuple[ProposalAuditProjection, ...] = ()
     acceptance_manifests_v2: tuple[AcceptanceManifestRefV2, ...] = ()
+    fact_commit_proposal_audits_v2: tuple[FactCommitProposalAuditRefV2, ...] = ()
+    acceptance_manifests_v3: tuple[AcceptanceManifestRefV3, ...] = ()
     acceptance_decisions: tuple[AcceptanceDecisionRef, ...] = ()
 
     @model_validator(mode="after")
@@ -997,6 +1012,7 @@ class ReducerState(FrozenModel):
                         "world-v2-reducers.15",
                         "world-v2-reducers.16",
                         "world-v2-reducers.17",
+                        "world-v2-reducers.18",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else item.model_dump(
@@ -1039,6 +1055,7 @@ class ReducerState(FrozenModel):
                     in {
                         "world-v2-reducers.16",
                         "world-v2-reducers.17",
+                        "world-v2-reducers.18",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else plan.model_dump(
@@ -1054,6 +1071,7 @@ class ReducerState(FrozenModel):
                     in {
                         "world-v2-reducers.16",
                         "world-v2-reducers.17",
+                        "world-v2-reducers.18",
                         REDUCER_BUNDLE_VERSION,
                     }
                     else occurrence.model_dump(
@@ -1113,6 +1131,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.15",
             "world-v2-reducers.16",
             "world-v2-reducers.17",
+            "world-v2-reducers.18",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["threads"] = tuple(item.model_dump(mode="json") for item in self.threads)
@@ -1127,6 +1146,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.15",
             "world-v2-reducers.16",
             "world-v2-reducers.17",
+            "world-v2-reducers.18",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["commitments"] = tuple(
@@ -1142,6 +1162,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.15",
             "world-v2-reducers.16",
             "world-v2-reducers.17",
+            "world-v2-reducers.18",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["facts"] = tuple(item.model_dump(mode="json") for item in self.facts)
@@ -1154,6 +1175,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.15",
             "world-v2-reducers.16",
             "world-v2-reducers.17",
+            "world-v2-reducers.18",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["experience_transitions"] = tuple(
@@ -1164,6 +1186,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.15",
             "world-v2-reducers.16",
             "world-v2-reducers.17",
+            "world-v2-reducers.18",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["memory_candidates"] = tuple(
@@ -1177,6 +1200,7 @@ class ReducerState(FrozenModel):
             "world-v2-reducers.15",
             "world-v2-reducers.16",
             "world-v2-reducers.17",
+            "world-v2-reducers.18",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["character_core"] = (
@@ -1190,6 +1214,7 @@ class ReducerState(FrozenModel):
         if reducer_bundle_version in {
             "world-v2-reducers.16",
             "world-v2-reducers.17",
+            "world-v2-reducers.18",
             REDUCER_BUNDLE_VERSION,
         }:
             payload["clock_transition_history"] = tuple(
@@ -1217,6 +1242,13 @@ class ReducerState(FrozenModel):
             )
             payload["attention_transitions"] = tuple(
                 item.model_dump(mode="json") for item in self.attention_transitions
+            )
+        if reducer_bundle_version == "world-v2-reducers.19":
+            payload["fact_commit_proposal_audits_v2"] = tuple(
+                item.model_dump(mode="json") for item in self.fact_commit_proposal_audits_v2
+            )
+            payload["acceptance_manifests_v3"] = tuple(
+                item.model_dump(mode="json") for item in self.acceptance_manifests_v3
             )
         return payload
 
@@ -2644,11 +2676,14 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
     raw = event.payload()
     if (
         "manifest_version" in raw
-        and raw.get("manifest_version") != "acceptance-manifest.2"
+        and raw.get("manifest_version")
+        not in {"acceptance-manifest.2", "acceptance-manifest.3"}
     ):
         raise ValueError("acceptance_manifest.unsupported_manifest_version")
     if raw.get("manifest_version") == "acceptance-manifest.2":
         return _acceptance_manifest_v2_recorded(state, event)
+    if raw.get("manifest_version") == "acceptance-manifest.3":
+        return _acceptance_manifest_v3_recorded(state, event)
     proposal_id = raw.get("proposal_id")
     evaluated_world_revision = raw.get("evaluated_world_revision")
     if not isinstance(proposal_id, str) or not isinstance(evaluated_world_revision, int):
@@ -2823,6 +2858,167 @@ def _acceptance_manifest_v2_recorded(
             raise TypeError("typed proposal registry returned an incompatible state")
         updated = discarded
     return updated
+
+
+def _fact_commit_proposal_audit_v2_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    """Index the closed Fact-v2 audit without treating it as a legacy proposal.
+
+    ``FactCommitProposalRecorded`` is a deliberation event.  Its pinned world
+    revision therefore has to match the state immediately before this event;
+    the later manifest-v3 reducer rebinds the complete event hash rather than
+    relying on an ambient proposal cache.
+    """
+
+    audit = FactCommitProposalAuditRefV2.from_event(event)
+    if audit.proposal_world_id != event.world_id:
+        raise ValueError("Fact v2 proposal audit world identity does not match its event")
+    if audit.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("Fact v2 proposal audit must evaluate the current world revision")
+    if any(item.proposal_id == audit.proposal_id for item in state.fact_commit_proposal_audits_v2):
+        raise ValueError("Fact v2 proposal audit identity is already registered")
+    return state.model_copy(
+        update={
+            "fact_commit_proposal_audits_v2": (
+                *state.fact_commit_proposal_audits_v2,
+                audit,
+            )
+        }
+    )
+
+
+def _acceptance_manifest_v3_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    """Accept the first closed v3 authority lane: one Fact-v2 commit plan."""
+
+    manifest = rehydrate_acceptance_manifest_v3(event.payload())
+    current_world_revision = len(state.committed_world_event_refs)
+    if manifest.status != "accepted":
+        raise ValueError("Fact v2 manifest must be accepted")
+    if manifest.evaluated_world_revision != current_world_revision:
+        raise ValueError("accepted Fact v2 manifest must evaluate the current world")
+    if len(manifest.proposals) != 1 or len(manifest.authorized_effects) != 1:
+        raise ValueError("Fact v2 manifest must contain exactly one proposal and effect")
+    if any(
+        item.manifest.acceptance_id == manifest.acceptance_id
+        for item in state.acceptance_manifests_v3
+    ) or any(
+        item.acceptance_id == manifest.acceptance_id for item in state.acceptance_manifests_v2
+    ) or any(item.acceptance_id == manifest.acceptance_id for item in state.acceptance_decisions):
+        raise ValueError("acceptance identity is already registered")
+
+    summary = manifest.proposals[0]
+    if summary.audit_contract != "fact-commit-proposal-audit.2":
+        raise ValueError("Fact v2 manifest uses an unsupported proposal audit")
+    audit = next(
+        (
+            item
+            for item in state.fact_commit_proposal_audits_v2
+            if item.proposal_id == summary.proposal_id
+        ),
+        None,
+    )
+    if audit is None or any(
+        item.proposal_id == summary.proposal_id for item in state.acceptance_decisions
+    ):
+        raise ValueError("Fact v2 manifest references unavailable or decided proposal authority")
+    if (
+        summary.proposal_schema_registry != audit.proposal_schema_registry
+        or summary.proposal_event_ref != audit.event_ref
+        or summary.proposal_event_payload_hash != audit.event_payload_hash
+        or summary.proposal_hash != audit.proposal_hash
+        or summary.evaluated_world_revision != audit.evaluated_world_revision
+        or event.causation_id != audit.event_ref
+    ):
+        raise ValueError("Fact v2 manifest does not exactly bind its proposal audit")
+    proposal = validate_fact_commit_proposal_v2(
+        json.loads(audit.proposal_json), world_id=audit.proposal_world_id
+    )
+    if (
+        summary.proposal_kind != proposal.proposal_kind
+        or summary.proposal_schema_registry != proposal.schema_registry_version
+        or summary.action_intents
+        or len(summary.changes) != len(proposal.proposed_changes)
+    ):
+        raise ValueError("Fact v2 manifest proposal summary is not exact")
+    expected_changes = {
+        change.change_id: (
+            change.kind,
+            change.target_id,
+            change.transition,
+            change.expected_entity_revision,
+            change.evidence_refs,
+            change.preconditions,
+            change.policy_refs,
+            change.payload.payload_schema,
+            change.payload.payload_version,
+            change.payload.payload_hash,
+            canonical_full_change_authority_hash_v2(change),
+        )
+        for change in proposal.proposed_changes
+    }
+    for change in summary.changes:
+        if expected_changes.get(change.change_id) != (
+            change.kind,
+            change.target_id,
+            change.transition,
+            change.expected_entity_revision,
+            change.evidence_refs,
+            change.preconditions,
+            change.policy_refs,
+            change.payload_schema,
+            change.payload_version,
+            change.payload_hash,
+            change.full_change_authority_hash,
+        ):
+            raise ValueError("Fact v2 manifest change authority is not exact")
+
+    effect = manifest.authorized_effects[0]
+    if (
+        effect.ordinal != 0
+        or effect.role != "domain_mutation"
+        or effect.event_type != "FactCommittedV2"
+        or len(effect.authority_refs) != 1
+    ):
+        raise ValueError("Fact v2 manifest effect is not the installed mutation")
+    authority = effect.authority_refs[0]
+    change = next((item for item in summary.changes if item.change_id == authority.authority_id), None)
+    if (
+        authority.proposal_id != summary.proposal_id
+        or authority.authority_kind != "change"
+        or change is None
+        or authority.authority_hash != change.full_change_authority_hash
+    ):
+        raise ValueError("Fact v2 manifest effect authority is not exact")
+
+    decision = AcceptanceDecisionRef(
+        proposal_id=summary.proposal_id,
+        evaluated_world_revision=summary.evaluated_world_revision,
+        acceptance_id=manifest.acceptance_id,
+        status="accepted",
+        accepted_change_id=change.change_id,
+        accepted_change_hash=change.full_change_authority_hash,
+        manifest_version=manifest.manifest_version,
+        manifest_hash=manifest.manifest_hash,
+        acceptance_event_ref=event.event_id,
+        acceptance_event_payload_hash=event.payload_hash,
+    )
+    return state.model_copy(
+        update={
+            "acceptance_decisions": (*state.acceptance_decisions, decision),
+            "acceptance_manifests_v3": (
+                *state.acceptance_manifests_v3,
+                AcceptanceManifestRefV3.from_manifest(
+                    manifest,
+                    acceptance_event_ref=event.event_id,
+                    acceptance_event_payload_hash=event.payload_hash,
+                    recorded_at_world_revision=current_world_revision + 1,
+                ),
+            ),
+        }
+    )
 
 
 def _world_started(state: ReducerState, _event: WorldEvent) -> ReducerState:
@@ -4491,6 +4687,82 @@ def _fact_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
     )
 
 
+def _fact_v2_committed(state: ReducerState, event: WorldEvent) -> ReducerState:
+    """Replay the sealed Fact-v2 effect only through its adjacent v3 manifest."""
+
+    if (
+        not state.committed_world_event_refs
+        or state.committed_world_event_refs[-1].event_type != "AcceptanceRecorded"
+    ):
+        raise ValueError("Fact v2 commit requires adjacent AcceptanceRecorded authority")
+    acceptance_ref = state.committed_world_event_refs[-1]
+    retained = next(
+        (
+            item
+            for item in state.acceptance_manifests_v3
+            if item.acceptance_event_ref == acceptance_ref.event_id
+            and item.acceptance_event_payload_hash == acceptance_ref.payload_hash
+        ),
+        None,
+    )
+    if retained is None:
+        raise ValueError("Fact v2 commit requires a retained manifest v3 authority")
+    manifest = retained.manifest
+    if (
+        manifest.status != "accepted"
+        or len(manifest.proposals) != 1
+        or len(manifest.authorized_effects) != 1
+        or event.causation_id != acceptance_ref.event_id
+    ):
+        raise ValueError("Fact v2 commit does not bind its adjacent manifest authority")
+    effect = manifest.authorized_effects[0]
+    if (
+        effect.ordinal != 0
+        or effect.event_id != event.event_id
+        or effect.event_type != event.event_type
+        or effect.payload_hash != event.payload_hash
+        or len(effect.authority_refs) != 1
+    ):
+        raise ValueError("Fact v2 commit does not match its authorized effect")
+    payload = rehydrate_fact_commit_materialized_v2_json(event.payload_json)
+    summary = manifest.proposals[0]
+    authority = effect.authority_refs[0]
+    change = next((item for item in summary.changes if item.change_id == payload.change_id), None)
+    if (
+        payload.policy_refs != ("policy:fact-commit.2",)
+        or payload.acceptance_id != manifest.acceptance_id
+        or payload.proposal_id != summary.proposal_id
+        or payload.evaluated_world_revision != manifest.evaluated_world_revision
+        or change is None
+        or authority.proposal_id != summary.proposal_id
+        or authority.authority_kind != "change"
+        or authority.authority_id != payload.change_id
+        or authority.authority_hash != payload.full_change_authority_hash
+        or change.full_change_authority_hash != payload.full_change_authority_hash
+        or change.target_id != payload.fact_id
+        or change.transition != "commit"
+        or change.expected_entity_revision != payload.expected_entity_revision
+        or change.evidence_refs != tuple(item.ref_id for item in payload.evidence_refs)
+        or change.policy_refs != payload.policy_refs
+    ):
+        raise ValueError("Fact v2 commit payload does not match its manifest change authority")
+    projection_change = materialized_fact_v2_as_projection_change(
+        payload=payload,
+        event_id=event.event_id,
+        logical_time=_require_life_time(state, event),
+    )
+    facts, transitions = reduce_fact(
+        state.facts,
+        state.fact_transitions,
+        projection_change,
+        event_type="FactCommittedV2",
+        logical_time=_require_life_time(state, event),
+        message_observations=state.message_observations,
+        operator_observations=state.operator_observations,
+    )
+    return state.model_copy(update={"facts": facts, "fact_transitions": transitions})
+
+
 def _v2_goal_changed(state: ReducerState, event: WorldEvent) -> ReducerState:
     logical_time = _require_life_time(state, event)
     payload = V2GoalChangedPayload.model_validate_json(event.payload_json)
@@ -5236,7 +5508,9 @@ _EVENTS = {
         ),
         EventDefinition("ProposalRecorded", RevisionClass.DELIBERATION, _proposal_recorded),
         EventDefinition(
-            "FactCommitProposalRecorded", RevisionClass.DELIBERATION, _audit_only
+            "FactCommitProposalRecorded",
+            RevisionClass.DELIBERATION,
+            _fact_commit_proposal_audit_v2_recorded,
         ),
         EventDefinition("AcceptanceRecorded", RevisionClass.WORLD, _acceptance_recorded),
         EventDefinition("LegacyAcceptanceAuditRecorded", RevisionClass.WORLD, _audit_only),
@@ -5395,6 +5669,7 @@ _EVENTS = {
             EventDefinition(event_type, RevisionClass.WORLD, _fact_changed)
             for event_type in FACT_PAYLOAD_MODELS
         ),
+        EventDefinition("FactCommittedV2", RevisionClass.WORLD, _fact_v2_committed),
         *(
             EventDefinition(event_type, RevisionClass.WORLD, _memory_candidate_changed)
             for event_type in MEMORY_CANDIDATE_PAYLOAD_MODELS
@@ -5600,6 +5875,8 @@ def make_projection(
         model_result_audits=state.model_result_audits,
         proposal_audits=state.proposal_audits,
         acceptance_manifests_v2=state.acceptance_manifests_v2,
+        fact_commit_proposal_audits_v2=state.fact_commit_proposal_audits_v2,
+        acceptance_manifests_v3=state.acceptance_manifests_v3,
         acceptance_decisions=state.acceptance_decisions,
         outcome_proposals=state.outcome_proposals,
         semantic_hash=semantic_hash(

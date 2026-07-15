@@ -163,8 +163,12 @@ def _cursor(ledger: SQLiteWorldLedger) -> ProjectionCursor:
     )
 
 
-def _bound(tmp_path):
-    ledger = SQLiteWorldLedger(path=tmp_path / "fact-candidate.sqlite3", world_id=WORLD_ID)
+def _bound(tmp_path, *, accepted_batch_issuer: AcceptedLedgerBatchIssuer | None = None):
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "fact-candidate.sqlite3",
+        world_id=WORLD_ID,
+        accepted_batch_issuer=accepted_batch_issuer,
+    )
     message = _message()
     ledger.commit((message,), expected_world_revision=0, expected_deliberation_revision=0)
     proposal = _proposal(event_payload_hash=message.payload_hash)
@@ -450,7 +454,10 @@ def test_materialized_fact_v2_maps_to_shared_fact_projection_without_legacy_prop
 
 
 def test_atomic_recorder_materializes_exact_acceptance_then_fact_batch(tmp_path) -> None:
-    ledger, registry, reader, proposal_handle, prepared, sources, candidate, _ = _bound(tmp_path)
+    batch_issuer = AcceptedLedgerBatchIssuer()
+    ledger, registry, reader, proposal_handle, prepared, sources, candidate, _ = _bound(
+        tmp_path, accepted_batch_issuer=batch_issuer
+    )
     envelope_request = FactV2AcceptanceEnvelopeRequestV2.model_validate(
         candidate.model_dump(mode="python")
         | {"acceptance_causation_id": reader.audit(handle=proposal_handle).event_ref},
@@ -471,7 +478,6 @@ def test_atomic_recorder_materializes_exact_acceptance_then_fact_batch(tmp_path)
     )
     builder = FactV2AcceptedManifestBuilder(plan_issuer=plan_issuer)
     bundle_handle = builder.build(plan_handle=plan_handle)
-    batch_issuer = AcceptedLedgerBatchIssuer()
     batch_handle = FactV2AtomicRecorder(
         manifest_builder=builder, batch_issuer=batch_issuer
     ).prepare_batch(bundle_handle=bundle_handle)
@@ -506,4 +512,15 @@ def test_atomic_recorder_materializes_exact_acceptance_then_fact_batch(tmp_path)
             expected_world_revision=_cursor(ledger).world_revision,
             accepted_manifest_v3_authorized=True,
         )
+    result = ledger.commit_accepted(batch_handle, expected_cursor=_cursor(ledger))
+    assert result.world_revision == 3
+    assert result.deliberation_revision == 1
+    projection = ledger.project()
+    assert len(projection.facts) == 1
+    assert projection.facts[0].values.value_ref == "value:alice"
+    assert len(projection.acceptance_manifests_v3) == 1
+    assert projection.acceptance_manifests_v3[0].manifest.acceptance_id == (
+        envelope_request.acceptance_id
+    )
+    assert len(ledger.rebuild().facts) == 1
     ledger.close()
