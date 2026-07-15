@@ -47,6 +47,17 @@ def _commit(ledger: SQLiteWorldLedger | WorldLedger, event: WorldEvent, number: 
     )
 
 
+def _prefix_roots(path, *, world_id: str) -> tuple[bytes, bytes]:
+    with sqlite3.connect(path) as connection:
+        row = connection.execute(
+            """SELECT mmr_root, locator_root FROM world_v2_prefix_heads
+               WHERE world_id = ?""",
+            (world_id,),
+        ).fetchone()
+    assert row is not None
+    return bytes(row[0]), bytes(row[1])
+
+
 def test_sqlite_prefix_state_is_incremental_and_survives_restart(tmp_path) -> None:
     path = tmp_path / "prefix.sqlite3"
     sqlite_ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
@@ -56,8 +67,10 @@ def test_sqlite_prefix_state_is_incremental_and_survives_restart(tmp_path) -> No
         _commit(sqlite_ledger, event, number)
         _commit(memory_ledger, event, number)
 
-    assert sqlite_ledger._prefix_mmr.root == memory_ledger._prefix_mmr.root
-    assert sqlite_ledger._prefix_locator_map.root == memory_ledger._prefix_locator_map.root
+    assert _prefix_roots(path, world_id=WORLD) == (
+        memory_ledger._prefix_mmr.root,
+        memory_ledger._prefix_locator_map.root,
+    )
     with sqlite3.connect(path) as connection:
         head = connection.execute(
             "SELECT mmr_leaf_count, checkpoint_count FROM world_v2_prefix_heads WHERE world_id = ?",
@@ -70,9 +83,59 @@ def test_sqlite_prefix_state_is_incremental_and_survives_restart(tmp_path) -> No
     sqlite_ledger.close()
 
     reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert reopened._prefix_mmr.root == memory_ledger._prefix_mmr.root
-    assert reopened._prefix_locator_map.root == memory_ledger._prefix_locator_map.root
+    assert _prefix_roots(path, world_id=WORLD) == (
+        memory_ledger._prefix_mmr.root,
+        memory_ledger._prefix_locator_map.root,
+    )
     reopened.close()
+
+
+def test_sqlite_restart_append_uses_addressed_plans_without_builder_restore(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "prefix-restart-append.sqlite3"
+    sqlite_ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
+    memory_ledger = WorldLedger(world_id=WORLD)
+    first = _observation("event:restart:1", "obs:restart:1")
+    _commit(sqlite_ledger, first, 1)
+    _commit(memory_ledger, first, 1)
+    sqlite_ledger.close()
+
+    def fail_restore(*_args, **_kwargs):
+        raise AssertionError("normal SQLite startup/append must not restore proof builders")
+
+    monkeypatch.setattr(SQLiteWorldLedger, "_load_prefix_proof_state_locked", fail_restore)
+    reopened = SQLiteWorldLedger(path=path, world_id=WORLD)
+    statements: list[str] = []
+    reopened._connection.set_trace_callback(statements.append)
+    try:
+        second = _observation("event:restart:2", "obs:restart:2")
+        _commit(reopened, second, 2)
+        _commit(memory_ledger, second, 2)
+    finally:
+        reopened._connection.set_trace_callback(None)
+        reopened.close()
+
+    assert _prefix_roots(path, world_id=WORLD) == (
+        memory_ledger._prefix_mmr.root,
+        memory_ledger._prefix_locator_map.root,
+    )
+    mmr_selects = tuple(
+        statement.upper()
+        for statement in statements
+        if "WORLD_V2_PREFIX_MMR_NODES" in statement.upper()
+        and statement.lstrip().upper().startswith("SELECT")
+    )
+    assert mmr_selects
+    assert all("HEIGHT =" in statement and "NODE_INDEX =" in statement for statement in mmr_selects)
+    locator_selects = tuple(
+        statement.upper()
+        for statement in statements
+        if "WORLD_V2_PREFIX_LOCATOR_NODES" in statement.upper()
+        and statement.lstrip().upper().startswith("SELECT")
+    )
+    assert locator_selects
+    assert all("DEPTH =" in statement and "PREFIX_BITS =" in statement for statement in locator_selects)
 
 
 def test_sqlite_proof_reader_authenticates_historical_membership_and_absence(tmp_path) -> None:
@@ -275,7 +338,7 @@ def test_sqlite_legacy_prefix_migration_rebuilds_only_when_all_v1_rows_absent(tm
     path = tmp_path / "legacy-prefix.sqlite3"
     ledger = SQLiteWorldLedger(path=path, world_id=WORLD)
     _commit(ledger, _observation("event:legacy", "obs:legacy"), 1)
-    expected_root = ledger._prefix_mmr.root
+    expected_root = _prefix_roots(path, world_id=WORLD)[0]
     ledger.close()
 
     with sqlite3.connect(path) as connection:
@@ -289,7 +352,7 @@ def test_sqlite_legacy_prefix_migration_rebuilds_only_when_all_v1_rows_absent(tm
             connection.execute(f"DELETE FROM {table}")
 
     migrated = SQLiteWorldLedger(path=path, world_id=WORLD)
-    assert migrated._prefix_mmr.root == expected_root
+    assert _prefix_roots(path, world_id=WORLD)[0] == expected_root
     migrated.close()
 
     with sqlite3.connect(path) as connection:
