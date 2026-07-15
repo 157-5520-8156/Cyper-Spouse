@@ -80,11 +80,14 @@ class PinnedTurnCompiler:
         observation_event: WorldEvent,
         cursor: ProjectionCursor,
     ) -> ProposalAuditCommit:
-        """Compile and audit only if the Observation's exact cursor is current.
+        """Compile an audit at a cursor that includes the committed Observation.
 
         The audit is a deliberation-only commit.  Any world revision change
         between the read and write makes the attempt stale; callers must build
-        a fresh turn rather than reusing its Capsule or proposal.
+        a fresh turn rather than reusing its Capsule or proposal.  A background
+        appraisal may legitimately run after the observation's trigger process
+        was durably opened, so its source event need only be at-or-before the
+        pinned cursor; the evidence retains that event's original revision.
         """
 
         if observation.world_id != self._ledger.world_id or observation_event.world_id != observation.world_id:
@@ -95,8 +98,8 @@ class PinnedTurnCompiler:
         if (
             stored is None
             or stored[0] != observation_event
-            or stored[1].world_revision != cursor.world_revision
-            or stored[1].ledger_sequence != cursor.ledger_sequence
+            or stored[1].world_revision > cursor.world_revision
+            or stored[1].ledger_sequence > cursor.ledger_sequence
         ):
             raise ValueError("Pinned turn observation event is not the committed authority")
         try:
