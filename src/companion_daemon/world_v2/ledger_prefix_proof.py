@@ -152,6 +152,68 @@ class PrefixCheckpointLeafV1:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ObservationLocatorValueV1:
+    """The value authenticated by an observation locator-map membership proof."""
+
+    observation_id: str
+    event_type: str
+    event_id: str
+    ledger_sequence: int
+    world_revision: int
+    deliberation_revision: int
+    event_leaf_index: int
+    event_leaf_hash: bytes
+
+    def digest(self) -> bytes:
+        if type(self.event_type) is not str or self.event_type not in {"ObservationRecorded", "OperatorObservationRecorded"}:
+            raise ValueError("locator value event_type is not an observation event")
+        return _hash(
+            "world-v2-observation-locator-value.1",
+            _record(
+                "world-v2-observation-locator-value.1",
+                (
+                    ("deliberation_revision", _require_nonnegative(self.deliberation_revision, label="deliberation_revision")),
+                    ("event_id", _require_text(self.event_id, label="event_id")),
+                    ("event_leaf_hash", _require_hash_bytes(self.event_leaf_hash, label="event_leaf_hash")),
+                    ("event_leaf_index", _require_nonnegative(self.event_leaf_index, label="event_leaf_index")),
+                    ("event_type", self.event_type),
+                    ("ledger_sequence", _require_positive(self.ledger_sequence, label="ledger_sequence")),
+                    ("observation_id", _require_text(self.observation_id, label="observation_id")),
+                    ("world_revision", _require_nonnegative(self.world_revision, label="world_revision")),
+                ),
+            ),
+        )
+
+
+def ordered_event_ids_hash_v1(event_ids: tuple[str, ...]) -> str:
+    if not event_ids or len(event_ids) > 4_096:
+        raise ValueError("checkpoint event ids must contain between 1 and 4096 entries")
+    return _hash(
+        "world-v2-ordered-event-ids.1",
+        b"".join(
+            _field("event_id", _require_text(event_id, label="event_id")) for event_id in event_ids
+        ),
+    ).hex()
+
+
+def commit_result_hash_v1(
+    *, world_revision: int, deliberation_revision: int, ledger_sequence: int, event_ids: tuple[str, ...]
+) -> str:
+    return _hash(
+        "world-v2-commit-result.1",
+        _record(
+            "world-v2-commit-result.1",
+            (
+                ("deliberation_revision", _require_nonnegative(deliberation_revision, label="deliberation_revision")),
+                ("event_ids_hash", bytes.fromhex(ordered_event_ids_hash_v1(event_ids))),
+                ("ledger_sequence", _require_nonnegative(ledger_sequence, label="ledger_sequence")),
+                ("world_revision", _require_nonnegative(world_revision, label="world_revision")),
+            ),
+        ),
+    ).hex()
+
+
 def _require_nonnegative(value: int, *, label: str) -> int:
     if type(value) is not int or not 0 <= value <= _MAX_I63:
         raise ValueError(f"{label} must be a non-negative integer")
