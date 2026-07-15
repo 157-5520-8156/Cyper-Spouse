@@ -5,6 +5,11 @@ from companion_daemon.world_v2.affect_proposal_compiler import AffectProposalCom
 from companion_daemon.world_v2.affect_acceptance_runtime import AffectAcceptanceRuntime
 from companion_daemon.world_v2.deliberation import DeliberationResult
 from companion_daemon.world_v2.ledger import WorldLedger
+from companion_daemon.world_v2.context_resolver import query_from_projection
+from companion_daemon.world_v2.ledger_context_resolver import (
+    ContextRelevanceScope,
+    context_capsule_compiler_from_ledger,
+)
 from companion_daemon.world_v2.proposal_audit import ProposalAuditContext, ProposalAuditRecorder
 from companion_daemon.world_v2.proposal_envelope import (
     CanonicalTypedPayload,
@@ -138,3 +143,15 @@ def test_compiler_records_a_source_bound_open_affect_candidate() -> None:
     )
     assert accepted.world_revision == ledger.project().world_revision
     assert ledger.project().affect_episodes[0].components[0].intensity_bp == 4200
+    capsule = context_capsule_compiler_from_ledger(
+        ledger=ledger,
+        relevance_scope=ContextRelevanceScope(
+            actor_ref="agent:companion", related_subject_refs=("interaction:user:1",)
+        ),
+    ).compile(
+        query_from_projection(
+            ledger.project(), actor_ref="agent:companion", trigger_ref="event:next-turn"
+        )
+    )
+    assert capsule.affect_episodes.availability == "available"
+    assert '"dimension":"hurt"' in capsule.affect_episodes.items[0].payload_json

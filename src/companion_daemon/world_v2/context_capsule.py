@@ -342,7 +342,14 @@ class ContextCapsuleBudgetPolicy(_FrozenModel):
         default_factory=lambda: SliceBudget(max_items=1, max_fields=48, max_characters=2_000)
     )
     appraisals: SliceBudget = Field(default_factory=SliceBudget)
-    affect_episodes: SliceBudget = Field(default_factory=SliceBudget)
+    # An accepted episode carries its appraisal hypotheses and immutable
+    # provenance.  Four thousand characters can reject the entire highest
+    # priority episode, leaving the next deliberation affect-blind.  Reserve
+    # enough room for one fully source-bound episode; the global capsule cap
+    # and per-slice selection still bound total context.
+    affect_episodes: SliceBudget = Field(
+        default_factory=lambda: SliceBudget(max_items=8, max_fields=96, max_characters=6_000)
+    )
     open_threads: SliceBudget = Field(
         default_factory=lambda: SliceBudget(max_items=12, max_fields=144, max_characters=4_000)
     )
