@@ -18,6 +18,9 @@ from pathlib import Path
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .action_pump import ActionExecutor, ActionPumpResult
 from .affect_trigger_runtime import AffectTriggerRunResult
+from .appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
+from .appraisal_proposal_compiler import AppraisalProposalCompiler
+from .appraisal_proposal_worker import AppraisalProposalWorker
 from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
 from .advisory_compiler import AdvisoryCompiler
 from .deliberation import (
@@ -51,9 +54,16 @@ class WorldV2TurnApplicationConfig:
     chat_budget_limit: int = 10_000
     reply_budget_amount: int = 10
     reply_recovery_policy: str = "effect_once"
+    appraisal_worker_owner: str = "worker:world-v2:appraisal"
 
     def __post_init__(self) -> None:
-        for name in ("world_id", "companion_actor_ref", "reply_target", "action_pump_owner"):
+        for name in (
+            "world_id",
+            "companion_actor_ref",
+            "reply_target",
+            "action_pump_owner",
+            "appraisal_worker_owner",
+        ):
             if not getattr(self, name):
                 raise ValueError(f"{name} must not be empty")
         if not self.chat_account_id or not self.chat_window_id:
@@ -98,6 +108,7 @@ def build_sqlite_world_v2_turn_application(
     quick_recovery: QuickRecoveryAdapter,
     transport: PlatformTransport,
     advisory_compiler: AdvisoryCompiler | None = None,
+    appraisal_model: DeliberationModelAdapter | None = None,
     now: datetime,
 ) -> WorldV2TurnApplication:
     """Build one durable v2 chat lane without importing the legacy application.
@@ -120,6 +131,33 @@ def build_sqlite_world_v2_turn_application(
             companion_actor_ref=config.companion_actor_ref,
             advisory_compiler=advisory_compiler,
         )
+        appraisal_acceptance = (
+            AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
+            if appraisal_model is not None
+            else None
+        )
+        appraisal_worker = (
+            AppraisalProposalWorker(
+                compiler=AppraisalProposalCompiler(ledger=ledger),
+                acceptance=appraisal_acceptance,
+                actor=config.appraisal_worker_owner,
+            )
+            if appraisal_acceptance is not None
+            else None
+        )
+        appraisal_turn = (
+            PinnedTurnCompiler(
+                ledger=ledger,
+                capsule_compiler=context_capsule_compiler_from_ledger(ledger=ledger),
+                deliberation=Deliberation(
+                    router=router, main_model=appraisal_model, quick_recovery=appraisal_model
+                ),
+                companion_actor_ref=config.companion_actor_ref,
+                advisory_compiler=advisory_compiler,
+            )
+            if appraisal_model is not None
+            else None
+        )
         runtime = WorldRuntime(
             world_id=config.world_id,
             ledger=ledger,
@@ -132,6 +170,15 @@ def build_sqlite_world_v2_turn_application(
                 recovery_policy=config.reply_recovery_policy,
             ),
             reply_recorder=MinimalReplyAtomicRecorder(batch_issuer=issuer),
+            interaction_appraisal_owner=(
+                config.appraisal_worker_owner if appraisal_turn is not None else None
+            ),
+            appraisal_acceptance=appraisal_acceptance,
+            appraisal_acceptance_actor=(
+                config.appraisal_worker_owner if appraisal_acceptance is not None else None
+            ),
+            appraisal_worker=appraisal_worker,
+            interaction_appraisal_turn=appraisal_turn,
             action_executor=build_platform_action_executor(ledger=ledger, transport=transport),
             action_pump_owner=config.action_pump_owner,
         )

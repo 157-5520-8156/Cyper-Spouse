@@ -13,6 +13,7 @@ from companion_daemon.world_v2.deliberation import (
     RouteRequest,
 )
 from companion_daemon.world_v2.chat_model_deliberation_adapter import ChatModelDeliberationAdapter
+from companion_daemon.world_v2.appraisal_chat_model_adapter import AppraisalDraftDeliberationAdapter
 from companion_daemon.world_v2.platform_action_executor import PlatformDispatchReceipt
 from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
@@ -92,6 +93,23 @@ class _DeliveredTransport:
 
     async def lookup(self, **_kwargs):  # type: ignore[no-untyped-def]
         return None
+
+
+class _NoChangeAppraisalChat:
+    model = "test-appraiser"
+
+    async def complete(self, _messages, *, temperature: float = 0.8):  # type: ignore[no-untyped-def]
+        del temperature
+        return json.dumps(
+            {
+                "appraise": False,
+                "brief_rationale": "The ordinary message does not warrant a durable relational interpretation.",
+                "behavior_tendency": "observe",
+                "stance": "wait",
+                "display_strategy": "withhold",
+                "confidence": 3000,
+            }
+        )
 
 
 def _config() -> WorldV2TurnApplicationConfig:
@@ -193,3 +211,40 @@ async def test_production_application_materializes_a_chat_draft_and_settles_one_
     assert outcome.status == "action_authorized"
     assert delivery is not None and delivery.status == "settled"
     assert transport.bodies == ["嗯，我刚刚有点飘走了。你继续说，我在听。"]
+
+
+@pytest.mark.asyncio
+async def test_production_application_drains_appraisal_after_the_visible_reply_lane(tmp_path: Path) -> None:
+    transport = _DeliveredTransport()
+    reply_model = ChatModelDeliberationAdapter(model=_DraftChatModel())
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "world-v2-background-appraisal.sqlite",
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=reply_model,
+        quick_recovery=reply_model,
+        appraisal_model=AppraisalDraftDeliberationAdapter(model=_NoChangeAppraisalChat()),
+        transport=transport,
+        now=NOW,
+    )
+    try:
+        outcome = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:background-appraisal",
+                text="今天就是有点累。",
+                observed_at=NOW,
+                trace_id="trace:production-background-appraisal",
+            )
+        )
+        background = await app.drain_background_once()
+        await app.drain_actions_once()
+    finally:
+        app.close()
+
+    assert outcome.status == "action_authorized"
+    assert background is not None
+    assert background.status == "processed"
+    assert background.work_status == "no_change"

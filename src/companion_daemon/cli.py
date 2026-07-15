@@ -9,6 +9,7 @@ from companion_daemon.world_v2.chat_model_deliberation_adapter import (
     ChatCompletionModel,
     RoutedChatModelDeliberationAdapter,
 )
+from companion_daemon.world_v2.appraisal_chat_model_adapter import AppraisalDraftDeliberationAdapter
 from companion_daemon.world_v2.deliberation import ModelRoute, RouteRequest
 from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
@@ -89,6 +90,7 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
         main_model=adapter,
         quick_recovery=adapter,
         transport=transport,
+        appraisal_model=AppraisalDraftDeliberationAdapter(model=flash_model),
         now=now,
     )
     try:
@@ -104,6 +106,7 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
             )
         )
         delivery = await app.drain_actions_once()
+        await app.drain_background_once()
         if not transport.bodies:
             print(f"[reply:{outcome.status}] no settled reply ({delivery.status if delivery else 'idle'})")
             return
