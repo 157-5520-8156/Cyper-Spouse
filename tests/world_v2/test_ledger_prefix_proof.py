@@ -120,3 +120,33 @@ def test_locator_key_is_domain_separated_by_world_and_event_type() -> None:
     assert observation_locator_key(world_id="world:a", event_type="ObservationRecorded", **common) != observation_locator_key(
         world_id="world:a", event_type="OperatorObservationRecorded", **common
     )
+    with pytest.raises(ValueError, match="observation event"):
+        observation_locator_key(world_id="world:a", event_type="FactCommitted", **common)
+    with pytest.raises(ValueError, match="observation event"):
+        observation_locator_key(world_id="world:a", event_type=[] , **common)  # type: ignore[arg-type]
+
+
+def test_proof_methods_reject_hostile_expected_values_before_comparison() -> None:
+    key = observation_locator_key(
+        world_id="world:proof", event_type="ObservationRecorded", idempotency_key="idem:m"
+    )
+    locator_map = SparseMerkleMapV1().put(key=key, value_hash=_hash("event:m"))
+    proof = locator_map.prove(key)
+    with pytest.raises(ValueError, match="expected SMT key"):
+        proof.verify_membership(
+            expected_root=locator_map.root, expected_key=b"too-short", expected_value_hash=_hash("event:m")
+        )
+    with pytest.raises(ValueError, match="SMT proof key"):
+        type(proof)(key="not-bytes", value_hash=proof.value_hash, siblings=proof.siblings).verify_membership(  # type: ignore[arg-type]
+            expected_root=locator_map.root, expected_key=key, expected_value_hash=_hash("event:m")
+        )
+
+
+def test_leaf_hash_contract_rejects_noncanonical_uppercase_hex() -> None:
+    leaf = LedgerLeafV1(
+        world_id="world:proof", ledger_sequence=1, world_revision=1, deliberation_revision=0,
+        commit_id="commit:one", event_id="event:one", idempotency_key="idem:one",
+        event_envelope_hash=("A" * 64),
+    )
+    with pytest.raises(ValueError, match="sha256 hex"):
+        leaf.digest()
