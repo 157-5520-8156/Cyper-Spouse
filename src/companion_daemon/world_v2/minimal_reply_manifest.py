@@ -23,7 +23,22 @@ def _canonical_json(value: object) -> str:
 def canonical_minimal_reply_value_hash(value: object) -> str:
     """Hash one fully materialized reply value, never merely its identifier."""
 
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+    return hashlib.sha256(_canonical_json(_compatibility_normalize(value)).encode("utf-8")).hexdigest()
+
+
+def _compatibility_normalize(value: object) -> object:
+    if isinstance(value, dict):
+        normalized = {key: _compatibility_normalize(item) for key, item in value.items()}
+        if normalized.get("storage_kind") == "inline_text":
+            normalized.pop("storage_kind", None)
+            normalized.pop("sidecar_kind", None)
+            normalized.pop("privacy_class", None)
+        return normalized
+    if isinstance(value, tuple):
+        return tuple(_compatibility_normalize(item) for item in value)
+    if isinstance(value, list):
+        return [_compatibility_normalize(item) for item in value]
+    return value
 
 
 def canonical_minimal_reply_manifest_hash(value: dict[str, object]) -> str:

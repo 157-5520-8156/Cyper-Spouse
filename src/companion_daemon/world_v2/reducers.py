@@ -106,6 +106,7 @@ from .minimal_reply_events import (
     MessagePayloadStoredPayload,
 )
 from .life_content_events import LifeContentRecordedPayload
+from .expression_payload_events import ExpressionPayloadDescriptorRecordedPayload
 from .minimal_reply_manifest import (
     MINIMAL_REPLY_MANIFEST_VERSION,
     MinimalReplyManifest,
@@ -277,6 +278,7 @@ from .schemas import (
     ExpressionPlanManifestRef,
     ExpressionPlanManifestBeatRef,
     StoredMessagePayloadProjection,
+    ExpressionPayloadDescriptorProjection,
     ExpressionPlanProjection,
     ExpressionBeatProjection,
     ExpressionPlanLifecycleEntry,
@@ -411,6 +413,24 @@ def _expression_beat_semantic_dump(
     return dumped
 
 
+def _expression_plan_manifest_semantic_dump(
+    manifest: ExpressionPlanManifestRef,
+) -> dict[str, Any]:
+    """Preserve .24 hashes for ordinary inline plans.
+
+    Descriptor authority is semantically visible only when a beat really uses
+    the sidecar; adding default-sidecar metadata to historic inline manifests
+    must not rewrite their replay hash.
+    """
+    dumped = manifest.model_dump(mode="json")
+    for beat in dumped["beats"]:
+        if beat["storage_kind"] == "inline_text":
+            beat.pop("storage_kind")
+            beat.pop("sidecar_kind")
+            beat.pop("privacy_class")
+    return dumped
+
+
 class RevisionClass(StrEnum):
     WORLD = "world"
     DELIBERATION = "deliberation"
@@ -513,6 +533,7 @@ class ReducerState(FrozenModel):
     minimal_reply_manifests: tuple[MinimalReplyManifestRef, ...] = ()
     expression_plan_manifests: tuple[ExpressionPlanManifestRef, ...] = ()
     stored_message_payloads: tuple[StoredMessagePayloadProjection, ...] = ()
+    expression_payload_descriptors: tuple[ExpressionPayloadDescriptorProjection, ...] = ()
     life_content_descriptors: tuple[LifeContentDescriptorProjection, ...] = ()
     expression_plans: tuple[ExpressionPlanProjection, ...] = ()
     expression_beats: tuple[ExpressionBeatProjection, ...] = ()
@@ -1391,11 +1412,16 @@ class ReducerState(FrozenModel):
             )
             if declared_reducer_bundle_version == REDUCER_BUNDLE_VERSION:
                 payload["expression_plan_manifests"] = tuple(
-                    item.model_dump(mode="json") for item in self.expression_plan_manifests
+                    _expression_plan_manifest_semantic_dump(item)
+                    for item in self.expression_plan_manifests
                 )
             payload["stored_message_payloads"] = tuple(
                 item.model_dump(mode="json") for item in self.stored_message_payloads
             )
+            if self.expression_payload_descriptors:
+                payload["expression_payload_descriptors"] = tuple(
+                    item.model_dump(mode="json") for item in self.expression_payload_descriptors
+                )
             payload["expression_plans"] = tuple(
                 _expression_plan_semantic_dump(
                     item, reducer_bundle_version=reducer_bundle_version
@@ -3373,11 +3399,16 @@ def _expression_plan_manifest_recorded(state: ReducerState, event: WorldEvent) -
         if not isinstance(draft, dict):
             raise ValueError("expression plan draft is invalid")
         intent = intents.get(item.beat.beat_id)
+        inline_text = draft.get("inline_text")
+        has_sidecar = isinstance(draft.get("payload_ref"), str) or "inline_encrypted_payload" in draft
         if intent is None or (
             draft.get("beat_id") != item.beat.beat_id
-            or draft.get("materialized_payload_ref") != item.beat.payload.payload_ref
+            or (draft.get("payload_ref") if isinstance(draft.get("payload_ref"), str) else draft.get("materialized_payload_ref")) != item.beat.payload.payload_ref
             or draft.get("payload_hash") != item.beat.payload.payload_hash
-            or draft.get("inline_text") != item.beat.payload.text
+            or inline_text != item.beat.payload.text
+            or (item.beat.payload.storage_kind == "inline_text") != isinstance(inline_text, str)
+            or (item.beat.payload.storage_kind == "sidecar") != has_sidecar
+            or (item.beat.payload.storage_kind == "sidecar" and item.beat.payload.sidecar_kind != ("referenced" if isinstance(draft.get("payload_ref"), str) else "inline_encrypted"))
             or tuple(draft.get("dependency_beat_ids", ())) != item.beat.dependency_beat_ids
             or intent.intent_id != item.intent_id
             or canonical_expression_plan_value_hash(intent.model_dump(mode="json")) != item.intent_hash
@@ -3390,7 +3421,8 @@ def _expression_plan_manifest_recorded(state: ReducerState, event: WorldEvent) -
         refs.append(ExpressionPlanManifestBeatRef(
             beat_id=item.beat.beat_id, payload_ref=item.beat.payload.payload_ref,
             payload_hash=item.beat.payload.payload_hash, text=item.beat.payload.text,
-            content_type=item.beat.payload.content_type,
+            content_type=item.beat.payload.content_type, storage_kind=item.beat.payload.storage_kind,
+            sidecar_kind=item.beat.payload.sidecar_kind, privacy_class=item.beat.payload.privacy_class,
             dependency_beat_ids=item.beat.dependency_beat_ids,
             not_before=item.beat.not_before,
             expires_at=item.beat.expires_at,
@@ -3617,8 +3649,9 @@ def _message_payload_stored(state: ReducerState, event: WorldEvent) -> ReducerSt
     payload = MessagePayloadStoredPayload.model_validate_json(event.payload_json)
     generic = _expression_plan_manifest(state, payload.acceptance_id)
     if generic is not None:
-        if any(item.acceptance_id == payload.acceptance_id for item in state.stored_message_payloads):
-            _require_previous_event(state, "MessagePayloadStored")
+        if any(item.acceptance_id == payload.acceptance_id for item in state.stored_message_payloads) or any(item.acceptance_id == payload.acceptance_id for item in state.expression_payload_descriptors):
+            if not state.committed_world_event_refs or state.committed_world_event_refs[-1].event_type not in {"MessagePayloadStored", "ExpressionPayloadDescriptorRecorded"}:
+                raise ValueError("expression plan payload storage must be contiguous")
         else:
             _require_previous_event(state, "AcceptanceRecorded", generic.acceptance_event_ref)
         beat = next(
@@ -3630,6 +3663,7 @@ def _message_payload_stored(state: ReducerState, event: WorldEvent) -> ReducerSt
             or payload.message.payload_hash != beat.payload_hash
             or payload.message.text != beat.text
             or payload.message.content_type != beat.content_type
+            or payload.message.storage_kind != "inline_text"
             or canonical_expression_plan_value_hash(payload.message.model_dump(mode="json"))
             != beat.message_hash
             or any(item.payload_ref == payload.message.payload_ref for item in state.stored_message_payloads)
@@ -3672,6 +3706,43 @@ def _message_payload_stored(state: ReducerState, event: WorldEvent) -> ReducerSt
     )
 
 
+def _expression_payload_descriptor_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    payload = ExpressionPayloadDescriptorRecordedPayload.model_validate_json(event.payload_json)
+    generic = _expression_plan_manifest(state, payload.acceptance_id)
+    if generic is None:
+        raise ValueError("expression payload descriptor requires generic expression manifest")
+    if any(item.acceptance_id == payload.acceptance_id for item in state.stored_message_payloads) or any(
+        item.acceptance_id == payload.acceptance_id for item in state.expression_payload_descriptors
+    ):
+        if not state.committed_world_event_refs or state.committed_world_event_refs[-1].event_type not in {"MessagePayloadStored", "ExpressionPayloadDescriptorRecorded"}:
+            raise ValueError("expression plan payload storage must be contiguous")
+    else:
+        _require_previous_event(state, "AcceptanceRecorded", generic.acceptance_event_ref)
+    beat = next((item for item in generic.beats if item.payload_ref == payload.payload_ref), None)
+    if (
+        beat is None
+        or payload.proposal_id != generic.proposal_id
+        or beat.storage_kind != "sidecar"
+        or beat.sidecar_kind != payload.payload_kind
+        or beat.payload_hash != payload.payload_hash
+        or beat.content_type != payload.content_type
+        or beat.privacy_class != payload.privacy_class
+        or any(item.payload_ref == payload.payload_ref for item in state.expression_payload_descriptors)
+        or any(item.payload_ref == payload.payload_ref for item in state.stored_message_payloads)
+    ):
+        raise ValueError("expression payload descriptor is not authorized")
+    return state.model_copy(update={"expression_payload_descriptors": (
+        *state.expression_payload_descriptors,
+        ExpressionPayloadDescriptorProjection(
+            acceptance_id=payload.acceptance_id, proposal_id=payload.proposal_id,
+            payload_ref=payload.payload_ref, payload_hash=payload.payload_hash,
+            content_type=payload.content_type, privacy_class=payload.privacy_class,
+            payload_kind=payload.payload_kind, event_ref=event.event_id,
+            event_payload_hash=event.payload_hash,
+        ),
+    )})
+
+
 def _expression_plan_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
     payload = ExpressionPlanAcceptedPayload.model_validate_json(event.payload_json)
     generic = _expression_plan_manifest(state, payload.acceptance_id)
@@ -3681,7 +3752,8 @@ def _expression_plan_accepted(state: ReducerState, event: WorldEvent) -> Reducer
             or payload.expression_change_id != generic.expression_change_id
             or payload.plan_id != generic.plan_id
             or any(item.plan_id == payload.plan_id for item in state.expression_plans)
-            or {item.payload_ref for item in state.stored_message_payloads if item.acceptance_id == payload.acceptance_id}
+            or ({item.payload_ref for item in state.stored_message_payloads if item.acceptance_id == payload.acceptance_id}
+                | {item.payload_ref for item in state.expression_payload_descriptors if item.acceptance_id == payload.acceptance_id})
             != {item.payload_ref for item in generic.beats}
         ):
             raise ValueError("expression plan is not authorized")
@@ -3741,7 +3813,10 @@ def _expression_beat_authorized(state: ReducerState, event: WorldEvent) -> Reduc
             or payload.beat.payload.payload_hash != beat_ref.payload_hash
             or canonical_expression_plan_value_hash(payload.beat.model_dump(mode="json")) != beat_ref.beat_hash
             or not any(item.plan_id == generic.plan_id for item in state.expression_plans)
-            or not any(item.payload_ref == beat_ref.payload_ref and item.payload_hash == beat_ref.payload_hash for item in state.stored_message_payloads)
+            or not any(
+                item.payload_ref == beat_ref.payload_ref and item.payload_hash == beat_ref.payload_hash
+                for item in (*state.stored_message_payloads, *state.expression_payload_descriptors)
+            )
             or any(item.beat_id == payload.beat.beat_id for item in state.expression_beats)
         ):
             raise ValueError("expression beat is not authorized")
@@ -6741,6 +6816,7 @@ _EVENTS = {
         ),
         EventDefinition("BudgetAccountConfigured", RevisionClass.WORLD, _budget_account_configured),
         EventDefinition("MessagePayloadStored", RevisionClass.WORLD, _message_payload_stored),
+        EventDefinition("ExpressionPayloadDescriptorRecorded", RevisionClass.WORLD, _expression_payload_descriptor_recorded),
         EventDefinition("ExpressionPlanAccepted", RevisionClass.WORLD, _expression_plan_accepted),
         EventDefinition("ExpressionBeatAuthorized", RevisionClass.WORLD, _expression_beat_authorized),
         EventDefinition("ExpressionBeatSettled", RevisionClass.WORLD, _expression_beat_settled),
@@ -7194,6 +7270,7 @@ def make_projection(
         minimal_reply_manifests=state.minimal_reply_manifests,
         expression_plan_manifests=state.expression_plan_manifests,
         stored_message_payloads=state.stored_message_payloads,
+        expression_payload_descriptors=state.expression_payload_descriptors,
         life_content_descriptors=state.life_content_descriptors,
         expression_plans=state.expression_plans,
         expression_beats=state.expression_beats,

@@ -47,6 +47,7 @@ from .deliberation import (
 from .ledger_context_resolver import ContextRelevanceScope, context_capsule_compiler_from_ledger
 from .ledger_payload_reader import LedgerAuthorizedPayloadReader
 from .life_content_store import SQLiteImmutableLifeContentStore
+from .expression_payload_store import SQLiteImmutableExpressionPayloadStore
 from .occurrence_content_coordinator import (
     OccurrenceContentCommitRequest,
     OccurrenceContentCoordinator,
@@ -119,11 +120,13 @@ class WorldV2TurnApplication:
         turns: WorldTurnRuntime,
         ledger: SQLiteWorldLedger,
         life_content_store: SQLiteImmutableLifeContentStore,
+        expression_payload_store: SQLiteImmutableExpressionPayloadStore,
         occurrence_content: OccurrenceContentCoordinator,
     ) -> None:
         self._turns = turns
         self._ledger = ledger
         self._life_content_store = life_content_store
+        self._expression_payload_store = expression_payload_store
         self._occurrence_content = occurrence_content
 
     async def respond(self, inbound: InboundTurn) -> RuntimeOutcome:
@@ -165,6 +168,7 @@ class WorldV2TurnApplication:
 
     def close(self) -> None:
         self._life_content_store.close()
+        self._expression_payload_store.close()
         self._ledger.close()
 
 
@@ -195,6 +199,7 @@ def build_sqlite_world_v2_turn_application(
     issuer = AcceptedLedgerBatchIssuer()
     ledger = SQLiteWorldLedger(path=path, world_id=config.world_id, accepted_batch_issuer=issuer)
     life_content_store = SQLiteImmutableLifeContentStore(path=str(path), world_id=config.world_id)
+    expression_payload_store = SQLiteImmutableExpressionPayloadStore(path=str(path), world_id=config.world_id)
     try:
         occurrence_content = OccurrenceContentCoordinator(
             ledger=ledger, store=life_content_store
@@ -340,6 +345,7 @@ def build_sqlite_world_v2_turn_application(
                 recovery_policy=config.reply_recovery_policy,
             ),
             expression_recorder=ExpressionPlanAtomicRecorder(batch_issuer=issuer),
+            expression_payload_store=expression_payload_store,
             interaction_appraisal_owner=(
                 config.appraisal_worker_owner if appraisal_turn is not None else None
             ),
@@ -386,27 +392,32 @@ def build_sqlite_world_v2_turn_application(
             affect_acceptance_actor=(
                 config.affect_worker_owner if affect_acceptance is not None else None
             ),
-            action_executor=build_platform_action_executor(ledger=ledger, transport=transport),
+            action_executor=build_platform_action_executor(ledger=ledger, transport=transport, expression_payload_store=expression_payload_store),
             action_pump_owner=config.action_pump_owner,
         )
         return WorldV2TurnApplication(
             turns=WorldTurnRuntime(runtime=runtime, identities=identities),
             ledger=ledger,
             life_content_store=life_content_store,
+            expression_payload_store=expression_payload_store,
             occurrence_content=occurrence_content,
         )
     except Exception:
         life_content_store.close()
+        expression_payload_store.close()
         ledger.close()
         raise
 
 
 def build_platform_action_executor(
-    *, ledger: SQLiteWorldLedger, transport: PlatformTransport
+    *, ledger: SQLiteWorldLedger, transport: PlatformTransport,
+    expression_payload_store: SQLiteImmutableExpressionPayloadStore | None = None,
 ) -> ActionExecutor:
     """Bind the platform executor to a read-only accepted-payload capability."""
 
-    return PlatformActionExecutor(payloads=LedgerAuthorizedPayloadReader(ledger=ledger), transport=transport)
+    return PlatformActionExecutor(payloads=LedgerAuthorizedPayloadReader(
+        ledger=ledger, expression_payload_store=expression_payload_store
+    ), transport=transport)
 
 
 def _bootstrap(

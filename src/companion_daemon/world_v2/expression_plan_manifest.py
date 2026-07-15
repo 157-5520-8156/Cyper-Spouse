@@ -32,7 +32,29 @@ def _canonical_json(value: object) -> str:
 
 
 def canonical_expression_plan_value_hash(value: object) -> str:
-    return hashlib.sha256(_canonical_json(value).encode("utf-8")).hexdigest()
+    return hashlib.sha256(_canonical_json(_compatibility_normalize(value)).encode("utf-8")).hexdigest()
+
+
+def _compatibility_normalize(value: object) -> object:
+    """Remove default sidecar metadata from pre-sidecar inline values.
+
+    Existing .24 manifests and their component hashes were committed before
+    these fields existed.  They must remain byte-identical after a replay;
+    actual sidecar values retain every field and therefore remain authority
+    bearing.
+    """
+    if isinstance(value, dict):
+        normalized = {key: _compatibility_normalize(item) for key, item in value.items()}
+        if normalized.get("storage_kind") == "inline_text":
+            normalized.pop("storage_kind", None)
+            normalized.pop("sidecar_kind", None)
+            normalized.pop("privacy_class", None)
+        return normalized
+    if isinstance(value, tuple):
+        return tuple(_compatibility_normalize(item) for item in value)
+    if isinstance(value, list):
+        return [_compatibility_normalize(item) for item in value]
+    return value
 
 
 def canonical_expression_plan_manifest_hash(value: dict[str, object]) -> str:

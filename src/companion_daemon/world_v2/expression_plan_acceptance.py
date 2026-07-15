@@ -9,6 +9,10 @@ import json
 from pydantic import Field, model_validator
 
 from .minimal_reply_acceptance import ExpressionBeatMaterial, MessagePayloadMaterial
+from .expression_payload_store import (
+    ImmutableExpressionPayloadStore,
+    StoredExpressionPayload,
+)
 from .proposal_audit_schemas import ProposalAuditProjection
 from .proposal_envelope import ProposalInput, validate_proposal_envelope
 from .schema_core import FrozenModel
@@ -107,6 +111,7 @@ def derive_expression_plan_material(
     created_at: datetime,
     trace_id: str,
     correlation_id: str,
+    payload_store: ImmutableExpressionPayloadStore | None = None,
 ) -> ExpressionPlanAcceptanceMaterial:
     """Fail closed unless all external expression work is one complete plan.
 
@@ -163,12 +168,23 @@ def derive_expression_plan_material(
             raise ExpressionPlanAcceptanceError("beats_invalid")
         beat_id = draft.get("beat_id")
         text = draft.get("inline_text")
-        payload_ref = draft.get("materialized_payload_ref")
+        referenced_ref = draft.get("payload_ref")
+        payload_ref = referenced_ref if isinstance(referenced_ref, str) else draft.get("materialized_payload_ref")
         payload_hash = draft.get("payload_hash")
-        if not all(isinstance(value, str) and value for value in (beat_id, text, payload_ref, payload_hash)):
+        if not all(isinstance(value, str) and value for value in (beat_id, payload_ref, payload_hash)):
             raise ExpressionPlanAcceptanceError("beat_binding_invalid")
-        if payload_hash != "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest():
-            raise ExpressionPlanAcceptanceError("beat_binding_invalid")
+        if isinstance(text, str) and text:
+            if payload_hash != "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest():
+                raise ExpressionPlanAcceptanceError("beat_binding_invalid")
+            message = MessagePayloadMaterial(
+                payload_ref=payload_ref, payload_hash=payload_hash, text=text,
+                content_type=str(draft.get("content_type")),
+            )
+        else:
+            message = _resolve_sidecar_payload(
+                draft=draft, payload_ref=payload_ref, payload_hash=payload_hash,
+                payload_store=payload_store,
+            )
         intent = by_beat.get(beat_id)
         if intent is None or (
             intent.causal_change_id != change.change_id
@@ -202,12 +218,7 @@ def derive_expression_plan_material(
         beat = ExpressionBeatMaterial(
             plan_id=plan_id,
             beat_id=beat_id,
-            payload=MessagePayloadMaterial(
-                payload_ref=payload_ref,
-                payload_hash=payload_hash,
-                text=text,
-                content_type=str(draft.get("content_type")),
-            ),
+            payload=message,
             dependency_beat_ids=tuple(draft.get("dependency_beat_ids", ())),
             not_before=not_before,
             expires_at=expires_at,
@@ -255,6 +266,58 @@ def derive_expression_plan_material(
         expression_change_hash=change.payload.payload_hash, plan_id=plan_id,
         ordering_policy=str(payload.get("ordering_policy")), terminal_policy=str(payload.get("terminal_policy")),
         beats=tuple(materialized),
+    )
+
+
+def _resolve_sidecar_payload(
+    *,
+    draft: dict[str, object],
+    payload_ref: str,
+    payload_hash: str,
+    payload_store: ImmutableExpressionPayloadStore | None,
+) -> MessagePayloadMaterial:
+    """Materialize/verify opaque bytes before the ledger is allowed to refer to them.
+
+    An existing ``payload_ref`` must already be in the sidecar.  Inline
+    encrypted material is persisted first; an abandoned proposal can therefore
+    leave unreachable append-only bytes, but it can never cause a ledger
+    descriptor without a hash-verified record.
+    """
+    if payload_store is None:
+        raise ExpressionPlanAcceptanceError("sidecar_payload_store_unavailable")
+    content_type = draft.get("content_type")
+    if not isinstance(content_type, str) or not content_type:
+        raise ExpressionPlanAcceptanceError("beat_binding_invalid")
+    ref = draft.get("payload_ref")
+    inline = draft.get("inline_encrypted_payload")
+    if isinstance(ref, str) and ref:
+        record = payload_store.read_exact(payload_ref=payload_ref)
+        expected_kind = "referenced"
+    elif isinstance(inline, (str, dict)) and inline:
+        encoded = inline if isinstance(inline, str) else _canonical_json(inline)
+        try:
+            payload_store.put_if_absent(StoredExpressionPayload(
+                payload_ref=payload_ref, payload_hash=payload_hash,
+                content_type=content_type, privacy_class="private",
+                payload_kind="inline_encrypted", encoded_payload=encoded,
+            ))
+        except ValueError as exc:
+            raise ExpressionPlanAcceptanceError("sidecar_payload_invalid") from exc
+        record = payload_store.read_exact(payload_ref=payload_ref)
+        expected_kind = "inline_encrypted"
+    else:
+        raise ExpressionPlanAcceptanceError("beat_binding_invalid")
+    if record is None or (
+        record.payload_hash != payload_hash
+        or record.content_type != content_type
+        or record.payload_kind != expected_kind
+        or record.privacy_class == "withhold"
+    ):
+        raise ExpressionPlanAcceptanceError("sidecar_payload_unavailable")
+    return MessagePayloadMaterial(
+        payload_ref=record.payload_ref, payload_hash=record.payload_hash,
+        text=None, content_type=record.content_type, storage_kind="sidecar",
+        sidecar_kind=record.payload_kind, privacy_class=record.privacy_class,
     )
 
 

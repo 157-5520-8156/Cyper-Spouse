@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 
@@ -13,6 +14,13 @@ from companion_daemon.world_v2.expression_plan_acceptance import (
     derive_expression_plan_material,
 )
 from companion_daemon.world_v2.expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder
+from companion_daemon.world_v2.expression_payload_store import (
+    InMemoryImmutableExpressionPayloadStore,
+    SQLiteImmutableExpressionPayloadStore,
+    StoredExpressionPayload,
+    expression_payload_hash,
+)
+from companion_daemon.world_v2.ledger_payload_reader import LedgerAuthorizedPayloadReader
 from companion_daemon.world_v2.proposal_audit_schemas import ProposalAuditProjection, canonical_json
 from companion_daemon.world_v2.proposal_envelope import (
     CanonicalTypedPayload,
@@ -21,7 +29,7 @@ from companion_daemon.world_v2.proposal_envelope import (
     ProposalEvidenceRef,
     TypedChange,
 )
-from companion_daemon.world_v2.reducers import ReducerState, reduce_event
+from companion_daemon.world_v2.reducers import ReducerState, make_projection, reduce_event
 from companion_daemon.world_v2.schemas import BudgetAccount, CommittedWorldEventRef, ProjectionCursor
 
 
@@ -109,6 +117,81 @@ def test_accepted_expression_plan_materializes_all_beats_actions_dependencies_an
         state = reduce_event(state, event)
     assert tuple(beat.beat_id for beat in state.expression_beats) == ("beat:expression:1", "beat:expression:2")
     assert tuple(action.action_id for action in state.pending_actions) == tuple(item.action.action_id for item in material.beats)
+
+
+def test_sidecar_payloads_are_stored_outside_ledger_and_descriptor_authorized(tmp_path) -> None:
+    proposal = _proposal()
+    encrypted = {"ciphertext_ref": "cipher:opaque:1", "key_ref": "key:1", "plaintext_hash": _hash("hidden")}
+    encoded = canonical_json(encrypted)
+    referenced = "already-encrypted-payload"
+    first_hash, second_hash = expression_payload_hash(referenced), expression_payload_hash(encoded)
+    drafts = proposal.proposed_changes[0].payload.value()["beat_drafts"]
+    first_draft = {key: value for key, value in drafts[0].items() if key not in {"inline_text", "materialized_payload_ref"}}
+    second_draft = {key: value for key, value in drafts[1].items() if key != "inline_text"}
+    revised_drafts = [
+        {**first_draft, "payload_ref": "payload:opaque:1", "payload_hash": first_hash},
+        {**second_draft, "inline_encrypted_payload": encrypted, "payload_hash": second_hash},
+    ]
+    payload = proposal.proposed_changes[0].payload.value()
+    change = proposal.proposed_changes[0].model_copy(update={"payload": CanonicalTypedPayload.from_value(
+        payload_schema="expression_plan_transition.v1", value={**payload, "beat_drafts": revised_drafts}
+    )})
+    intents = (
+        proposal.action_intents[0].model_copy(update={"payload_ref": "payload:opaque:1", "payload_hash": first_hash}),
+        proposal.action_intents[1].model_copy(update={"payload_hash": second_hash}),
+    )
+    proposal = proposal.model_copy(update={"proposed_changes": (change,), "action_intents": intents})
+    audit = _audit().model_copy(update={"proposal_json": canonical_json(proposal.model_dump(mode="json")), "proposal_hash": proposal.proposal_hash})
+    store = InMemoryImmutableExpressionPayloadStore()
+    store.put_if_absent(StoredExpressionPayload(
+        payload_ref="payload:opaque:1", payload_hash=first_hash, content_type="text/plain",
+        privacy_class="private", payload_kind="referenced", encoded_payload=referenced,
+    ))
+    material = derive_expression_plan_material(
+        audit=audit, cursor=ProjectionCursor(world_revision=4, deliberation_revision=2, ledger_sequence=7),
+        world_id=WORLD, policy=_policy(), account=BudgetAccount(account_id="account:chat:1", category="chat", window_id="window:1", limit=1000),
+        logical_time=NOW, created_at=NOW, trace_id="trace:1", correlation_id="correlation:1", payload_store=store,
+    )
+    assert all(item.beat.payload.text is None for item in material.beats)
+    issuer = AcceptedLedgerBatchIssuer()
+    handle = ExpressionPlanAtomicRecorder(batch_issuer=issuer).prepare_batch(
+        acceptance_id="acceptance:expression:sidecar:1", material=material, actor="agent:companion", source="test"
+    )
+    events, _ = issuer.verify(handle=handle, world_id=WORLD, expected_cursor=material.cursor)
+    assert tuple(event.event_type for event in events[1:3]) == (
+        "ExpressionPayloadDescriptorRecorded", "ExpressionPayloadDescriptorRecorded",
+    )
+    assert "cipher:opaque:1" not in "".join(event.payload_json for event in events)
+    validate_commit_batch(events, expected_world_revision=4, accepted_manifest_v3_authorized=True)
+    state = ReducerState(
+        proposal_audits=(audit,), budget_accounts=(BudgetAccount(account_id="account:chat:1", category="chat", window_id="window:1", limit=1000),),
+        committed_world_event_refs=tuple(CommittedWorldEventRef(event_id=f"event:prior:{index}", event_type="WorldStarted", world_revision=index + 1, payload_hash="c" * 64, logical_time=NOW) for index in range(4)),
+    )
+    for event in events:
+        state = reduce_event(state, event)
+    assert len(state.expression_payload_descriptors) == 2
+    projection = make_projection(
+        world_id=WORLD, world_revision=len(state.committed_world_event_refs), deliberation_revision=2,
+        ledger_sequence=7 + len(events), state=state,
+    )
+
+    class _Reader:
+        world_id = WORLD
+        blocks_event_loop = False
+
+        def project(self):
+            return projection
+
+    reader = LedgerAuthorizedPayloadReader(ledger=_Reader(), expression_payload_store=store)
+    resolved = asyncio.run(reader.resolve(material.beats[1].action))
+    assert resolved.body == encoded
+    path = str(tmp_path / "expression-sidecar.sqlite")
+    durable = SQLiteImmutableExpressionPayloadStore(path=path, world_id=WORLD)
+    durable.put_if_absent(StoredExpressionPayload("payload:restart:1", expression_payload_hash("bytes"), "text/plain", "private", "referenced", "bytes"))
+    durable.close()
+    reopened = SQLiteImmutableExpressionPayloadStore(path=path, world_id=WORLD)
+    assert reopened.read_exact(payload_ref="payload:restart:1").encoded_payload == "bytes"
+    reopened.close()
 
 
 def test_rejects_intent_layer_or_delay_binding_that_does_not_match_frozen_beat() -> None:

@@ -11,6 +11,7 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+from typing import Literal
 
 from pydantic import Field, model_validator
 
@@ -59,14 +60,26 @@ class ReplyBudgetPolicy(FrozenModel):
 class MessagePayloadMaterial(FrozenModel):
     payload_ref: str = Field(min_length=1, max_length=512)
     payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    text: str = Field(min_length=1, max_length=4_096)
+    # ``sidecar`` deliberately has no ledger-resident body.  It is used by
+    # generic expression plans; the minimal reply lane remains inline-only.
+    text: str | None = Field(default=None, min_length=1, max_length=4_096)
     content_type: str = Field(min_length=1, max_length=128)
+    storage_kind: Literal["inline_text", "sidecar"] = "inline_text"
+    sidecar_kind: Literal["referenced", "inline_encrypted"] | None = None
+    privacy_class: Literal["public", "shareable", "personal", "private", "withhold"] = "private"
 
     @model_validator(mode="after")
     def text_hash_is_exact(self) -> MessagePayloadMaterial:
-        expected = "sha256:" + hashlib.sha256(self.text.encode("utf-8")).hexdigest()
-        if self.payload_hash != expected:
-            raise ValueError("message payload hash does not bind its text")
+        if self.storage_kind == "inline_text":
+            if self.text is None:
+                raise ValueError("inline message payload requires text")
+            expected = "sha256:" + hashlib.sha256(self.text.encode("utf-8")).hexdigest()
+            if self.payload_hash != expected:
+                raise ValueError("message payload hash does not bind its text")
+        elif self.text is not None:
+            raise ValueError("sidecar message payload cannot carry ledger text")
+        if (self.storage_kind == "sidecar") != (self.sidecar_kind is not None):
+            raise ValueError("sidecar message payload must declare its sidecar kind")
         return self
 
 

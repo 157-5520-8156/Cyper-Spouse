@@ -1870,6 +1870,7 @@ class SQLiteWorldLedger:
             minimal_reply_manifests=projection.minimal_reply_manifests,
             expression_plan_manifests=projection.expression_plan_manifests,
             stored_message_payloads=projection.stored_message_payloads,
+            expression_payload_descriptors=projection.expression_payload_descriptors,
             expression_plans=projection.expression_plans,
             expression_beats=projection.expression_beats,
             acceptance_decisions=projection.acceptance_decisions,

@@ -817,8 +817,11 @@ class ExpressionPlanManifestBeatRef(FrozenModel):
     beat_id: str = Field(min_length=1)
     payload_ref: str = Field(min_length=1)
     payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    text: str = Field(min_length=1, max_length=4_096)
+    text: str | None = Field(default=None, min_length=1, max_length=4_096)
     content_type: str = Field(min_length=1, max_length=128)
+    storage_kind: Literal["inline_text", "sidecar"] = "inline_text"
+    sidecar_kind: Literal["referenced", "inline_encrypted"] | None = None
+    privacy_class: PrivacyClass = "private"
     dependency_beat_ids: tuple[str, ...] = ()
     not_before: datetime | None = None
     expires_at: datetime | None = None
@@ -864,6 +867,20 @@ class StoredMessagePayloadProjection(FrozenModel):
     payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     text: str = Field(min_length=1, max_length=4_096)
     content_type: str = Field(min_length=1, max_length=128)
+    event_ref: str = Field(min_length=1)
+    event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class ExpressionPayloadDescriptorProjection(FrozenModel):
+    """Ledger authority permitting an opaque expression sidecar read."""
+
+    acceptance_id: str = Field(min_length=1)
+    proposal_id: str = Field(min_length=1)
+    payload_ref: str = Field(min_length=1)
+    payload_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    content_type: str = Field(min_length=1, max_length=128)
+    privacy_class: PrivacyClass
+    payload_kind: Literal["referenced", "inline_encrypted"]
     event_ref: str = Field(min_length=1)
     event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
@@ -4241,6 +4258,7 @@ class LedgerProjection(FrozenModel):
     minimal_reply_manifests: tuple[MinimalReplyManifestRef, ...] = ()
     expression_plan_manifests: tuple[ExpressionPlanManifestRef, ...] = ()
     stored_message_payloads: tuple[StoredMessagePayloadProjection, ...] = ()
+    expression_payload_descriptors: tuple[ExpressionPayloadDescriptorProjection, ...] = ()
     life_content_descriptors: tuple[LifeContentDescriptorProjection, ...] = ()
     expression_plans: tuple[ExpressionPlanProjection, ...] = ()
     expression_beats: tuple[ExpressionBeatProjection, ...] = ()

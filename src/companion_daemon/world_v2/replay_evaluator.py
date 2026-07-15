@@ -60,12 +60,20 @@ class ReplayEvaluator:
         if projection.semantic_hash != replay.semantic_hash:
             findings.append(ReplayFinding("replay_hash_mismatch", "error", "semantic replay differs"))
         payloads = {item.payload_ref: item for item in projection.stored_message_payloads}
+        sidecar_payloads = {
+            item.payload_ref: item for item in projection.expression_payload_descriptors
+        }
         beats = {item.beat_id: item for item in projection.expression_beats}
         reservations = {item.reservation_id: item for item in projection.budget_reservations}
         for action in projection.actions:
             if action.kind != "reply":
                 continue
-            if action.payload_ref not in payloads or payloads[action.payload_ref].payload_hash != action.payload_hash:
+            inline = payloads.get(action.payload_ref)
+            sidecar = sidecar_payloads.get(action.payload_ref)
+            if (
+                (inline is None or inline.payload_hash != action.payload_hash)
+                and (sidecar is None or sidecar.payload_hash != action.payload_hash)
+            ):
                 findings.append(ReplayFinding("reply_payload_missing", "error", action.action_id))
             if not any(beat.payload_ref == action.payload_ref and beat.payload_hash == action.payload_hash for beat in beats.values()):
                 findings.append(ReplayFinding("reply_beat_missing", "error", action.action_id))

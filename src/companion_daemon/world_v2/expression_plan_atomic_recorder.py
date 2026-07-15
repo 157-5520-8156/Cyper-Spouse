@@ -14,6 +14,7 @@ from .minimal_reply_events import (
     ExpressionPlanAcceptedPayload,
     MessagePayloadStoredPayload,
 )
+from .expression_payload_events import ExpressionPayloadDescriptorRecordedPayload
 from .schemas import WorldEvent
 
 
@@ -63,10 +64,23 @@ class ExpressionPlanAtomicRecorder:
             ("AcceptanceRecorded", "acceptance", acceptance_id, manifest.model_dump(mode="json"), True)
         ]
         for item in material.beats:
-            raw.append((
-                "MessagePayloadStored", "message", item.beat.payload.payload_ref,
-                MessagePayloadStoredPayload(acceptance_id=acceptance_id, proposal_id=material.proposal_id, message=item.beat.payload).model_dump(mode="json"), True,
-            ))
+            if item.beat.payload.storage_kind == "inline_text":
+                raw.append((
+                    "MessagePayloadStored", "message", item.beat.payload.payload_ref,
+                    MessagePayloadStoredPayload(acceptance_id=acceptance_id, proposal_id=material.proposal_id, message=item.beat.payload).model_dump(mode="json"), True,
+                ))
+            else:
+                raw.append((
+                    "ExpressionPayloadDescriptorRecorded", "payload-descriptor", item.beat.payload.payload_ref,
+                    ExpressionPayloadDescriptorRecordedPayload(
+                        acceptance_id=acceptance_id, proposal_id=material.proposal_id,
+                        payload_ref=item.beat.payload.payload_ref,
+                        payload_hash=item.beat.payload.payload_hash,
+                        content_type=item.beat.payload.content_type,
+                        privacy_class=item.beat.payload.privacy_class,
+                        payload_kind=item.beat.payload.sidecar_kind,
+                    ).model_dump(mode="json"), True,
+                ))
         raw.append((
             "ExpressionPlanAccepted", "plan", material.plan_id,
             ExpressionPlanAcceptedPayload(acceptance_id=acceptance_id, proposal_id=material.proposal_id, expression_change_id=material.expression_change_id, plan_id=material.plan_id).model_dump(mode="json"), True,

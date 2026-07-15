@@ -40,6 +40,7 @@ from .experience_events import (
 )
 from .life_events import LIFE_PAYLOAD_MODELS
 from .life_content_events import LIFE_CONTENT_PAYLOAD_MODELS
+from .expression_payload_events import EXPRESSION_PAYLOAD_EVENT_MODELS
 from .memory_events import MEMORY_CANDIDATE_PAYLOAD_MODELS
 from .proposal_audit_schemas import ModelResultRecordedPayload, ProposalRecordedV2Payload
 from .acceptance_manifest import parse_acceptance_manifest_v2
@@ -361,6 +362,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         **FACT_PAYLOAD_MODELS,
         **EXPERIENCE_PAYLOAD_MODELS,
         **LIFE_CONTENT_PAYLOAD_MODELS,
+        **EXPRESSION_PAYLOAD_EVENT_MODELS,
         **MEMORY_CANDIDATE_PAYLOAD_MODELS,
         **CHARACTER_CORE_PAYLOAD_MODELS,
         **V2_GOAL_PAYLOAD_MODELS,
@@ -392,6 +394,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ModelResultRecorded": "world_id+model_call_id+model_result_ref",
         "AcceptanceRecorded": "v2:world_id+manifest_version+acceptance_id;legacy:proposal+revision",
         "MessagePayloadStored": "world_id+acceptance_id+payload_ref+payload_hash",
+        "ExpressionPayloadDescriptorRecorded": "world_id+acceptance_id+payload_ref+payload_hash",
         "ExpressionPlanAccepted": "world_id+acceptance_id+plan_id+expression_change_id",
         "ExpressionBeatAuthorized": "world_id+acceptance_id+plan_id+beat_id+payload_hash",
         "ExpressionBeatSettled": "world_id+beat_id+receipt_id+terminal_state",
@@ -766,6 +769,15 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "MessagePayloadStoredPayload",
                 allowed_predecessors=("AcceptanceRecorded",),
                 evidence_types=("minimal_reply_manifest",),
+                successors=("ExpressionPlanAccepted", "ExpressionBeatAuthorized"),
+            ),
+            _contract(
+                "ExpressionPayloadDescriptorRecorded",
+                "expression_plan_recorder",
+                "world",
+                "ExpressionPayloadDescriptorRecordedPayload",
+                allowed_predecessors=("AcceptanceRecorded", "MessagePayloadStored", "ExpressionPayloadDescriptorRecorded"),
+                evidence_types=("expression_plan_manifest", "immutable_expression_payload"),
                 successors=("ExpressionPlanAccepted", "ExpressionBeatAuthorized"),
             ),
             _contract(

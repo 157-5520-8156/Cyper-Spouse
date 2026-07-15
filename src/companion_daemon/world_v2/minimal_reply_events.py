@@ -11,7 +11,7 @@ import hashlib
 import json
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from .minimal_reply_acceptance import ExpressionBeatMaterial, MessagePayloadMaterial
 from .schema_core import FrozenModel
@@ -58,6 +58,12 @@ class MessagePayloadStoredPayload(FrozenModel):
     acceptance_id: str = Field(min_length=1, max_length=256)
     proposal_id: str = Field(min_length=1, max_length=256)
     message: MessagePayloadMaterial
+
+    @model_validator(mode="after")
+    def message_is_inline(self) -> "MessagePayloadStoredPayload":
+        if self.message.storage_kind != "inline_text" or self.message.text is None:
+            raise ValueError("message payload event cannot store a sidecar body")
+        return self
 
 
 class ExpressionPlanAcceptedPayload(FrozenModel):

@@ -226,6 +226,13 @@ def _life_identity_components(
             _mapping_value(message, "payload_ref"),
             _mapping_value(message, "payload_hash"),
         )
+    if event_type == "ExpressionPayloadDescriptorRecorded":
+        return (
+            world_id,
+            payload.get("acceptance_id"),
+            payload.get("payload_ref"),
+            payload.get("payload_hash"),
+        )
     if event_type == "ExpressionPlanAccepted":
         return (
             world_id,

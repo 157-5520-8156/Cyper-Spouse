@@ -29,6 +29,7 @@ from .expression_plan_acceptance import (
     derive_expression_plan_material,
 )
 from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder, expression_plan_event_id
+from .expression_payload_store import ImmutableExpressionPayloadStore
 from .appraisal_trigger import interaction_appraisal_trigger_events
 from .fact_trigger import interaction_fact_trigger_event
 from .fact_draft_adapter import FactObservationProposalAdapter
@@ -115,6 +116,7 @@ class WorldRuntime:
         reply_recorder: MinimalReplyAtomicRecorder | None = None,
         expression_policy: ExpressionPlanBudgetPolicy | None = None,
         expression_recorder: ExpressionPlanAtomicRecorder | None = None,
+        expression_payload_store: ImmutableExpressionPayloadStore | None = None,
         interaction_appraisal_owner: str | None = None,
         appraisal_acceptance: AppraisalAcceptanceRuntime | None = None,
         appraisal_acceptance_actor: str | None = None,
@@ -153,8 +155,11 @@ class WorldRuntime:
         self._reply_recorder = reply_recorder
         if (expression_policy is None) != (expression_recorder is None):
             raise ValueError("expression plan policy and recorder must be configured together")
+        if expression_payload_store is not None and expression_policy is None:
+            raise ValueError("expression payload store requires expression plan acceptance")
         self._expression_policy = expression_policy
         self._expression_recorder = expression_recorder
+        self._expression_payload_store = expression_payload_store
         if interaction_appraisal_owner is not None and not interaction_appraisal_owner:
             raise ValueError("interaction appraisal owner must not be empty")
         self._interaction_appraisal_owner = interaction_appraisal_owner
@@ -965,6 +970,7 @@ class WorldRuntime:
                                     created_at=observation.created_at,
                                     trace_id=observation.trace_id,
                                     correlation_id=observation.correlation_id,
+                                    payload_store=self._expression_payload_store,
                                 )
                             except ExpressionPlanAcceptanceError as exc:
                                 if exc.code in {

@@ -43,6 +43,7 @@ from .minimal_reply_events import (
     minimal_reply_event_id,
     minimal_reply_idempotency_key,
 )
+from .expression_payload_events import ExpressionPayloadDescriptorRecordedPayload
 from .minimal_reply_manifest import (
     MINIMAL_REPLY_MANIFEST_VERSION,
     MinimalReplyManifest,
@@ -787,9 +788,14 @@ def _validate_authorized_expression_plan_manifest_batch(
         raise ValueError("expression_plan.accepted_batch_payload_is_invalid") from exc
     if manifest.evaluated_world_revision != expected_world_revision:
         raise ValueError("expression_plan.accepted_batch_authority_is_not_pinned")
+    payload_types = tuple(
+        "MessagePayloadStored" if item.beat.payload.storage_kind == "inline_text"
+        else "ExpressionPayloadDescriptorRecorded"
+        for item in manifest.beats
+    )
     expected_types = (
         ("AcceptanceRecorded",)
-        + ("MessagePayloadStored",) * len(manifest.beats)
+        + payload_types
         + ("ExpressionPlanAccepted",)
         + sum((("ExpressionBeatAuthorized", "BudgetReserved", "ActionAuthorized") for _ in manifest.beats), ())
     )
@@ -811,20 +817,34 @@ def _validate_authorized_expression_plan_manifest_batch(
         for item in events[1:]
     ):
         raise ValueError("expression_plan.accepted_batch_envelope_metadata_mismatch")
-    messages = events[1 : 1 + len(manifest.beats)]
+    payload_events = events[1 : 1 + len(manifest.beats)]
     plan_event = events[1 + len(manifest.beats)]
     tails = events[2 + len(manifest.beats) :]
     _validate_expression_plan_identity(acceptance, manifest=manifest, role="acceptance", stable_id=manifest.acceptance_id, domain_identity=True)
-    for message_event, item in zip(messages, manifest.beats, strict=True):
-        _validate_expression_plan_identity(message_event, manifest=manifest, role="message", stable_id=item.beat.payload.payload_ref, domain_identity=True)
-        message = MessagePayloadStoredPayload.model_validate_json(message_event.payload_json)
-        if (
-            message.acceptance_id != manifest.acceptance_id
-            or message.proposal_id != manifest.proposal_id
-            or message.message != item.beat.payload
-            or canonical_expression_plan_value_hash(message.message.model_dump(mode="json")) != item.message_hash
-        ):
-            raise ValueError("expression_plan.message_does_not_match_manifest")
+    for payload_event, item in zip(payload_events, manifest.beats, strict=True):
+        if item.beat.payload.storage_kind == "inline_text":
+            _validate_expression_plan_identity(payload_event, manifest=manifest, role="message", stable_id=item.beat.payload.payload_ref, domain_identity=True)
+            message = MessagePayloadStoredPayload.model_validate_json(payload_event.payload_json)
+            if (
+                message.acceptance_id != manifest.acceptance_id
+                or message.proposal_id != manifest.proposal_id
+                or message.message != item.beat.payload
+                or canonical_expression_plan_value_hash(message.message.model_dump(mode="json")) != item.message_hash
+            ):
+                raise ValueError("expression_plan.message_does_not_match_manifest")
+        else:
+            _validate_expression_plan_identity(payload_event, manifest=manifest, role="payload-descriptor", stable_id=item.beat.payload.payload_ref, domain_identity=True)
+            descriptor = ExpressionPayloadDescriptorRecordedPayload.model_validate_json(payload_event.payload_json)
+            if (
+                descriptor.acceptance_id != manifest.acceptance_id
+                or descriptor.proposal_id != manifest.proposal_id
+                or descriptor.payload_ref != item.beat.payload.payload_ref
+                or descriptor.payload_hash != item.beat.payload.payload_hash
+                or descriptor.content_type != item.beat.payload.content_type
+                or descriptor.privacy_class != item.beat.payload.privacy_class
+                or descriptor.payload_kind != item.beat.payload.sidecar_kind
+            ):
+                raise ValueError("expression_plan.payload_descriptor_does_not_match_manifest")
     _validate_expression_plan_identity(plan_event, manifest=manifest, role="plan", stable_id=manifest.plan_id, domain_identity=True)
     plan = ExpressionPlanAcceptedPayload.model_validate_json(plan_event.payload_json)
     if (
