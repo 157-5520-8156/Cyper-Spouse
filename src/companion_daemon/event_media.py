@@ -50,6 +50,11 @@ from companion_daemon.media_interaction import (
     MediaInteractionBid,
     load_interaction_catalog,
 )
+from companion_daemon.media_eligibility import (
+    CHARGE_RANK as _ELIGIBILITY_CHARGE_RANK,
+    MediaEligibilityRouter,
+    PrivateExpressionBasis,
+)
 from companion_daemon.media_moment import MomentCapture
 from companion_daemon.media_shot import MediaShotPlan
 from companion_daemon.media_subject import (
@@ -409,6 +414,7 @@ class MediaOpportunity:
     audience_context: "AudienceContext | None" = None
     sensual_charge_ceiling: str = "none"
     expression_charge_ceiling: str | None = None
+    private_expression_basis: PrivateExpressionBasis | None = None
 
 
 @dataclass(frozen=True)
@@ -799,6 +805,17 @@ class MediaPlanner:
         preflight = _validate_opportunity(opportunity)
         if preflight:
             return NotRenderable(opportunity.opportunity_id, preflight)
+        lane = MediaEligibilityRouter().classify(
+            family=opportunity.family,
+            privacy_ceiling=opportunity.privacy_ceiling,
+            expression_charge_ceiling=_expression_charge_ceiling(opportunity),
+            event_snapshot=opportunity.event_snapshot,
+            private_expression_basis=opportunity.private_expression_basis,
+        )
+        # Historical v1-v4 plans retain their original replay semantics.  The
+        # eligibility lane is a v5 entry rule, not a reinterpretation of them.
+        if self.v5_enabled and not lane.allowed:
+            return NotRenderable(opportunity.opportunity_id, lane.reason, lane.details)
         recent = tuple(_history_fingerprint(item) for item in recent_media[-12:])
         recent_subjects = tuple(_history_subject_signature(item) for item in recent_media[-12:])
         recent_embodiments = tuple(
@@ -872,7 +889,7 @@ class MediaPlanner:
                         str(exc)[:240],
                     )
             complete_candidates = tuple(
-                item.planner_payload()
+                payload
                 for item in build_complete_candidates(
                     opportunity_id=opportunity.opportunity_id,
                     family=opportunity.family,
@@ -884,7 +901,15 @@ class MediaPlanner:
                     identity_catalog_version=identity_catalog_version,
                     event_snapshot=opportunity.event_snapshot,
                 )
-                if _complete_candidate_world_legal(item.planner_payload(), opportunity)
+                if _complete_candidate_world_legal((payload := item.planner_payload()), opportunity)
+                and (
+                    not self.v5_enabled
+                    or lane.lane != "private_expression"
+                    or _ELIGIBILITY_CHARGE_RANK[
+                        str(payload["media_address_strategy"]["expression_charge"])
+                    ]
+                    >= _ELIGIBILITY_CHARGE_RANK[lane.required_charge]
+                )
             )
             if not complete_candidates:
                 return NotRenderable(opportunity.opportunity_id, "no_complete_expression_candidate")
@@ -1652,6 +1677,19 @@ def _compile_media_prompt_v5(
         if plan.moment_capture
         else ""
     )
+    capture_physics = {
+        "character_front_camera": (
+            "Self-authorship invariant: the character is operating the front-facing phone herself. "
+            "Make that physically legible with a credible foreground holding hand, forearm, shoulder-to-camera "
+            "relationship, or partial device edge. It may be naturally cropped, but cannot disappear completely. "
+            "No third photographer, tripod, or authorless portrait viewpoint."
+        ),
+        "mirror": (
+            "Self-authorship invariant: the phone is visibly reflected and held by the character in the mirror; "
+            "the reflected hand, device, pose and camera angle must agree. No third photographer or impossible "
+            "extra device."
+        ),
+    }.get(plan.capture_mode, "Capture authorship must remain physically visible and coherent.")
     return (
         "Create one believable fictional personal-media photograph. No text or watermark.\n"
         f"Frozen MediaPlan v5={plan.plan_id}; event={plan.event_id}; family={plan.family}.\n"
@@ -1674,6 +1712,7 @@ def _compile_media_prompt_v5(
         f"subject_occupancy={camera.subject_occupancy}; placement={camera.subject_placement}; "
         f"environment_share={camera.environment_share}; focus={camera.focus_behavior}; "
         f"imperfection={camera.imperfection_profile}; device={camera.device_visibility}.\n"
+        f"Capture Physics: {capture_physics}\n"
         f"{moment}"
         f"{authenticity + chr(10) if authenticity else ''}"
         f"{portrait_authenticity + chr(10) if portrait_authenticity else ''}"
@@ -3120,7 +3159,8 @@ def _inspection_prompt(plan: MediaPlan) -> str:
             "For a frozen Moment Capture contract, also return moment_capture_matches. "
             "Also return every v6 quality, subject, social, embodied and capture "
             "field applicable to the frozen plan. Reject a third-party image that reads as paparazzi or "
-            "an authorless AI editorial; a front-camera image that contradicts its frozen distance, "
+            "an authorless AI editorial; a front-camera image lacking a credible visible self-authorship "
+            "relationship (operator hand/forearm/shoulder or partial device) or that contradicts its frozen distance, "
             "occupancy or device physics; invite_desire diluted into a polite generic portrait; camera, "
             "hands, action or authorship conflicts; copied reference head tilt/smile/hair/framing; identity "
             "drift; structural defects; invented private facts; non-explicit boundary violations; a frozen "

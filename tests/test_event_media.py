@@ -24,6 +24,7 @@ from companion_daemon.event_media import (
     _repair_prompt,
 )
 from companion_daemon.image_generation import GeneratedImage
+from companion_daemon.media_eligibility import PrivateExpressionBasis
 
 
 @pytest.fixture(autouse=True)
@@ -111,6 +112,68 @@ async def test_expression_charge_ceiling_falls_back_and_rejects_conflicts() -> N
     rejected = await MediaPlanner(FakeModel(proposal)).plan(conflict)
     assert isinstance(rejected, NotRenderable)
     assert rejected.reason == "conflicting_expression_charge_ceilings"
+
+
+@pytest.mark.asyncio
+async def test_v5_refuses_to_promote_an_ordinary_event_into_private_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    result = await MediaPlanner(FakeModel(_proposal())).plan(
+        _opportunity(
+            privacy="intimate",
+            sensual_charge_ceiling="charged",
+            audience_context=AudienceContext(recipient_ref="user:1", relationship_stage="lover"),
+        )
+    )
+
+    assert isinstance(result, NotRenderable)
+    assert result.reason == "private_lane_unsupported_by_event"
+    assert result.details == "recommended_lane=personal_selfie"
+
+
+@pytest.mark.asyncio
+async def test_v5_private_media_requires_a_world_frozen_private_expression_basis(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COMPANION_EVENT_MEDIA_V5_ENABLED", "1")
+    snapshot = _snapshot()
+    snapshot["relationship_media_context"] = {
+        "declared_display": {"event_id": "display:42", "kind": "recipient_directed"}
+    }
+    opportunity = replace(
+        _opportunity(
+            privacy="intimate",
+            sensual_charge_ceiling="charged",
+            snapshot=snapshot,
+            audience_context=AudienceContext(recipient_ref="user:1", relationship_stage="lover"),
+        ),
+        opportunity_id="opportunity:private-basis",
+        private_expression_basis=PrivateExpressionBasis(
+            kind="recipient_display",
+            evidence_refs=("/relationship_media_context/declared_display",),
+            required_charge="charged",
+        ),
+    )
+    proposal = _proposal(
+        content_domain="activity_process",
+        share_intent="intimate_signal",
+        privacy="intimate",
+        interaction_bid_id="invite_desire",
+    )
+    for field in (
+        "composition",
+        "action",
+        "camera_direction",
+        "sharing_motive",
+        "subject_variant_id",
+    ):
+        proposal.pop(field, None)
+    result = await MediaPlanner(V5SelectingModel(proposal)).plan(opportunity)
+
+    assert isinstance(result, PlannedMedia)
+    assert result.plan.media_address_strategy is not None
+    assert result.plan.media_address_strategy.expression_charge == "charged"
 
 
 def _proposal(**overrides: object) -> dict[str, object]:
@@ -400,6 +463,8 @@ async def test_v5_freezes_complete_expression_candidate_without_free_direction_t
     assert "Facial Micro-Performance" in prompt
     assert "frozen expression beat" in prompt
     assert "Character-photo realism" in prompt
+    assert "Self-authorship invariant" in prompt
+    assert "No third photographer, tripod, or authorless portrait viewpoint" in prompt
     assert "nose/cheek" in prompt
     assert "action unit" not in prompt.lower()
     assert "facial micro performance v1" not in prompt.lower()

@@ -302,6 +302,24 @@ available → selected → planned → generated → shared
 
 世界机可在 `MediaOpportunity` 中冻结可选 `AudienceContext`：`recipient_ref`、有来源的 `relationship_stage`、可公开 Affect 和可选 Display Strategy 边界。世界机不得提供嘟嘴、眉眼、头向或生图 prompt。
 
+### 私密表达资格分流（v5）
+
+`character_media` 不是私密媒体的同义词。图片机在规划前用 `MediaEligibilityRouter` 将机会分类为 `personal_selfie` 或 `private_expression`；它不决定发送，也不把被拒绝的私密机会偷偷改成日常图。
+
+世界机若要请求 `intimate` 或非 `none` 的表达张力，必须冻结一个 `PrivateExpressionBasis`：一个主类别、证据 JSON Pointer，以及本次最小张力（`subtle / charged / veiled`）。类别是互斥的主解释，而不是姿势或 prompt：
+
+| 主类别 | 必要世界证据根 | 含义 |
+| --- | --- | --- |
+| `relational_turn` | `/relationship_media_context/active_exchange` | 已提交的私下互动正在形成可见回应。 |
+| `recipient_display` | `/relationship_media_context/declared_display` | 角色当次明确决定向该收件人展示自己。 |
+| `embodied_state` | `/character/visible_physical_state` | 已证实的汗水、湿发、恢复状态等构成本张图的身体现场感。 |
+| `private_transition` | `/activity/private_transition` | 有明确衣装/活动证据的私人准备、整理或过渡，不可由“在卧室”推断。 |
+| `shared_ritual` | `/relationship_media_context/shared_ritual` | 已建立的共同私人仪式或记忆线索。 |
+
+没有该依据的普通回家、吃东西、读书、穿搭或镜前整理，只能作为 `personal_selfie` 规划。图片机返回 `private_lane_unsupported_by_event` 和 `recommended_lane=personal_selfie`，由世界机决定是否以日常自拍重新选择；不得在图片侧绕过世界授权。
+
+对于 `character_front_camera`，计划与渲染必须让自拍作者关系可见：可信的持机手、前臂、肩部到镜头关系或局部设备边缘至少一项成立；它不能退化为第三方或隐形三脚架肖像。对于 `mirror`，镜中必须可见角色持有的手机，手机、手、反射和机位必须一致。视觉验收将这两者作为 `capture_relationship_legible` 的硬条件。
+
 选择第一期完整闭环：只有媒体通过验收、世界机决定发送且收到真实投递回执后，世界机才把计划里的 `Media Interaction Bid` 建立为待回应状态：
 
 ```text
