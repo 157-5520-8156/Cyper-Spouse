@@ -93,6 +93,7 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
         transport=transport,
         appraisal_model=AppraisalDraftDeliberationAdapter(model=flash_model),
         affect_model=AffectDraftDeliberationAdapter(model=flash_model),
+        fact_model=flash_model,
         now=now,
     )
     try:

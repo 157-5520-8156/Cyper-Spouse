@@ -18,6 +18,9 @@ from pathlib import Path
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .action_pump import ActionExecutor, ActionPumpResult
 from .affect_trigger_runtime import AffectTriggerRunResult
+from .fact_draft_adapter import FactDraftChatModel, FactObservationProposalAdapter
+from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
+from .interaction_fact_trigger_runtime import FactTriggerRunResult
 from .affect_acceptance_runtime import AffectAcceptanceRuntime
 from .affect_deliberation_worker import AffectDeliberationWorker
 from .affect_proposal_compiler import AffectProposalCompiler
@@ -59,6 +62,7 @@ class WorldV2TurnApplicationConfig:
     reply_recovery_policy: str = "effect_once"
     appraisal_worker_owner: str = "worker:world-v2:appraisal"
     affect_worker_owner: str = "worker:world-v2:affect"
+    fact_worker_owner: str = "worker:world-v2:fact"
 
     def __post_init__(self) -> None:
         for name in (
@@ -68,6 +72,7 @@ class WorldV2TurnApplicationConfig:
             "action_pump_owner",
             "appraisal_worker_owner",
             "affect_worker_owner",
+            "fact_worker_owner",
         ):
             if not getattr(self, name):
                 raise ValueError(f"{name} must not be empty")
@@ -99,8 +104,8 @@ class WorldV2TurnApplication:
 
     async def drain_background_once(
         self,
-    ) -> AppraisalTriggerRunResult | AffectTriggerRunResult | None:
-        """Run one separately scheduled background-affect unit, when configured."""
+    ) -> AppraisalTriggerRunResult | AffectTriggerRunResult | FactTriggerRunResult | None:
+        """Run one separately scheduled mental-state or memory work unit."""
 
         return await self._turns.drain_background_once()
 
@@ -120,6 +125,7 @@ def build_sqlite_world_v2_turn_application(
     advisory_compiler: AdvisoryCompiler | None = None,
     appraisal_model: DeliberationModelAdapter | None = None,
     affect_model: DeliberationModelAdapter | None = None,
+    fact_model: FactDraftChatModel | None = None,
     now: datetime,
 ) -> WorldV2TurnApplication:
     """Build one durable v2 chat lane without importing the legacy application.
@@ -204,6 +210,11 @@ def build_sqlite_world_v2_turn_application(
             if affect_acceptance is not None and affect_turn is not None
             else None
         )
+        fact_acceptance = (
+            FactV2AcceptanceRuntime.compose(ledger=ledger, batch_issuer=issuer)
+            if fact_model is not None
+            else None
+        )
         runtime = WorldRuntime(
             world_id=config.world_id,
             ledger=ledger,
@@ -225,6 +236,15 @@ def build_sqlite_world_v2_turn_application(
             ),
             appraisal_worker=appraisal_worker,
             interaction_appraisal_turn=appraisal_turn,
+            interaction_fact_owner=(
+                config.fact_worker_owner if fact_acceptance is not None else None
+            ),
+            fact_acceptance=fact_acceptance,
+            fact_adapter=(
+                FactObservationProposalAdapter(model=fact_model)
+                if fact_model is not None
+                else None
+            ),
             affect_deliberation_owner=(
                 config.affect_worker_owner if affect_worker is not None else None
             ),

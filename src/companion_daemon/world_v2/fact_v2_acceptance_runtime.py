@@ -70,6 +70,28 @@ class FactV2AcceptanceRuntime:
             world_id=world_id,
             accepted_batch_issuer=batch_issuer,
         )
+        return cls.compose(ledger=ledger, batch_issuer=batch_issuer)
+
+    @classmethod
+    def compose(
+        cls,
+        *,
+        ledger: SQLiteWorldLedger,
+        batch_issuer: AcceptedLedgerBatchIssuer,
+    ) -> FactV2AcceptanceRuntime:
+        """Attach Fact acceptance to an already-owned SQLite ledger.
+
+        The chat composition root owns one ledger and one accepted-batch
+        issuer.  Opening a second Fact runtime against the same database
+        would create a competing writer and would make its opaque batch
+        capabilities unusable by the host ledger.  This constructor is the
+        explicit, same-process alternative.
+        """
+
+        if type(ledger) is not SQLiteWorldLedger:
+            raise TypeError("Fact v2 acceptance requires the exact SQLite ledger")
+        if type(batch_issuer) is not AcceptedLedgerBatchIssuer:
+            raise TypeError("Fact v2 acceptance requires the exact batch issuer")
         proposal_reader = FactCommitProposalAuthorityReaderV2(ledger=ledger)
         history_reader = SQLiteProofBackedObservationReader(ledger=ledger)
         resolver = ProofBackedFactEvidenceResolverV2(reader=history_reader)

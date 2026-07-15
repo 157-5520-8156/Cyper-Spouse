@@ -61,6 +61,7 @@ class FactObservationProposalAdapter:
         observation: Observation,
         observation_event: WorldEvent,
         source_world_revision: int,
+        evaluated_world_revision: int | None = None,
     ) -> FactCommitProposalEnvelopeV2 | None:
         raw = await self._model.complete(
             self._messages(observation), temperature=self._temperature
@@ -70,6 +71,7 @@ class FactObservationProposalAdapter:
             observation=observation,
             observation_event=observation_event,
             source_world_revision=source_world_revision,
+            evaluated_world_revision=evaluated_world_revision,
         )
 
     @staticmethod
@@ -110,6 +112,7 @@ def materialize_fact_observation_draft(
     observation: Observation,
     observation_event: WorldEvent,
     source_world_revision: int,
+    evaluated_world_revision: int | None = None,
 ) -> FactCommitProposalEnvelopeV2 | None:
     """Derive a closed Fact-v2 proposal from one exact model draft and event."""
 
@@ -120,6 +123,10 @@ def materialize_fact_observation_draft(
         or source_world_revision < 1
     ):
         raise ValueError("FactDraft requires an exact committed message observation")
+    if evaluated_world_revision is None:
+        evaluated_world_revision = source_world_revision
+    if evaluated_world_revision < source_world_revision:
+        raise ValueError("FactDraft evaluation cannot precede its source observation")
     draft = _parse(raw)
     retain = draft.get("retain")
     if not isinstance(retain, bool):
@@ -189,7 +196,7 @@ def materialize_fact_observation_draft(
             "world_id": observation.world_id,
             "proposal_id": proposal_id,
             "trigger_ref": observation_event.event_id,
-            "evaluated_world_revision": source_world_revision,
+            "evaluated_world_revision": evaluated_world_revision,
             "evidence_refs": (
                 {
                     "ref_id": observation.observation_id,

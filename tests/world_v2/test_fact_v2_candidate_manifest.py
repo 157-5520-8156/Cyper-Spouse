@@ -587,3 +587,16 @@ def test_fact_v2_production_composition_root_commits_and_reopens(tmp_path) -> No
     assert len(reopened.ledger.project().facts) == 1
     assert reopened.ledger.rebuild() == reopened.ledger.project()
     reopened.close()
+
+
+def test_fact_v2_composes_with_the_host_owned_ledger_and_batch_issuer(tmp_path) -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "shared-host.sqlite3",
+        world_id=WORLD_ID,
+        accepted_batch_issuer=issuer,
+    )
+    runtime = FactV2AcceptanceRuntime.compose(ledger=ledger, batch_issuer=issuer)
+
+    assert runtime.ledger is ledger
+    runtime.close()

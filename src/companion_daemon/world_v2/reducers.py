@@ -75,6 +75,7 @@ from .acceptance_manifest import (
     parse_acceptance_manifest_v2,
 )
 from .batch_invariants import interaction_appraisal_trigger_identity
+from .fact_trigger import interaction_fact_trigger_identity
 from .commitment_events import (
     COMMITMENT_ACCEPTED_PAYLOAD_MODELS,
     CommitmentAuthorizedMutationPayload,
@@ -4017,6 +4018,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
     if process.process_kind in {
         "npc_world_appraisal",
         "interaction_appraisal",
+        "interaction_fact",
         "affect_deliberation",
     }:
         if (
@@ -4056,6 +4058,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
     if process.process_kind in {
         "npc_world_appraisal",
         "interaction_appraisal",
+        "interaction_fact",
         "affect_deliberation",
     }:
         raise ValueError("appraisal trigger must be opened before it is claimed")
@@ -4078,6 +4081,18 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             or process.trigger_ref != f"interaction:{process.source_evidence_ref}"
         ):
             raise ValueError("interaction appraisal trigger identity is not deterministic")
+    if process.process_kind == "interaction_fact":
+        if not any(
+            item.observation_id == process.source_evidence_ref
+            for item in state.message_observations
+        ):
+            raise ValueError("interaction fact trigger requires an observed message")
+        if (
+            process.trigger_id
+            != interaction_fact_trigger_identity(event.world_id, process.source_evidence_ref)
+            or process.trigger_ref != f"fact:{process.source_evidence_ref}"
+        ):
+            raise ValueError("interaction fact trigger identity is not deterministic")
     if process.process_kind == "npc_world_appraisal":
         source = next(
             (

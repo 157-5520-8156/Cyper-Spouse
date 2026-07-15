@@ -152,6 +152,24 @@ class _OpenAffectChat:
         )
 
 
+class _FactChat:
+    model = "test-fact"
+
+    async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        assert temperature == 0.1
+        return json.dumps(
+            {
+                "retain": True,
+                "predicate_code": "preference.likes",
+                "value": "乌龙茶",
+                "privacy_class": "personal",
+                "confidence": 8600,
+                "rationale": "The user stated an enduring preference.",
+            },
+            ensure_ascii=False,
+        )
+
+
 def _config() -> WorldV2TurnApplicationConfig:
     return WorldV2TurnApplicationConfig(
         world_id="world:production-turn-application",
@@ -324,6 +342,50 @@ async def test_production_application_drains_appraisal_after_the_visible_reply_l
     assert background is not None
     assert background.status == "processed"
     assert background.work_status == "no_change"
+
+
+@pytest.mark.asyncio
+async def test_production_application_accepts_a_fact_outside_the_visible_reply_lane(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "world-v2-background-fact.sqlite"
+    reply_model = ChatModelDeliberationAdapter(model=_DraftChatModel())
+    app = build_sqlite_world_v2_turn_application(
+        path=path,
+        config=_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=reply_model,
+        quick_recovery=reply_model,
+        fact_model=_FactChat(),
+        transport=_DeliveredTransport(),
+        now=NOW,
+    )
+    try:
+        outcome = await app.respond(
+            InboundTurn(
+                platform="test",
+                platform_user_id="user.1",
+                platform_message_id="message:background-fact",
+                text="我最近很喜欢喝乌龙茶。",
+                observed_at=NOW,
+                trace_id="trace:production-background-fact",
+            )
+        )
+        background = await app.drain_background_once()
+    finally:
+        app.close()
+
+    assert outcome.status == "action_authorized"
+    assert background is not None
+    assert background.work_status == "accepted"
+    ledger = SQLiteWorldLedger(path=path, world_id=_config().world_id)
+    try:
+        facts = ledger.project().facts
+    finally:
+        ledger.close()
+    assert len(facts) == 1
+    assert facts[0].values.predicate_code == "preference.likes"
 
 
 @pytest.mark.asyncio

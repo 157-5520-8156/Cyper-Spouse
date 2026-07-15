@@ -429,6 +429,7 @@ class TriggerProcess(FrozenModel):
         "recovery",
         "npc_world_appraisal",
         "interaction_appraisal",
+        "interaction_fact",
         "affect_deliberation",
     ]
     source_evidence_ref: str | None = None
@@ -441,7 +442,12 @@ class TriggerProcess(FrozenModel):
     def active_attempt_matches_lease(self) -> TriggerProcess:
         if (
             self.process_kind
-            not in {"npc_world_appraisal", "interaction_appraisal", "affect_deliberation"}
+            not in {
+                "npc_world_appraisal",
+                "interaction_appraisal",
+                "interaction_fact",
+                "affect_deliberation",
+            }
             and self.source_evidence_ref is not None
         ):
             raise ValueError("only appraisal triggers may carry source evidence")

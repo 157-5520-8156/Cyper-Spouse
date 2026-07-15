@@ -22,6 +22,10 @@ from .minimal_reply_acceptance import (
 from .minimal_reply_atomic_recorder import MinimalReplyAtomicRecorder
 from .minimal_reply_events import minimal_reply_event_id
 from .appraisal_trigger import interaction_appraisal_trigger_events
+from .fact_trigger import interaction_fact_trigger_event
+from .fact_draft_adapter import FactObservationProposalAdapter
+from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
+from .interaction_fact_trigger_runtime import FactTriggerRunResult, InteractionFactTriggerRuntime
 from .batch_invariants import interaction_appraisal_trigger_identity
 from .appraisal_acceptance_runtime import (
     AppraisalAcceptanceError,
@@ -71,6 +75,9 @@ class WorldRuntime:
         appraisal_acceptance_actor: str | None = None,
         appraisal_worker: AppraisalProposalWorker | None = None,
         interaction_appraisal_turn: PinnedTurnCompiler | None = None,
+        interaction_fact_owner: str | None = None,
+        fact_acceptance: FactV2AcceptanceRuntime | None = None,
+        fact_adapter: FactObservationProposalAdapter | None = None,
         affect_deliberation_owner: str | None = None,
         affect_worker: AffectDeliberationWorker | None = None,
         action_executor: ActionExecutor | None = None,
@@ -108,6 +115,17 @@ class WorldRuntime:
         if interaction_appraisal_turn is not None and appraisal_worker is None:
             raise ValueError("interaction appraisal turn requires an appraisal worker")
         self._interaction_appraisal_turn = interaction_appraisal_turn
+        if interaction_fact_owner is not None and not interaction_fact_owner:
+            raise ValueError("interaction fact owner must not be empty")
+        if (fact_acceptance is None) != (fact_adapter is None):
+            raise ValueError("Fact acceptance and adapter must be configured together")
+        if (fact_acceptance is None) != (interaction_fact_owner is None):
+            raise ValueError("Fact acceptance requires an interaction fact worker owner")
+        if fact_acceptance is not None and fact_acceptance.ledger is not self._ledger:
+            raise ValueError("Fact acceptance runtime must own this exact ledger")
+        self._interaction_fact_owner = interaction_fact_owner
+        self._fact_acceptance = fact_acceptance
+        self._fact_adapter = fact_adapter
         if affect_deliberation_owner is not None and not affect_deliberation_owner:
             raise ValueError("affect deliberation owner must not be empty")
         self._affect_deliberation_owner = affect_deliberation_owner
@@ -138,7 +156,7 @@ class WorldRuntime:
 
     async def drain_background_once(
         self,
-    ) -> AppraisalTriggerRunResult | AffectTriggerRunResult | None:
+    ) -> AppraisalTriggerRunResult | AffectTriggerRunResult | FactTriggerRunResult | None:
         """Run one low-priority mental-state job without delaying an interactive turn.
 
         Hosts call this from their durable worker loop.  It is intentionally
@@ -161,6 +179,17 @@ class WorldRuntime:
                 if appraisal.status != "idle":
                     return appraisal
                 appraisal_result = appraisal
+            if self._fact_acceptance is not None:
+                assert self._fact_adapter is not None
+                assert self._interaction_fact_owner is not None
+                fact = await InteractionFactTriggerRuntime(
+                    ledger=self._fact_acceptance.ledger,
+                    acceptance=self._fact_acceptance,
+                    adapter=self._fact_adapter,
+                    owner_id=self._interaction_fact_owner,
+                ).drain_one()
+                if fact.status != "idle":
+                    return fact
             if self._affect_worker is None:
                 return appraisal_result
             assert self._affect_deliberation_owner is not None
@@ -647,6 +676,17 @@ class WorldRuntime:
                 trigger_head = await self._project_for_write()
                 committed = await self._commit(
                     list(trigger_events),
+                    world_revision=trigger_head.world_revision,
+                    deliberation_revision=trigger_head.deliberation_revision,
+                )
+            if self._interaction_fact_owner is not None:
+                fact_event = interaction_fact_trigger_event(
+                    observation=observation,
+                    observation_event=event,
+                )
+                trigger_head = await self._project_for_write()
+                committed = await self._commit(
+                    [fact_event],
                     world_revision=trigger_head.world_revision,
                     deliberation_revision=trigger_head.deliberation_revision,
                 )
