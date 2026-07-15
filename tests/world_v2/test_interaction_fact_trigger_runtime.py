@@ -81,6 +81,14 @@ class _FactChat:
         )
 
 
+class _InvalidFactChat:
+    model = "test-invalid-fact"
+
+    async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        assert temperature == 0.1
+        return "not-json"
+
+
 @pytest.mark.asyncio
 async def test_fact_trigger_accepts_one_source_bound_fact_and_completes(tmp_path) -> None:
     issuer = AcceptedLedgerBatchIssuer()
@@ -111,4 +119,33 @@ async def test_fact_trigger_accepts_one_source_bound_fact_and_completes(tmp_path
     assert projection.facts[0].values.assertion_binding.source_ref == observation.observation_id
     assert projection.trigger_processes[0].state == "terminal"
     assert ledger.rebuild() == projection
+    ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_invalid_fact_model_output_is_terminal_and_has_no_world_effect(tmp_path) -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = SQLiteWorldLedger(
+        path=tmp_path / "interaction-fact-invalid.sqlite3",
+        world_id=WORLD_ID,
+        accepted_batch_issuer=issuer,
+    )
+    observation, observation_event = _observation()
+    ledger.commit((observation_event,), expected_world_revision=0, expected_deliberation_revision=0)
+    trigger = interaction_fact_trigger_event(
+        observation=observation, observation_event=observation_event
+    )
+    ledger.commit((trigger,), expected_world_revision=1, expected_deliberation_revision=0)
+    runtime = InteractionFactTriggerRuntime(
+        ledger=ledger,
+        acceptance=FactV2AcceptanceRuntime.compose(ledger=ledger, batch_issuer=issuer),
+        adapter=FactObservationProposalAdapter(model=_InvalidFactChat()),
+        owner_id="worker:interaction-fact",
+    )
+
+    result = await runtime.drain_one()
+
+    assert result.work_status == "no_change"
+    assert ledger.project().facts == ()
+    assert ledger.project().trigger_processes[0].state == "terminal"
     ledger.close()

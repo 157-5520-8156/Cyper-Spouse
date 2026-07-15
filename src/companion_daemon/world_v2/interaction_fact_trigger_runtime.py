@@ -89,12 +89,27 @@ class InteractionFactTriggerRuntime:
         if source_commit is None:
             raise ValueError("interaction fact source event is no longer available")
         source_world_revision = source_commit[1].world_revision
-        proposal = await self._adapter.propose(
-            observation=observation,
-            observation_event=source_event,
-            source_world_revision=source_world_revision,
-            evaluated_world_revision=cursor.world_revision,
-        )
+        try:
+            proposal = await self._adapter.propose(
+                observation=observation,
+                observation_event=source_event,
+                source_world_revision=source_world_revision,
+                evaluated_world_revision=cursor.world_revision,
+            )
+        except ValueError:
+            # A malformed or overreaching model draft has no durable meaning.
+            # Mark the source opportunity consumed without producing either a
+            # Fact or a scripted user-visible repair; future messages create
+            # their own independently source-bound opportunities.
+            await self._complete(
+                process=active,
+                source_event=source_event,
+                cursor=cursor,
+                outcome_ref=f"outcome:{active.trigger_id}:invalid-draft",
+            )
+            return FactTriggerRunResult(
+                trigger_id=active.trigger_id, status="processed", work_status="no_change"
+            )
         if proposal is None:
             await self._complete(
                 process=active,
