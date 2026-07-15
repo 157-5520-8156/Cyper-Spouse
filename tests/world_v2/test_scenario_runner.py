@@ -110,5 +110,6 @@ async def test_suite_manifest_is_hash_bound_and_explicitly_not_human_evaluation(
     assert suite.passed
     manifest = suite.export_manifest()
     assert len(manifest["manifest_hash"]) == 64
+    assert manifest["mechanism_baseline_version"] == "world-v2-offline-mechanism-baseline.2"
     assert "not a human" in str(manifest["runner_limitations"])
     assert json.dumps(manifest, ensure_ascii=False)

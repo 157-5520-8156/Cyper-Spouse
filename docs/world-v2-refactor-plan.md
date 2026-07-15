@@ -2041,6 +2041,7 @@ Phase 2 不再按“把所有 projection 一起写完”的宽任务施工，而
 
 - 实现拟真人味 replay suite。
 - 固化 scenario gold set、judge/rubric/statistics version、裸聊与归档 baseline、热冷性能与 test-economy profile。
+- 离线机制 CI 的输入 corpus 与机制基线必须分开版本化；当前 `world-v2-offline-mechanism-baseline.2` 记录了 source-bound `private_impressions` Context slice 的加入。该 slice 即使为空也会合法改变 Capsule、Proposal 与 replay 身份链；它不是人味盲测或真人体验提升的证据。
 - 建立机制闭环 CI。
 - 删除或隔离旧行为入口。
 - World v2 切为默认运行时。

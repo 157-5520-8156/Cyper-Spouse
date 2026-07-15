@@ -55,14 +55,16 @@ class ScenarioVerificationError(AssertionError):
     """A frozen scenario did not exercise its declared authority predicates."""
 
 
-# Filled after the complete, fixed fake suite has been run.  A change to this
-# value is a new offline mechanism baseline, not evidence of a human-likeness
-# improvement.
-# Updated after the source-bound affect turn was corrected to read an
-# Appraisal that precedes (rather than equals) its later trigger cursor. The
-# fixed suite was run twice in independent clean archives before freezing this
-# deterministic mechanism baseline.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "aae528f5e935d05673ef99e984f0068fd4bddf768f25b0034e6e8be506b906aa"
+# This identifies the executable mechanism baseline independently from the
+# frozen input corpus. ``.2`` adds the source-bound private-impression slice
+# to every Context Capsule, so proposal and replay identities intentionally
+# change even when that slice is empty. It is not human-likeness evidence.
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.2"
+
+# Filled only after the complete, fixed fake suite has been run. A change to
+# this value requires the corresponding baseline-version rationale; it must
+# not be rewritten merely to silence a scenario failure.
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "311bf231afef3eb98f71eda31e01bcc637094fd3bf3aad63e111b9d0e37cf780"
 
 
 class _FixedScenarioRouter:
@@ -501,6 +503,7 @@ class ScenarioRunResult:
 class ScenarioSuiteResult:
     corpus_version: str
     economy_profile_version: str
+    mechanism_baseline_version: str
     runs: tuple[ScenarioRunResult, ...]
 
     @property
@@ -512,6 +515,7 @@ class ScenarioSuiteResult:
         payload = {
             "corpus_version": self.corpus_version,
             "economy_profile_version": self.economy_profile_version,
+            "mechanism_baseline_version": self.mechanism_baseline_version,
             "runs": [item.manifest_row() for item in self.runs],
         }
         raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
@@ -522,6 +526,7 @@ class ScenarioSuiteResult:
             "kind": "world-v2-offline-scenario-run.1",
             "corpus_version": self.corpus_version,
             "economy_profile_version": self.economy_profile_version,
+            "mechanism_baseline_version": self.mechanism_baseline_version,
             "runner_limitations": (
                 "fixed fake model/provider only; this is not a human or model blind evaluation"
             ),
@@ -920,6 +925,7 @@ class ScenarioRunner:
         suite = ScenarioSuiteResult(
             corpus_version=SCENARIO_CORPUS_VERSION,
             economy_profile_version=TEST_ECONOMY_PROFILE_VERSION,
+            mechanism_baseline_version=FROZEN_OFFLINE_SUITE_BASELINE_VERSION,
             runs=runs,
         )
         if limit is None and suite.manifest_hash != FROZEN_OFFLINE_SUITE_MANIFEST_HASH:
@@ -1022,6 +1028,7 @@ def run_frozen_suite_sync(*, workdir: str | Path, limit: int | None = None) -> S
 
 
 __all__ = [
+    "FROZEN_OFFLINE_SUITE_BASELINE_VERSION",
     "ScenarioRunResult",
     "ScenarioRunner",
     "ScenarioSuiteResult",
