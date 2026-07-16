@@ -49,11 +49,69 @@ MediaCandidateStatus = Literal[
 ]
 MediaLane = Literal["ordinary_life", "alluring_life", "exclusive_private", "explicit_reserved"]
 MediaPrivacyCeiling = Literal["ordinary", "personal", "intimate"]
+CharacterMediaKind = Literal[
+    "public_checkin", "selfie", "mirror", "companion_shot", "body_detail",
+]
+CharacterCaptureMode = Literal[
+    "character_front_camera", "character_rear_camera", "mirror", "timer_fixed",
+    "requested_helper", "known_companion",
+]
+CharacterVisibility = Literal["identifiable", "body_detail"]
 
 
 class MediaEvidenceSource(FrozenModel):
     event_ref: str = Field(min_length=1, max_length=512)
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+def character_media_contract_digest(
+    *,
+    subject_ref: str,
+    kind: CharacterMediaKind,
+    source_events: tuple[MediaEvidenceSource, ...],
+    allowed_capture_modes: tuple[CharacterCaptureMode, ...],
+    allowed_character_visibility: tuple[CharacterVisibility, ...],
+) -> str:
+    """Hash the complete, non-model-editable P2 visual allowance."""
+
+    return media_digest({
+        "contract": "character-media-candidate.1",
+        "subject_ref": subject_ref,
+        "kind": kind,
+        "source_events": [item.model_dump(mode="json") for item in source_events],
+        "allowed_capture_modes": allowed_capture_modes,
+        "allowed_character_visibility": allowed_character_visibility,
+    })
+
+
+class CharacterMediaCandidateContract(FrozenModel):
+    """The closed P2 visual space attached to one character-media candidate."""
+
+    subject_ref: str = Field(min_length=1, max_length=512)
+    kind: CharacterMediaKind
+    allowed_capture_modes: tuple[CharacterCaptureMode, ...] = Field(min_length=1, max_length=6)
+    allowed_character_visibility: tuple[CharacterVisibility, ...] = Field(min_length=1, max_length=2)
+    authority_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def allowed_space_is_canonical(self) -> "CharacterMediaCandidateContract":
+        if self.allowed_capture_modes != tuple(sorted(set(self.allowed_capture_modes))):
+            raise ValueError("character media capture modes must be sorted and unique")
+        if self.allowed_character_visibility != tuple(sorted(set(self.allowed_character_visibility))):
+            raise ValueError("character media visibility must be sorted and unique")
+        kind_modes: dict[CharacterMediaKind, frozenset[CharacterCaptureMode]] = {
+            "public_checkin": frozenset({"timer_fixed", "requested_helper"}),
+            "selfie": frozenset({"character_front_camera"}),
+            "mirror": frozenset({"mirror"}),
+            "companion_shot": frozenset({"known_companion"}),
+            "body_detail": frozenset({"character_front_camera", "character_rear_camera"}),
+        }
+        if not set(self.allowed_capture_modes) <= kind_modes[self.kind]:
+            raise ValueError("character media capture mode is incompatible with candidate kind")
+        expected_visibility = ("body_detail",) if self.kind == "body_detail" else ("identifiable",)
+        if self.allowed_character_visibility != expected_visibility:
+            raise ValueError("character media visibility is incompatible with candidate kind")
+        return self
 
 
 class PhotoCandidate(FrozenModel):
@@ -76,6 +134,7 @@ class PhotoCandidate(FrozenModel):
     ecology_category: str | None = Field(default=None, min_length=1, max_length=128)
     ecology_observed_at: datetime | None = None
     source_events: tuple[MediaEvidenceSource, ...] = ()
+    character_media_contract: CharacterMediaCandidateContract | None = None
     opened_event_ref: str | None = Field(default=None, min_length=1, max_length=512)
     opened_event_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
@@ -103,6 +162,19 @@ class PhotoCandidate(FrozenModel):
             raise ValueError("photo candidate opening event coordinates are incomplete")
         if self.opened_event_ref is not None and self.opened_at is None:
             raise ValueError("candidate opening event requires P1 lifecycle coordinates")
+        if self.family == "character_media":
+            if self.character_media_contract is None:
+                raise ValueError("character media candidate requires a frozen visual contract")
+            if self.character_media_contract.authority_digest != character_media_contract_digest(
+                subject_ref=self.character_media_contract.subject_ref,
+                kind=self.character_media_contract.kind,
+                source_events=self.source_events,
+                allowed_capture_modes=self.character_media_contract.allowed_capture_modes,
+                allowed_character_visibility=self.character_media_contract.allowed_character_visibility,
+            ):
+                raise ValueError("character media candidate contract digest does not bind candidate sources")
+        elif self.character_media_contract is not None:
+            raise ValueError("life-share candidate may not carry a character media contract")
         return self
 
 
