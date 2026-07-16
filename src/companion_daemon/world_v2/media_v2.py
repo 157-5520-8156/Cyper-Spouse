@@ -402,6 +402,9 @@ class MediaOpportunity(FrozenModel):
     ecology_observed_at: datetime | None = None
     recipient_ref: str | None = Field(default=None, min_length=1, max_length=256)
     private_expression_basis_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    selection_proposal_id: str | None = Field(default=None, min_length=1, max_length=256)
+    selection_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    selected_candidate_revision: int | None = Field(default=None, ge=1)
     expires_at: datetime
 
     @model_validator(mode="after")
@@ -420,6 +423,15 @@ class MediaOpportunity(FrozenModel):
             raise ValueError("exclusive private requires recipient-specific private-expression basis")
         if self.media_lane not in {"exclusive_private"} and self.private_expression_basis_ref is not None:
             raise ValueError("private-expression basis may only authorize exclusive-private media")
+        selection_coordinates = (
+            self.selection_proposal_id,
+            self.selection_hash,
+            self.selected_candidate_revision,
+        )
+        if any(value is not None for value in selection_coordinates) and not all(
+            value is not None for value in selection_coordinates
+        ):
+            raise ValueError("media opportunity selection coordinates are incomplete")
         return self
 
 

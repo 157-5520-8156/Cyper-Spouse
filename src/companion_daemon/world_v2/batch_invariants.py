@@ -22,6 +22,12 @@ from .activity_lifecycle_acceptance_manifest import (
     ActivityLifecycleAcceptanceManifest,
     canonical_activity_lifecycle_acceptance_value_hash,
 )
+from .media_selection_acceptance_manifest import MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
+from .media_selection_acceptance_manifest import (
+    MediaSelectionAcceptanceManifest,
+    canonical_media_selection_value_hash,
+)
+from .media_v2 import MediaOpportunityFrozenPayload
 from .outcome_acceptance_manifest import (
     OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
     OutcomeAcceptanceManifest,
@@ -115,6 +121,7 @@ def validate_commit_batch(
         reject_appraisal_acceptance_manifest_without_recorder(events)
         reject_affect_acceptance_manifest_without_recorder(events)
         reject_activity_lifecycle_acceptance_manifest_without_recorder(events)
+        reject_media_selection_acceptance_manifest_without_recorder(events)
         reject_outcome_acceptance_manifest_without_recorder(events)
         reject_interaction_bid_acceptance_manifest_without_recorder(events)
         reject_media_thread_acceptance_manifest_without_recorder(events)
@@ -147,6 +154,11 @@ def validate_commit_batch(
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_authorized_activity_lifecycle_acceptance_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_media_selection_acceptance_manifest_batch(
         events,
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
@@ -258,6 +270,7 @@ def validate_commit_batch(
         if acceptance.get("manifest_version") in {
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
             ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
+            MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION,
         }:
             # Dedicated source-bound lane is validated above; it is not a
             # member of the generic typed Thread mutation family.
@@ -497,6 +510,7 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
             APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
             AFFECT_ACCEPTANCE_MANIFEST_VERSION,
             ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
+            MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION,
             OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
@@ -1260,6 +1274,112 @@ def _validate_authorized_activity_lifecycle_acceptance_manifest_batch(
         )
         if expected is None or event.idempotency_key != expected:
             raise ValueError("activity_lifecycle_acceptance.event_identity_is_not_deterministic")
+
+
+def reject_media_selection_acceptance_manifest_without_recorder(
+    events: Sequence[WorldEvent],
+) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("media_selection_acceptance.recorder_capability_required")
+
+
+def _validate_authorized_media_selection_acceptance_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    """Require the complete accepted selection → frozen planning authorization.
+
+    This is deliberately not a generic accepted effect: P1 has four effects
+    whose identities must remain inseparable.  The reducer rechecks the
+    candidate/proposal state; this guard rejects a partial or substituted wire
+    batch before any reducer sees it.
+    """
+
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("media_selection_acceptance.recorder_capability_required")
+    if len(manifests) != 1 or len(events) != 4:
+        raise ValueError("media_selection_acceptance.accepted_batch_must_be_exact")
+    acceptance, opportunity_event, reservation_event, action_event = events
+    try:
+        manifest = MediaSelectionAcceptanceManifest.model_validate_json(acceptance.payload_json)
+        opportunity = MediaOpportunityFrozenPayload.model_validate_json(
+            opportunity_event.payload_json
+        ).opportunity
+        reservation = BudgetReservation.model_validate(reservation_event.payload().get("reservation"))
+        # Event payloads have crossed the JSON envelope by this point.  Parse
+        # them in JSON mode so RFC 3339 timestamps and JSON arrays rehydrate
+        # to the strict Action value rather than being rejected as Python
+        # strings/lists.
+        action = Action.model_validate_json(
+            json.dumps(action_event.payload().get("action"), ensure_ascii=False)
+        )
+    except Exception as exc:
+        raise ValueError("media_selection_acceptance.accepted_batch_payload_is_invalid") from exc
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or tuple(event.event_type for event in events)
+        != ("AcceptanceRecorded", "MediaOpportunityFrozen", "BudgetReserved", "ActionAuthorized")
+        or acceptance.event_id != manifest.acceptance_event_ref
+        or acceptance.causation_id != manifest.proposal_event_ref
+        or opportunity_event.event_id != manifest.opportunity_event_id
+        or opportunity_event.causation_id != acceptance.event_id
+        or opportunity_event.payload_hash != manifest.opportunity_payload_hash
+        or reservation_event.event_id != manifest.reservation_event_id
+        or reservation_event.causation_id != opportunity_event.event_id
+        or reservation_event.payload_hash != manifest.reservation_payload_hash
+        or action_event.event_id != manifest.action_event_id
+        or action_event.causation_id != reservation_event.event_id
+        or action_event.payload_hash != manifest.action_payload_hash
+        or opportunity.opportunity_id != manifest.opportunity_id
+        or opportunity.candidate_id != manifest.candidate_id
+        or opportunity.selection_proposal_id != manifest.proposal_id
+        or opportunity.selection_hash != manifest.selection_hash
+        or opportunity.selected_candidate_revision != manifest.expected_candidate_revision
+        or opportunity.event_snapshot_ref != manifest.snapshot_ref
+        or opportunity.event_snapshot_hash != manifest.snapshot_hash
+        or reservation.action_id != action.action_id
+        or action.kind != "media_planning"
+        or action.intent_ref != opportunity.opportunity_id
+        or action.payload_ref != opportunity.event_snapshot_ref
+        or action.payload_hash != opportunity.event_snapshot_hash
+        or action.budget_reservation_id != reservation.reservation_id
+        or canonical_media_selection_value_hash(opportunity_event.payload())
+        != manifest.opportunity_payload_hash
+    ):
+        raise ValueError("media_selection_acceptance.batch_does_not_match_manifest")
+    if any(
+        getattr(effect, field) != getattr(acceptance, field)
+        for effect in (opportunity_event, reservation_event, action_event)
+        for field in (
+            "world_id",
+            "logical_time",
+            "created_at",
+            "actor",
+            "source",
+            "trace_id",
+            "correlation_id",
+        )
+    ):
+        raise ValueError("media_selection_acceptance.envelope_metadata_mismatch")
+    for event in (acceptance, opportunity_event):
+        expected = domain_idempotency_key(
+            event_type=event.event_type, world_id=event.world_id, payload=event.payload()
+        )
+        if expected is None or event.idempotency_key != expected:
+            raise ValueError("media_selection_acceptance.event_identity_is_not_deterministic")
 
 
 def reject_outcome_acceptance_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:

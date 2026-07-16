@@ -290,7 +290,12 @@ async def test_worker_runs_a_real_frozen_action_without_authoring_an_opportunity
         store.close()
 
     assert result.status == "not_renderable"
-    assert projection.photo_candidates == (candidate,)
+    # A frozen candidate remains one aggregate throughout planning: opening
+    # selects it, and an explicit NotRenderable result closes that same
+    # candidate rather than leaving a retryable "available" phantom.
+    assert projection.photo_candidates == (
+        candidate.model_copy(update={"entity_revision": 3, "status": "unrenderable"}),
+    )
     assert projection.media_opportunities == (opportunity,)
     assert projection.media_unrenderable_opportunity_ids == (opportunity.opportunity_id,)
     action = next(item for item in projection.actions if item.kind == "media_planning")

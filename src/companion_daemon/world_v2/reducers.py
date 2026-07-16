@@ -244,6 +244,10 @@ from .media_selection_proposal import (
     MediaSelectionProposalRecordedPayload,
     media_candidate_authority_hash,
 )
+from .media_selection_acceptance_manifest import (
+    MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION,
+    MediaSelectionAcceptanceManifest,
+)
 from .life_reducers import (
     activate_occurrence,
     commit_experience,
@@ -3129,6 +3133,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         AFFECT_ACCEPTANCE_MANIFEST_VERSION,
         OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
         ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
+        MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION,
         INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
         MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
     }:
@@ -3149,6 +3154,8 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         return _outcome_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION:
         return _activity_lifecycle_acceptance_manifest_recorded(state, event)
+    if raw.get("manifest_version") == MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION:
+        return _media_selection_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION:
         return _interaction_bid_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION:
@@ -3952,6 +3959,64 @@ def _activity_lifecycle_acceptance_manifest_recorded(
                     status="accepted",
                     accepted_change_id=manifest.accepted_change_id,
                     accepted_change_hash=manifest.accepted_change_hash,
+                    manifest_version=manifest.manifest_version,
+                    manifest_hash=manifest.manifest_hash,
+                    acceptance_event_ref=event.event_id,
+                    acceptance_event_payload_hash=event.payload_hash,
+                ),
+            )
+        }
+    )
+
+
+def _media_selection_acceptance_manifest_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    """Accept a P1 choice only while its source-bound candidate remains current."""
+
+    manifest = MediaSelectionAcceptanceManifest.model_validate_json(event.payload_json)
+    current_world_revision = len(state.committed_world_event_refs)
+    revision = next(
+        (item for item in state.proposal_revisions if item.proposal_id == manifest.proposal_id),
+        None,
+    )
+    candidate = next(
+        (item for item in state.photo_candidates if item.candidate_id == manifest.candidate_id),
+        None,
+    )
+    if (
+        manifest.evaluated_world_revision != current_world_revision
+        or event.causation_id != manifest.proposal_event_ref
+        or revision is None
+        or revision.evaluated_world_revision != manifest.evaluated_world_revision
+        or revision.proposal_event_ref != manifest.proposal_event_ref
+        or revision.proposal_event_payload_hash != manifest.proposal_event_payload_hash
+        or revision.proposed_change_hash != manifest.accepted_change_hash
+        or revision.selection_hash != manifest.selection_hash
+        or candidate is None
+        or candidate.status != "available"
+        or candidate.entity_revision != manifest.expected_candidate_revision
+        or candidate.expires_at is None
+        or event.logical_time >= candidate.expires_at
+        or media_candidate_authority_hash(candidate) != manifest.candidate_authority_hash
+        or any(
+            item.acceptance_id == manifest.acceptance_id or item.proposal_id == manifest.proposal_id
+            for item in state.acceptance_decisions
+        )
+    ):
+        raise ValueError("media selection acceptance manifest does not bind a current proposal")
+    return state.model_copy(
+        update={
+            "acceptance_decisions": (
+                *state.acceptance_decisions,
+                AcceptanceDecisionRef(
+                    proposal_id=manifest.proposal_id,
+                    evaluated_world_revision=manifest.evaluated_world_revision,
+                    acceptance_id=manifest.acceptance_id,
+                    status="accepted",
+                    accepted_change_id=manifest.accepted_change_id,
+                    accepted_change_hash=manifest.accepted_change_hash,
+                    selection_hash=manifest.selection_hash,
                     manifest_version=manifest.manifest_version,
                     manifest_hash=manifest.manifest_hash,
                     acceptance_event_ref=event.event_id,
@@ -5047,6 +5112,8 @@ def _media_selection_proposal_recorded(state: ReducerState, event: WorldEvent) -
                     evaluated_world_revision=payload.evaluated_world_revision,
                     proposal_event_ref=event.event_id,
                     proposal_event_payload_hash=event.payload_hash,
+                    proposed_change_hash=payload.proposed_change_hash,
+                    selection_hash=payload.selection_hash,
                 ),
             ),
         }
@@ -5090,6 +5157,31 @@ def _media_opportunity_frozen(state: ReducerState, event: WorldEvent) -> Reducer
         raise ValueError("media opportunity requires an existing photo candidate")
     if any(item.opportunity_id == opportunity.opportunity_id for item in state.media_opportunities):
         raise ValueError("media opportunity identity is already registered")
+    if opportunity.selection_proposal_id is not None:
+        if not state.committed_world_event_refs:
+            raise ValueError("P1 media opportunity requires adjacent acceptance")
+        acceptance = state.committed_world_event_refs[-1]
+        decision = next(
+            (
+                item
+                for item in state.acceptance_decisions
+                if item.proposal_id == opportunity.selection_proposal_id
+                and item.acceptance_event_ref == acceptance.event_id
+            ),
+            None,
+        )
+        if (
+            acceptance.event_type != "AcceptanceRecorded"
+            or event.causation_id != acceptance.event_id
+            or decision is None
+            or decision.manifest_version != MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
+            or opportunity.selection_hash is None
+            or decision.selection_hash != opportunity.selection_hash
+            or opportunity.selected_candidate_revision is None
+            or candidate.entity_revision != opportunity.selected_candidate_revision
+            or candidate.status != "available"
+        ):
+            raise ValueError("P1 media opportunity does not bind accepted candidate selection")
     if (
         candidate.family != opportunity.family
         or candidate.privacy_ceiling != opportunity.privacy_ceiling

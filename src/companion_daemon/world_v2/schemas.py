@@ -963,6 +963,7 @@ class AcceptanceDecisionRef(FrozenModel):
     status: Literal["accepted", "rejected", "stale"]
     accepted_change_id: str | None = None
     accepted_change_hash: str | None = Field(default=None, min_length=64, max_length=64)
+    selection_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     manifest_version: (
         Literal[
             "acceptance-manifest.2",
@@ -971,6 +972,7 @@ class AcceptanceDecisionRef(FrozenModel):
             "affect-acceptance.1",
             "outcome-acceptance.1",
             "activity-lifecycle-acceptance.2",
+            "media-selection-acceptance.1",
             "interaction-bid-acceptance.1",
             "media-delivery-thread-acceptance.1",
         ]
@@ -1214,6 +1216,10 @@ class ProposalRevisionRef(FrozenModel):
     proposal_event_payload_hash: str | None = Field(
         default=None, pattern=r"^[0-9a-f]{64}$"
     )
+    proposed_change_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    # P1 media selection persists this alongside the generic proposal audit
+    # coordinates, so Acceptance can replay-check the exact selected shape.
+    selection_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def persisted_event_coordinates_are_complete(self) -> "ProposalRevisionRef":

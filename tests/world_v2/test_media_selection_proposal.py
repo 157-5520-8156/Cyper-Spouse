@@ -124,6 +124,7 @@ def test_p1_selection_proposal_pins_one_available_candidate_and_its_event_bytes(
 
     assert reduced.proposal_ids == (proposal.proposal_id,)
     assert reduced.proposal_revisions[0].proposal_event_ref == "event:selection-proposal:1"
+    assert reduced.proposal_revisions[0].selection_hash == proposal.selection_hash
 
 
 def test_p1_selection_proposal_rejects_a_candidate_revision_replayed_after_selection() -> None:
