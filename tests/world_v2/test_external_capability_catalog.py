@@ -22,12 +22,18 @@ def test_remaining_capability_verticals_are_explicit_and_fail_closed() -> None:
         assert capability.availability == "adapter_only"
         assert "concrete_transport" in capability.missing_closure
 
-    for action_kind in ("vision", "transcription", "creative_media_request"):
+    for action_kind in ("vision", "transcription"):
         capability = external_capability(action_kind)
-        assert capability.availability == "planned"
-        assert "source_bound_request" in capability.missing_closure
+        assert capability.availability == "adapter_only"
+        assert "enforcement_authorization" in capability.installed_closure
+        assert "default_provider_composition" in capability.missing_closure
+    capability = external_capability("creative_media_request")
+    assert capability.availability == "planned"
+    assert "source_bound_request" in capability.missing_closure
     assert external_capability("read_only_tool").availability == "adapter_only"
-    assert "production_request_deliberation" in external_capability("read_only_tool").missing_closure
+    assert (
+        "production_request_deliberation" in external_capability("read_only_tool").missing_closure
+    )
     assert "enforcement_authorization" in external_capability("read_only_tool").installed_closure
 
 
@@ -41,6 +47,10 @@ def test_catalogue_has_no_implicit_or_duplicate_external_capabilities() -> None:
 def test_production_chat_grammar_only_exposes_catalogued_production_expression_actions() -> None:
     grammar = production_proposal_grammar("chat_reply")
     action_kinds = frozenset().union(
-        *(capability.action_kinds for capability in grammar.capabilities if capability.allows_actions)
+        *(
+            capability.action_kinds
+            for capability in grammar.capabilities
+            if capability.allows_actions
+        )
     )
     assert action_kinds == production_expression_capabilities()

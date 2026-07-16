@@ -80,6 +80,11 @@ from .read_only_tool_trigger_runtime import (
     ReadOnlyToolTriggerRunResult,
     ReadOnlyToolTriggerRuntime,
 )
+from .perception_result_trigger_runtime import (
+    PerceptionResultDeliberator,
+    PerceptionResultTriggerRunResult,
+    PerceptionResultTriggerRuntime,
+)
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -163,6 +168,8 @@ class WorldRuntime:
         external_result_deliberator: ToolResultDeliberator | None = None,
         read_only_tool_owner: str | None = None,
         read_only_tool_trigger_runtime: ReadOnlyToolTriggerRuntime | None = None,
+        perception_result_owner: str | None = None,
+        perception_result_deliberator: PerceptionResultDeliberator | None = None,
     ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
@@ -280,6 +287,10 @@ class WorldRuntime:
             raise ValueError("read-only tool trigger runtime must own this exact ledger")
         self._read_only_tool_owner = read_only_tool_owner
         self._read_only_tool_trigger_runtime = read_only_tool_trigger_runtime
+        if (perception_result_owner is None) != (perception_result_deliberator is None):
+            raise ValueError("perception result owner and deliberator must be configured together")
+        self._perception_result_owner = perception_result_owner
+        self._perception_result_deliberator = perception_result_deliberator
         self._lock = asyncio.Lock()
 
     @property
@@ -299,6 +310,7 @@ class WorldRuntime:
         | ExpressionReconsiderationRunResult
         | ExternalResultTriggerRunResult
         | ReadOnlyToolTriggerRunResult
+        | PerceptionResultTriggerRunResult
         | None
     ):
         """Run one low-priority mental-state job without delaying an interactive turn.
@@ -309,6 +321,14 @@ class WorldRuntime:
         """
 
         async with self._lock:
+            if self._perception_result_owner is not None:
+                assert self._perception_result_deliberator is not None
+                perception_result = await PerceptionResultTriggerRuntime(
+                    ledger=self._ledger, deliberator=self._perception_result_deliberator,
+                    owner_id=self._perception_result_owner,
+                ).drain_one()
+                if perception_result.status != "idle":
+                    return perception_result
             if self._read_only_tool_trigger_runtime is not None:
                 tool = await self._read_only_tool_trigger_runtime.drain_one()
                 if tool.status != "idle":

@@ -76,6 +76,7 @@ from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .private_impression_events import PRIVATE_IMPRESSION_PAYLOAD_MODELS
 from .thread_events import THREAD_MECHANICAL_PAYLOAD_MODELS, THREAD_PAYLOAD_MODELS
 from .read_only_tool import ToolRequestAcceptedPayload, ToolResultAcceptedPayload
+from .perception import PerceptionRequestAcceptedPayload, PerceptionResultAcceptedPayload
 from .schemas import (
     Action,
     ActionReconciliation,
@@ -299,6 +300,8 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         ),
         "ToolRequestAccepted": ToolRequestAcceptedPayload,
         "ToolResultAccepted": ToolResultAcceptedPayload,
+        "PerceptionRequestAccepted": PerceptionRequestAcceptedPayload,
+        "PerceptionResultAccepted": PerceptionResultAcceptedPayload,
         "ProposalRecorded": _payload_model(
             "ProposalRecordedPayload", {"proposal_id": _ID}, allow_audit_extensions=True
         ),
@@ -411,6 +414,8 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "TriggerProcessCompleted": "world_id+trigger_id+attempt_id+completed",
         "ToolRequestAccepted": "world_id+request_id",
         "ToolResultAccepted": "world_id+result_id",
+        "PerceptionRequestAccepted": "world_id+request_id",
+        "PerceptionResultAccepted": "world_id+result_id",
         "ProposalRecorded": "world_id+trigger_id+proposal_id",
         "ModelResultRecorded": "world_id+model_call_id+model_result_ref",
         "AcceptanceRecorded": "v2:world_id+manifest_version+acceptance_id;legacy:proposal+revision",
@@ -711,6 +716,23 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "ToolResultAcceptedPayload",
                 allowed_predecessors=("ExecutionReceiptRecorded",),
                 evidence_types=("delivered_read_only_tool_action", "immutable_tool_result"),
+                successors=("TriggerProcessOpened",),
+            ),
+            _contract(
+                "PerceptionRequestAccepted",
+                "perception_acceptance",
+                "world",
+                "PerceptionRequestAcceptedPayload",
+                evidence_types=("committed_observation_or_world_event", "perception_request_proposal"),
+                successors=("BudgetReserved", "ActionAuthorized"),
+            ),
+            _contract(
+                "PerceptionResultAccepted",
+                "perception_settlement",
+                "world",
+                "PerceptionResultAcceptedPayload",
+                allowed_predecessors=("ExecutionReceiptRecorded",),
+                evidence_types=("delivered_perception_action", "immutable_perception_result"),
                 successors=("TriggerProcessOpened",),
             ),
             _contract(

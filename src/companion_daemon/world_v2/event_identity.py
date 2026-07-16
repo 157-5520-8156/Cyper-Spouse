@@ -119,6 +119,10 @@ def _life_identity_components(
         return world_id, _nested(payload, "request", "request_id")
     if event_type == "ToolResultAccepted":
         return world_id, _nested(payload, "result", "result_id")
+    if event_type == "PerceptionRequestAccepted":
+        return world_id, _nested(payload, "request", "request_id")
+    if event_type == "PerceptionResultAccepted":
+        return world_id, _nested(payload, "result", "result_id")
     if event_type == "MediaDeliveryThreadProposalRecorded":
         return world_id, payload.get("media_thread_proposal_id"), payload.get("change_id")
     if event_type in {"MediaDeliveryThreadOpened", "MediaDeliveryThreadUpdated"}:

@@ -289,6 +289,10 @@ from .read_only_tool import (
     ToolResultAcceptedPayload,
     external_result_trigger_id,
 )
+from .perception import (
+    PerceptionRequestAcceptedPayload,
+    PerceptionResultAcceptedPayload,
+)
 from .typed_proposal_families import INSTALLED_TYPED_PROPOSAL_FAMILIES
 from .typed_proposals import (
     TypedProposalRegistration,
@@ -372,6 +376,8 @@ from .schemas import (
     RelationshipSignalProjection,
     RelationshipStateProjection,
     ReadOnlyToolRequestProjection,
+    PerceptionRequestProjection,
+    PerceptionResultProjection,
     PrivateImpressionProjection,
     PrivateImpressionProposalProjection,
     ThreadProjection,
@@ -582,6 +588,8 @@ class ReducerState(FrozenModel):
     pending_actions: tuple[Action, ...] = ()
     read_only_tool_requests: tuple[ReadOnlyToolRequestProjection, ...] = ()
     tool_results: tuple[ToolResultProjection, ...] = ()
+    perception_requests: tuple[PerceptionRequestProjection, ...] = ()
+    perception_results: tuple[PerceptionResultProjection, ...] = ()
     photo_candidates: tuple[PhotoCandidate, ...] = ()
     media_opportunities: tuple[MediaOpportunity, ...] = ()
     media_plans: tuple[MediaPlan, ...] = ()
@@ -5851,6 +5859,38 @@ def _tool_result_accepted(state: ReducerState, event: WorldEvent) -> ReducerStat
     return state.model_copy(update={"tool_results": (*state.tool_results, result)})
 
 
+def _perception_request_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
+    request = PerceptionRequestAcceptedPayload.model_validate_json(event.payload_json).request
+    source = next((item for item in state.committed_world_event_refs if item.event_id == request.source_event_ref), None)
+    if (
+        source is None or source.world_revision != request.source_world_revision
+        or source.payload_hash != request.source_payload_hash
+        or any(item.request_id == request.request_id for item in state.perception_requests)
+        or any(item.action_id == request.action_id for item in state.perception_requests)
+    ):
+        raise ValueError("perception request is not bound to committed source authority")
+    return state.model_copy(update={"perception_requests": (*state.perception_requests, request)})
+
+
+def _perception_result_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
+    result = PerceptionResultAcceptedPayload.model_validate_json(event.payload_json).result
+    request = next((item for item in state.perception_requests if item.request_id == result.request_id), None)
+    receipt_event = next((item for item in state.committed_world_event_refs if item.event_id == result.receipt_event_ref), None)
+    action = next((item for item in state.actions if item.action_id == result.action_id), None)
+    receipt = next((item for item in state.execution_receipts if item.result_id == result.external_result_id), None)
+    if (
+        request is None or request.action_id != result.action_id or request.analysis_kind != result.analysis_kind
+        or request.content_privacy_class != result.content_privacy_class or action is None
+        or action.kind != result.analysis_kind or action.layer != "perception_tool" or action.state != "delivered"
+        or receipt is None or receipt.action_id != result.action_id or receipt.result_ref != result.result_ref
+        or receipt.result_hash != result.result_hash or receipt_event is None
+        or receipt_event.event_type != "ExecutionReceiptRecorded" or receipt_event.payload_hash != result.receipt_event_payload_hash
+        or result.accepted_event_ref != event.event_id or any(item.result_id == result.result_id for item in state.perception_results)
+    ):
+        raise ValueError("perception result is not bound to its delivered Action receipt")
+    return state.model_copy(update={"perception_results": (*state.perception_results, result)})
+
+
 def _budget_settlement_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     settlement = _model_from_payload(event, "settlement", BudgetSettlement)
     if any(item.settlement_id == settlement.settlement_id for item in state.budget_settlements):
@@ -8340,6 +8380,8 @@ _EVENTS = {
         ),
         EventDefinition("ToolRequestAccepted", RevisionClass.WORLD, _tool_request_accepted),
         EventDefinition("ToolResultAccepted", RevisionClass.WORLD, _tool_result_accepted),
+        EventDefinition("PerceptionRequestAccepted", RevisionClass.WORLD, _perception_request_accepted),
+        EventDefinition("PerceptionResultAccepted", RevisionClass.WORLD, _perception_result_accepted),
         EventDefinition("BudgetSettled", RevisionClass.WORLD, _budget_settlement_recorded),
         EventDefinition("BudgetReleased", RevisionClass.WORLD, _budget_settlement_recorded),
         EventDefinition("BudgetAdjusted", RevisionClass.WORLD, _budget_settlement_recorded),
@@ -8731,6 +8773,8 @@ def make_projection(
         pending_actions=state.pending_actions,
         read_only_tool_requests=state.read_only_tool_requests,
         tool_results=state.tool_results,
+        perception_requests=state.perception_requests,
+        perception_results=state.perception_results,
         photo_candidates=state.photo_candidates,
         media_opportunities=state.media_opportunities,
         media_plans=state.media_plans,

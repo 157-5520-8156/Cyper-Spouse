@@ -439,14 +439,17 @@ def _validate_mutation(
         if values.capability_kind == "read_only_tool":
             if not all(item.startswith("tool:") for item in targets):
                 raise ValueError("tool capability requires tool target scopes")
+        elif values.capability_kind == "perception_tool":
+            if not targets <= {"perception:vision", "perception:transcription"}:
+                raise ValueError("perception capability requires perception target scopes")
         elif values.capability_kind in {"media_planning", "media_render", "media_inspection", "media_repair"}:
             if targets != {"provider:media"}:
                 raise ValueError("provider media capability requires provider:media target scope")
         elif not all(item.startswith("channel:") for item in targets):
             raise ValueError("communication capability requires channel target scopes")
         constraints = set(values.constraint_refs)
-        if "constraint:read-only" in constraints and values.capability_kind != "read_only_tool":
-            raise ValueError("read-only constraint requires tool capability")
+        if "constraint:read-only" in constraints and values.capability_kind not in {"read_only_tool", "perception_tool"}:
+            raise ValueError("read-only constraint requires non-mutating capability")
         if "constraint:text-only" in constraints and values.capability_kind != "message_send":
             raise ValueError("text-only constraint requires message capability")
     if domain == "privacy":

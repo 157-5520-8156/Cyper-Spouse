@@ -161,6 +161,7 @@ class ExternalObservation(FrozenModel):
         "provider_ack",
         "execution_receipt",
         "tool_result",
+        "perception_result",
         "media_result",
         "reconciliation_result",
     ]
@@ -365,6 +366,7 @@ class ActionIntent(FrozenModel):
         "external_action",
         "media_action",
         "read_only_tool",
+        "perception_tool",
     ]
     target: str = Field(min_length=1)
     payload_ref: str = Field(min_length=1)
@@ -425,6 +427,15 @@ class ReadOnlyToolAuthorizationBinding(FrozenModel):
     privacy_policy_revision: int = Field(ge=1)
 
 
+class PerceptionAuthorizationBinding(ReadOnlyToolAuthorizationBinding):
+    """Exact enforcement grant for one user supplied media analysis.
+
+    This stays distinct from a text/query tool grant: a provider may see image
+    or audio bytes, and the accepted request therefore pins content class and
+    privacy class in addition to the normal authorization lineage.
+    """
+
+
 class MediaDeliveryApprovalBinding(FrozenModel):
     """Immutable Action reference to one operator delivery-approval revision."""
 
@@ -442,7 +453,7 @@ class Action(FrozenModel):
     causation_id: str = Field(min_length=1)
     correlation_id: str = Field(min_length=1)
     kind: str = Field(min_length=1)
-    layer: Literal["external_action", "media_action", "read_only_tool"]
+    layer: Literal["external_action", "media_action", "read_only_tool", "perception_tool"]
     intent_ref: str = Field(min_length=1)
     actor: str = Field(min_length=1)
     target: str = Field(min_length=1)
@@ -456,6 +467,7 @@ class Action(FrozenModel):
     expression_beat_id: str | None = Field(default=None, min_length=1)
     provider_media_grant: ProviderMediaGrantBinding | None = None
     read_only_tool_authorization: ReadOnlyToolAuthorizationBinding | None = None
+    perception_authorization: PerceptionAuthorizationBinding | None = None
     media_delivery_approval: MediaDeliveryApprovalBinding | None = None
     idempotency_key: str = Field(min_length=1)
     not_before: datetime | None = None
@@ -487,6 +499,11 @@ class Action(FrozenModel):
                 raise ValueError("read-only tool Action requires exact enforcement authorization")
         elif self.read_only_tool_authorization is not None:
             raise ValueError("only read-only tool Actions may carry tool authorization")
+        if self.kind in {"vision", "transcription"}:
+            if self.layer != "perception_tool" or self.perception_authorization is None:
+                raise ValueError("perception Action requires exact enforcement authorization")
+        elif self.perception_authorization is not None:
+            raise ValueError("only perception Actions may carry perception authorization")
         if self.kind == "media_delivery":
             if self.layer != "external_action" or self.media_delivery_approval is None:
                 raise ValueError("media delivery Action requires an exact operator approval")
@@ -529,6 +546,8 @@ class TriggerProcess(FrozenModel):
         "interaction_appraisal",
         "interaction_fact",
         "read_only_tool_deliberation",
+        "perception_deliberation",
+        "perception_result_deliberation",
         "affect_deliberation",
         "outcome_deliberation",
         "expression_reconsideration",
@@ -552,6 +571,8 @@ class TriggerProcess(FrozenModel):
                 "interaction_appraisal",
                 "interaction_fact",
                 "read_only_tool_deliberation",
+                "perception_deliberation",
+                "perception_result_deliberation",
                 "affect_deliberation",
                 "outcome_deliberation",
                 "expression_reconsideration",
@@ -660,6 +681,38 @@ class ToolResultProjection(FrozenModel):
     result_id: str = Field(min_length=1)
     request_id: str = Field(min_length=1)
     action_id: str = Field(min_length=1)
+    result_ref: str = Field(min_length=1)
+    result_hash: str = Field(min_length=64, max_length=71)
+    receipt_event_ref: str = Field(min_length=1)
+    receipt_event_payload_hash: str = Field(min_length=64, max_length=64)
+    external_result_id: str = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+    accepted_at: datetime
+
+
+class PerceptionRequestProjection(FrozenModel):
+    """Accepted immutable request to inspect one user-provided media item."""
+
+    request_id: str = Field(min_length=1)
+    action_id: str = Field(min_length=1)
+    source_event_ref: str = Field(min_length=1)
+    source_world_revision: int = Field(ge=0)
+    source_payload_hash: str = Field(min_length=64, max_length=64)
+    analysis_kind: Literal["vision", "transcription"]
+    target: Literal["perception:vision", "perception:transcription"]
+    input_ref: str = Field(min_length=1)
+    input_hash: str = Field(min_length=64, max_length=71)
+    content_privacy_class: PrivacyClass
+
+
+class PerceptionResultProjection(FrozenModel):
+    """Immutable provider descriptor; never an inferred fact or transcript text."""
+
+    result_id: str = Field(min_length=1)
+    request_id: str = Field(min_length=1)
+    action_id: str = Field(min_length=1)
+    analysis_kind: Literal["vision", "transcription"]
+    content_privacy_class: PrivacyClass
     result_ref: str = Field(min_length=1)
     result_hash: str = Field(min_length=64, max_length=71)
     receipt_event_ref: str = Field(min_length=1)
@@ -4050,6 +4103,7 @@ class CapabilityGrantValues(FrozenModel):
         "media_send",
         "reaction_send",
         "read_only_tool",
+        "perception_tool",
         "media_planning",
         "media_render",
         "media_inspection",
@@ -4064,6 +4118,8 @@ class CapabilityGrantValues(FrozenModel):
             "tool:weather",
             "tool:web_search",
             "tool:calendar_read",
+            "perception:vision",
+            "perception:transcription",
             "provider:media",
         ],
         ...,
@@ -4256,6 +4312,7 @@ class ConsentGrantValues(FrozenModel):
             "media_send",
             "reaction_send",
             "read_only_tool",
+            "perception_tool",
             "media_planning",
             "media_render",
             "media_inspection",
@@ -4264,7 +4321,7 @@ class ConsentGrantValues(FrozenModel):
         ...,
     ] = Field(min_length=1)
     data_scope_refs: tuple[
-        Literal["data:message_content", "data:user_profile", "data:attachment", "data:location"],
+        Literal["data:message_content", "data:user_profile", "data:attachment", "data:location", "data:image_content", "data:audio_content"],
         ...,
     ] = ()
     channel_scope_refs: tuple[Literal["channel:qq", "channel:wechat", "channel:http"], ...] = ()
@@ -4304,7 +4361,7 @@ class NamedPolicyRef(FrozenModel):
 class PrivacyPolicyValues(FrozenModel):
     subject_ref: str = Field(min_length=1)
     data_class_refs: tuple[
-        Literal["data:message_content", "data:user_profile", "data:attachment", "data:location"],
+        Literal["data:message_content", "data:user_profile", "data:attachment", "data:location", "data:image_content", "data:audio_content"],
         ...,
     ] = ()
     viewer_rule_refs: tuple[
@@ -4586,6 +4643,8 @@ class LedgerProjection(FrozenModel):
     pending_actions: tuple[Action, ...] = ()
     read_only_tool_requests: tuple[ReadOnlyToolRequestProjection, ...] = ()
     tool_results: tuple[ToolResultProjection, ...] = ()
+    perception_requests: tuple[PerceptionRequestProjection, ...] = ()
+    perception_results: tuple[PerceptionResultProjection, ...] = ()
     photo_candidates: tuple[PhotoCandidate, ...] = ()
     media_opportunities: tuple[MediaOpportunity, ...] = ()
     media_plans: tuple[MediaPlan, ...] = ()

@@ -11,6 +11,7 @@ from .expression_lifecycle_runtime import ExpressionReceiptLifecycle
 from .media_delivery_runtime import MediaDeliveryReceiptLifecycle
 from .media_delivery_interaction import media_delivery_interaction_trigger_event
 from .read_only_tool import accepted_tool_result_events
+from .perception import accepted_perception_result_events
 from .schemas import (
     Action,
     ActionReconciliation,
@@ -292,6 +293,17 @@ class SettlementPlanner:
                         payload=payload,
                     )
                 )
+        if action.kind in {"vision", "transcription"}:
+            perception_request = next(
+                (item for item in projection.perception_requests if item.action_id == action.action_id), None
+            )
+            if perception_request is None:
+                raise ValueError("perception Action has no accepted request authority")
+            for event_type, suffix, payload in accepted_perception_result_events(
+                world_id=self._world_id, result=result, receipt_event=receipt_event,
+                request=perception_request, accepted_event_ref=f"event:{trigger_id}:perception-result",
+            ):
+                events.append(self._event(result, trigger_id=trigger_id, event_type=event_type, suffix=suffix, payload=payload))
         events.extend(
             self._event(
                 result,

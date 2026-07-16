@@ -25,7 +25,7 @@ from .expression_action_capabilities import (
 from .schema_core import FrozenModel
 
 
-EXTERNAL_CAPABILITY_CATALOG_VERSION = "world-v2-external-capability-catalog.1"
+EXTERNAL_CAPABILITY_CATALOG_VERSION = "world-v2-external-capability-catalog.2"
 ExternalCapabilityAvailability = Literal["production", "adapter_only", "planned", "prohibited"]
 ExternalCapabilityFamily = Literal[
     "expression", "perception", "read_only_tool", "creative_media"
@@ -117,29 +117,25 @@ EXTERNAL_CAPABILITIES: tuple[ExternalCapability, ...] = (
         capability_id="perception.vision",
         action_kind="vision",
         family="perception",
-        availability="planned",
-        missing_closure=(
-            "source_bound_request",
-            "acceptance_budget",
-            "provider_adapter",
-            "vision_result_projection",
-            "deterministic_result_trigger",
-            "receipt_recovery",
+        availability="adapter_only",
+        installed_closure=(
+            "source_bound_request", "acceptance_budget", "enforcement_authorization",
+            "injected_provider_adapter", "vision_result_projection",
+            "deterministic_result_trigger", "receipt_recovery",
         ),
+        missing_closure=("default_provider_composition", "production_request_deliberation", "result_response_lane"),
     ),
     ExternalCapability(
         capability_id="perception.transcription",
         action_kind="transcription",
         family="perception",
-        availability="planned",
-        missing_closure=(
-            "source_bound_request",
-            "acceptance_budget",
-            "provider_adapter",
-            "transcription_result_projection",
-            "deterministic_result_trigger",
-            "receipt_recovery",
+        availability="adapter_only",
+        installed_closure=(
+            "source_bound_request", "acceptance_budget", "enforcement_authorization",
+            "injected_provider_adapter", "transcription_result_projection",
+            "deterministic_result_trigger", "receipt_recovery",
         ),
+        missing_closure=("default_provider_composition", "production_request_deliberation", "result_response_lane"),
     ),
     ExternalCapability(
         capability_id="tool.read_only",
