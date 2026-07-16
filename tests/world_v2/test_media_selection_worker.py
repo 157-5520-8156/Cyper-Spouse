@@ -6,26 +6,65 @@ from datetime import UTC, datetime
 
 from companion_daemon.world_v2.media_selection_draft import MediaSelectionDraftAdapter
 from companion_daemon.world_v2.media_selection_worker import MediaSelectionWorker
+from companion_daemon.world_v2.media_v2 import MediaEvidenceSource, PhotoCandidate
 
 NOW = datetime(2026, 7, 16, tzinfo=UTC)
 
 class _Model:
     model = "test"
+    def __init__(self) -> None:
+        self.calls = 0
+
     async def complete(self, _messages, *, temperature=0.2):  # type: ignore[no-untyped-def]
+        self.calls += 1
         return '{"decision":"no_op"}'
 
 class _Ledger:
     def project(self):
         return SimpleNamespace(logical_time=NOW, photo_candidates=())
 
-class _Recorder: pass
+class _Recorder:
+    pass
 
 @pytest.mark.asyncio
 async def test_worker_does_not_call_the_model_or_write_when_no_candidate_exists() -> None:
+    model = _Model()
     worker = MediaSelectionWorker(
-        ledger=_Ledger(), draft_adapter=MediaSelectionDraftAdapter(model=_Model()),
+        ledger=_Ledger(), draft_adapter=MediaSelectionDraftAdapter(model=model),
         proposal_recorder=_Recorder(), catalog_version="test.1",
     )
     result = await worker.select_once(logical_time=NOW, actor="worker", trace_id="trace", correlation_id="correlation")
     assert result.status == "no_op"
     assert result.reason_code == "media_selection.no_available_candidates"
+    assert model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_worker_does_not_repeat_a_model_call_for_an_unaccepted_candidate_revision() -> None:
+    candidate = PhotoCandidate(
+        candidate_id="candidate:pending", source_event_refs=("event:source",), family="life_share",
+        privacy_ceiling="shareable", opened_at=NOW, expires_at=NOW.replace(hour=1),
+        ecology_category="activity_result", ecology_observed_at=NOW,
+        source_events=(MediaEvidenceSource(event_ref="event:source", payload_hash="a" * 64),),
+    )
+    model = _Model()
+    ledger = SimpleNamespace(
+        project=lambda: SimpleNamespace(
+            logical_time=NOW,
+            photo_candidates=(candidate,),
+            proposal_revisions=(SimpleNamespace(
+                candidate_id=candidate.candidate_id,
+                expected_candidate_revision=candidate.entity_revision,
+            ),),
+        ),
+    )
+    worker = MediaSelectionWorker(
+        ledger=ledger, draft_adapter=MediaSelectionDraftAdapter(model=model),
+        proposal_recorder=_Recorder(), catalog_version="test.1",
+    )
+
+    result = await worker.select_once(logical_time=NOW, actor="worker", trace_id="trace", correlation_id="correlation")
+
+    assert result.status == "no_op"
+    assert result.reason_code == "media_selection.pending_proposal"
+    assert model.calls == 0

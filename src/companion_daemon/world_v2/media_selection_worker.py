@@ -35,9 +35,37 @@ class MediaSelectionWorker:
         projection = self._ledger.project()
         if projection.logical_time != logical_time:
             return MediaSelectionRunResult(status="blocked", reason_code="media_selection.logical_time_not_current")
-        candidates = tuple(item for item in projection.photo_candidates if item.status == "available" and item.opened_at is not None and item.expires_at is not None and item.expires_at > logical_time and item.source_events)
+        eligible = tuple(
+            item
+            for item in projection.photo_candidates
+            if item.status == "available"
+            and item.opened_at is not None
+            and item.expires_at is not None
+            and item.expires_at > logical_time
+            and item.source_events
+        )
+        pending = {
+            (item.candidate_id, item.expected_candidate_revision)
+            for item in getattr(projection, "proposal_revisions", ())
+            if getattr(item, "candidate_id", None) is not None
+            and getattr(item, "expected_candidate_revision", None) is not None
+        }
+        # A proposal deliberately leaves a candidate ``available`` until
+        # Acceptance.  Do not call the model again for the same aggregate
+        # revision while that proposal is waiting to be accepted or closed.
+        candidates = tuple(
+            item for item in sorted(eligible, key=lambda value: value.candidate_id)
+            if (item.candidate_id, item.entity_revision) not in pending
+        )[:32]
         if not candidates:
-            return MediaSelectionRunResult(status="no_op", reason_code="media_selection.no_available_candidates")
+            return MediaSelectionRunResult(
+                status="no_op",
+                reason_code=(
+                    "media_selection.pending_proposal"
+                    if eligible
+                    else "media_selection.no_available_candidates"
+                ),
+            )
         cursor = ProjectionCursor(world_revision=projection.world_revision, deliberation_revision=projection.deliberation_revision, ledger_sequence=projection.ledger_sequence)
         # The token is deliberately distinct from the candidate id: model text
         # cannot become an authority-bearing identifier by coincidence.
