@@ -86,6 +86,7 @@ from .media_v2 import (
     MediaPlan,
     PhotoCandidate,
     PhotoCandidateOpenedPayload,
+    PhotoCandidateUnrenderablePayload,
     continuation_trigger_id,
     media_repair_attempt_id,
     media_repair_action_id,
@@ -5069,6 +5070,37 @@ def _photo_candidate_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
     return state.model_copy(update={"photo_candidates": (*state.photo_candidates, candidate)})
 
 
+def _photo_candidate_unrenderable(state: ReducerState, event: WorldEvent) -> ReducerState:
+    """Record a compiler refusal against the same available P1 candidate."""
+
+    payload = PhotoCandidateUnrenderablePayload.model_validate_json(event.payload_json)
+    candidate = next(
+        (item for item in state.photo_candidates if item.candidate_id == payload.candidate_id), None
+    )
+    if (
+        state.logical_time is None
+        or event.logical_time != state.logical_time
+        or candidate is None
+        or candidate.status != "available"
+        or candidate.entity_revision != payload.expected_entity_revision
+        or candidate.opened_at is None
+        or candidate.expires_at is None
+        or candidate.opened_event_ref is None
+        or candidate.opened_event_payload_hash is None
+    ):
+        raise ValueError("photo candidate unrenderable result is not current")
+    return state.model_copy(
+        update={
+            "photo_candidates": _advance_media_candidate(
+                state.photo_candidates,
+                candidate_id=candidate.candidate_id,
+                expected_status="available",
+                next_status="unrenderable",
+            )
+        }
+    )
+
+
 def _media_selection_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     """Persist a model's P1 candidate choice without granting media effects."""
 
@@ -8747,6 +8779,9 @@ _EVENTS = {
             "ProviderMediaGrantRecorded", RevisionClass.WORLD, _provider_media_grant_recorded
         ),
         EventDefinition("PhotoCandidateOpened", RevisionClass.WORLD, _photo_candidate_opened),
+        EventDefinition(
+            "PhotoCandidateUnrenderable", RevisionClass.WORLD, _photo_candidate_unrenderable
+        ),
         EventDefinition(
             "MediaSelectionProposalRecorded",
             RevisionClass.DELIBERATION,

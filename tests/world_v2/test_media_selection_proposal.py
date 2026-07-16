@@ -14,7 +14,11 @@ from companion_daemon.world_v2.media_selection_proposal import (
     media_candidate_authority_hash,
     media_selection_proposed_change_hash,
 )
-from companion_daemon.world_v2.media_v2 import MediaEvidenceSource, PhotoCandidate
+from companion_daemon.world_v2.media_v2 import (
+    MediaEvidenceSource,
+    PhotoCandidate,
+    PhotoCandidateUnrenderablePayload,
+)
 from companion_daemon.world_v2.reducers import ReducerState, reduce_event
 from companion_daemon.world_v2.schemas import CommittedWorldEventRef, LedgerProjection, WorldEvent
 
@@ -178,3 +182,25 @@ def test_compiler_derives_candidate_authority_and_cursor_coordinates_from_projec
     assert proposal.candidate_id == candidate.candidate_id
     assert proposal.expected_candidate_revision == candidate.entity_revision
     assert proposal.evaluated_ledger_sequence == 2
+
+
+def test_unrenderable_snapshot_closes_the_same_available_candidate_without_substitution() -> None:
+    state = _opened_state()
+    candidate = state.photo_candidates[0]
+
+    reduced = reduce_event(
+        state,
+        _event(
+            "event:candidate-unrenderable:1",
+            "PhotoCandidateUnrenderable",
+            PhotoCandidateUnrenderablePayload(
+                candidate_id=candidate.candidate_id,
+                expected_entity_revision=candidate.entity_revision,
+                reason_code="no_visual_evidence",
+            ).model_dump(mode="json"),
+        ),
+    )
+
+    assert reduced.photo_candidates == (
+        candidate.model_copy(update={"entity_revision": 2, "status": "unrenderable"}),
+    )

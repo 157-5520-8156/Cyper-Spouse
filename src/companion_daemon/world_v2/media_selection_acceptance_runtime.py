@@ -10,6 +10,7 @@ from .accepted_ledger_batch import AcceptedLedgerBatchHandle, AcceptedLedgerBatc
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
 from .media_opportunity_authorizer import MediaOpportunityAuthorizer
+from .media_evidence_snapshot import MediaEvidenceNotRenderable
 from .media_selection_acceptance_manifest import (
     build_media_selection_acceptance_manifest,
 )
@@ -20,6 +21,7 @@ from .media_selection_proposal import (
 from .media_v2 import (
     ImmutableMediaPayloadStore,
     MediaOpportunityFrozenPayload,
+    PhotoCandidateUnrenderablePayload,
     StoredMediaPayload,
     media_digest,
     planning_request_id,
@@ -391,6 +393,79 @@ class MediaSelectionAtomicRecorder:
             + _digest({"cursor": cursor.model_dump(mode="json"), "manifest": manifest.manifest_hash}),
         )
 
+    def record_unrenderable(
+        self,
+        *,
+        handle: _PinnedMediaSelectionProposal,
+        actor: str,
+        source: str,
+        logical_time: datetime,
+        created_at: datetime,
+        trace_id: str,
+        correlation_id: str,
+        reason_code: str,
+    ) -> CommitResult:
+        """Close the exact candidate when frozen evidence cannot be compiled.
+
+        This is a mechanical terminal fact, not an Acceptance substitute: no
+        opportunity, budget, or provider Action was authorized.  Keeping it
+        outside the accepted four-effect batch also means a failed compiler
+        can never leave an orphaned reservation.
+        """
+
+        if not self._reader.owns(handle):
+            raise MediaSelectionAcceptanceError("proposal_handle_untrusted")
+        proposal = object.__getattribute__(handle, "_PinnedMediaSelectionProposal__proposal")
+        proposal_event = object.__getattribute__(handle, "_PinnedMediaSelectionProposal__event")
+        cursor = object.__getattribute__(handle, "_PinnedMediaSelectionProposal__cursor")
+        projection = self._ledger.project_at(cursor)
+        candidate = next(
+            (item for item in projection.photo_candidates if item.candidate_id == proposal.candidate_id), None
+        )
+        if (
+            candidate is None
+            or candidate.status != "available"
+            or candidate.entity_revision != proposal.expected_candidate_revision
+            or projection.logical_time != logical_time
+        ):
+            raise MediaSelectionAcceptanceError("candidate_not_current")
+        payload = PhotoCandidateUnrenderablePayload(
+            candidate_id=candidate.candidate_id,
+            expected_entity_revision=candidate.entity_revision,
+            reason_code=reason_code,
+        ).model_dump(mode="json")
+        event = WorldEvent.from_payload(
+            schema_version="world-v2.1",
+            event_id=_event_id(
+                role="candidate-unrenderable",
+                stable=_digest({
+                    "candidate_id": candidate.candidate_id,
+                    "reason_code": reason_code,
+                    "revision": candidate.entity_revision,
+                }),
+            ),
+            event_type="PhotoCandidateUnrenderable",
+            world_id=self._ledger.world_id,
+            logical_time=logical_time,
+            created_at=created_at,
+            actor=actor,
+            source=source,
+            trace_id=trace_id,
+            causation_id=proposal_event.event_id,
+            correlation_id=correlation_id,
+            idempotency_key=_identity(
+                event_type="PhotoCandidateUnrenderable", world_id=self._ledger.world_id, payload=payload
+            ),
+            payload=payload,
+        )
+        return self._ledger.commit_at_cursor(
+            (event,),
+            expected_cursor=cursor,
+            commit_id="commit:media-selection-unrenderable:" + _digest(
+                {"cursor": cursor.model_dump(mode="json"), "event_id": event.event_id}
+            ),
+        )
+
 
 class MediaSelectionAcceptanceRuntime:
     def __init__(
@@ -430,18 +505,30 @@ class MediaSelectionAcceptanceRuntime:
         amount_limit: int,
     ) -> CommitResult:
         cursor = object.__getattribute__(handle, "_PinnedMediaSelectionProposal__cursor")
-        batch = self._recorder.prepare_batch(
-            handle=handle,
-            actor=actor,
-            source=source,
-            logical_time=logical_time,
-            created_at=created_at,
-            trace_id=trace_id,
-            correlation_id=correlation_id,
-            grant=grant,
-            account_id=account_id,
-            amount_limit=amount_limit,
-        )
+        try:
+            batch = self._recorder.prepare_batch(
+                handle=handle,
+                actor=actor,
+                source=source,
+                logical_time=logical_time,
+                created_at=created_at,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+                grant=grant,
+                account_id=account_id,
+                amount_limit=amount_limit,
+            )
+        except MediaEvidenceNotRenderable as exc:
+            return self._recorder.record_unrenderable(
+                handle=handle,
+                actor=actor,
+                source=source,
+                logical_time=logical_time,
+                created_at=created_at,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+                reason_code=exc.reason_code,
+            )
         return self.ledger.commit_accepted(batch, expected_cursor=cursor)
 
 

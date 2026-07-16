@@ -463,6 +463,19 @@ class PhotoCandidateOpenedPayload(FrozenModel):
     candidate: PhotoCandidate
 
 
+class PhotoCandidateUnrenderablePayload(FrozenModel):
+    """Close one selected-attempt candidate before a planner Action exists.
+
+    Evidence compilation is a hard precondition, not a retryable image
+    provider failure.  Retaining the candidate ID/revision and reason makes
+    this terminal result inspectable without inventing a replacement event.
+    """
+
+    candidate_id: str = Field(min_length=1, max_length=256)
+    expected_entity_revision: int = Field(ge=1)
+    reason_code: str = Field(min_length=1, max_length=128)
+
+
 class MediaOpportunityFrozenPayload(FrozenModel):
     opportunity: MediaOpportunity
 
@@ -481,6 +494,7 @@ class MediaNotRenderableRecordedPayload(FrozenModel):
 
 MEDIA_V2_PAYLOAD_MODELS = {
     "PhotoCandidateOpened": PhotoCandidateOpenedPayload,
+    "PhotoCandidateUnrenderable": PhotoCandidateUnrenderablePayload,
     "MediaOpportunityFrozen": MediaOpportunityFrozenPayload,
     "MediaPlanRecorded": MediaPlanRecordedPayload,
     "MediaNotRenderableRecorded": MediaNotRenderableRecordedPayload,
@@ -632,7 +646,7 @@ def media_delivery_id(*, action_id: str, receipt_id: str) -> str:
 
 __all__ = [
     "MEDIA_V2_PAYLOAD_MODELS", "PhotoCandidate", "MediaEvidenceSource", "ImageEvidenceIndexEntry", "ImageEventSnapshot", "FrozenMediaEvidenceSnapshot", "MediaPrivacyCeiling", "MediaOpportunity", "MediaPlan", "MediaNotRenderable", "MediaArtifact", "MediaInspectionRecord", "MediaPreview", "MediaRepairAuthorization", "MediaAutomaticDeliveryApproval", "MediaDeliveryShared",
-    "PhotoCandidateOpenedPayload", "MediaOpportunityFrozenPayload", "MediaPlanRecordedPayload", "MediaNotRenderableRecordedPayload", "MediaRenderArtifactRecordedPayload", "MediaInspectionRecordedPayload", "MediaPreviewGeneratedPayload", "MediaPreviewFailedPayload", "MediaRepairAuthorizedPayload", "MediaAutomaticDeliveryApprovedPayload", "MediaDeliverySharedPayload",
+    "PhotoCandidateOpenedPayload", "PhotoCandidateUnrenderablePayload", "MediaOpportunityFrozenPayload", "MediaPlanRecordedPayload", "MediaNotRenderableRecordedPayload", "MediaRenderArtifactRecordedPayload", "MediaInspectionRecordedPayload", "MediaPreviewGeneratedPayload", "MediaPreviewFailedPayload", "MediaRepairAuthorizedPayload", "MediaAutomaticDeliveryApprovedPayload", "MediaDeliverySharedPayload",
     "StoredMediaPayload", "ImmutableMediaPayloadStore", "InMemoryImmutableMediaPayloadStore", "SQLiteImmutableMediaPayloadStore",
     "MediaPlanner", "MediaPlanningResult", "media_digest", "media_payload_hash", "planning_request_id", "continuation_trigger_id", "media_repair_trigger_id", "media_repair_attempt_id", "media_repair_action_id", "media_repair_reservation_id", "media_delivery_action_id", "media_delivery_reservation_id", "media_delivery_id",
 ]

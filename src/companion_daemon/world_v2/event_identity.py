@@ -91,6 +91,13 @@ def _life_identity_components(
         return world_id, _nested(payload, "npc", "npc_id")
     if event_type == "PhotoCandidateOpened":
         return world_id, _nested(payload, "candidate", "candidate_id")
+    if event_type == "PhotoCandidateUnrenderable":
+        return (
+            world_id,
+            payload.get("candidate_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("reason_code"),
+        )
     if event_type == "MediaSelectionProposalRecorded":
         return world_id, payload.get("proposal_id")
     if event_type == "MediaOpportunityFrozen":
