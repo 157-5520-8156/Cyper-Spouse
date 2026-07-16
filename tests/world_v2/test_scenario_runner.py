@@ -15,7 +15,11 @@ from companion_daemon.world_v2.scenario_corpus import (
     scenario_cases_digest,
     verify_frozen_scenario_corpus,
 )
-from companion_daemon.world_v2.scenario_runner import ScenarioRunner
+from companion_daemon.world_v2.scenario_runner import (
+    FROZEN_OFFLINE_SUITE_BASELINE_VERSION,
+    FROZEN_OFFLINE_SUITE_MANIFEST_HASH,
+    ScenarioRunner,
+)
 
 
 def test_frozen_phase8_corpus_has_required_family_emotion_and_hash_coverage() -> None:
@@ -110,6 +114,16 @@ async def test_suite_manifest_is_hash_bound_and_explicitly_not_human_evaluation(
     assert suite.passed
     manifest = suite.export_manifest()
     assert len(manifest["manifest_hash"]) == 64
-    assert manifest["mechanism_baseline_version"] == "world-v2-offline-mechanism-baseline.2"
+    assert manifest["mechanism_baseline_version"] == FROZEN_OFFLINE_SUITE_BASELINE_VERSION
     assert "not a human" in str(manifest["runner_limitations"])
     assert json.dumps(manifest, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+async def test_complete_frozen_suite_matches_the_explicit_mechanism_baseline(tmp_path) -> None:
+    """The CI baseline covers every fixture, not just the smoke-test prefix."""
+
+    suite = await ScenarioRunner(workdir=tmp_path).run_frozen_suite()
+
+    assert suite.passed
+    assert suite.manifest_hash == FROZEN_OFFLINE_SUITE_MANIFEST_HASH

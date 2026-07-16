@@ -2041,7 +2041,7 @@ Phase 2 不再按“把所有 projection 一起写完”的宽任务施工，而
 
 - 实现拟真人味 replay suite。
 - 固化 scenario gold set、judge/rubric/statistics version、裸聊与归档 baseline、热冷性能与 test-economy profile。
-- 离线机制 CI 的输入 corpus 与机制基线必须分开版本化；当前 `world-v2-offline-mechanism-baseline.2` 记录了 source-bound `private_impressions` Context slice 的加入。该 slice 即使为空也会合法改变 Capsule、Proposal 与 replay 身份链；它不是人味盲测或真人体验提升的证据。
+- 离线机制 CI 的输入 corpus 与机制基线必须分开版本化。`world-v2-offline-mechanism-baseline.2` 曾记录 source-bound `private_impressions` Context slice 的加入；其冻结 hash 已在后续接受路径变更中陈旧。当前 `world-v2-offline-mechanism-baseline.3` 固化完整的 120 场景 manifest：read-only tool 的 enforcement authorization 进入 `Action` canonical payload 后，普通 Action 也显式记录 `read_only_tool_authorization: null`，因此 acceptance/event/replay identity 合法改变。升级前后 120 条场景逐行比较的 output、event types、terminal states、trigger kinds、room projection、模型调用和验证结果均不变，只有 replay identity 链变化；它不是人味盲测或真人体验提升的证据。
 - 建立机制闭环 CI。
 - 删除或隔离旧行为入口。
 - World v2 切为默认运行时。
