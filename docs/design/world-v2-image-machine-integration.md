@@ -5,6 +5,22 @@
 读者：World v2 agent、图片机维护者  
 相关规格：[World v2 重构计划](../world-v2-refactor-plan.md)、[图片机合同](../media-machine.md)
 
+> 实施状态更新（2026-07-16）：P0 的 source-bound life-share preview、P1
+> 的候选选择/接受批次，以及 P2 的普通角色公开 preview 已接入 World v2
+> 生产组装。P2 的角色合同、AppearanceState 和可选短时身体状态会在
+> pinned event time 冻结；capture/合同授权留在外层 sidecar，不作为图片
+> 规划证据。P3 的 `VisiblePhysicalState` 事实域已实现，但私密 lane、
+> `relationship_media_context` 和 `PrivateExpressionBasis` 仍未开放，不能
+> 把本文件的 P3/P4 清单误读为已经上线的能力。
+
+> 当前验证入口：`tests/world_v2/test_media_evidence_snapshot.py`、
+> `test_media_opportunity_authorizer.py`、
+> `test_media_selection_acceptance_manifest.py`、
+> `test_event_media_planner_adapter.py` 与
+> `test_production_turn_application.py`。其中生产测试覆盖 SQLite 上的
+> `活动→ImageEvidenceDeclared→角色候选→Selection Proposal→Acceptance→V2
+> snapshot`；图片桥接测试还覆盖 P2 capture 越权拒绝。
+
 ## 结论
 
 World v2 已经具备媒体链路最难替换的骨架：不可变 sidecar、候选/机会/计划/验收/预览记录、effect-once Action、预算、修复与投递后的互动线程。它还**没有**具备图片机 v5 的输入适配层。
