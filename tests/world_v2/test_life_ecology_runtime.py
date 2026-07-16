@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import hashlib
 from types import SimpleNamespace
 
@@ -191,6 +191,29 @@ async def test_life_ecology_owns_one_valid_durable_wake_then_fans_out_once_and_r
         "correlation_id": "correlation:run",
     }]
     assert trigger_store.completed[0][2] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_life_ecology_retries_an_exact_older_wake_at_the_current_logical_time() -> None:
+    event = _event("older-clock")
+    ledger = _Ledger(event)
+    later = NOW + timedelta(minutes=5)
+    ledger._projection.logical_time = later
+    ledger._projection.world_revision = 9
+    trigger_store, media = _TriggerStore(), _Media()
+    runtime = LifeEcologyRuntime(
+        ledger=ledger,
+        trigger_store=trigger_store,
+        media_followup=media,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id, trace_id="trace:late-retry", correlation_id="correlation:late-retry"
+    )
+
+    assert result.status == "idle"
+    assert media.calls[0]["logical_time"] == later
 
 
 @pytest.mark.asyncio

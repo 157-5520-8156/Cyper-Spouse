@@ -216,7 +216,10 @@ class LifeEcologyRuntime:
         if (
             committed is None
             or committed.event_type not in LIFE_ECOLOGY_WAKE_EVENT_TYPES
-            or committed.logical_time != logical_time
+            # A worker may recover a durable wake after a later ClockAdvanced.
+            # The wake's immutable bytes remain its proof; candidate frequency
+            # and expiry are evaluated at the current authoritative time.
+            or committed.logical_time > logical_time
         ):
             return None
         located = self._ledger.lookup_event_commit(wake_event_ref)

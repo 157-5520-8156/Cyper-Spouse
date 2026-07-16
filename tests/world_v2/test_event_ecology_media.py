@@ -208,6 +208,31 @@ def test_ecology_is_replay_safe_and_category_cooldown_uses_persisted_opportuniti
     ).status == "idle"
 
 
+def test_ecology_recovers_an_older_committed_wake_at_the_current_logical_time() -> None:
+    wake = _ref("clock", "ClockAdvanced", at=NOW)
+    activity = _ref("activity", "ActivityStarted", at=NOW)
+    projection = _projection(
+        refs=(wake, activity),
+        plans=(SimpleNamespace(
+            status="active", authority_origin=_origin(activity.event_id, at=NOW),
+            privacy_class="shareable", last_transitioned_at=NOW,
+            activity_kind="walk", location_ref="location:park", participant_refs=("companion:celia",),
+        ),),
+    )
+    later = NOW + timedelta(minutes=5)
+    projection.logical_time = later
+    ledger = _Ledger(projection)
+    runtime = EventEcologyMediaCandidateRuntime(ledger=ledger, sidecar=InMemoryImmutableMediaPayloadStore())
+
+    result = runtime.drain_once(
+        wake_event_ref=wake.event_id, logical_time=later, actor="worker:event-ecology",
+        trace_id="trace:recovery", correlation_id="correlation:recovery",
+    )
+
+    assert result.status == "created"
+    assert len(result.candidate_ids) == 1
+
+
 def test_ecology_refuses_an_uncommitted_or_non_life_wake() -> None:
     start = _ref("start", "WorldStarted")
     projection = _projection(refs=(start,))

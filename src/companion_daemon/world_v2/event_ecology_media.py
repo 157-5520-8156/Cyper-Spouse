@@ -181,6 +181,8 @@ class EventEcologyMediaCandidateRuntime:
             raise ValueError("event ecology requires a committed life/clock/worker wake event")
         if projection.logical_time is None or logical_time != projection.logical_time:
             raise ValueError("event ecology must run at the current authoritative logical time")
+        if wake.logical_time > logical_time:
+            raise ValueError("event ecology wake cannot be later than the authoritative logical time")
         candidates = self._discover(projection=projection, logical_time=logical_time)
         if not candidates:
             return EcologyDrainResult(status="idle")
