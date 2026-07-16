@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from dataclasses import replace
 import hashlib
 
 import pytest
@@ -8,15 +9,20 @@ import pytest
 from companion_daemon import event_media
 from companion_daemon.world_v2.event_media_planner_adapter import EventMediaPlannerAdapter
 from companion_daemon.world_v2.media_v2 import (
+    CharacterMediaCandidateContract,
+    CharacterMediaSnapshotAuthorization,
     FrozenMediaEvidenceSnapshot,
+    ImageEventSnapshotV2,
     InMemoryImmutableMediaPayloadStore,
     MediaEvidenceSource,
     MediaOpportunity,
     MediaPlanningResult,
+    PhotoCandidate,
     StoredMediaPayload,
     canonical_media_json,
     media_payload_hash,
     planning_request_id,
+    character_media_contract_digest,
 )
 
 
@@ -218,6 +224,74 @@ def _legacy_plan(*, opportunity: MediaOpportunity, snapshot: dict[str, object]) 
     )
 
 
+def _character_sidecar() -> tuple[InMemoryImmutableMediaPayloadStore, MediaOpportunity, dict[str, object]]:
+    declaration = MediaEvidenceSource(event_ref="event:declaration:bridge", payload_hash="b" * 64)
+    activity = MediaEvidenceSource(event_ref=SOURCE_REF, payload_hash=SOURCE_HASH)
+    contract = CharacterMediaCandidateContract(
+        subject_ref="agent:companion", kind="selfie",
+        allowed_capture_modes=("character_front_camera",),
+        allowed_character_visibility=("identifiable",),
+        authority_digest=character_media_contract_digest(
+            subject_ref="agent:companion", kind="selfie", source_events=(activity, declaration),
+            allowed_capture_modes=("character_front_camera",),
+            allowed_character_visibility=("identifiable",),
+        ),
+    )
+    candidate = PhotoCandidate(
+        candidate_id="candidate:character-bridge", source_event_refs=(SOURCE_REF, declaration.event_ref),
+        family="character_media", privacy_ceiling="shareable", opened_at=NOW,
+        expires_at=NOW + timedelta(hours=1), ecology_category="character_media:selfie",
+        ecology_observed_at=NOW, source_events=(activity, declaration),
+        opened_event_ref="event:candidate:character-bridge", opened_event_payload_hash="c" * 64,
+        character_media_contract=contract,
+    )
+    authorization = CharacterMediaSnapshotAuthorization(
+        candidate_id=candidate.candidate_id, candidate_revision=candidate.entity_revision,
+        subject_ref=contract.subject_ref, kind=contract.kind,
+        allowed_capture_modes=contract.allowed_capture_modes,
+        allowed_character_visibility=contract.allowed_character_visibility,
+        authority_digest=contract.authority_digest, source_event_refs=candidate.source_event_refs,
+    )
+    snapshot = _image_snapshot() | {
+        "schema_version": "world-image-event-snapshot-v2",
+        "character": {"subject_ref": "agent:companion", "presence": {"present": True}},
+        "participants": (), "objects": (), "existing_media": (),
+    }
+    snapshot["evidence_index"] = snapshot["evidence_index"] | {
+        "/character/subject_ref": {
+            "source_event_ref": declaration.event_ref,
+            "source_payload_hash": declaration.payload_hash,
+            "visibility": "shareable",
+        },
+        "/character/presence/present": {
+            "source_event_ref": declaration.event_ref,
+            "source_payload_hash": declaration.payload_hash,
+            "visibility": "shareable",
+        },
+    }
+    frozen = FrozenMediaEvidenceSnapshot(
+        source_events=(activity, declaration), complete_candidate=candidate.model_dump(mode="json"),
+        image_event_snapshot=ImageEventSnapshotV2.model_validate(snapshot),
+        character_media_authorization=authorization,
+    )
+    body = canonical_media_json(frozen.model_dump(mode="json"))
+    opportunity = MediaOpportunity(
+        opportunity_id="opportunity:character-bridge", candidate_id=candidate.candidate_id,
+        family="character_media", delivery_mode="preview", privacy_ceiling="shareable",
+        event_snapshot_ref="sidecar:character-bridge:snapshot", event_snapshot_hash=media_payload_hash(body),
+        source_event_refs=(SOURCE_REF, declaration.event_ref),
+        candidate_source_event_refs=candidate.source_event_refs,
+        snapshot_source_events=(activity, declaration), catalog_version="world-image-event-snapshot-v2",
+        expires_at=NOW + timedelta(hours=1),
+    )
+    sidecar = InMemoryImmutableMediaPayloadStore()
+    sidecar.put_if_absent(StoredMediaPayload(
+        payload_ref=opportunity.event_snapshot_ref, payload_hash=opportunity.event_snapshot_hash,
+        content_type="application/vnd.world-v2.media-opportunity+json", body=body,
+    ))
+    return sidecar, opportunity, snapshot
+
+
 @pytest.mark.asyncio
 async def test_bridge_maps_only_frozen_public_life_preview_and_preserves_both_hashes() -> None:
     sidecar, opportunity = _sidecar()
@@ -249,8 +323,50 @@ async def test_bridge_maps_only_frozen_public_life_preview_and_preserves_both_ha
             allowed_evidence_refs=tuple(sorted(_image_snapshot()["evidence_index"])),
         )
     ]
+
+
+@pytest.mark.asyncio
+async def test_bridge_admits_only_the_outer_authorized_ordinary_character_preview() -> None:
+    sidecar, opportunity, snapshot = _character_sidecar()
+    legacy_plan = replace(
+        _legacy_plan(opportunity=opportunity, snapshot=snapshot), family="character_media",
+        capture_mode="character_front_camera", character_visibility="identifiable",
+    )
+    legacy = _LegacyPlanner(event_media.PlannedMedia(legacy_plan))
+    adapter = EventMediaPlannerAdapter(sidecar=sidecar, legacy_planner=legacy, result_store=_ResultStore())
+
+    result = await adapter.plan(
+        opportunity=opportunity, planning_request_id=planning_request_id(opportunity.opportunity_id)
+    )
+
+    assert result.plan is not None
+    assert result.plan.family == "character_media"
+    assert len(legacy.calls) == 1
+    planner_snapshot = legacy.calls[0].event_snapshot
+    assert "character_media_authorization" not in planner_snapshot
+    assert "capture_authorization" not in planner_snapshot["character"]
+    assert "candidate_contract" not in planner_snapshot["character"]
+    assert result.plan_payload is not None
     assert result.plan_payload.content_type == "application/vnd.world-v2.media-plan+json"
-    assert result.plan_payload.body == canonical_media_json(_legacy_plan(opportunity=opportunity, snapshot=snapshot).to_payload())
+    assert result.plan_payload.body == canonical_media_json(legacy_plan.to_payload())
+
+
+@pytest.mark.asyncio
+async def test_bridge_rejects_a_character_plan_that_exceeds_frozen_capture_authority() -> None:
+    sidecar, opportunity, snapshot = _character_sidecar()
+    legacy_plan = replace(
+        _legacy_plan(opportunity=opportunity, snapshot=snapshot), family="character_media",
+        capture_mode="character_rear_camera", character_visibility="identifiable",
+    )
+    legacy = _LegacyPlanner(event_media.PlannedMedia(legacy_plan))
+    adapter = EventMediaPlannerAdapter(sidecar=sidecar, legacy_planner=legacy, result_store=_ResultStore())
+
+    result = await adapter.plan(
+        opportunity=opportunity, planning_request_id=planning_request_id(opportunity.opportunity_id)
+    )
+
+    assert result.not_renderable is not None
+    assert result.not_renderable.reason_code == "p2_legacy_plan_exceeds_authorization"
 
 
 @pytest.mark.asyncio

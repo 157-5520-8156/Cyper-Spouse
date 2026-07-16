@@ -24,6 +24,7 @@ from typing import Mapping, Protocol
 from companion_daemon import event_media
 
 from .media_v2 import (
+    CharacterMediaSnapshotAuthorization,
     FrozenMediaEvidenceSnapshot,
     ImmutableMediaPayloadStore,
     MediaNotRenderable,
@@ -31,6 +32,7 @@ from .media_v2 import (
     MediaPlan,
     MediaPlanningResult,
     StoredMediaPayload,
+    PhotoCandidate,
     canonical_media_json,
     media_digest,
     media_payload_hash,
@@ -40,7 +42,8 @@ from .media_v2 import (
 
 _OPPORTUNITY_CONTENT_TYPE = "application/vnd.world-v2.media-opportunity+json"
 _PLAN_CONTENT_TYPE = "application/vnd.world-v2.media-plan+json"
-_IMAGE_EVENT_SCHEMA = "world-image-event-snapshot-v1"
+_P0_IMAGE_EVENT_SCHEMA = "world-image-event-snapshot-v1"
+_P2_IMAGE_EVENT_SCHEMA = "world-image-event-snapshot-v2"
 _PUBLIC_VISIBILITIES = frozenset({"public", "shareable"})
 _STRUCTURAL_SNAPSHOT_KEYS = frozenset({"schema_version", "evidence_index"})
 
@@ -263,7 +266,11 @@ class EventMediaPlannerAdapter:
             return self._not_renderable(
                 opportunity, planning_request_id, "planning_request_id_mismatch"
             )
-        if not self._p0_opportunity_is_authorized(opportunity):
+        lane = self._authorized_lane(opportunity)
+        if lane is None:
+            # Preserve P0's public error contract for legacy/invalid
+            # opportunities.  A valid P2 opportunity reaches its distinct
+            # authorization checks below.
             return self._not_renderable(opportunity, planning_request_id, "p0_opportunity_not_authorized")
         try:
             prior = await self._result_store.lookup(planning_request_id=planning_request_id)
@@ -274,13 +281,13 @@ class EventMediaPlannerAdapter:
         if prior is not None:
             return prior
 
-        snapshot, error = self._load_image_event_snapshot(opportunity)
+        snapshot, error = self._load_image_event_snapshot(opportunity, lane=lane)
         if error is not None:
             return self._not_renderable(opportunity, planning_request_id, error)
         assert snapshot is not None
         legacy_opportunity = event_media.MediaOpportunity(
             opportunity_id=opportunity.opportunity_id,
-            family="life_share",
+            family=opportunity.family,
             privacy_ceiling="ordinary",
             event_snapshot=snapshot,
             delivery_mode="preview",
@@ -305,12 +312,12 @@ class EventMediaPlannerAdapter:
         )
         return await self._store_terminal(planning_request_id=planning_request_id, result=result)
 
-    def _p0_opportunity_is_authorized(self, opportunity: MediaOpportunity) -> bool:
+    def _authorized_lane(self, opportunity: MediaOpportunity) -> str | None:
         # ``privacy_ceiling`` is World visibility in the current persisted
         # model.  ``media_privacy_ceiling`` will be added by the snapshot
         # migration; accepting a future non-ordinary value here would silently
         # expand P0, so treat an absent field as the only compatible ordinary.
-        return (
+        if (
             opportunity.family == "life_share"
             and opportunity.delivery_mode == "preview"
             and opportunity.privacy_ceiling in _PUBLIC_VISIBILITIES
@@ -318,7 +325,21 @@ class EventMediaPlannerAdapter:
             and opportunity.recipient_ref is None
             and opportunity.private_expression_basis_ref is None
             and getattr(opportunity, "media_privacy_ceiling", "ordinary") == "ordinary"
-        )
+        ):
+            return "p0"
+        if (
+            opportunity.family == "character_media"
+            and opportunity.delivery_mode == "preview"
+            and opportunity.privacy_ceiling in _PUBLIC_VISIBILITIES
+            and opportunity.media_lane == "ordinary_life"
+            and opportunity.recipient_ref is None
+            and opportunity.private_expression_basis_ref is None
+            and opportunity.media_privacy_ceiling == "ordinary"
+            and bool(opportunity.candidate_source_event_refs)
+            and bool(opportunity.snapshot_source_events)
+        ):
+            return "p2"
+        return None
 
     async def _store_terminal(
         self, *, planning_request_id: str, result: MediaPlanningResult
@@ -340,7 +361,7 @@ class EventMediaPlannerAdapter:
         )
 
     def _load_image_event_snapshot(
-        self, opportunity: MediaOpportunity
+        self, opportunity: MediaOpportunity, *, lane: str
     ) -> tuple[dict[str, object] | None, str | None]:
         record = self._sidecar.read_exact(payload_ref=opportunity.event_snapshot_ref)
         if (
@@ -351,42 +372,92 @@ class EventMediaPlannerAdapter:
             return None, "frozen_snapshot_unavailable"
         try:
             raw = json.loads(record.body)
-            # ``image_event_snapshot`` is an additive sidecar field owned by
-            # the image-snapshot Module.  Older FrozenMediaEvidenceSnapshot
-            # releases intentionally reject unknown fields, so validate the
-            # established outer wire after taking this one embedded payload
-            # out; we never reconstruct or mutate its bytes.
             if not isinstance(raw, dict):
                 return None, "malformed_frozen_snapshot"
-            outer_wire = dict(raw)
-            outer_wire.pop("image_event_snapshot", None)
-            # Canonical JSON represents the frozen tuple as an array while
-            # the strict Pydantic wire model deliberately requires a tuple.
-            # This is a wire-shape restoration, not a projection read.
-            if isinstance(outer_wire.get("source_events"), list):
-                outer_wire["source_events"] = tuple(outer_wire["source_events"])
-            evidence = FrozenMediaEvidenceSnapshot.model_validate(outer_wire)
+            # Validate the whole immutable wire.  In particular, P2's outer
+            # authorization is only valid when it is paired with its V2 inner
+            # snapshot; stripping that inner value would weaken the contract.
+            evidence = FrozenMediaEvidenceSnapshot.model_validate_json(record.body)
         except (TypeError, ValueError, json.JSONDecodeError):
-            return None, "malformed_frozen_snapshot"
+            # Preserve the legacy diagnostic boundary: once the outer record
+            # exists and carries an inner image snapshot object, malformed
+            # inner provenance is reported as an image-snapshot failure.
+            return None, (
+                "malformed_image_event_snapshot"
+                if isinstance(raw.get("image_event_snapshot"), dict)
+                else "malformed_frozen_snapshot"
+            )
         source_hashes = {item.event_ref: item.payload_hash for item in evidence.source_events}
         if tuple(sorted(source_hashes)) != opportunity.source_event_refs:
             return None, "frozen_snapshot_source_mismatch"
+        if opportunity.snapshot_source_events and evidence.source_events != opportunity.snapshot_source_events:
+            return None, "frozen_snapshot_hash_lineage_mismatch"
+        if lane == "p2":
+            error = self._validate_p2_outer_authorization(
+                opportunity=opportunity, evidence=evidence,
+            )
+            if error is not None:
+                return None, error
         snapshot = raw.get("image_event_snapshot")
         if not isinstance(snapshot, dict):
             return None, "missing_image_event_snapshot"
-        error = self._validate_image_event_snapshot(snapshot=snapshot, source_hashes=source_hashes)
+        error = self._validate_image_event_snapshot(
+            snapshot=snapshot, source_hashes=source_hashes, lane=lane,
+        )
         return (snapshot, error) if error is not None else (snapshot, None)
 
     @staticmethod
+    def _validate_p2_outer_authorization(
+        *, opportunity: MediaOpportunity, evidence: FrozenMediaEvidenceSnapshot,
+    ) -> str | None:
+        authorization = evidence.character_media_authorization
+        if authorization is None or evidence.complete_candidate is None:
+            return "p2_character_authorization_missing"
+        try:
+            candidate = PhotoCandidate.model_validate_json(
+                canonical_media_json(evidence.complete_candidate)
+            )
+        except ValueError:
+            return "p2_complete_candidate_malformed"
+        contract = candidate.character_media_contract
+        if (
+            candidate.family != "character_media"
+            or contract is None
+            or candidate.candidate_id != opportunity.candidate_id
+            or candidate.source_event_refs != opportunity.candidate_source_event_refs
+            or authorization != CharacterMediaSnapshotAuthorization(
+                candidate_id=candidate.candidate_id,
+                candidate_revision=candidate.entity_revision,
+                subject_ref=contract.subject_ref,
+                kind=contract.kind,
+                allowed_capture_modes=contract.allowed_capture_modes,
+                allowed_character_visibility=contract.allowed_character_visibility,
+                authority_digest=contract.authority_digest,
+                source_event_refs=candidate.source_event_refs,
+            )
+            or not set(candidate.source_event_refs).issubset(opportunity.source_event_refs)
+        ):
+            return "p2_character_authorization_mismatch"
+        return None
+
+    @staticmethod
     def _validate_image_event_snapshot(
-        *, snapshot: Mapping[str, object], source_hashes: Mapping[str, str]
+        *, snapshot: Mapping[str, object], source_hashes: Mapping[str, str], lane: str
     ) -> str | None:
         required_mappings = (
             "event", "source", "location", "activity", "environment", "character",
             "visual_requirements", "evidence_index",
         )
-        if snapshot.get("schema_version") != _IMAGE_EVENT_SCHEMA:
+        expected_schema = _P0_IMAGE_EVENT_SCHEMA if lane == "p0" else _P2_IMAGE_EVENT_SCHEMA
+        if snapshot.get("schema_version") != expected_schema:
             return "unsupported_image_event_snapshot"
+        if lane == "p2" and (
+            "character_media_authorization" in snapshot
+            or {"capture_authorization", "candidate_contract"}.intersection(
+                snapshot.get("character", {}) if isinstance(snapshot.get("character"), dict) else {}
+            )
+        ):
+            return "p2_authorization_leaked_into_planner_snapshot"
         if any(not isinstance(snapshot.get(name), dict) for name in required_mappings):
             return "malformed_image_event_snapshot"
         if not isinstance(snapshot.get("participants"), list) or not isinstance(snapshot.get("objects"), list):
@@ -456,11 +527,24 @@ class EventMediaPlannerAdapter:
         inner_hash = hashlib.sha256(canonical_media_json(image_event_snapshot).encode("utf-8")).hexdigest()
         if (
             legacy_plan.opportunity_id != opportunity.opportunity_id
-            or legacy_plan.family != "life_share"
+            or legacy_plan.family != opportunity.family
             or legacy_plan.delivery_mode != "preview"
             or legacy_plan.snapshot_hash != inner_hash
         ):
             return self._not_renderable(opportunity, planning_request_id, "legacy_plan_binding_mismatch")
+        if opportunity.family == "character_media":
+            authorization = self._p2_authorization_from_sidecar(opportunity)
+            if authorization is None:
+                return self._not_renderable(opportunity, planning_request_id, "p2_character_authorization_missing")
+            lane = getattr(legacy_plan.media_lane, "lane", "ordinary_life")
+            if (
+                legacy_plan.privacy != "ordinary"
+                or legacy_plan.capture_mode not in authorization.allowed_capture_modes
+                or legacy_plan.character_visibility not in authorization.allowed_character_visibility
+                or lane != "ordinary_life"
+                or legacy_plan.private_expression_basis is not None
+            ):
+                return self._not_renderable(opportunity, planning_request_id, "p2_legacy_plan_exceeds_authorization")
         body = canonical_media_json(legacy_plan.to_payload())
         payload_ref = "sidecar:media-plan:" + media_digest({
             "opportunity_id": opportunity.opportunity_id,
@@ -482,7 +566,7 @@ class EventMediaPlannerAdapter:
             planning_request_id=planning_request_id,
             opportunity_id=opportunity.opportunity_id,
             event_snapshot_hash=opportunity.event_snapshot_hash,
-            family="life_share",
+            family=opportunity.family,
             planner_version=legacy_plan.version,
             schema_version=legacy_plan.version,
             media_machine_version=opportunity.media_machine_version,
@@ -518,6 +602,22 @@ class EventMediaPlannerAdapter:
             ))
         assert result.not_renderable is not None
         return MediaPlanningResult(not_renderable=result.not_renderable.model_copy(update={"reason_code": reason_code}))
+
+    def _p2_authorization_from_sidecar(
+        self, opportunity: MediaOpportunity,
+    ) -> CharacterMediaSnapshotAuthorization | None:
+        record = self._sidecar.read_exact(payload_ref=opportunity.event_snapshot_ref)
+        if record is None or record.payload_hash != opportunity.event_snapshot_hash:
+            return None
+        try:
+            raw = json.loads(record.body)
+            if not isinstance(raw, dict):
+                return None
+            return FrozenMediaEvidenceSnapshot.model_validate_json(
+                record.body
+            ).character_media_authorization
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
 
 
 def _snapshot_leaves(value: object, pointer: str = "") -> set[str]:
