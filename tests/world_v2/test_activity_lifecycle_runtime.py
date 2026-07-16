@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import pytest
+
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.activity_lifecycle_proposal import ActivityLifecycleProposalCompiler
+from companion_daemon.world_v2.activity_lifecycle_draft import ActivityLifecycleDraftAdapter
 from companion_daemon.world_v2.activity_lifecycle_runtime import (
     ActivityLifecycleAcceptanceRuntime,
     ActivityLifecycleProposalRecorder,
 )
+from companion_daemon.world_v2.activity_lifecycle_worker import ActivityLifecycleWorker
 from companion_daemon.world_v2.schemas import CommitResult, ProjectionCursor
 
 from test_activity_lifecycle_proposal import (
@@ -28,6 +32,9 @@ class _Ledger:
 
     def project_at(self, cursor: ProjectionCursor):  # type: ignore[no-untyped-def]
         assert cursor == self.cursor
+        return self.projection
+
+    def project(self):  # type: ignore[no-untyped-def]
         return self.projection
 
     @property
@@ -121,3 +128,38 @@ def test_recorder_and_acceptance_runtime_preserve_the_exact_proposal_to_effect_c
     assert ledger.accepted[0].causation_id == record.proposal_event_ref
     assert ledger.accepted[1].causation_id == ledger.accepted[0].event_id
     assert ledger.accepted[1].payload()["activity_lifecycle_proposal_id"] == proposal.proposal_id
+
+
+class _Model:
+    model = "test-flash"
+
+    async def complete(self, messages, *, temperature=0.2):  # type: ignore[no-untyped-def]
+        token = __import__("json").loads(messages[1]["content"])["openings"][0]["opening_token"]
+        return '{"decision":"select","opening_token":"' + token + '"}'
+
+
+@pytest.mark.asyncio
+async def test_worker_turns_one_claimed_wake_into_one_accepted_transition() -> None:
+    projection, trigger_id = _claimed_projection()
+    ledger = _Ledger(projection)
+    ledger.issuer = AcceptedLedgerBatchIssuer()
+    worker = ActivityLifecycleWorker(
+        ledger=ledger,
+        catalog=_catalog(),
+        draft_adapter=ActivityLifecycleDraftAdapter(model=_Model()),
+        proposal_recorder=ActivityLifecycleProposalRecorder(ledger=ledger),
+        acceptance_runtime=ActivityLifecycleAcceptanceRuntime(ledger=ledger, batch_issuer=ledger.issuer),
+        ecology_catalog_version=ECOLOGY_CATALOG_VERSION,
+    )
+
+    result = await worker.advance_once(
+        wake_event_ref="event:clock:opening",
+        trigger_id=trigger_id,
+        logical_time=NOW,
+        actor="worker:life-ecology",
+        trace_id="trace:worker",
+        correlation_id="correlation:worker",
+    )
+
+    assert result.status == "transitioned"
+    assert [item.event_type for item in ledger.accepted] == ["AcceptanceRecorded", "ActivityStarted"]
