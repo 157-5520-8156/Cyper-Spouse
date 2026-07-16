@@ -10,18 +10,19 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal
-
-from pydantic import Field, model_validator
-
 from .activity_lifecycle_draft import ActivityLifecycleModelDraft
+from .activity_lifecycle_contract import (
+    ActivityLifecycleEffectEventType,
+    ActivityLifecycleProposalRecordedPayload,
+    EFFECT_BY_ACTIVITY_OPERATION,
+    activity_lifecycle_mutation_hash,
+)
 from .life_ecology_activity import (
     ActivityOpeningCatalog,
-    ActivityOpeningOperation,
 )
 from .life_ecology_contract import life_ecology_trigger_id
 from .plan_evidence import canonical_plan_evidence_hash
-from .schema_core import EvidenceRef, FrozenModel
+from .schema_core import EvidenceRef
 from .schemas import LedgerProjection
 
 
@@ -46,104 +47,14 @@ ACTIVITY_LIFECYCLE_PROPOSAL_POLICY_DIGEST = _digest(
     }
 )
 
-ActivityLifecycleEffectEventType = Literal[
-    "ActivityStarted", "ActivityPaused", "ActivityResumed", "ActivityCompleted", "ActivityAbandoned"
-]
-
-_EFFECT_BY_OPERATION: dict[ActivityOpeningOperation, ActivityLifecycleEffectEventType] = {
-    "start": "ActivityStarted",
-    "pause": "ActivityPaused",
-    "resume": "ActivityResumed",
-    "complete": "ActivityCompleted",
-    "abandon": "ActivityAbandoned",
-}
-
-
 class ActivityLifecycleProposalError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = f"activity_lifecycle_proposal.{code}"
         super().__init__(self.code)
 
 
-def activity_lifecycle_mutation_hash(
-    *,
-    change_id: str,
-    plan_id: str,
-    expected_plan_revision: int,
-    operation: ActivityOpeningOperation,
-    evaluated_world_revision: int,
-    wake_event_ref: str,
-    wake_event_payload_hash: str,
-    catalog_version: str,
-    catalog_hash: str,
-    opening_token: str,
-) -> str:
-    """Hash the only mutation Acceptance may later materialize."""
-
-    return _digest(
-        {
-            "catalog_hash": catalog_hash,
-            "catalog_version": catalog_version,
-            "change_id": change_id,
-            "evaluated_world_revision": evaluated_world_revision,
-            "expected_plan_revision": expected_plan_revision,
-            "opening_token": opening_token,
-            "operation": operation,
-            "plan_id": plan_id,
-            "wake_event_payload_hash": wake_event_payload_hash,
-            "wake_event_ref": wake_event_ref,
-        }
-    )
-
-
-class ActivityLifecycleProposal(FrozenModel):
-    """All authority facts derived from one audited opaque model choice."""
-
-    proposal_id: str = Field(min_length=1, max_length=256)
-    change_id: str = Field(min_length=1, max_length=256)
-    transition_id: str = Field(min_length=1, max_length=256)
-    evaluated_world_revision: int = Field(ge=0)
-    ecology_trigger_id: str = Field(min_length=1, max_length=256)
-    wake_event_ref: str = Field(min_length=1, max_length=512)
-    wake_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    catalog_version: str = Field(min_length=1, max_length=128)
-    catalog_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    opening_token: str = Field(pattern=r"^[0-9a-f]{64}$")
-    plan_id: str = Field(min_length=1, max_length=512)
-    expected_plan_revision: int = Field(ge=1)
-    operation: ActivityOpeningOperation
-    effect_event_type: ActivityLifecycleEffectEventType
-    proposed_change_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
-    evidence_refs: tuple[EvidenceRef, ...] = Field(min_length=2, max_length=2)
-    policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
-    model: str = Field(min_length=1, max_length=256)
-    raw_output_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-    normalized_output_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
-
-    @model_validator(mode="after")
-    def fields_are_closed(self) -> "ActivityLifecycleProposal":
-        if self.effect_event_type != _EFFECT_BY_OPERATION[self.operation]:
-            raise ValueError("activity lifecycle effect type does not match operation")
-        expected_hash = activity_lifecycle_mutation_hash(
-            change_id=self.change_id,
-            plan_id=self.plan_id,
-            expected_plan_revision=self.expected_plan_revision,
-            operation=self.operation,
-            evaluated_world_revision=self.evaluated_world_revision,
-            wake_event_ref=self.wake_event_ref,
-            wake_event_payload_hash=self.wake_event_payload_hash,
-            catalog_version=self.catalog_version,
-            catalog_hash=self.catalog_hash,
-            opening_token=self.opening_token,
-        )
-        if self.proposed_change_hash != expected_hash:
-            raise ValueError("activity lifecycle proposed change hash is invalid")
-        evidence_types = tuple(item.evidence_type for item in self.evidence_refs)
-        if evidence_types != ("active_plan", "committed_world_event"):
-            raise ValueError("activity lifecycle evidence must be canonical plan then clock wake")
-        if any(item.evidence_type == "observed_message" for item in self.evidence_refs):
-            raise ValueError("activity lifecycle proposal cannot use observed messages")
-        return self
+class ActivityLifecycleProposal(ActivityLifecycleProposalRecordedPayload):
+    """Compiler-facing name for the persisted proposal shape."""
 
 
 class ActivityLifecycleProposalCompiler:
@@ -230,7 +141,7 @@ class ActivityLifecycleProposalCompiler:
             plan_id=resolved.plan_id,
             expected_plan_revision=resolved.plan_revision,
             operation=resolved.operation,
-            effect_event_type=_EFFECT_BY_OPERATION[resolved.operation],
+            effect_event_type=EFFECT_BY_ACTIVITY_OPERATION[resolved.operation],
             proposed_change_hash=activity_lifecycle_mutation_hash(
                 change_id=change_id,
                 plan_id=resolved.plan_id,

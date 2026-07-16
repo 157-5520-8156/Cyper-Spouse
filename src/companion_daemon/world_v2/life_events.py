@@ -8,6 +8,7 @@ import json
 
 from pydantic import Field, model_validator
 
+from .activity_lifecycle_contract import ActivityLifecycleProposalRecordedPayload
 from .schemas import (
     EvidenceRef,
     FrozenModel,
@@ -209,6 +210,7 @@ LIFE_PAYLOAD_MODELS = {
     "ActivityResumed": ActivityTransitionPayload,
     "ActivityCompleted": ActivityTransitionPayload,
     "ActivityAbandoned": ActivityTransitionPayload,
+    "ActivityLifecycleProposalRecorded": ActivityLifecycleProposalRecordedPayload,
     "WorldOccurrenceCommitted": WorldOccurrenceCommittedPayload,
     "WorldOccurrenceActivated": WorldOccurrenceActivatedPayload,
     "OutcomeObservationRecorded": OutcomeObservationRecordedPayload,

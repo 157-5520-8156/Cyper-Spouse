@@ -158,6 +158,10 @@ from .life_ecology_contract import (
     life_ecology_trigger_id,
     parse_life_ecology_trigger_ref,
 )
+from .life_ecology_activity import ActivityOpeningCatalog
+from .activity_lifecycle_proposal import (
+    ACTIVITY_LIFECYCLE_PROPOSAL_POLICY_DIGEST,
+)
 from .expression_payload_events import ExpressionPayloadDescriptorRecordedPayload
 from .minimal_reply_manifest import (
     MINIMAL_REPLY_MANIFEST_VERSION,
@@ -221,6 +225,7 @@ from .experience_events import (
 from .errors import UnknownEventType
 from .event_catalog import event_contract
 from .life_events import (
+    ActivityLifecycleProposalRecordedPayload,
     ActivityPlannedPayload,
     ActivityTransitionPayload,
     NpcRegisteredPayload,
@@ -6643,6 +6648,84 @@ def _activity_transitioned(
     )
 
 
+def _activity_lifecycle_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    """Validate scheduler proposal authority without changing World facts."""
+
+    _require_life_time(state, event)
+    payload = _validated_life_payload(state, event, ActivityLifecycleProposalRecordedPayload)
+    if payload.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("activity lifecycle proposal must evaluate the current world revision")
+    if payload.proposal_id in state.proposal_ids:
+        raise ValueError("proposal identity is already registered")
+    if payload.policy_digest != ACTIVITY_LIFECYCLE_PROPOSAL_POLICY_DIGEST:
+        raise ValueError("activity lifecycle proposal policy is not installed")
+    wake = next(
+        (item for item in state.committed_world_event_refs if item.event_id == payload.wake_event_ref),
+        None,
+    )
+    trigger = next(
+        (item for item in state.trigger_processes if item.trigger_id == payload.ecology_trigger_id),
+        None,
+    )
+    parsed_trigger = parse_life_ecology_trigger_ref(trigger.trigger_ref) if trigger else None
+    if (
+        wake is None
+        or wake.event_type != "ClockAdvanced"
+        or wake.payload_hash != payload.wake_event_payload_hash
+        or trigger is None
+        or trigger.process_kind != "life_ecology"
+        or trigger.state != "claimed"
+        or trigger.claim_lease is None
+        or trigger.source_evidence_ref != payload.wake_event_ref
+        or parsed_trigger is None
+        or trigger.trigger_id
+        != life_ecology_trigger_id(
+            world_id=event.world_id,
+            wake_event_ref=payload.wake_event_ref,
+            catalog_version=parsed_trigger[0],
+        )
+    ):
+        raise ValueError("activity lifecycle proposal does not bind claimed ecology trigger")
+    plan = next((item for item in state.plans if item.plan_id == payload.plan_id), None)
+    if plan is None or plan.owner_actor_ref is None:
+        raise ValueError("activity lifecycle proposal plan is unavailable")
+    projection = make_projection(
+        state,
+        world_id=event.world_id,
+        world_revision=len(state.committed_world_event_refs),
+        deliberation_revision=state.deliberation_revision,
+        reducer_bundle_version=REDUCER_BUNDLE_VERSION,
+    )
+    resolved = ActivityOpeningCatalog(
+        owner_actor_ref=plan.owner_actor_ref,
+        catalog_version=payload.catalog_version,
+    ).resolve_opening(
+        projection=projection,
+        wake_event_ref=payload.wake_event_ref,
+        opening_token=payload.opening_token,
+    )
+    if (
+        resolved is None
+        or resolved.catalog_hash != payload.catalog_hash
+        or resolved.plan_id != payload.plan_id
+        or resolved.plan_revision != payload.expected_plan_revision
+        or resolved.operation != payload.operation
+    ):
+        raise ValueError("activity lifecycle proposal opening is not current")
+    return state.model_copy(
+        update={
+            "proposal_ids": (*state.proposal_ids, payload.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=payload.proposal_id,
+                    evaluated_world_revision=payload.evaluated_world_revision,
+                ),
+            ),
+        }
+    )
+
+
 def _world_occurrence_committed(state: ReducerState, event: WorldEvent) -> ReducerState:
     _require_life_time(state, event)
     payload = _validated_life_payload(state, event, WorldOccurrenceCommittedPayload)
@@ -8522,6 +8605,11 @@ _EVENTS = {
                 target_status="abandoned",
                 allowed_statuses=frozenset({"planned", "active", "paused"}),
             ),
+        ),
+        EventDefinition(
+            "ActivityLifecycleProposalRecorded",
+            RevisionClass.DELIBERATION,
+            _activity_lifecycle_proposal_recorded,
         ),
         EventDefinition(
             "WorldOccurrenceCommitted",

@@ -479,6 +479,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "WorldOccurrenceActivated": "occurrence_id+transition_id",
         "OutcomeObservationRecorded": "world_id+outcome_observation_id",
         "OutcomeProposalRecorded": "world_id+outcome_proposal_id",
+        "ActivityLifecycleProposalRecorded": "world_id+proposal_id",
         "WorldOccurrenceSettled": "occurrence_id+result_id+expected_entity_revision",
         "ExperienceCommitted": "world_id+experience_id",
         "LifeContentRecorded": "world_id+content_id+source_event_ref+content_payload_hash",
