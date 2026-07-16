@@ -118,6 +118,8 @@ class PrivateMediaEvidenceSnapshotCompiler:
             projection=projection,
             candidate=candidate,
             context=context,
+            declaration_event=declaration_event,
+            declaration=declaration,
             at_logical_time=source_event.logical_time,
             body=body,
             origins=origins,
@@ -241,15 +243,31 @@ class PrivateMediaEvidenceSnapshotCompiler:
         return located[0]
 
     def _freeze_historical_character_state(self, *, projection, candidate: PhotoCandidate,
-                                           context: RelationshipMediaContextV1, at_logical_time,
+                                           context: RelationshipMediaContextV1, declaration_event: WorldEvent,
+                                           declaration: RecipientScopedImageEvidenceDeclaredPayload, at_logical_time,
                                            body: dict[str, object], origins: dict[str, tuple[WorldEvent, str]]) -> tuple[WorldEvent, ...]:
         contract = candidate.character_media_contract
         assert contract is not None
+        basis = context.private_expression_basis
+        if basis.kind == "private_transition":
+            activity = declaration.image_evidence.activity
+            if (
+                basis.source_event_ref != declaration_event.event_id
+                or basis.source_event_payload_hash != declaration_event.payload_hash
+                or not isinstance(activity, dict)
+                or activity.get("private_transition") is not True
+                or activity.get("id") is None
+                or activity.get("kind") is None
+            ):
+                raise MediaEvidenceNotRenderable("p3_private_transition_not_current")
+            origins["/relationship_media_context/private_expression_basis"] = (
+                declaration_event, declaration.image_evidence.visibility,
+            )
+            return ()
         physical = visible_physical_state_at(
             tuple(projection.visible_physical_states), subject_ref=contract.subject_ref,
             at_logical_time=at_logical_time,
         )
-        basis = context.private_expression_basis
         if (
             physical is None or not physical.has_positive_cues
             or physical.physical_state_id != basis.physical_state_id

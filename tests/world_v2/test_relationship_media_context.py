@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from companion_daemon.world_v2.relationship_media_context import (
+    PrivateTransitionEvidenceV1,
     RelationshipMediaContextResolver,
 )
 from companion_daemon.world_v2.schemas import RelationshipStateProjection
@@ -110,3 +111,23 @@ def test_context_rejects_tampered_digest() -> None:
     assert context is not None
     with pytest.raises(ValueError, match="context digest"):
         type(context).model_validate({**context.model_dump(mode="python"), "authority_digest": "0" * 64})
+
+
+def test_resolver_freezes_a_recipient_scoped_private_transition() -> None:
+    projection = SimpleNamespace(relationship_states=(_relationship(),), visible_physical_states=())
+    transition = PrivateTransitionEvidenceV1(
+        declaration_event_ref="event:recipient-evidence:transition",
+        declaration_event_payload_hash="d" * 64,
+        recipient_ref="user:1", activity_id="activity:wind-down", activity_kind="wind_down",
+        valid_until=NOW + timedelta(minutes=15),
+    )
+
+    result = RelationshipMediaContextResolver().resolve(
+        projection=projection, character_ref="character:ava", recipient_ref="user:1", at_logical_time=NOW,
+        basis_kind="private_transition", private_transition=transition,
+    )
+
+    assert result.context is not None
+    assert result.context.private_expression_basis.kind == "private_transition"
+    assert result.context.private_expression_basis.evidence_ref == "/activity/private_transition"
+    assert result.context.private_expression_basis.source_event_ref == transition.declaration_event_ref

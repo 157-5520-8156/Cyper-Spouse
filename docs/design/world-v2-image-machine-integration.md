@@ -12,8 +12,9 @@
 > 规划证据。P3 现已开放一个窄的、可回放的 recipient-scoped 路径：私密
 > 视觉事实声明、关系阶段与**正向**短时身体状态会冻结为 V3 sidecar，外层
 > 授权和 `media-selection-acceptance.2` 绑定其 digest。当前只可形成
-> `alluring_life` preview，且只支持 `embodied_state` basis；关系私下互动、
-> 共同仪式、private transition/coverage 与 `exclusive_private` 仍 fail-closed。
+> `alluring_life` preview，支持 `embodied_state` 与已声明的
+> `private_transition` basis；关系私下互动、共同仪式、coverage 与
+> `exclusive_private` 仍 fail-closed。
 > `suggestive_private` / `explicit_reserved` 未接入 World v2，不能把本文件
 > 的后续 P3/P4 清单误读为已经上线的能力。
 

@@ -71,7 +71,9 @@ def test_private_compiler_freezes_recipient_context_and_keeps_authorization_oute
         source_event_ref=SOURCE_ID, source_event_payload_hash=source.payload_hash,
         source_event_type="ActivityCompleted", source_privacy_ceiling="private", recipient_ref="user:1",
         image_evidence=RecipientScopedImageEvidenceV1(
-            visibility="private", activity={"id": "activity:wind-down", "kind": "wind_down"},
+            visibility="private", activity={
+                "id": "activity:wind-down", "kind": "wind_down", "private_transition": True,
+            },
             character_media={
                 "character_ref": "character:ava", "present": True,
                 "capture_capabilities": ("character_front_camera",),
@@ -166,9 +168,10 @@ def test_private_compiler_freezes_recipient_context_and_keeps_authorization_oute
         selection=MediaSelection(
             candidate_id=candidate.candidate_id, family="character_media", media_privacy_ceiling="intimate",
             expression_charge_ceiling="subtle", recipient_ref="user:1",
-            private_expression_basis_ref=context.private_expression_basis.basis_id,
+            private_expression_basis_ref="basis:transition:" + DECLARATION_ID,
         ),
         category=candidate.ecology_category or "private", observed_at=NOW, expires_at=candidate.expires_at,
     )
     assert opportunity.media_lane == "alluring_life"
     assert opportunity.p3_authorization_digest == authorized.snapshot.private_media_authorization.authorization_digest
+    assert authorized.snapshot.image_event_snapshot.relationship_media_context.private_expression_basis.kind == "private_transition"

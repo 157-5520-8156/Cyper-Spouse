@@ -25,10 +25,11 @@ from .visible_physical_state import visible_physical_state_at
 RelationshipStageV1 = Literal[
     "stranger", "acquaintance", "friend", "close_friend", "ambiguous", "lover"
 ]
-PrivateExpressionBasisKindV1 = Literal["embodied_state"]
+PrivateExpressionBasisKindV1 = Literal["embodied_state", "private_transition"]
 PrivateExpressionChargeV1 = Literal["subtle", "charged", "veiled"]
 
 _EMBODIED_STATE_POINTER = "/character/visible_physical_state"
+_PRIVATE_TRANSITION_POINTER = "/activity/private_transition"
 
 
 def _canonical_digest(value: object) -> str:
@@ -61,6 +62,21 @@ class AudienceContextV1(FrozenModel):
         return self
 
 
+class PrivateTransitionEvidenceV1(FrozenModel):
+    """One recipient-scoped, already-declared private activity transition.
+
+    The resolver receives this typed value from the P3 snapshot compiler or
+    selection derivation; it never accepts a free activity label or text.
+    """
+
+    declaration_event_ref: str = Field(min_length=1, max_length=512)
+    declaration_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    recipient_ref: str = Field(min_length=1, max_length=256)
+    activity_id: str = Field(min_length=1, max_length=256)
+    activity_kind: str = Field(min_length=1, max_length=128)
+    valid_until: datetime
+
+
 class PrivateExpressionBasisV1(FrozenModel):
     """One source-bound, positive embodied-state basis.
 
@@ -76,9 +92,9 @@ class PrivateExpressionBasisV1(FrozenModel):
     required_charge: PrivateExpressionChargeV1 = "subtle"
     subject_ref: str = Field(min_length=1, max_length=256)
     recipient_ref: str = Field(min_length=1, max_length=256)
-    evidence_ref: Literal["/character/visible_physical_state"] = _EMBODIED_STATE_POINTER
-    physical_state_id: str = Field(min_length=1, max_length=256)
-    physical_state_revision: int = Field(ge=1)
+    evidence_ref: Literal["/character/visible_physical_state", "/activity/private_transition"]
+    physical_state_id: str | None = Field(default=None, min_length=1, max_length=256)
+    physical_state_revision: int | None = Field(default=None, ge=1)
     source_event_ref: str = Field(min_length=1, max_length=512)
     source_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     source_visibility: PrivacyClass
@@ -89,7 +105,21 @@ class PrivateExpressionBasisV1(FrozenModel):
     def basis_is_recipient_specific_and_hashed(self) -> "PrivateExpressionBasisV1":
         if self.subject_ref == self.recipient_ref:
             raise ValueError("private expression basis recipient must not equal subject")
-        expected = _canonical_digest(self.model_dump(mode="json", exclude={"basis_digest"}))
+        if self.kind == "embodied_state" and (
+            self.evidence_ref != _EMBODIED_STATE_POINTER
+            or self.physical_state_id is None
+            or self.physical_state_revision is None
+        ):
+            raise ValueError("embodied basis requires a physical-state coordinate")
+        if self.kind == "private_transition" and (
+            self.evidence_ref != _PRIVATE_TRANSITION_POINTER
+            or self.physical_state_id is not None
+            or self.physical_state_revision is not None
+        ):
+            raise ValueError("private-transition basis cannot carry physical-state coordinates")
+        expected = _canonical_digest(
+            self.model_dump(mode="json", exclude={"basis_digest"}, exclude_none=True)
+        )
         if self.basis_digest != expected:
             raise ValueError("private expression basis digest does not bind its contents")
         return self
@@ -115,7 +145,9 @@ class RelationshipMediaContextV1(FrozenModel):
             raise ValueError("relationship context expiry must equal its basis validity")
         if self.expires_at <= self.resolved_at:
             raise ValueError("relationship context must expire after resolution")
-        expected = _canonical_digest(self.model_dump(mode="json", exclude={"authority_digest"}))
+        expected = _canonical_digest(
+            self.model_dump(mode="json", exclude={"authority_digest"}, exclude_none=True)
+        )
         if self.authority_digest != expected:
             raise ValueError("relationship media context digest does not bind its contents")
         return self
@@ -150,8 +182,9 @@ class RelationshipMediaContextResolver:
         at_logical_time: datetime,
         basis_kind: str = "embodied_state",
         required_charge: PrivateExpressionChargeV1 = "subtle",
+        private_transition: PrivateTransitionEvidenceV1 | None = None,
     ) -> RelationshipMediaContextResolution:
-        if basis_kind != "embodied_state":
+        if basis_kind not in {"embodied_state", "private_transition"}:
             return RelationshipMediaContextResolution(None, "unsupported_private_expression_basis")
         if character_ref == recipient_ref:
             return RelationshipMediaContextResolution(None, "recipient_character_subject_mismatch")
@@ -167,6 +200,23 @@ class RelationshipMediaContextResolver:
             return RelationshipMediaContextResolution(None, "relationship_ambiguous")
         relationship = recipient_states[0]
 
+        audience = AudienceContextV1(
+            relationship_id=relationship.relationship_id,
+            relationship_revision=relationship.entity_revision,
+            recipient_ref=recipient_ref,
+            character_ref=character_ref,
+            relationship_stage=relationship.stage,
+            relationship_policy_digest=relationship.policy_digest,
+            relationship_origin_event_ref=(
+                relationship.origin.accepted_event_ref if relationship.origin is not None else None
+            ),
+        )
+        if basis_kind == "private_transition":
+            return self._resolve_private_transition(
+                audience=audience, character_ref=character_ref, recipient_ref=recipient_ref,
+                at_logical_time=at_logical_time, required_charge=required_charge,
+                transition=private_transition,
+            )
         physical_states = tuple(getattr(projection, "visible_physical_states", ()))
         active = visible_physical_state_at(
             physical_states, subject_ref=character_ref, at_logical_time=at_logical_time
@@ -181,18 +231,6 @@ class RelationshipMediaContextResolver:
             return RelationshipMediaContextResolution(None, "visible_physical_negative_only")
         if active.visibility == "withhold":
             return RelationshipMediaContextResolution(None, "visible_physical_visibility_withheld")
-
-        audience = AudienceContextV1(
-            relationship_id=relationship.relationship_id,
-            relationship_revision=relationship.entity_revision,
-            recipient_ref=recipient_ref,
-            character_ref=character_ref,
-            relationship_stage=relationship.stage,
-            relationship_policy_digest=relationship.policy_digest,
-            relationship_origin_event_ref=(
-                relationship.origin.accepted_event_ref if relationship.origin is not None else None
-            ),
-        )
         basis_body = {
             "schema_version": "private-expression-basis-v1",
             "basis_id": f"basis:embodied:{active.physical_state_id}:{active.entity_revision}",
@@ -215,8 +253,8 @@ class RelationshipMediaContextResolver:
         )
         context_body = {
             "schema_version": "relationship-media-context-v1",
-            "audience": audience.model_dump(mode="json"),
-            "private_expression_basis": basis.model_dump(mode="json"),
+            "audience": audience.model_dump(mode="json", exclude_none=True),
+            "private_expression_basis": basis.model_dump(mode="json", exclude_none=True),
             "resolved_at": at_logical_time,
             "expires_at": active.valid_until,
         }
@@ -230,9 +268,54 @@ class RelationshipMediaContextResolver:
             )
         )
 
+    @staticmethod
+    def _resolve_private_transition(
+        *, audience: AudienceContextV1, character_ref: str, recipient_ref: str,
+        at_logical_time: datetime, required_charge: PrivateExpressionChargeV1,
+        transition: PrivateTransitionEvidenceV1 | None,
+    ) -> RelationshipMediaContextResolution:
+        if transition is None:
+            return RelationshipMediaContextResolution(None, "private_transition_evidence_missing")
+        if transition.recipient_ref != recipient_ref:
+            return RelationshipMediaContextResolution(None, "private_transition_recipient_mismatch")
+        if transition.valid_until <= at_logical_time:
+            return RelationshipMediaContextResolution(None, "private_transition_expired")
+        basis_body = {
+            "schema_version": "private-expression-basis-v1",
+            "basis_id": "basis:transition:" + transition.declaration_event_ref,
+            "basis_revision": 1,
+            "kind": "private_transition",
+            "required_charge": required_charge,
+            "subject_ref": character_ref,
+            "recipient_ref": recipient_ref,
+            "evidence_ref": _PRIVATE_TRANSITION_POINTER,
+            "source_event_ref": transition.declaration_event_ref,
+            "source_event_payload_hash": transition.declaration_event_payload_hash,
+            "source_visibility": "private",
+            "valid_until": transition.valid_until,
+        }
+        basis = PrivateExpressionBasisV1(
+            **basis_body, basis_digest=_canonical_digest(basis_body)
+        )
+        context_body = {
+            "schema_version": "relationship-media-context-v1",
+            "audience": audience.model_dump(mode="json", exclude_none=True),
+            "private_expression_basis": basis.model_dump(mode="json", exclude_none=True),
+            "resolved_at": at_logical_time,
+            "expires_at": transition.valid_until,
+        }
+        return RelationshipMediaContextResolution(
+            RelationshipMediaContextV1(
+                audience=audience, private_expression_basis=basis,
+                resolved_at=at_logical_time, expires_at=transition.valid_until,
+                authority_digest=_canonical_digest(context_body),
+            )
+        )
+
 
 __all__ = [
     "AudienceContextV1",
+    "PrivateTransitionEvidenceV1",
     "PrivateExpressionBasisV1",
     "RelationshipMediaContextResolution",
     "RelationshipMediaContextResolver",

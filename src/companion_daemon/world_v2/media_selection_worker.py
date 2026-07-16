@@ -15,7 +15,10 @@ from .media_selection_draft import (
 )
 from .media_selection_proposal import MediaSelectionProposalCompiler
 from .private_image_evidence_contract import RecipientScopedImageEvidenceDeclaredPayload
-from .relationship_media_context import RelationshipMediaContextResolver
+from .relationship_media_context import (
+    PrivateTransitionEvidenceV1,
+    RelationshipMediaContextResolver,
+)
 from .media_candidate_advisory import MediaCandidateAdvisoryCompiler
 from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
@@ -139,7 +142,7 @@ class MediaSelectionWorker:
         contract = candidate.character_media_contract
         if contract is None or projection.logical_time is None:
             return None
-        declarations: list[RecipientScopedImageEvidenceDeclaredPayload] = []
+        declarations: list[tuple[RecipientScopedImageEvidenceDeclaredPayload, object]] = []
         for source in candidate.source_events:
             located = self._ledger.lookup_event_commit(source.event_ref)
             if located is None or located[0].payload_hash != source.payload_hash:
@@ -156,13 +159,20 @@ class MediaSelectionWorker:
                 and declaration.image_evidence.character_media is not None
                 and declaration.image_evidence.character_media.character_ref == contract.subject_ref
             ):
-                declarations.append(declaration)
+                declarations.append((declaration, event))
         if len(declarations) != 1:
             return None
-        recipient_ref = declarations[0].recipient_ref
+        declaration, declaration_event = declarations[0]
+        recipient_ref = declaration.recipient_ref
+        transition = self._private_transition(
+            declaration=declaration, declaration_event=declaration_event,
+            valid_until=candidate.expires_at,
+        )
         context = self._relationship_context_resolver.resolve(
             projection=projection, character_ref=contract.subject_ref,
             recipient_ref=recipient_ref, at_logical_time=projection.logical_time,
+            basis_kind=("private_transition" if transition is not None else "embodied_state"),
+            private_transition=transition,
         ).context
         if context is None:
             return None
@@ -170,6 +180,24 @@ class MediaSelectionWorker:
             candidate_id=candidate.candidate_id, family="character_media", media_privacy_ceiling="intimate",
             expression_charge_ceiling="subtle", recipient_ref=recipient_ref,
             private_expression_basis_ref=context.private_expression_basis.basis_id,
+        )
+
+    @staticmethod
+    def _private_transition(*, declaration, declaration_event, valid_until):  # type: ignore[no-untyped-def]
+        activity = declaration.image_evidence.activity
+        if (
+            not isinstance(activity, dict)
+            or activity.get("private_transition") is not True
+            or not isinstance(activity.get("id"), str)
+            or not isinstance(activity.get("kind"), str)
+            or valid_until is None
+        ):
+            return None
+        return PrivateTransitionEvidenceV1(
+            declaration_event_ref=declaration_event.event_id,
+            declaration_event_payload_hash=declaration_event.payload_hash,
+            recipient_ref=declaration.recipient_ref, activity_id=activity["id"],
+            activity_kind=activity["kind"], valid_until=valid_until,
         )
 
 

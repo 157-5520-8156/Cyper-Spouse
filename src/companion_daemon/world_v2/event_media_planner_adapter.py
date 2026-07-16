@@ -618,15 +618,20 @@ class EventMediaPlannerAdapter:
             authorization = self._p3_authorization_from_sidecar(opportunity)
             context = image_event_snapshot.get("relationship_media_context")
             lane = getattr(legacy_plan.media_lane, "lane", "")
+            expected_basis = (
+                context.get("private_expression_basis")
+                if isinstance(context, dict) else None
+            )
             if (
                 authorization is None
                 or not isinstance(context, dict)
+                or not isinstance(expected_basis, dict)
                 or legacy_plan.privacy != "intimate"
                 or legacy_plan.capture_mode not in authorization.allowed_capture_modes
                 or lane != authorization.media_lane
                 or legacy_plan.private_expression_basis is None
-                or legacy_plan.private_expression_basis.kind != "embodied_state"
-                or legacy_plan.private_expression_basis.evidence_ref != "/character/visible_physical_state"
+                or legacy_plan.private_expression_basis.kind != expected_basis.get("kind")
+                or legacy_plan.private_expression_basis.evidence_ref != expected_basis.get("evidence_ref")
                 or legacy_plan.private_expression_basis.recipient_ref != opportunity.recipient_ref
             ):
                 return self._not_renderable(opportunity, planning_request_id, "p3_legacy_plan_exceeds_authorization")

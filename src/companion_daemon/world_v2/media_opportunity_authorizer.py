@@ -7,6 +7,8 @@ from .private_media_evidence_snapshot import (
     PrivateMediaEvidenceSnapshotCompiler,
 )
 from .relationship_media_context import RelationshipMediaContextResolver
+from .relationship_media_context import PrivateTransitionEvidenceV1
+from .private_image_evidence_contract import RecipientScopedImageEvidenceDeclaredPayload
 from .media_selection import MediaSelection
 from .media_v2 import MediaOpportunity, media_digest
 from .schemas import ProjectionCursor
@@ -127,10 +129,13 @@ class MediaOpportunityAuthorizer:
     ) -> tuple[MediaOpportunity, object]:
         contract = candidate.character_media_contract
         assert contract is not None
+        transition = self._private_transition(candidate=candidate, expires_at=expires_at)
         resolution = self._relationship_context_resolver.resolve(
             projection=projection, character_ref=contract.subject_ref,
             recipient_ref=selection.recipient_ref or "", at_logical_time=projection.logical_time,
             required_charge="subtle",
+            basis_kind=("private_transition" if transition is not None else "embodied_state"),
+            private_transition=transition,
         )
         context = resolution.context
         if context is None:
@@ -193,6 +198,39 @@ class MediaOpportunityAuthorizer:
             # in the bounded alluring lane until that fact domain exists.
             return "alluring_life", "charged"
         raise ValueError("media_authorizer.p3_relationship_stage_not_eligible")
+
+    def _private_transition(self, *, candidate, expires_at: datetime):  # type: ignore[no-untyped-def]
+        """Re-read an exact P3 declaration; never trust selection prose."""
+
+        matches = []
+        for source in candidate.source_events:
+            located = self._ledger.lookup_event_commit(source.event_ref)
+            if located is None or located[0].payload_hash != source.payload_hash:
+                return None
+            event, _commit = located
+            if event.event_type != "RecipientScopedImageEvidenceDeclared":
+                continue
+            try:
+                declaration = RecipientScopedImageEvidenceDeclaredPayload.model_validate_json(event.payload_json)
+            except ValueError:
+                return None
+            activity = declaration.image_evidence.activity
+            if (
+                declaration.source_privacy_ceiling == "private"
+                and isinstance(activity, dict)
+                and activity.get("private_transition") is True
+                and isinstance(activity.get("id"), str)
+                and isinstance(activity.get("kind"), str)
+            ):
+                matches.append((event, declaration, activity))
+        if len(matches) != 1:
+            return None
+        event, declaration, activity = matches[0]
+        return PrivateTransitionEvidenceV1(
+            declaration_event_ref=event.event_id, declaration_event_payload_hash=event.payload_hash,
+            recipient_ref=declaration.recipient_ref, activity_id=activity["id"],
+            activity_kind=activity["kind"], valid_until=expires_at,
+        )
 
 
 __all__ = ["MediaOpportunityAuthorizer"]
