@@ -189,11 +189,19 @@ class MediaSelectionAcceptanceComposition:
 
     grant: ProviderMediaGrantBinding
     account_id: str
+    account_window_id: str
+    account_limit: int
     amount_limit: int
     actor: str = "worker:world-v2:media-selection-acceptance"
 
     def __post_init__(self) -> None:
-        if not self.account_id or not self.actor or self.amount_limit < 0:
+        if (
+            not self.account_id
+            or not self.account_window_id
+            or not self.actor
+            or self.amount_limit < 0
+            or self.account_limit < self.amount_limit
+        ):
             raise ValueError("media selection acceptance composition is invalid")
 
 
@@ -1387,6 +1395,14 @@ def _bootstrap(
     if include_tool:
         accounts.append(BudgetAccount(account_id=config.tool_account_id, category="tool",
                                       window_id=config.tool_window_id, limit=config.tool_budget_limit))
+    if config.media_selection_acceptance is not None:
+        media = config.media_selection_acceptance
+        accounts.append(BudgetAccount(
+            account_id=media.account_id,
+            category="image",
+            window_id=media.account_window_id,
+            limit=media.account_limit,
+        ))
     missing: list[BudgetAccount] = []
     for account in accounts:
         existing = next(

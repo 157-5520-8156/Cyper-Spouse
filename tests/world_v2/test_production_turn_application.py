@@ -18,6 +18,7 @@ from companion_daemon.world_v2.affect_chat_model_adapter import AffectDraftDelib
 from companion_daemon.world_v2.memory_retrieval import MemoryRetrievalCompiler
 from companion_daemon.world_v2.platform_action_executor import PlatformDispatchReceipt
 from companion_daemon.world_v2.production_turn_application import (
+    MediaSelectionAcceptanceComposition,
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
@@ -30,7 +31,7 @@ from companion_daemon.world_v2.image_evidence_runtime import ImageEvidenceDeclar
 from companion_daemon.world_v2.event_ecology_media import EcologyPolicy
 from companion_daemon.world_v2.life_ecology_runtime import LifeEcologyRunResult
 from companion_daemon.world_v2.production_turn_application import LifeEcologyComposition
-from companion_daemon.world_v2.schemas import ClockObservation, ProjectionCursor
+from companion_daemon.world_v2.schemas import ClockObservation, ProjectionCursor, ProviderMediaGrantBinding
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn
 
@@ -241,6 +242,32 @@ def _life_ecology_config() -> WorldV2TurnApplicationConfig:
         action_pump_owner="pump:life-ecology-production",
         life_ecology=LifeEcologyComposition.production_v1(),
     )
+
+
+def test_media_selection_acceptance_configuration_bootstraps_its_image_account(tmp_path: Path) -> None:
+    config = WorldV2TurnApplicationConfig(
+        world_id="world:media-selection-acceptance-config",
+        companion_actor_ref="agent:companion",
+        reply_target="user:user.1",
+        action_pump_owner="pump:media-selection-acceptance-config",
+        event_ecology_policy=EcologyPolicy(),
+        media_selection_acceptance=MediaSelectionAcceptanceComposition(
+            grant=ProviderMediaGrantBinding(grant_id="grant:media", grant_revision=1),
+            account_id="account:media", account_window_id="window:media", account_limit=5,
+            amount_limit=1,
+        ),
+    )
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "media-selection-acceptance-config.sqlite", config=config,
+        identities=_Identities(), router=_Router(), main_model=_InvalidModel(),
+        quick_recovery=_InvalidQuick(), transport=_Transport(), now=NOW,
+    )
+    try:
+        account = next(item for item in app._ledger.project().budget_accounts if item.account_id == "account:media")  # type: ignore[attr-defined]
+        assert account.category == "image"
+        assert account.limit == 5
+    finally:
+        app.close()
 
 
 @pytest.mark.asyncio
