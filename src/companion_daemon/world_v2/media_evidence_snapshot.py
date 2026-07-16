@@ -61,6 +61,9 @@ class CompiledMediaEvidence:
     snapshot_body: str
     snapshot_ref: str
     snapshot_hash: str
+    image_event_snapshot_body: str
+    image_event_snapshot_hash: str
+    evidence_index_digest: str
 
 
 class _ProjectionLike(Protocol):
@@ -176,6 +179,10 @@ class MediaEvidenceSnapshotCompiler:
                 relationship_media_context=None, evidence_index=evidence_index,
             ),
         )
+        image_snapshot = snapshot.image_event_snapshot
+        if image_snapshot is None:  # Keep the sidecar boundary explicit even for type checkers.
+            raise AssertionError("compiled media evidence must contain an image event snapshot")
+        image_event_snapshot_body = canonical_media_json(image_snapshot.model_dump(mode="json"))
         snapshot_body = canonical_media_json(snapshot.model_dump(mode="json"))
         snapshot_ref = "sidecar:world-image-event-snapshot:" + media_digest({
             "contract": "world-image-event-snapshot-v1", "candidate_id": candidate.candidate_id,
@@ -185,6 +192,9 @@ class MediaEvidenceSnapshotCompiler:
         return CompiledMediaEvidence(
             snapshot=snapshot, snapshot_body=snapshot_body, snapshot_ref=snapshot_ref,
             snapshot_hash=media_payload_hash(snapshot_body),
+            image_event_snapshot_body=image_event_snapshot_body,
+            image_event_snapshot_hash=media_payload_hash(image_event_snapshot_body),
+            evidence_index_digest=media_digest(image_snapshot.evidence_index),
         )
 
     @staticmethod

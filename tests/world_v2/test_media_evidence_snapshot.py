@@ -95,6 +95,9 @@ def test_compiler_freezes_only_explicit_public_image_evidence_with_leaf_provenan
     assert image.evidence_index["/activity/description"].source_event_ref == event.event_id
     assert image.evidence_index["/objects/0/description"].source_payload_hash == event.payload_hash
     assert compiled.snapshot_hash.startswith("sha256:")
+    assert compiled.image_event_snapshot_hash.startswith("sha256:")
+    assert compiled.image_event_snapshot_hash != compiled.snapshot_hash
+    assert len(compiled.evidence_index_digest) == 64
     assert ledger.project_at_calls == 1
 
 
@@ -162,3 +165,4 @@ def test_replay_at_same_cursor_is_byte_stable_and_does_not_use_current_projectio
     assert first.snapshot_body == second.snapshot_body
     assert first.snapshot_hash == second.snapshot_hash
     assert first.snapshot_ref == second.snapshot_ref
+    assert first.image_event_snapshot_hash == second.image_event_snapshot_hash
