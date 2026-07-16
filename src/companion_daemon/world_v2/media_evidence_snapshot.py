@@ -20,8 +20,10 @@ from .visible_physical_state import (
 )
 from .media_v2 import (
     FrozenMediaEvidenceSnapshot,
+    CharacterMediaSnapshotAuthorization,
     ImageEvidenceIndexEntry,
     ImageEventSnapshot,
+    ImageEventSnapshotV2,
     MediaEvidenceSource,
     PhotoCandidate,
     canonical_media_json,
@@ -229,15 +231,29 @@ class MediaEvidenceSnapshotCompiler:
             raise MediaEvidenceNotRenderable("no_visual_evidence")
 
         evidence_index = self._build_index(body=body, origins=origins)
-        snapshot = FrozenMediaEvidenceSnapshot(
-            source_events=source_events,
-            image_event_snapshot=ImageEventSnapshot(
+        image_event_snapshot = (
+            ImageEventSnapshotV2(
+                event=body["event"], source=body["source"], location=body["location"],
+                activity=body["activity"], participants=body["participants"], objects=body["objects"],
+                environment=body["environment"], character=body["character"],
+                existing_media=body["existing_media"], visual_requirements=body["visual_requirements"],
+                relationship_media_context=None,
+                character_media_authorization=body["character_media_authorization"],
+                evidence_index=evidence_index,
+            )
+            if candidate.family == "character_media"
+            else ImageEventSnapshot(
                 event=body["event"], source=body["source"], location=body["location"],
                 activity=body["activity"], participants=body["participants"], objects=body["objects"],
                 environment=body["environment"], character=body["character"],
                 existing_media=body["existing_media"], visual_requirements=body["visual_requirements"],
                 relationship_media_context=None, evidence_index=evidence_index,
-            ),
+            )
+        )
+        snapshot = FrozenMediaEvidenceSnapshot(
+            source_events=source_events,
+            complete_candidate=(candidate.model_dump(mode="json") if candidate.family == "character_media" else None),
+            image_event_snapshot=image_event_snapshot,
         )
         image_snapshot = snapshot.image_event_snapshot
         if image_snapshot is None:  # Keep the sidecar boundary explicit even for type checkers.
@@ -413,6 +429,16 @@ class MediaEvidenceSnapshotCompiler:
                 "authority_digest": contract.authority_digest,
             },
         }
+        body["character_media_authorization"] = CharacterMediaSnapshotAuthorization(
+            candidate_id=candidate.candidate_id,
+            candidate_revision=candidate.entity_revision,
+            subject_ref=contract.subject_ref,
+            kind=contract.kind,
+            allowed_capture_modes=contract.allowed_capture_modes,
+            allowed_character_visibility=contract.allowed_character_visibility,
+            authority_digest=contract.authority_digest,
+            source_event_refs=candidate.source_event_refs,
+        )
         origins["/character"] = (declaration_event, visibility)
         extras: list[WorldEvent] = []
         appearance = appearance_state_at(

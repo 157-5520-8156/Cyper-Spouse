@@ -290,7 +290,10 @@ def test_character_snapshot_freezes_fact_bound_appearance_and_physical_state_at_
 
     image = compiled.snapshot.image_event_snapshot
     assert image is not None
+    assert image.schema_version == "world-image-event-snapshot-v2"
     assert image.character["subject_ref"] == "agent:companion"
+    assert image.character_media_authorization.candidate_id == candidate.candidate_id
+    assert image.character_media_authorization.kind == "selfie"
     assert image.character["appearance_state"]["visible_attributes"][0]["description"] == "深色运动外套"
     assert image.character["visible_physical_state"]["positive_cues"][0]["cue_id"] == "perspiration"
     assert image.evidence_index["/character/appearance_state/visible_attributes/0/description"].source_event_ref == appearance_record.event_id

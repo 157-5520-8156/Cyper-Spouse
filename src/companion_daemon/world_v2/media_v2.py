@@ -249,6 +249,36 @@ class ImageEventSnapshot(FrozenModel):
         return self
 
 
+class CharacterMediaSnapshotAuthorization(FrozenModel):
+    """Adapter-only P2 allowance; it is intentionally not planner evidence."""
+
+    candidate_id: str = Field(min_length=1, max_length=256)
+    candidate_revision: int = Field(ge=1)
+    subject_ref: str = Field(min_length=1, max_length=512)
+    kind: CharacterMediaKind
+    allowed_capture_modes: tuple[CharacterCaptureMode, ...] = Field(min_length=1, max_length=6)
+    allowed_character_visibility: tuple[CharacterVisibility, ...] = Field(min_length=1, max_length=2)
+    authority_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_event_refs: tuple[str, ...] = Field(min_length=1, max_length=32)
+
+    @model_validator(mode="after")
+    def is_canonical(self) -> "CharacterMediaSnapshotAuthorization":
+        if self.source_event_refs != tuple(sorted(set(self.source_event_refs))):
+            raise ValueError("character snapshot authorization source refs must be sorted and unique")
+        if self.allowed_capture_modes != tuple(sorted(set(self.allowed_capture_modes))):
+            raise ValueError("character snapshot authorization modes must be sorted and unique")
+        if self.allowed_character_visibility != tuple(sorted(set(self.allowed_character_visibility))):
+            raise ValueError("character snapshot authorization visibility must be sorted and unique")
+        return self
+
+
+class ImageEventSnapshotV2(ImageEventSnapshot):
+    """P2 ordinary-character snapshot, distinct from P0's public life-share wire."""
+
+    schema_version: Literal["world-image-event-snapshot-v2"] = "world-image-event-snapshot-v2"
+    character_media_authorization: CharacterMediaSnapshotAuthorization
+
+
 class FrozenMediaEvidenceSnapshot(FrozenModel):
     """The only ledger-independent bytes that planning may read.
 
@@ -266,7 +296,7 @@ class FrozenMediaEvidenceSnapshot(FrozenModel):
     location: dict[str, object] | None = None
     visible_physical_state: dict[str, object] | None = None
     recipient_context: dict[str, object] | None = None
-    image_event_snapshot: ImageEventSnapshot | None = None
+    image_event_snapshot: ImageEventSnapshotV2 | ImageEventSnapshot | None = None
 
     @model_validator(mode="after")
     def source_events_are_canonical(self) -> "FrozenMediaEvidenceSnapshot":
