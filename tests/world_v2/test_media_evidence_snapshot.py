@@ -292,8 +292,9 @@ def test_character_snapshot_freezes_fact_bound_appearance_and_physical_state_at_
     assert image is not None
     assert image.schema_version == "world-image-event-snapshot-v2"
     assert image.character["subject_ref"] == "agent:companion"
-    assert image.character_media_authorization.candidate_id == candidate.candidate_id
-    assert image.character_media_authorization.kind == "selfie"
+    assert compiled.snapshot.character_media_authorization is not None
+    assert compiled.snapshot.character_media_authorization.candidate_id == candidate.candidate_id
+    assert compiled.snapshot.character_media_authorization.kind == "selfie"
     assert "capture_authorization" not in image.character
     assert "candidate_contract" not in image.character
     assert not any("authorization" in pointer or "contract" in pointer for pointer in image.evidence_index)

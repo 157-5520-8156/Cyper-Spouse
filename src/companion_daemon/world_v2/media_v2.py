@@ -276,7 +276,6 @@ class ImageEventSnapshotV2(ImageEventSnapshot):
     """P2 ordinary-character snapshot, distinct from P0's public life-share wire."""
 
     schema_version: Literal["world-image-event-snapshot-v2"] = "world-image-event-snapshot-v2"
-    character_media_authorization: CharacterMediaSnapshotAuthorization
 
 
 class FrozenMediaEvidenceSnapshot(FrozenModel):
@@ -297,6 +296,12 @@ class FrozenMediaEvidenceSnapshot(FrozenModel):
     visible_physical_state: dict[str, object] | None = None
     recipient_context: dict[str, object] | None = None
     image_event_snapshot: ImageEventSnapshotV2 | ImageEventSnapshot | None = None
+    # P2 authorization is deliberately outer-sidecar data.  The inner image
+    # event snapshot is planner input; letting a capture capability or a
+    # contract digest appear there would turn permission data into prompt
+    # material.  An adapter may inspect this value only to validate and build
+    # a smaller planner view.
+    character_media_authorization: CharacterMediaSnapshotAuthorization | None = None
 
     @model_validator(mode="after")
     def source_events_are_canonical(self) -> "FrozenMediaEvidenceSnapshot":
@@ -310,6 +315,11 @@ class FrozenMediaEvidenceSnapshot(FrozenModel):
                     raise ValueError("image evidence index key must be an RFC 6901 pointer")
                 if source_hashes.get(entry.source_event_ref) != entry.source_payload_hash:
                     raise ValueError("image evidence index must bind an outer snapshot source")
+        if self.character_media_authorization is not None:
+            if self.image_event_snapshot is None or self.image_event_snapshot.schema_version != "world-image-event-snapshot-v2":
+                raise ValueError("character snapshot authorization requires a V2 image snapshot")
+            if self.complete_candidate is None:
+                raise ValueError("character snapshot authorization requires the complete candidate")
         return self
 
 

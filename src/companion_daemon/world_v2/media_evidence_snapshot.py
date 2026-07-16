@@ -231,6 +231,7 @@ class MediaEvidenceSnapshotCompiler:
             raise MediaEvidenceNotRenderable("no_visual_evidence")
 
         evidence_index = self._build_index(body=body, origins=origins)
+        character_authorization = body.pop("character_media_authorization", None)
         image_event_snapshot = (
             ImageEventSnapshotV2(
                 event=body["event"], source=body["source"], location=body["location"],
@@ -238,7 +239,6 @@ class MediaEvidenceSnapshotCompiler:
                 environment=body["environment"], character=body["character"],
                 existing_media=body["existing_media"], visual_requirements=body["visual_requirements"],
                 relationship_media_context=None,
-                character_media_authorization=body["character_media_authorization"],
                 evidence_index=evidence_index,
             )
             if candidate.family == "character_media"
@@ -254,6 +254,7 @@ class MediaEvidenceSnapshotCompiler:
             source_events=source_events,
             complete_candidate=(candidate.model_dump(mode="json") if candidate.family == "character_media" else None),
             image_event_snapshot=image_event_snapshot,
+            character_media_authorization=character_authorization,
         )
         image_snapshot = snapshot.image_event_snapshot
         if image_snapshot is None:  # Keep the sidecar boundary explicit even for type checkers.
