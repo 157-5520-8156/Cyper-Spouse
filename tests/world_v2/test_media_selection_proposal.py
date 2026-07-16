@@ -187,6 +187,15 @@ def test_compiler_derives_candidate_authority_and_cursor_coordinates_from_projec
 def test_unrenderable_snapshot_closes_the_same_available_candidate_without_substitution() -> None:
     state = _opened_state()
     candidate = state.photo_candidates[0]
+    proposal = _proposal(candidate)
+    state = reduce_event(
+        state,
+        _event(
+            "event:selection-proposal:unrenderable",
+            "MediaSelectionProposalRecorded",
+            proposal.model_dump(mode="json"),
+        ),
+    )
 
     reduced = reduce_event(
         state,
@@ -198,7 +207,7 @@ def test_unrenderable_snapshot_closes_the_same_available_candidate_without_subst
                 expected_entity_revision=candidate.entity_revision,
                 reason_code="no_visual_evidence",
             ).model_dump(mode="json"),
-        ),
+        ).model_copy(update={"causation_id": "event:selection-proposal:unrenderable"}),
     )
 
     assert reduced.photo_candidates == (

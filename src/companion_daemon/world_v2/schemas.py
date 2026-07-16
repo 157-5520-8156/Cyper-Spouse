@@ -1220,11 +1220,18 @@ class ProposalRevisionRef(FrozenModel):
     # P1 media selection persists this alongside the generic proposal audit
     # coordinates, so Acceptance can replay-check the exact selected shape.
     selection_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    # P1 media-selection coordinates are optional for historical/general
+    # proposals, but let mechanical terminal outcomes prove which aggregate
+    # the preceding deliberation was allowed to close.
+    candidate_id: str | None = Field(default=None, min_length=1, max_length=256)
+    expected_candidate_revision: int | None = Field(default=None, ge=1)
 
     @model_validator(mode="after")
     def persisted_event_coordinates_are_complete(self) -> "ProposalRevisionRef":
         if (self.proposal_event_ref is None) != (self.proposal_event_payload_hash is None):
             raise ValueError("proposal revision event coordinates are incomplete")
+        if (self.candidate_id is None) != (self.expected_candidate_revision is None):
+            raise ValueError("proposal revision candidate coordinates are incomplete")
         return self
 
 

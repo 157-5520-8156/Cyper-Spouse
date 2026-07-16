@@ -5087,6 +5087,12 @@ def _photo_candidate_unrenderable(state: ReducerState, event: WorldEvent) -> Red
         or candidate.expires_at is None
         or candidate.opened_event_ref is None
         or candidate.opened_event_payload_hash is None
+        or not any(
+            item.proposal_event_ref == event.causation_id
+            and item.candidate_id == candidate.candidate_id
+            and item.expected_candidate_revision == candidate.entity_revision
+            for item in state.proposal_revisions
+        )
     ):
         raise ValueError("photo candidate unrenderable result is not current")
     return state.model_copy(
@@ -5146,6 +5152,8 @@ def _media_selection_proposal_recorded(state: ReducerState, event: WorldEvent) -
                     proposal_event_payload_hash=event.payload_hash,
                     proposed_change_hash=payload.proposed_change_hash,
                     selection_hash=payload.selection_hash,
+                    candidate_id=payload.candidate_id,
+                    expected_candidate_revision=payload.expected_candidate_revision,
                 ),
             ),
         }
