@@ -238,6 +238,23 @@ mechanisms:
       - tests/world_v2/test_action_lifecycle.py::test_atomic_settlement_survives_sqlite_restart
       - tests/world_v2/test_action_pump.py::test_non_idempotent_started_action_becomes_unknown_without_redispatch
 
+  - id: injected-read-only-tool
+    phase: 5
+    status: partial
+    runtime_activation: limited-production
+    limitations: [requires-explicit-model-and-transport-injection, only-no-change-result-deliberation-is-installed, vision-transcription-and-creative-media-remain-closed]
+    sources: [audited-tool-proposal, claimed-tool-trigger, enforcement-authorization, provider-result-descriptor]
+    events: [ToolRequestAccepted, ToolResultAccepted]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [read-only-tool-requests, read-only-tool-results, external-result-trigger]
+    decision_consumers: [ReadOnlyToolProposalCompiler, ReadOnlyToolTriggerRuntime, NoopToolResultDeliberator]
+    actions: [read-only-tool]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [injected-read-only-tool-provider]
+    tests:
+      - tests/world_v2/test_read_only_tool_vertical.py::test_tool_executor_rejects_a_revoked_capability_on_final_projection
+      - tests/world_v2/test_read_only_tool_production_lane.py::test_injected_tool_lane_compiles_enforced_request_then_settles_a_real_result
+
   - id: media-preview-and-approval
     phase: 6
     status: partial
@@ -296,7 +313,7 @@ mechanisms:
     phase: 7
     status: partial
     runtime_activation: limited-production
-    limitations: [read-only-v2-room-endpoint-exists, default-dashboard-and-godot-consumers-not-fully-migrated]
+    limitations: [read-only-v2-room-endpoint-exists, godot-room-consumer-is-migrated, web-dashboard-default-consumer-remains-legacy]
     sources: [v2-viewer-request, internal-room-projection]
     events: [WorldStarted]
     reducers: [src/companion_daemon/world_v2/reducers.py]
@@ -304,11 +321,12 @@ mechanisms:
     decision_consumers: [RoomProjectionMaterializer, DashboardProjectionAdapter]
     actions: []
     terminal_states: []
-    adapters: [http-dashboard-v2]
+    adapters: [http-dashboard-v2, godot-room-v2]
     tests:
       - tests/world_v2/test_room_projection_materialization.py::test_room_redacts_private_situation_and_preview_media
       - tests/world_v2/test_dashboard_projection_adapter.py::test_dashboard_adapter_is_a_read_only_projection_consumer
       - tests/world_v2/test_http_v2_host_migration.py::test_http_dashboard_room_route_is_operator_gated_and_returns_only_the_v2_public_dto
+      - tests/world_v2/test_display_architecture_guard.py::test_selected_v2_display_consumers_remain_public_projection_readers
 
   - id: offline-mechanism-evaluation
     phase: 8
