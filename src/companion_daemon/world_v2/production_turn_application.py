@@ -91,6 +91,9 @@ from .test_economy import CostProfile
 from .media_execution_runtime import MediaExecutionRuntime, MediaExecutionWorker
 from .media_planning_runtime import MediaPlanningRuntime
 from .media_planning_worker import MediaPlanningRunResult, MediaPlanningWorker
+from .media_selection_acceptance_runtime import MediaSelectionProposalRecorder
+from .media_selection_draft import MediaSelectionDraftAdapter, MediaSelectionDraftModel
+from .media_selection_worker import MediaSelectionRunResult, MediaSelectionWorker
 from .media_payload_reader import MediaSidecarPayloadReader, PlatformAndMediaPayloadReader
 from .media_delivery_runtime import MediaDeliveryRuntime
 from .media_v2 import MediaAutomaticDeliveryApproval
@@ -189,6 +192,7 @@ class WorldV2TurnApplicationConfig:
     expression_reconsideration_owner: str = "worker:world-v2:expression-reconsideration"
     media_planning_worker_owner: str = "worker:world-v2:media-planning"
     event_ecology_worker_actor: str = "worker:world-v2:event-ecology"
+    media_selection_worker_actor: str = "worker:world-v2:media-selection"
     event_ecology_policy: EcologyPolicy | None = None
     life_ecology: LifeEcologyComposition | None = None
     media_cost_profile: CostProfile | None = None
@@ -211,6 +215,7 @@ class WorldV2TurnApplicationConfig:
             "expression_reconsideration_owner",
             "media_planning_worker_owner",
             "event_ecology_worker_actor",
+            "media_selection_worker_actor",
             "tool_worker_owner",
         ):
             if not getattr(self, name):
@@ -249,6 +254,8 @@ class WorldV2TurnApplication:
         media_ecology: EventEcologyMediaCandidateRuntime | None,
         life_ecology: LifeEcologyRuntime | None,
         event_ecology_worker_actor: str,
+        media_selection_worker: MediaSelectionWorker | None,
+        media_selection_worker_actor: str,
         media_delivery: MediaDeliveryRuntime,
         occurrence_content: OccurrenceContentCoordinator,
         activity_plans: ActivityPlanRuntime,
@@ -266,6 +273,8 @@ class WorldV2TurnApplication:
         self._media_ecology = media_ecology
         self._life_ecology = life_ecology
         self._event_ecology_worker_actor = event_ecology_worker_actor
+        self._media_selection_worker = media_selection_worker
+        self._media_selection_worker_actor = media_selection_worker_actor
         self._media_delivery = media_delivery
         self._occurrence_content = occurrence_content
         self._activity_plans = activity_plans
@@ -621,6 +630,27 @@ class WorldV2TurnApplication:
             return await asyncio.to_thread(self._media_ecology.drain_once, **kwargs)
         return self._media_ecology.drain_once(**kwargs)
 
+    async def drain_media_selection_once(
+        self, *, logical_time: datetime, trace_id: str, correlation_id: str,
+    ) -> MediaSelectionRunResult | None:
+        """Ask the bounded P1 selector whether an available candidate matters.
+
+        This is intentionally a proposal-only scheduler seam.  A model can
+        select one opaque candidate token or decline; it cannot authorize a
+        preview, reserve budget, construct an evidence snapshot, render, or
+        deliver media.  Those consequences remain behind the separate
+        acceptance runtime and its capability-bound grant checks.
+        """
+
+        if self._media_selection_worker is None:
+            return None
+        return await self._media_selection_worker.select_once(
+            logical_time=logical_time,
+            actor=self._media_selection_worker_actor,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+
     async def advance_life_ecology_once(
         self, *, wake_event_ref: str, trace_id: str, correlation_id: str,
     ) -> LifeEcologyRunResult:
@@ -735,6 +765,7 @@ def build_sqlite_world_v2_turn_application(
     fact_model: FactDraftChatModel | None = None,
     memory_model: FactMemoryDraftChatModel | None = None,
     activity_lifecycle_model: ActivityLifecycleDraftModel | None = None,
+    media_selection_model: MediaSelectionDraftModel | None = None,
     read_only_tool_model: DeliberationModelAdapter | None = None,
     read_only_tool_transport: ReadOnlyToolTransport | None = None,
     expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
@@ -1114,6 +1145,16 @@ def build_sqlite_world_v2_turn_application(
             if ecology_policy is not None
             else None
         )
+        media_selection_worker = (
+            MediaSelectionWorker(
+                ledger=ledger,
+                draft_adapter=MediaSelectionDraftAdapter(model=media_selection_model),
+                proposal_recorder=MediaSelectionProposalRecorder(ledger=ledger),
+                catalog_version=ecology_policy.catalog_version + ":selection.1",
+            )
+            if ecology_policy is not None and media_selection_model is not None
+            else None
+        )
         activity_lifecycle = (
             ActivityLifecycleWorker(
                 ledger=ledger,
@@ -1168,6 +1209,8 @@ def build_sqlite_world_v2_turn_application(
             media_ecology=media_ecology,
             life_ecology=life_ecology,
             event_ecology_worker_actor=config.event_ecology_worker_actor,
+            media_selection_worker=media_selection_worker,
+            media_selection_worker_actor=config.media_selection_worker_actor,
             media_delivery=MediaDeliveryRuntime(ledger=ledger),
             occurrence_content=occurrence_content,
             activity_plans=ActivityPlanRuntime(

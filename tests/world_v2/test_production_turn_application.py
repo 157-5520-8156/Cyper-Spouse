@@ -83,6 +83,14 @@ class _DraftChatModel:
         )
 
 
+class _NoOpMediaSelectionModel:
+    model = "test-media-selection"
+
+    async def complete(self, _messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        assert temperature == 0.2
+        return '{"decision":"no_op"}'
+
+
 class _CapturingDraftChatModel(_DraftChatModel):
     """Keep the exact model request so a production turn can assert Context."""
 
@@ -273,6 +281,46 @@ async def test_production_life_ecology_profile_claims_one_clock_wake_without_wri
         assert first.status == "joined_existing"
         assert first.reason_code == "life_ecology.run_completed"
         assert second.status == "joined_existing"
+    finally:
+        app.close()
+
+
+@pytest.mark.asyncio
+async def test_production_media_selection_is_explicitly_proposal_only_and_noops_without_candidates(
+    tmp_path: Path,
+) -> None:
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "media-selection.sqlite",
+        config=_life_ecology_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_InvalidModel(),
+        quick_recovery=_InvalidQuick(),
+        transport=_Transport(),
+        media_selection_model=_NoOpMediaSelectionModel(),
+        now=NOW,
+    )
+    try:
+        selected_at = NOW + timedelta(minutes=1)
+        await app.tick(
+            tick_id="media-selection:1",
+            logical_time_from=NOW,
+            logical_time_to=selected_at,
+            observed_at=selected_at,
+            trace_id="trace:media-selection:clock",
+            causation_id="scheduler:media-selection",
+            correlation_id="correlation:media-selection",
+            reason="test",
+        )
+        result = await app.drain_media_selection_once(
+            logical_time=selected_at,
+            trace_id="trace:media-selection",
+            correlation_id="correlation:media-selection",
+        )
+        assert result is not None
+        assert result.status == "no_op"
+        assert result.reason_code == "media_selection.no_available_candidates"
+        assert app._ledger.project().proposal_ids == ()  # type: ignore[attr-defined]
     finally:
         app.close()
 
