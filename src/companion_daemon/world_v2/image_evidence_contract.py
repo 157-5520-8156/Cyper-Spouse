@@ -30,6 +30,57 @@ _ALLOWED_EVIDENCE_KEYS = frozenset({
     "objects", "environment", "existing_media", "requires_readable_text",
 })
 
+CharacterCaptureCapability = Literal[
+    "character_front_camera",
+    "character_rear_camera",
+    "mirror",
+    "timer_fixed",
+    "requested_helper",
+    "known_companion",
+]
+NonSensitiveBodyRegion = Literal[
+    "hair",
+    "ear",
+    "neck",
+    "shoulder",
+    "upper_arm",
+    "forearm",
+    "wrist",
+    "hand",
+    "ankle",
+    "foot",
+]
+
+
+class CharacterBodyDetailGroundingV1(FrozenModel):
+    """One event-bound, non-sensitive body-detail subject and its visible object."""
+
+    body_region: NonSensitiveBodyRegion
+    object_ref: str = Field(min_length=1, max_length=512)
+
+
+class CharacterMediaEvidenceV1(FrozenModel):
+    """P2-only facts that can later support a bounded character-media candidate.
+
+    This is source evidence, not a shot instruction.  The fact binder owns
+    deciding whether a specific character-media kind is eligible.
+    """
+
+    character_ref: str = Field(min_length=1, max_length=512)
+    present: Literal[True]
+    capture_capabilities: tuple[CharacterCaptureCapability, ...] = Field(min_length=1, max_length=6)
+    body_detail: CharacterBodyDetailGroundingV1 | None = None
+
+    @model_validator(mode="after")
+    def capture_capabilities_are_unique(self) -> "CharacterMediaEvidenceV1":
+        if len(set(self.capture_capabilities)) != len(self.capture_capabilities):
+            raise ValueError("character media capture capabilities must be unique")
+        if self.body_detail is not None and not {
+            "character_front_camera", "character_rear_camera",
+        }.intersection(self.capture_capabilities):
+            raise ValueError("character media body detail requires front/rear capture")
+        return self
+
 
 class ImageEvidenceV1(FrozenModel):
     """A typed envelope; leaf-level planner checks remain fail-closed downstream."""
@@ -44,6 +95,7 @@ class ImageEvidenceV1(FrozenModel):
     environment: dict[str, object] | None = None
     existing_media: tuple[dict[str, object], ...] = Field(default=(), max_length=16)
     requires_readable_text: Literal[False] = False
+    character_media: CharacterMediaEvidenceV1 | None = None
 
     @model_validator(mode="after")
     def contains_a_concrete_visual_slice(self) -> "ImageEvidenceV1":
@@ -88,8 +140,12 @@ IMAGE_EVIDENCE_PAYLOAD_MODELS = {
 
 
 __all__ = [
+    "CharacterBodyDetailGroundingV1",
+    "CharacterCaptureCapability",
+    "CharacterMediaEvidenceV1",
     "DECLARABLE_SOURCE_EVENT_TYPES",
     "IMAGE_EVIDENCE_PAYLOAD_MODELS",
     "ImageEvidenceDeclaredPayload",
     "ImageEvidenceV1",
+    "NonSensitiveBodyRegion",
 ]

@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 import pytest
 
 from companion_daemon.world_v2.image_evidence_contract import (
+    CharacterBodyDetailGroundingV1,
+    CharacterMediaEvidenceV1,
     ImageEvidenceDeclaredPayload,
     ImageEvidenceV1,
 )
@@ -82,6 +84,68 @@ def test_declaration_rejects_private_source_or_empty_visual_evidence() -> None:
         _payload(source_privacy_ceiling="private")
     with pytest.raises(ValueError, match="concrete visual slice"):
         ImageEvidenceV1(visibility="public")
+
+
+def test_character_media_evidence_binds_explicit_presence_and_hides_from_p0_planner_payload() -> None:
+    evidence = ImageEvidenceV1(
+        visibility="public",
+        activity={"id": "activity:walk"},
+        character_media=CharacterMediaEvidenceV1(
+            character_ref="actor:companion",
+            present=True,
+            capture_capabilities=("character_front_camera",),
+        ),
+    )
+
+    assert evidence.character_media is not None
+    assert evidence.character_media.character_ref == "actor:companion"
+    assert evidence.planner_payload() == {
+        "visibility": "public",
+        "activity": {"id": "activity:walk"},
+        "participants": [],
+        "objects": [],
+        "existing_media": [],
+        "requires_readable_text": False,
+    }
+
+
+def test_character_media_evidence_allows_only_closed_capabilities_and_non_sensitive_body_detail_capture() -> None:
+    body_detail = CharacterBodyDetailGroundingV1(
+        body_region="wrist",
+        object_ref="object:watch",
+    )
+    evidence = CharacterMediaEvidenceV1(
+        character_ref="actor:companion",
+        present=True,
+        capture_capabilities=("character_rear_camera",),
+        body_detail=body_detail,
+    )
+
+    assert evidence.body_detail == body_detail
+    with pytest.raises(ValueError, match="Input should be True"):
+        CharacterMediaEvidenceV1(
+            character_ref="actor:companion",
+            present=False,  # type: ignore[arg-type]
+            capture_capabilities=("character_front_camera",),
+        )
+    with pytest.raises(ValueError, match="Input should be"):
+        CharacterMediaEvidenceV1(
+            character_ref="actor:companion",
+            present=True,
+            capture_capabilities=("external_sender",),  # type: ignore[arg-type]
+        )
+    with pytest.raises(ValueError, match="character media body detail requires front/rear capture"):
+        CharacterMediaEvidenceV1(
+            character_ref="actor:companion",
+            present=True,
+            capture_capabilities=("mirror",),
+            body_detail=body_detail,
+        )
+    with pytest.raises(ValueError, match="Input should be"):
+        CharacterBodyDetailGroundingV1(
+            body_region="chest",  # type: ignore[arg-type]
+            object_ref="object:necklace",
+        )
 
 
 def test_reducer_rejects_a_declaration_with_mismatched_source_bytes() -> None:
