@@ -422,13 +422,12 @@ class MediaEvidenceSnapshotCompiler:
         body["character"] = {
             "subject_ref": contract.subject_ref,
             "presence": {"present": True},
-            "capture_authorization": {"allowed_modes": contract.allowed_capture_modes},
-            "candidate_contract": {
-                "kind": contract.kind,
-                "allowed_character_visibility": contract.allowed_character_visibility,
-                "authority_digest": contract.authority_digest,
-            },
         }
+        # The planner may read every leaf of ``character``.  Capture modes,
+        # contract kind, and the digest are authorization coordinates, not
+        # visual evidence, so they belong exclusively to the V2 adapter-only
+        # allowance below.  Keeping the two planes separate prevents the
+        # image planner from treating an internal permission as image content.
         body["character_media_authorization"] = CharacterMediaSnapshotAuthorization(
             candidate_id=candidate.candidate_id,
             candidate_revision=candidate.entity_revision,
