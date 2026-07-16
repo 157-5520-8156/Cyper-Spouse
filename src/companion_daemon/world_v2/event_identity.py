@@ -424,6 +424,7 @@ def _life_identity_components(
             "interaction_appraisal",
             "interaction_fact",
             "affect_deliberation",
+            "relationship_deliberation",
             "outcome_deliberation",
             "media_delivery_interaction",
             "expression_reconsideration",

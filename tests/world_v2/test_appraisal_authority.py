@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -18,6 +19,11 @@ from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.errors import IdempotencyConflict
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.runtime import WorldRuntime
+from companion_daemon.world_v2.relationship_trigger import (
+    relationship_deliberation_trigger_events,
+    relationship_deliberation_trigger_id,
+)
+from companion_daemon.world_v2.relationship_trigger_runtime import RelationshipTriggerRuntime
 from companion_daemon.world_v2.schemas import (
     AffectComponentProjection,
     AffectCalibrationEpisodeRef,
@@ -31,6 +37,7 @@ from companion_daemon.world_v2.schemas import (
     ClaimLease,
     ClockObservation,
     EvidenceRef,
+    ProjectionCursor,
     TriggerProcess,
     WorldEvent,
     affect_decay_config_digest,
@@ -495,6 +502,65 @@ async def test_accepted_appraisal_can_open_affect_through_an_independent_authori
         assert reopened.rebuild() == projection
         assert await WorldRuntime(world_id=WORLD_ID, ledger=reopened).advance(clock) == first
         assert reopened.project() == projection
+        reopened.close()
+
+
+@pytest.mark.parametrize("persistent", [False, True])
+@pytest.mark.asyncio
+async def test_accepted_appraisal_opens_a_replayable_relationship_trigger(
+    tmp_path, persistent: bool
+) -> None:
+    path = tmp_path / "relationship-trigger.sqlite3"
+    authority_ledger = SQLiteWorldLedger(path=path, world_id=WORLD_ID) if persistent else None
+    ledger, trigger, evidence = prepare_claimed_interaction(authority_ledger)
+    appraisal_payload = accepted_payload(ledger, trigger, evidence)
+    record_proposal(ledger, trigger, evidence, appraisal_payload)
+    commit(ledger, authorized_batch(trigger, appraisal_payload))
+    located = ledger.lookup_event_commit("interaction-appraisal-accepted")
+    assert located is not None
+    appraisal_event = located[0]
+    trigger_events = relationship_deliberation_trigger_events(
+        appraisal_event=appraisal_event, owner_id="worker:relationship"
+    )
+    commit(ledger, list(trigger_events))
+
+    class _Worker:
+        calls: list[str] = []
+
+        async def process(self, *, world_id, cursor, appraisal_event):  # type: ignore[no-untyped-def]
+            assert world_id == WORLD_ID
+            assert appraisal_event.event_id == "interaction-appraisal-accepted"
+            assert cursor == ProjectionCursor(
+                world_revision=ledger.project().world_revision,
+                deliberation_revision=ledger.project().deliberation_revision,
+                ledger_sequence=ledger.project().ledger_sequence,
+            )
+            self.calls.append(appraisal_event.event_id)
+            return SimpleNamespace(status="no_change")
+
+    worker = _Worker()
+    runtime = RelationshipTriggerRuntime(
+        ledger=ledger, worker=worker, owner_id="worker:relationship"
+    )
+    result = await runtime.drain_one()
+    projection = ledger.project()
+
+    trigger_id = relationship_deliberation_trigger_id(
+        world_id=WORLD_ID, appraisal_event_id="interaction-appraisal-accepted"
+    )
+    assert result.trigger_id == trigger_id
+    assert result.status == "processed"
+    assert result.work_status == "no_change"
+    assert worker.calls == ["interaction-appraisal-accepted"]
+    assert projection.trigger_processes[-1].state == "terminal"
+    assert projection.trigger_processes[-1].runtime_outcome_ref.endswith(":no_change")
+    assert ledger.rebuild() == projection
+    assert (await runtime.drain_one()).status == "idle"
+    if persistent:
+        ledger.close()
+        reopened = SQLiteWorldLedger(path=path, world_id=WORLD_ID)
+        assert reopened.project() == projection
+        assert reopened.rebuild() == projection
         reopened.close()
 
 

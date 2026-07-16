@@ -6646,6 +6646,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "interaction_appraisal",
         "interaction_fact",
         "affect_deliberation",
+        "relationship_deliberation",
         "outcome_deliberation",
         "expression_reconsideration",
         "life_ecology",
@@ -6689,6 +6690,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "interaction_appraisal",
         "interaction_fact",
         "affect_deliberation",
+        "relationship_deliberation",
         "outcome_deliberation",
         "expression_reconsideration",
         "life_ecology",
@@ -6779,6 +6781,27 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             or process.trigger_ref != f"affect:{process.source_evidence_ref}"
         ):
             raise ValueError("affect trigger requires an accepted appraisal event")
+    if process.process_kind == "relationship_deliberation":
+        source = next(
+            (
+                item
+                for item in state.committed_world_event_refs
+                if item.event_id == process.source_evidence_ref
+            ),
+            None,
+        )
+        from .relationship_trigger import relationship_deliberation_trigger_id
+
+        if (
+            source is None
+            or source.event_type != "AppraisalAccepted"
+            or process.trigger_id
+            != relationship_deliberation_trigger_id(
+                world_id=event.world_id, appraisal_event_id=source.event_id
+            )
+            or process.trigger_ref != f"relationship:{process.source_evidence_ref}"
+        ):
+            raise ValueError("relationship trigger requires an accepted appraisal event")
     if process.process_kind == "outcome_deliberation":
         source = next(
             (
