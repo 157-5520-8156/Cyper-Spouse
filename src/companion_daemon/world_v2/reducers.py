@@ -108,6 +108,10 @@ from .appearance_state import (
     AppearanceStateProjection,
     AppearanceStateRecordedPayload,
 )
+from .visible_physical_state import (
+    VisiblePhysicalStateProjection,
+    VisiblePhysicalStateRecordedPayload,
+)
 from .random_authority import RandomDrawRecordedPayload
 from .appraisal_reducers import (
     accept_appraisal,
@@ -626,6 +630,7 @@ class ReducerState(FrozenModel):
     perception_requests: tuple[PerceptionRequestProjection, ...] = ()
     perception_results: tuple[PerceptionResultProjection, ...] = ()
     appearance_states: tuple[AppearanceStateProjection, ...] = ()
+    visible_physical_states: tuple[VisiblePhysicalStateProjection, ...] = ()
     photo_candidates: tuple[PhotoCandidate, ...] = ()
     media_opportunities: tuple[MediaOpportunity, ...] = ()
     media_plans: tuple[MediaPlan, ...] = ()
@@ -788,6 +793,18 @@ class ReducerState(FrozenModel):
                 for previous, current in zip(history, history[1:])
             ):
                 raise ValueError("appearance state histories must not overlap")
+        for subject_ref in {item.subject_ref for item in self.visible_physical_states}:
+            history = tuple(
+                item for item in self.visible_physical_states if item.subject_ref == subject_ref
+            )
+            if tuple(item.entity_revision for item in history) != tuple(range(1, len(history) + 1)):
+                raise ValueError("visible physical state revisions must be contiguous")
+            if len({item.physical_state_id for item in history}) != 1:
+                raise ValueError("visible physical state subject must have one authority identity")
+            if any(current.valid_from <= previous.valid_from for previous, current in zip(history, history[1:])):
+                raise ValueError("visible physical state versions must move logical time forward")
+            if any(previous.valid_until > current.valid_from for previous, current in zip(history, history[1:])):
+                raise ValueError("visible physical state histories must not overlap")
         authority_ids = tuple(item.authority_id for item in self.actor_authorities)
         if len(authority_ids) != len(set(authority_ids)):
             raise ValueError("actor authority ids must be unique")
@@ -1287,6 +1304,15 @@ class ReducerState(FrozenModel):
             **(
                 {"appearance_states": tuple(item.model_dump(mode="json") for item in self.appearance_states)}
                 if self.appearance_states
+                else {}
+            ),
+            **(
+                {
+                    "visible_physical_states": tuple(
+                        item.model_dump(mode="json") for item in self.visible_physical_states
+                    )
+                }
+                if self.visible_physical_states
                 else {}
             ),
             "actions": tuple(
@@ -5226,6 +5252,47 @@ def _appearance_state_recorded(state: ReducerState, event: WorldEvent) -> Reduce
     )
     return state.model_copy(update={"appearance_states": (*next_states, appearance)})
 
+
+def _visible_physical_state_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    """Project only current-clock, source-bound short-lived physical evidence."""
+
+    payload = VisiblePhysicalStateRecordedPayload.model_validate_json(event.payload_json)
+    physical = payload.state
+    source = next(
+        (item for item in state.committed_world_event_refs if item.event_id == physical.source_event_ref),
+        None,
+    )
+    history = tuple(
+        item for item in state.visible_physical_states if item.subject_ref == physical.subject_ref
+    )
+    if (
+        state.logical_time is None
+        or event.logical_time != state.logical_time
+        or physical.valid_from != event.logical_time
+        or event.causation_id != physical.source_event_ref
+        or source is None
+        or source.event_type != physical.source_event_type
+        or source.payload_hash != physical.source_event_payload_hash
+        or source.event_type not in APPEARANCE_SOURCE_EVENT_TYPES
+        or source.logical_time > physical.valid_from
+        or physical.entity_revision != len(history) + 1
+        or (history and physical.physical_state_id != history[0].physical_state_id)
+        or (history and physical.valid_from <= history[-1].valid_from)
+    ):
+        raise ValueError("visible physical state source is not current")
+    updated_history = history
+    if history and history[-1].valid_until > physical.valid_from:
+        updated_history = (*history[:-1], history[-1].model_copy(update={"valid_until": physical.valid_from}))
+    updated_by_subject = {item.entity_revision: item for item in updated_history}
+    next_states = tuple(
+        updated_by_subject.get(item.entity_revision, item)
+        if item.subject_ref == physical.subject_ref
+        else item
+        for item in state.visible_physical_states
+    )
+    return state.model_copy(update={"visible_physical_states": (*next_states, physical)})
+
+
 def _random_draw_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     RandomDrawRecordedPayload.model_validate_json(event.payload_json)
     if state.logical_time is None or event.logical_time != state.logical_time:
@@ -8919,6 +8986,9 @@ _EVENTS = {
         EventDefinition("PhotoCandidateExpired", RevisionClass.WORLD, _photo_candidate_expired),
         EventDefinition("ImageEvidenceDeclared", RevisionClass.WORLD, _image_evidence_declared),
         EventDefinition("AppearanceStateRecorded", RevisionClass.WORLD, _appearance_state_recorded),
+        EventDefinition(
+            "VisiblePhysicalStateRecorded", RevisionClass.WORLD, _visible_physical_state_recorded
+        ),
         EventDefinition("RandomDrawRecorded", RevisionClass.WORLD, _random_draw_recorded),
         EventDefinition(
             "MediaSelectionProposalRecorded",
@@ -9410,6 +9480,7 @@ def make_projection(
         perception_requests=state.perception_requests,
         perception_results=state.perception_results,
         appearance_states=state.appearance_states,
+        visible_physical_states=state.visible_physical_states,
         photo_candidates=state.photo_candidates,
         media_opportunities=state.media_opportunities,
         media_plans=state.media_plans,

@@ -43,6 +43,7 @@ from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditPro
 from .acceptance_manifest import AcceptanceManifestRefV2
 from .schema_core import EvidenceRef, FrozenModel, PrivacyClass
 from .appearance_state import AppearanceStateProjection
+from .visible_physical_state import VisiblePhysicalStateProjection
 from .media_v2 import (
     MediaArtifact,
     MediaAutomaticDeliveryApproval,
@@ -4535,6 +4536,7 @@ class InternalWorldSnapshot(FrozenModel):
     privacy_policy: PrivacyPolicyProjection | None = None
     pending_actions: tuple[Action, ...] = ()
     appearance_states: tuple[AppearanceStateProjection, ...] = ()
+    visible_physical_states: tuple[VisiblePhysicalStateProjection, ...] = ()
     photo_candidates: tuple[PhotoCandidate, ...] = ()
     media_opportunities: tuple[MediaOpportunity, ...] = ()
     media_plans: tuple[MediaPlan, ...] = ()
@@ -4674,6 +4676,7 @@ class LedgerProjection(FrozenModel):
     perception_requests: tuple[PerceptionRequestProjection, ...] = ()
     perception_results: tuple[PerceptionResultProjection, ...] = ()
     appearance_states: tuple[AppearanceStateProjection, ...] = ()
+    visible_physical_states: tuple[VisiblePhysicalStateProjection, ...] = ()
     photo_candidates: tuple[PhotoCandidate, ...] = ()
     media_opportunities: tuple[MediaOpportunity, ...] = ()
     media_plans: tuple[MediaPlan, ...] = ()

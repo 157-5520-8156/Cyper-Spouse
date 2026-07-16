@@ -113,6 +113,12 @@ def _life_identity_components(
             _nested(payload, "state", "appearance_state_id"),
             _nested(payload, "state", "entity_revision"),
         )
+    if event_type == "VisiblePhysicalStateRecorded":
+        return (
+            world_id,
+            _nested(payload, "state", "physical_state_id"),
+            _nested(payload, "state", "entity_revision"),
+        )
     if event_type == "RandomDrawRecorded":
         return world_id, payload.get("draw_id")
     if event_type == "MediaSelectionProposalRecorded":
