@@ -201,7 +201,11 @@ class CharacterMediaCandidateRuntime:
             deliberation_revision=projection.deliberation_revision,
             ledger_sequence=projection.ledger_sequence,
         )
-        candidates = self._binder.discover(cursor=cursor, logical_time=logical_time)
+        candidates = tuple(
+            candidate
+            for candidate in self._binder.discover(cursor=cursor, logical_time=logical_time)
+            if wake_event_ref in candidate.source_event_refs
+        )
         if not candidates:
             return ()
         events: list[WorldEvent] = []
