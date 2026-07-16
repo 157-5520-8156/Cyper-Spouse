@@ -91,12 +91,54 @@ def test_candidate_and_opportunity_are_bound_only_to_prior_committed_events() ->
     )
     state = reduce_event(_state(), _event("PhotoCandidateOpened", PhotoCandidateOpenedPayload(candidate=candidate).model_dump(mode="json"), "candidate"))
     state = reduce_event(state, _event("MediaOpportunityFrozen", MediaOpportunityFrozenPayload(opportunity=_opportunity()).model_dump(mode="json"), "opportunity"))
-    assert state.photo_candidates == (candidate,)
+    assert state.photo_candidates == (
+        candidate.model_copy(update={"entity_revision": 2, "status": "selected"}),
+    )
     assert state.media_opportunities == (_opportunity(),)
 
     invalid = candidate.model_copy(update={"candidate_id": "candidate:invalid", "source_event_refs": ("event:uncommitted",)})
     with pytest.raises(ValueError, match="prior committed"):
         reduce_event(_state(), _event("PhotoCandidateOpened", PhotoCandidateOpenedPayload(candidate=invalid).model_dump(mode="json"), "invalid"))
+
+
+def test_p1_candidate_pins_source_hashes_expiry_and_selected_transition() -> None:
+    candidate = PhotoCandidate(
+        candidate_id="candidate:p1",
+        source_event_refs=(SOURCE,),
+        family="life_share",
+        privacy_ceiling="personal",
+        opened_at=NOW,
+        expires_at=NOW + timedelta(hours=1),
+        ecology_category="activity_result",
+        ecology_observed_at=NOW,
+        source_events=(MediaEvidenceSource(event_ref=SOURCE, payload_hash="a" * 64),),
+    )
+    state = reduce_event(
+        _state(),
+        _event("PhotoCandidateOpened", {"candidate": candidate.model_dump(mode="json")}, "candidate-p1"),
+    )
+    opportunity = _opportunity().model_copy(
+        update={
+            "opportunity_id": "opportunity:p1",
+            "candidate_id": candidate.candidate_id,
+            "ecology_category": "activity_result",
+        }
+    )
+    state = reduce_event(
+        state,
+        _event("MediaOpportunityFrozen", {"opportunity": opportunity.model_dump(mode="json")}, "opportunity-p1"),
+    )
+    assert state.photo_candidates[0].status == "selected"
+    assert state.photo_candidates[0].entity_revision == 2
+
+    forged = candidate.model_copy(
+        update={"candidate_id": "candidate:forged", "source_events": (MediaEvidenceSource(event_ref=SOURCE, payload_hash="b" * 64),)}
+    )
+    with pytest.raises(ValueError, match="source hashes"):
+        reduce_event(
+            _state(),
+            _event("PhotoCandidateOpened", {"candidate": forged.model_dump(mode="json")}, "candidate-forged"),
+        )
 
 
 def test_recorded_plan_requires_exact_delivered_action_receipt_and_opens_deterministic_continuation() -> None:

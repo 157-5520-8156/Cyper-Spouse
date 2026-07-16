@@ -17,6 +17,24 @@ class MediaOpportunityAuthorizer:
         candidate = next((x for x in projection.photo_candidates if x.candidate_id == selection.candidate_id), None)
         if candidate is None:
             raise ValueError("media_authorizer.candidate_not_available")
+        if candidate.status != "available":
+            raise ValueError("media_authorizer.candidate_not_available")
+        if (
+            candidate.opened_at is None
+            or candidate.expires_at is None
+            or candidate.ecology_category is None
+            or candidate.ecology_observed_at is None
+            or not candidate.source_events
+        ):
+            raise ValueError("media_authorizer.candidate_is_not_p1_source_bound")
+        if getattr(projection, "logical_time", None) is None or projection.logical_time >= candidate.expires_at:
+            raise ValueError("media_authorizer.candidate_expired")
+        if (
+            category != candidate.ecology_category
+            or observed_at != candidate.ecology_observed_at
+            or expires_at != candidate.expires_at
+        ):
+            raise ValueError("media_authorizer.selection_coordinates_do_not_match_candidate")
         if (selection.family, selection.delivery_mode, selection.media_privacy_ceiling,
             selection.expression_charge_ceiling) != ("life_share", "preview", "ordinary", "none"):
             raise ValueError("media_authorizer.p1_public_preview_only")
@@ -27,7 +45,8 @@ class MediaOpportunityAuthorizer:
             privacy_ceiling=candidate.privacy_ceiling, media_privacy_ceiling="ordinary",
             event_snapshot_ref=compiled.snapshot_ref, event_snapshot_hash=compiled.snapshot_hash,
             source_event_refs=candidate.source_event_refs, catalog_version=self._catalog_version,
-            ecology_category=category, ecology_observed_at=observed_at, expires_at=expires_at,
+            ecology_category=candidate.ecology_category,
+            ecology_observed_at=candidate.ecology_observed_at, expires_at=candidate.expires_at,
         )
         return opportunity, compiled
 

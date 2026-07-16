@@ -4983,10 +4983,43 @@ def _photo_candidate_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
     candidate = payload.candidate
     if any(item.candidate_id == candidate.candidate_id for item in state.photo_candidates):
         raise ValueError("photo candidate identity is already registered")
-    committed = {item.event_id for item in state.committed_world_event_refs}
-    if not set(candidate.source_event_refs) <= committed:
+    committed = {item.event_id: item.payload_hash for item in state.committed_world_event_refs}
+    if not set(candidate.source_event_refs) <= set(committed):
         raise ValueError("photo candidate must be bound only to prior committed world events")
+    if candidate.source_events and any(
+        committed.get(source.event_ref) != source.payload_hash
+        for source in candidate.source_events
+    ):
+        raise ValueError("P1 photo candidate source hashes do not bind committed world events")
+    if candidate.opened_at is not None and candidate.opened_at != event.logical_time:
+        raise ValueError("P1 photo candidate opening time must be authoritative")
     return state.model_copy(update={"photo_candidates": (*state.photo_candidates, candidate)})
+
+
+def _advance_media_candidate(
+    candidates: tuple[PhotoCandidate, ...], *, candidate_id: str, expected_status: str, next_status: str
+) -> tuple[PhotoCandidate, ...]:
+    """Advance one candidate aggregate without inferring an alternate picture.
+
+    The caller has already established the specific ledger event (opportunity,
+    plan, artifact, or delivery) that justifies this transition.  A terminal
+    candidate is never reopened by a retry in another media lane.
+    """
+
+    index = next((i for i, item in enumerate(candidates) if item.candidate_id == candidate_id), None)
+    if index is None:
+        # Pre-P1 snapshots persisted opportunities without a lifecycle
+        # aggregate.  They remain readable for migration/replay, but no live
+        # path can reach this branch because opportunity freezing requires the
+        # candidate above.  Do not manufacture a state record during replay.
+        return candidates
+    candidate = candidates[index]
+    if candidate.status != expected_status:
+        raise ValueError("media candidate lifecycle transition is not current")
+    updated = candidate.model_copy(
+        update={"entity_revision": candidate.entity_revision + 1, "status": next_status}
+    )
+    return (*candidates[:index], updated, *candidates[index + 1 :])
 
 
 def _media_opportunity_frozen(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -5004,11 +5037,25 @@ def _media_opportunity_frozen(state: ReducerState, event: WorldEvent) -> Reducer
         candidate.family != opportunity.family
         or candidate.privacy_ceiling != opportunity.privacy_ceiling
         or candidate.source_event_refs != opportunity.source_event_refs
+        or candidate.status != "available"
+        or (candidate.expires_at is not None and event.logical_time >= candidate.expires_at)
+        or (
+            candidate.ecology_category is not None
+            and opportunity.ecology_category != candidate.ecology_category
+        )
         or event.logical_time >= opportunity.expires_at
     ):
         raise ValueError("media opportunity does not exactly freeze its candidate")
     return state.model_copy(
-        update={"media_opportunities": (*state.media_opportunities, opportunity)}
+        update={
+            "photo_candidates": _advance_media_candidate(
+                state.photo_candidates,
+                candidate_id=candidate.candidate_id,
+                expected_status="available",
+                next_status="selected",
+            ),
+            "media_opportunities": (*state.media_opportunities, opportunity),
+        }
     )
 
 
@@ -5043,7 +5090,17 @@ def _media_plan_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         )
     ):
         raise ValueError("MediaPlanRecorded is not bound to one delivered planning Action")
-    return state.model_copy(update={"media_plans": (*state.media_plans, plan)})
+    return state.model_copy(
+        update={
+            "photo_candidates": _advance_media_candidate(
+                state.photo_candidates,
+                candidate_id=opportunity.candidate_id,
+                expected_status="selected",
+                next_status="planned",
+            ),
+            "media_plans": (*state.media_plans, plan),
+        }
+    )
 
 
 def _media_not_renderable_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -5076,6 +5133,12 @@ def _media_not_renderable_recorded(state: ReducerState, event: WorldEvent) -> Re
         raise ValueError("MediaNotRenderableRecorded is not bound to one delivered planning Action")
     return state.model_copy(
         update={
+            "photo_candidates": _advance_media_candidate(
+                state.photo_candidates,
+                candidate_id=opportunity.candidate_id,
+                expected_status="selected",
+                next_status="unrenderable",
+            ),
             "media_unrenderable_opportunity_ids": (
                 *state.media_unrenderable_opportunity_ids,
                 opportunity.opportunity_id,
@@ -5123,7 +5186,22 @@ def _media_render_artifact_recorded(state: ReducerState, event: WorldEvent) -> R
             raise ValueError(
                 "media repair artifact requires the first repairable inspection failure"
             )
-    return state.model_copy(update={"media_artifacts": (*state.media_artifacts, artifact)})
+    opportunity = next(
+        (item for item in state.media_opportunities if item.opportunity_id == plan.opportunity_id), None
+    )
+    if opportunity is None:
+        raise ValueError("media render artifact plan lacks its frozen opportunity")
+    return state.model_copy(
+        update={
+            "photo_candidates": _advance_media_candidate(
+                state.photo_candidates,
+                candidate_id=opportunity.candidate_id,
+                expected_status="planned" if action.kind == "media_render" else "generated",
+                next_status="generated",
+            ),
+            "media_artifacts": (*state.media_artifacts, artifact),
+        }
+    )
 
 
 def _media_inspection_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
@@ -5394,7 +5472,22 @@ def _media_delivery_shared(state: ReducerState, event: WorldEvent) -> ReducerSta
         raise ValueError(
             "MediaDeliveryShared requires one delivered approved media-delivery Action"
         )
-    return state.model_copy(update={"media_deliveries": (*state.media_deliveries, delivery)})
+    opportunity = next(
+        (item for item in state.media_opportunities if item.opportunity_id == plan.opportunity_id), None
+    )
+    if opportunity is None:
+        raise ValueError("media delivery plan lacks its frozen opportunity")
+    return state.model_copy(
+        update={
+            "photo_candidates": _advance_media_candidate(
+                state.photo_candidates,
+                candidate_id=opportunity.candidate_id,
+                expected_status="generated",
+                next_status="shared",
+            ),
+            "media_deliveries": (*state.media_deliveries, delivery),
+        }
+    )
 
 
 def _interaction_bid_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:

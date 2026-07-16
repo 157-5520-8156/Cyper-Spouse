@@ -23,6 +23,7 @@ from .media_v2 import (
     ImmutableMediaPayloadStore,
     MediaOpportunity,
     MediaOpportunityFrozenPayload,
+    MediaEvidenceSource,
     PhotoCandidate,
     PhotoCandidateOpenedPayload,
     StoredMediaPayload,
@@ -215,6 +216,16 @@ class EventEcologyMediaCandidateRuntime:
             candidate = PhotoCandidate(
                 candidate_id=candidate_id, source_event_refs=selected.source_event_refs,
                 family="life_share", privacy_ceiling=selected.privacy_ceiling,
+                opened_at=logical_time,
+                expires_at=selected.expires_at,
+                ecology_category=selected.category,
+                ecology_observed_at=selected.observed_at,
+                source_events=tuple(
+                    MediaEvidenceSource(event_ref=event_ref, payload_hash=payload_hash)
+                    for event_ref, payload_hash in zip(
+                        selected.source_event_refs, selected.source_payload_hashes, strict=True
+                    )
+                ),
             )
             candidate_payload = PhotoCandidateOpenedPayload(candidate=candidate).model_dump(mode="json")
             previous = events[-1].event_id if events else f"event:ecology-wake:{projection.ledger_sequence}"

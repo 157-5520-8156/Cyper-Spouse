@@ -36,27 +36,68 @@ def media_payload_hash(payload: str) -> str:
 
 MediaFamily = Literal["life_share", "character_media"]
 MediaDeliveryMode = Literal["preview", "automatic"]
-MediaCandidateStatus = Literal["available", "selected", "planned", "unrenderable"]
+MediaCandidateStatus = Literal[
+    "available",
+    "selected",
+    "planned",
+    "generated",
+    "shared",
+    "skipped",
+    "unrenderable",
+    "expired",
+    "failed",
+]
 MediaLane = Literal["ordinary_life", "alluring_life", "exclusive_private", "explicit_reserved"]
 MediaPrivacyCeiling = Literal["ordinary", "personal", "intimate"]
-
-
-class PhotoCandidate(FrozenModel):
-    candidate_id: str = Field(min_length=1, max_length=256)
-    source_event_refs: tuple[str, ...] = Field(min_length=1, max_length=32)
-    family: MediaFamily
-    privacy_ceiling: PrivacyClass
-
-    @model_validator(mode="after")
-    def canonical_sources(self) -> "PhotoCandidate":
-        if self.source_event_refs != tuple(sorted(set(self.source_event_refs))):
-            raise ValueError("photo candidate source refs must be sorted and unique")
-        return self
 
 
 class MediaEvidenceSource(FrozenModel):
     event_ref: str = Field(min_length=1, max_length=512)
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class PhotoCandidate(FrozenModel):
+    """Durable media-candidate aggregate, not merely a source descriptor.
+
+    P0 records did not retain lifecycle coordinates, so those fields remain
+    optional for replay compatibility.  Every P1 candidate must carry the
+    complete source/time tuple; later selection acceptance pins this aggregate
+    by ``entity_revision`` instead of trusting an ID string alone.
+    """
+
+    candidate_id: str = Field(min_length=1, max_length=256)
+    source_event_refs: tuple[str, ...] = Field(min_length=1, max_length=32)
+    family: MediaFamily
+    privacy_ceiling: PrivacyClass
+    entity_revision: int = Field(default=1, ge=1)
+    status: MediaCandidateStatus = "available"
+    opened_at: datetime | None = None
+    expires_at: datetime | None = None
+    ecology_category: str | None = Field(default=None, min_length=1, max_length=128)
+    ecology_observed_at: datetime | None = None
+    source_events: tuple[MediaEvidenceSource, ...] = ()
+
+    @model_validator(mode="after")
+    def lifecycle_coordinates_are_closed(self) -> "PhotoCandidate":
+        if self.source_event_refs != tuple(sorted(set(self.source_event_refs))):
+            raise ValueError("photo candidate source refs must be sorted and unique")
+        source_refs = tuple(item.event_ref for item in self.source_events)
+        if self.source_events and source_refs != self.source_event_refs:
+            raise ValueError("photo candidate source hashes must match source refs exactly")
+        lifecycle_values = (
+            self.opened_at,
+            self.expires_at,
+            self.ecology_category,
+            self.ecology_observed_at,
+        )
+        if any(value is not None for value in lifecycle_values):
+            if not all(value is not None for value in lifecycle_values) or not self.source_events:
+                raise ValueError("P1 photo candidate requires complete lifecycle coordinates")
+            if self.expires_at <= self.opened_at:
+                raise ValueError("photo candidate expiry must follow opening")
+        elif self.source_events:
+            raise ValueError("legacy photo candidate cannot carry source hashes without lifecycle coordinates")
+        return self
 
 
 class ImageEvidenceIndexEntry(FrozenModel):
