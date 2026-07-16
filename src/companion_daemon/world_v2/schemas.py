@@ -975,6 +975,7 @@ class AcceptanceDecisionRef(FrozenModel):
             "outcome-acceptance.1",
             "activity-lifecycle-acceptance.2",
             "media-selection-acceptance.1",
+            "media-selection-acceptance.2",
             "interaction-bid-acceptance.1",
             "media-delivery-thread-acceptance.1",
         ]

@@ -20,6 +20,7 @@ from typing import Literal, Protocol
 from pydantic import Field, model_validator
 
 from .schema_core import FrozenModel, PrivacyClass
+from .relationship_media_context import RelationshipMediaContextV1
 
 
 def canonical_media_json(value: object) -> str:
@@ -205,7 +206,7 @@ class ImageEventSnapshot(FrozenModel):
     character: dict[str, object]
     existing_media: tuple[dict[str, object], ...]
     visual_requirements: dict[str, object]
-    relationship_media_context: None = None
+    relationship_media_context: dict[str, object] | None = None
     evidence_index: dict[str, ImageEvidenceIndexEntry]
 
     @model_validator(mode="after")
@@ -216,20 +217,23 @@ class ImageEventSnapshot(FrozenModel):
             return token.replace("~", "~0").replace("/", "~1")
 
         def leaves(value: object, pointer: str) -> set[str]:
+            if isinstance(value, FrozenModel):
+                return leaves(value.model_dump(mode="json"), pointer)
             if isinstance(value, dict):
                 result: set[str] = set()
                 for key, nested in value.items():
                     result |= leaves(nested, pointer + "/" + escape(key))
                 return result
-            if isinstance(value, tuple):
+            if isinstance(value, (tuple, list)):
                 result = set()
                 for index, nested in enumerate(value):
                     result |= leaves(nested, pointer + "/" + str(index))
                 return result
             return {pointer}
 
-        # ``schema_version`` and the absence-only relationship slot are wire
-        # structure, not image facts.  Everything else is planner-readable.
+        # ``schema_version`` and an absent relationship slot are wire
+        # structure, not image facts.  P3's explicit relationship slice is
+        # planner-readable and therefore indexed like every other value.
         readable = {
             "event": self.event,
             "source": self.source,
@@ -242,6 +246,8 @@ class ImageEventSnapshot(FrozenModel):
             "existing_media": self.existing_media,
             "visual_requirements": self.visual_requirements,
         }
+        if self.relationship_media_context is not None:
+            readable["relationship_media_context"] = self.relationship_media_context
         expected = set().union(*(leaves(value, "/" + key) for key, value in readable.items()))
         supplied = set(self.evidence_index)
         if expected != supplied:
@@ -278,6 +284,47 @@ class ImageEventSnapshotV2(ImageEventSnapshot):
     schema_version: Literal["world-image-event-snapshot-v2"] = "world-image-event-snapshot-v2"
 
 
+class ImageEventSnapshotV3(ImageEventSnapshot):
+    """P3 recipient-scoped character snapshot.
+
+    The relationship context is evidence, but capability/capture/lane
+    permissions remain in the enclosing outer authorization sidecar.
+    """
+
+    schema_version: Literal["world-image-event-snapshot-v3"] = "world-image-event-snapshot-v3"
+    relationship_media_context: RelationshipMediaContextV1
+
+
+class PrivateMediaSnapshotAuthorization(FrozenModel):
+    """Adapter-only authorization for one P3 private-media opportunity."""
+
+    candidate_id: str = Field(min_length=1, max_length=256)
+    candidate_revision: int = Field(ge=1)
+    recipient_ref: str = Field(min_length=1, max_length=512)
+    media_lane: Literal["alluring_life", "exclusive_private"]
+    media_privacy_ceiling: Literal["intimate"] = "intimate"
+    expression_charge_ceiling: Literal["subtle", "charged", "veiled"]
+    allowed_capture_modes: tuple[Literal["character_front_camera", "mirror"], ...] = Field(
+        min_length=1, max_length=2
+    )
+    candidate_contract_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    relationship_context_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    private_basis_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_event_refs: tuple[str, ...] = Field(min_length=1, max_length=32)
+    authorization_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def is_canonical_and_self_binding(self) -> "PrivateMediaSnapshotAuthorization":
+        if self.allowed_capture_modes != tuple(sorted(set(self.allowed_capture_modes))):
+            raise ValueError("private media authorization capture modes must be sorted and unique")
+        if self.source_event_refs != tuple(sorted(set(self.source_event_refs))):
+            raise ValueError("private media authorization source refs must be sorted and unique")
+        expected = media_digest(self.model_dump(mode="json", exclude={"authorization_digest"}))
+        if self.authorization_digest != expected:
+            raise ValueError("private media authorization digest does not bind its contents")
+        return self
+
+
 class FrozenMediaEvidenceSnapshot(FrozenModel):
     """The only ledger-independent bytes that planning may read.
 
@@ -295,13 +342,14 @@ class FrozenMediaEvidenceSnapshot(FrozenModel):
     location: dict[str, object] | None = None
     visible_physical_state: dict[str, object] | None = None
     recipient_context: dict[str, object] | None = None
-    image_event_snapshot: ImageEventSnapshotV2 | ImageEventSnapshot | None = None
+    image_event_snapshot: ImageEventSnapshotV3 | ImageEventSnapshotV2 | ImageEventSnapshot | None = None
     # P2 authorization is deliberately outer-sidecar data.  The inner image
     # event snapshot is planner input; letting a capture capability or a
     # contract digest appear there would turn permission data into prompt
     # material.  An adapter may inspect this value only to validate and build
     # a smaller planner view.
     character_media_authorization: CharacterMediaSnapshotAuthorization | None = None
+    private_media_authorization: PrivateMediaSnapshotAuthorization | None = None
 
     @model_validator(mode="after")
     def source_events_are_canonical(self) -> "FrozenMediaEvidenceSnapshot":
@@ -320,6 +368,11 @@ class FrozenMediaEvidenceSnapshot(FrozenModel):
                 raise ValueError("character snapshot authorization requires a V2 image snapshot")
             if self.complete_candidate is None:
                 raise ValueError("character snapshot authorization requires the complete candidate")
+        if self.private_media_authorization is not None:
+            if self.image_event_snapshot is None or self.image_event_snapshot.schema_version != "world-image-event-snapshot-v3":
+                raise ValueError("private media authorization requires a V3 image snapshot")
+            if self.complete_candidate is None:
+                raise ValueError("private media authorization requires the complete candidate")
         return self
 
 

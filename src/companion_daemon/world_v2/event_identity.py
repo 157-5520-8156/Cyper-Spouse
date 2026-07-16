@@ -16,7 +16,7 @@ from .expression_plan_manifest import EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSIO
 from .interaction_bid_acceptance_manifest import INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION
 from .media_thread_acceptance_manifest import MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION
 from .activity_lifecycle_acceptance_manifest import ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
-from .media_selection_acceptance_manifest import MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
+from .media_selection_acceptance_manifest import MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS
 
 
 def domain_idempotency_key(
@@ -68,7 +68,7 @@ def _life_identity_components(
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
             ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
-            MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION,
+            *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
         }
     ):

@@ -25,7 +25,10 @@ from .character_core_events import CHARACTER_CORE_PAYLOAD_MODELS
 from .fact_events import FACT_PAYLOAD_MODELS
 from .fact_proposal_audit_v2 import FactCommitProposalRecordedPayloadV2
 from .activity_lifecycle_acceptance_manifest import ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
-from .media_selection_acceptance_manifest import MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
+from .media_selection_acceptance_manifest import (
+    MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
+    parse_media_selection_acceptance_manifest,
+)
 from .media_selection_proposal import MediaSelectionProposalRecordedPayload
 from .image_evidence_contract import IMAGE_EVIDENCE_PAYLOAD_MODELS
 from .private_image_evidence_contract import RECIPIENT_SCOPED_IMAGE_EVIDENCE_PAYLOAD_MODELS
@@ -162,7 +165,7 @@ class EventContract:
                 MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
                 EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
                 ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
-                MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION,
+                *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
             }:
                 raise ValueError("acceptance_manifest.unsupported_manifest_version")
         model = (
@@ -203,6 +206,12 @@ class EventContract:
                 json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
                 strict=True,
             )
+            return
+        if (
+            self.event_type == "AcceptanceRecorded"
+            and payload.get("manifest_version") in MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS
+        ):
+            parse_media_selection_acceptance_manifest(dict(payload))
             return
         if (
             self.event_type == "AcceptanceRecorded"

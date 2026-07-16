@@ -263,7 +263,9 @@ from .media_selection_proposal import (
 )
 from .media_selection_acceptance_manifest import (
     MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION,
-    MediaSelectionAcceptanceManifest,
+    MEDIA_SELECTION_ACCEPTANCE_MANIFEST_V2_VERSION,
+    MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
+    parse_media_selection_acceptance_manifest,
 )
 from .life_reducers import (
     activate_occurrence,
@@ -3191,7 +3193,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         AFFECT_ACCEPTANCE_MANIFEST_VERSION,
         OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
         ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
-        MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION,
+        *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
         INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
         MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
     }:
@@ -3212,7 +3214,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         return _outcome_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION:
         return _activity_lifecycle_acceptance_manifest_recorded(state, event)
-    if raw.get("manifest_version") == MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION:
+    if raw.get("manifest_version") in MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS:
         return _media_selection_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION:
         return _interaction_bid_acceptance_manifest_recorded(state, event)
@@ -4032,7 +4034,7 @@ def _media_selection_acceptance_manifest_recorded(
 ) -> ReducerState:
     """Accept a P1 choice only while its source-bound candidate remains current."""
 
-    manifest = MediaSelectionAcceptanceManifest.model_validate_json(event.payload_json)
+    manifest = parse_media_selection_acceptance_manifest(event.payload())
     current_world_revision = len(state.committed_world_event_refs)
     revision = next(
         (item for item in state.proposal_revisions if item.proposal_id == manifest.proposal_id),
@@ -5432,7 +5434,11 @@ def _media_opportunity_frozen(state: ReducerState, event: WorldEvent) -> Reducer
             acceptance.event_type != "AcceptanceRecorded"
             or event.causation_id != acceptance.event_id
             or decision is None
-            or decision.manifest_version != MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
+            or decision.manifest_version
+            not in {
+                MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION,
+                MEDIA_SELECTION_ACCEPTANCE_MANIFEST_V2_VERSION,
+            }
             or opportunity.selection_hash is None
             or decision.selection_hash != opportunity.selection_hash
             or opportunity.selected_candidate_revision is None

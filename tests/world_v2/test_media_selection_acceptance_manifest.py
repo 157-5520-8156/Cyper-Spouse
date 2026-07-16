@@ -7,10 +7,17 @@ import pytest
 
 from companion_daemon.world_v2.accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
+from companion_daemon.world_v2.event_catalog import event_contract
 from companion_daemon.world_v2.ledger import WorldLedger
 from companion_daemon.world_v2.media_selection import MediaSelection
 from companion_daemon.world_v2.media_selection_acceptance_manifest import (
+    MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION,
+    MEDIA_SELECTION_ACCEPTANCE_MANIFEST_V2_VERSION,
+    MediaSelectionAcceptanceManifest,
+    MediaSelectionAcceptanceManifestV2,
     build_media_selection_acceptance_manifest,
+    build_media_selection_acceptance_manifest_v2,
+    parse_media_selection_acceptance_manifest,
 )
 from companion_daemon.world_v2.media_selection_acceptance_runtime import (
     MediaSelectionAcceptanceError,
@@ -71,6 +78,67 @@ def test_manifest_hash_binds_every_accepted_media_effect_without_a_sha_fixed_poi
         manifest.model_copy(update={"opportunity_id": "opportunity:forged"}).model_validate(
             {**manifest.model_dump(mode="json"), "opportunity_id": "opportunity:forged"}
         )
+
+
+def test_p1_manifest_wire_and_hash_remain_byte_compatible_after_p3_is_installed() -> None:
+    manifest = _manifest()
+
+    assert manifest.manifest_version == MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
+    assert manifest.manifest_hash == "4616dc74bb29b1490766e3c1504bbbd6ce70e4feddd2a65b3e2a17af8606acac"
+    parsed = parse_media_selection_acceptance_manifest(manifest.model_dump(mode="json"))
+    assert type(parsed) is MediaSelectionAcceptanceManifest
+    assert parsed == manifest
+
+
+def test_p3_manifest_requires_and_hash_binds_all_private_authority_digests() -> None:
+    p1_material = _manifest().model_dump(
+        mode="json", exclude={"manifest_version", "status", "manifest_hash"}
+    )
+    manifest = build_media_selection_acceptance_manifest_v2(
+        **p1_material,
+        p3_authorization_digest="4" * 64,
+        relationship_context_digest="5" * 64,
+        private_basis_digest="6" * 64,
+        snapshot_schema_version="world-image-event-snapshot-v3",
+    )
+
+    assert manifest.manifest_version == MEDIA_SELECTION_ACCEPTANCE_MANIFEST_V2_VERSION
+    parsed = parse_media_selection_acceptance_manifest(manifest.model_dump(mode="json"))
+    assert type(parsed) is MediaSelectionAcceptanceManifestV2
+    assert parsed == manifest
+
+    missing_basis = manifest.model_dump(mode="json")
+    missing_basis.pop("private_basis_digest")
+    with pytest.raises(ValueError, match="private_basis_digest"):
+        parse_media_selection_acceptance_manifest(missing_basis)
+
+    forged_context = manifest.model_dump(mode="json")
+    forged_context["relationship_context_digest"] = "7" * 64
+    with pytest.raises(ValueError, match="manifest hash"):
+        parse_media_selection_acceptance_manifest(forged_context)
+
+    wrong_schema = manifest.model_dump(mode="json")
+    wrong_schema["snapshot_schema_version"] = "world-image-event-snapshot-v2"
+    with pytest.raises(ValueError, match="snapshot_schema_version"):
+        parse_media_selection_acceptance_manifest(wrong_schema)
+
+
+def test_catalog_accepts_only_the_complete_p3_manifest_wire_shape() -> None:
+    p1_material = _manifest().model_dump(
+        mode="json", exclude={"manifest_version", "status", "manifest_hash"}
+    )
+    payload = build_media_selection_acceptance_manifest_v2(
+        **p1_material,
+        p3_authorization_digest="4" * 64,
+        relationship_context_digest="5" * 64,
+        private_basis_digest="6" * 64,
+        snapshot_schema_version="world-image-event-snapshot-v3",
+    ).model_dump(mode="json")
+
+    event_contract("AcceptanceRecorded").validate_payload(payload)
+    payload.pop("p3_authorization_digest")
+    with pytest.raises(ValueError, match="p3_authorization_digest"):
+        event_contract("AcceptanceRecorded").validate_payload(payload)
 
 
 NOW = datetime(2026, 7, 16, 19, tzinfo=UTC)

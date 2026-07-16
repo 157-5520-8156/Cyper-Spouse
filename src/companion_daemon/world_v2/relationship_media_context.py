@@ -52,6 +52,7 @@ class AudienceContextV1(FrozenModel):
     character_ref: str = Field(min_length=1, max_length=256)
     relationship_stage: RelationshipStageV1
     relationship_policy_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    relationship_origin_event_ref: str | None = Field(default=None, min_length=1, max_length=512)
 
     @model_validator(mode="after")
     def recipient_is_not_the_character(self) -> "AudienceContextV1":
@@ -188,6 +189,9 @@ class RelationshipMediaContextResolver:
             character_ref=character_ref,
             relationship_stage=relationship.stage,
             relationship_policy_digest=relationship.policy_digest,
+            relationship_origin_event_ref=(
+                relationship.origin.accepted_event_ref if relationship.origin is not None else None
+            ),
         )
         basis_body = {
             "schema_version": "private-expression-basis-v1",

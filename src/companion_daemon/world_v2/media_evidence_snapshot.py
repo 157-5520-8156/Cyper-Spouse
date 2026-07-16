@@ -31,9 +31,11 @@ from .media_v2 import (
     media_payload_hash,
 )
 from .schemas import ProjectionCursor, WorldEvent
+from .schema_core import PrivacyClass
 
 
 _PUBLIC_VISIBILITIES = frozenset({"public", "shareable"})
+_RECIPIENT_SCOPED_VISIBILITIES = frozenset({"personal", "private"})
 _PRIVACY_RANK = {"public": 0, "shareable": 1, "personal": 2, "private": 3, "withhold": 4}
 _SUPPORTED_EVENT_TYPES = frozenset({
     "ActivityPlanned", "ActivityStarted", "ActivityResumed", "ActivityCompleted", "ActivityAbandoned",
@@ -94,7 +96,7 @@ def _leaf_pointers(value: object, pointer: str) -> tuple[str, ...]:
             for key, nested in value.items()
             for child in _leaf_pointers(nested, pointer + "/" + _escape_pointer_token(key))
         )
-    if isinstance(value, tuple):
+    if isinstance(value, (tuple, list)):
         return tuple(
             child
             for index, nested in enumerate(value)
@@ -103,8 +105,10 @@ def _leaf_pointers(value: object, pointer: str) -> tuple[str, ...]:
     return (pointer,)
 
 
-def _visibility(value: object, *, reason: str) -> Literal["public", "shareable"]:
-    if value not in _PUBLIC_VISIBILITIES:
+def _visibility(
+    value: object, *, reason: str, allowed: frozenset[str] = _PUBLIC_VISIBILITIES
+) -> PrivacyClass:
+    if value not in allowed:
         raise MediaEvidenceNotRenderable(reason)
     return value  # type: ignore[return-value]
 
@@ -117,14 +121,17 @@ def _plain_leaf(value: object, *, reason: str) -> str | int | float | bool | Non
 
 def _clean_mapping(
     value: object, *, fields: frozenset[str], reason: str,
-    fallback_visibility: Literal["public", "shareable"],
-) -> tuple[dict[str, object], Literal["public", "shareable"]]:
+    fallback_visibility: PrivacyClass, allowed_visibilities: frozenset[str] = _PUBLIC_VISIBILITIES,
+) -> tuple[dict[str, object], PrivacyClass]:
     if not isinstance(value, dict):
         raise MediaEvidenceNotRenderable(reason)
     unknown = set(value) - fields - {"evidence_visibility"}
     if unknown:
         raise MediaEvidenceNotRenderable(reason)
-    visibility = _visibility(value.get("evidence_visibility", fallback_visibility), reason=reason)
+    visibility = _visibility(
+        value.get("evidence_visibility", fallback_visibility), reason=reason,
+        allowed=allowed_visibilities,
+    )
     return (
         {key: _plain_leaf(item, reason=reason) for key, item in value.items() if key != "evidence_visibility"},
         visibility,
@@ -309,8 +316,10 @@ class MediaEvidenceSnapshotCompiler:
         return tuple(events)
 
     def _merge_explicit_evidence(
-        self, *, target: dict[str, object], origins: dict[str, tuple[WorldEvent, Literal["public", "shareable"]]],
-        event: WorldEvent, fallback_visibility: Literal["public", "shareable"], raw: object | None = None,
+        self, *, target: dict[str, object], origins: dict[str, tuple[WorldEvent, PrivacyClass]],
+        event: WorldEvent, fallback_visibility: PrivacyClass, raw: object | None = None,
+        allowed_visibilities: frozenset[str] = _PUBLIC_VISIBILITIES,
+        visibility_reason: str = "image_evidence_not_public_or_shareable",
     ) -> None:
         if raw is None:
             payload = event.payload()
@@ -324,7 +333,10 @@ class MediaEvidenceSnapshotCompiler:
         allowed = {"visibility", "summary", "outcome", "location", "activity", "participants", "objects", "environment", "existing_media", "requires_readable_text"}
         if set(raw) - allowed:
             raise MediaEvidenceNotRenderable("malformed_image_evidence")
-        visibility = _visibility(raw.get("visibility", fallback_visibility), reason="image_evidence_not_public_or_shareable")
+        visibility = _visibility(
+            raw.get("visibility", fallback_visibility),
+            reason=visibility_reason, allowed=allowed_visibilities,
+        )
         for key in ("summary", "outcome"):
             if key in raw:
                 target["event"][key] = _plain_leaf(raw[key], reason="malformed_image_evidence")  # type: ignore[index]
@@ -334,7 +346,7 @@ class MediaEvidenceSnapshotCompiler:
                 continue
             cleaned, section_visibility = _clean_mapping(
                 raw[section], fields=_SECTION_FIELDS[section], reason="malformed_image_evidence",
-                fallback_visibility=visibility,
+                fallback_visibility=visibility, allowed_visibilities=allowed_visibilities,
             )
             if target[section]:
                 raise MediaEvidenceNotRenderable("ambiguous_image_evidence")
@@ -349,7 +361,7 @@ class MediaEvidenceSnapshotCompiler:
             cleaned_values = tuple(
                 _clean_mapping(
                     item, fields=_SECTION_FIELDS[singular], reason="malformed_image_evidence",
-                    fallback_visibility=visibility,
+                    fallback_visibility=visibility, allowed_visibilities=allowed_visibilities,
                 )
                 for item in values
             )
@@ -363,7 +375,7 @@ class MediaEvidenceSnapshotCompiler:
             media_with_visibility = tuple(
                 _clean_mapping(
                     item, fields=_SECTION_FIELDS["existing_media"], reason="malformed_existing_media",
-                    fallback_visibility=visibility,
+                    fallback_visibility=visibility, allowed_visibilities=allowed_visibilities,
                 )
                 for item in values
             )
@@ -551,10 +563,16 @@ class MediaEvidenceSnapshotCompiler:
 
     @staticmethod
     def _build_index(
-        *, body: dict[str, object], origins: dict[str, tuple[WorldEvent, Literal["public", "shareable"]]],
+        *, body: dict[str, object], origins: dict[str, tuple[WorldEvent, PrivacyClass]],
     ) -> dict[str, ImageEvidenceIndexEntry]:
         index: dict[str, ImageEvidenceIndexEntry] = {}
-        for root in ("event", "source", "location", "activity", "participants", "objects", "environment", "character", "existing_media", "visual_requirements"):
+        roots = [
+            "event", "source", "location", "activity", "participants", "objects", "environment",
+            "character", "existing_media", "visual_requirements",
+        ]
+        if body.get("relationship_media_context") is not None:
+            roots.append("relationship_media_context")
+        for root in roots:
             for pointer in _leaf_pointers(body[root], "/" + root):
                 matching = [key for key in origins if pointer == key or pointer.startswith(key + "/")]
                 if not matching:

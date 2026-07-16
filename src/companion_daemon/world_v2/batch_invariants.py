@@ -22,10 +22,10 @@ from .activity_lifecycle_acceptance_manifest import (
     ActivityLifecycleAcceptanceManifest,
     canonical_activity_lifecycle_acceptance_value_hash,
 )
-from .media_selection_acceptance_manifest import MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
 from .media_selection_acceptance_manifest import (
-    MediaSelectionAcceptanceManifest,
+    MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
     canonical_media_selection_value_hash,
+    parse_media_selection_acceptance_manifest,
 )
 from .media_v2 import MediaOpportunityFrozenPayload
 from .outcome_acceptance_manifest import (
@@ -270,7 +270,7 @@ def validate_commit_batch(
         if acceptance.get("manifest_version") in {
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
             ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
-            MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION,
+            *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
         }:
             # Dedicated source-bound lane is validated above; it is not a
             # member of the generic typed Thread mutation family.
@@ -510,7 +510,7 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
             APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
             AFFECT_ACCEPTANCE_MANIFEST_VERSION,
             ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
-            MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION,
+            *MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS,
             OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
@@ -1282,7 +1282,7 @@ def reject_media_selection_acceptance_manifest_without_recorder(
     if any(
         event.event_type == "AcceptanceRecorded"
         and event.payload().get("manifest_version")
-        == MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
+        in MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS
         for event in events
     ):
         raise ValueError("media_selection_acceptance.recorder_capability_required")
@@ -1304,7 +1304,7 @@ def _validate_authorized_media_selection_acceptance_manifest_batch(
         for event in events
         if event.event_type == "AcceptanceRecorded"
         and event.payload().get("manifest_version")
-        == MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
+        in MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSIONS
     ]
     if not manifests:
         return
@@ -1314,7 +1314,7 @@ def _validate_authorized_media_selection_acceptance_manifest_batch(
         raise ValueError("media_selection_acceptance.accepted_batch_must_be_exact")
     acceptance, opportunity_event, reservation_event, action_event = events
     try:
-        manifest = MediaSelectionAcceptanceManifest.model_validate_json(acceptance.payload_json)
+        manifest = parse_media_selection_acceptance_manifest(acceptance.payload())
         opportunity = MediaOpportunityFrozenPayload.model_validate_json(
             opportunity_event.payload_json
         ).opportunity
