@@ -26,6 +26,7 @@ from .appraisal_proposal_compiler import AppraisalProposalCompiler
 from .expression_plan_acceptance import derive_expression_plan_material
 from .expression_plan_atomic_recorder import ExpressionPlanAtomicRecorder
 from .expression_plan_manifest import ExpressionPlanAcceptanceManifest
+from .external_capability_catalog import assert_external_capability_catalog_coverage
 from .expression_action_capabilities import production_expression_action_kinds
 from .outcome_acceptance_manifest import OutcomeAcceptanceManifest
 from .outcome_acceptance_runtime import OutcomeAcceptanceRuntime
@@ -311,6 +312,7 @@ def assert_production_proposal_grammar_coverage() -> None:
     accepted-manifest and reverse verifier rather than merely a parser entry.
     """
 
+    assert_external_capability_catalog_coverage()
     if PRODUCTION_PROPOSAL_GRAMMARS is not _EXPECTED_PRODUCTION_PROPOSAL_GRAMMARS:
         raise RuntimeError("production proposal grammar public view was replaced")
     expected = _EXPECTED_PRODUCTION_PROPOSAL_GRAMMARS
