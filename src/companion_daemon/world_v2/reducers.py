@@ -244,6 +244,7 @@ from .life_reducers import (
     terminate_occurrence,
     transition_activity,
 )
+from .plan_evidence import canonical_plan_evidence_hash
 from .media_provider_grants import (
     ProviderMediaGrantRecordedPayload,
     is_provider_media_action,
@@ -6419,18 +6420,6 @@ def _canonical_model_hash(value: FrozenModel) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _canonical_plan_evidence_hash(plan: PlanStateProjection) -> str:
-    if plan.owner_actor_ref != "legacy:unknown-owner":
-        return _canonical_model_hash(plan)
-    encoded = json.dumps(
-        plan.model_dump(mode="json", exclude={"owner_actor_ref", "authority_origin"}),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _validate_evidence_authority(
     state: ReducerState,
     evidence_refs: tuple[EvidenceRef, ...],
@@ -6538,7 +6527,7 @@ def _validate_evidence_authority(
                 raise ValueError("active-plan evidence does not resolve to authority")
             if (
                 evidence.source_world_revision is not None
-                or evidence.immutable_hash != _canonical_plan_evidence_hash(candidate)
+                or evidence.immutable_hash != canonical_plan_evidence_hash(candidate)
             ):
                 raise ValueError("active-plan evidence hash does not match authority")
             continue

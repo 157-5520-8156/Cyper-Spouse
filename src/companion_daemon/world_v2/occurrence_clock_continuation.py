@@ -13,6 +13,7 @@ import hashlib
 import json
 
 from .event_identity import domain_idempotency_key
+from .plan_evidence import canonical_plan_evidence_hash
 from .schemas import (
     ClockObservation,
     ClockTransitionProjection,
@@ -211,7 +212,7 @@ def _satisfied_precondition_evidence(
                 ref_id=plan.plan_id,
                 evidence_type="active_plan",
                 claim_purpose="future_plan",
-                immutable_hash=_canonical_plan_evidence_hash(plan),
+                immutable_hash=canonical_plan_evidence_hash(plan),
             )
         )
     return tuple(evidence)
@@ -249,15 +250,3 @@ def _continuation_id(
     ).encode("utf-8")
     return f"occurrence-clock:{operation}:{hashlib.sha256(encoded).hexdigest()}"
 
-
-def _canonical_plan_evidence_hash(plan: PlanStateProjection) -> str:
-    fields_to_exclude: set[str] = set()
-    if plan.owner_actor_ref == "legacy:unknown-owner":
-        fields_to_exclude = {"owner_actor_ref", "authority_origin"}
-    encoded = json.dumps(
-        plan.model_dump(mode="json", exclude=fields_to_exclude),
-        ensure_ascii=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()

@@ -11,11 +11,11 @@ import hashlib
 import json
 
 from .event_identity import domain_idempotency_key
+from .plan_evidence import canonical_plan_evidence_hash
 from .schemas import (
     EvidenceRef,
     LedgerProjection,
     OutcomeObservation,
-    PlanStateProjection,
     WorldEvent,
 )
 
@@ -112,7 +112,7 @@ def _source_evidence(
                     ref_id=plan.plan_id,
                     evidence_type="active_plan",
                     claim_purpose="current_fact",
-                    immutable_hash=_canonical_plan_evidence_hash(plan),
+                    immutable_hash=canonical_plan_evidence_hash(plan),
                 )
             )
         return tuple(result)
@@ -178,13 +178,6 @@ def _canonical_source_refs(source_refs: tuple[str, ...]) -> tuple[str, ...]:
     if source_refs != canonical:
         raise ValueError("outcome observation source references must be sorted and unique")
     return canonical
-
-
-def _canonical_plan_evidence_hash(plan: PlanStateProjection) -> str:
-    excluded: set[str] = set()
-    if plan.owner_actor_ref == "legacy:unknown-owner":
-        excluded = {"owner_actor_ref", "authority_origin"}
-    return _canonical_model_hash(plan, exclude=excluded)
 
 
 def _canonical_model_hash(value: object, *, exclude: set[str] | None = None) -> str:
