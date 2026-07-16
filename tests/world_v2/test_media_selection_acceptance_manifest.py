@@ -13,6 +13,7 @@ from companion_daemon.world_v2.media_selection_acceptance_manifest import (
     build_media_selection_acceptance_manifest,
 )
 from companion_daemon.world_v2.media_selection_acceptance_runtime import (
+    MediaSelectionAcceptanceError,
     MediaSelectionAcceptanceRuntime,
     MediaSelectionProposalRecorder,
 )
@@ -205,3 +206,74 @@ def test_real_ledger_acceptance_commits_one_selected_candidate_and_planning_acti
     assert replayed.media_opportunities[0].selected_candidate_revision == candidate.entity_revision
     assert replayed.actions[0].kind == "media_planning"
     assert replayed.actions[0].budget_reservation_id == replayed.budget_reservations[0].reservation_id
+
+
+def test_pin_rejects_selection_proposal_not_caused_by_its_candidate_opening() -> None:
+    """A structurally valid direct ledger write cannot skip candidate lineage."""
+
+    world_id = "world:media-selection-forged-lineage"
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=world_id, accepted_batch_issuer=issuer)
+    clock = _event(
+        world_id=world_id,
+        event_id="event:clock:forged-lineage",
+        event_type="ClockAdvanced",
+        payload={
+            "logical_time_from": (NOW - timedelta(seconds=1)).isoformat(),
+            "logical_time_to": NOW.isoformat(),
+        },
+        causation_id="cause:clock",
+    )
+    ledger.commit((clock,), expected_world_revision=0, expected_deliberation_revision=0)
+    started = _event(
+        world_id=world_id,
+        event_id="event:world-started:forged-lineage",
+        event_type="WorldStarted",
+        payload={},
+        causation_id="cause:world-started",
+    )
+    candidate = PhotoCandidate(
+        candidate_id="candidate:forged-lineage",
+        source_event_refs=(started.event_id,),
+        family="life_share",
+        privacy_ceiling="shareable",
+        opened_at=NOW,
+        expires_at=NOW + timedelta(hours=1),
+        ecology_category="activity_result",
+        ecology_observed_at=NOW,
+        source_events=(MediaEvidenceSource(event_ref=started.event_id, payload_hash=started.payload_hash),),
+    )
+    candidate_event = _event(
+        world_id=world_id,
+        event_id="event:candidate:forged-lineage",
+        event_type="PhotoCandidateOpened",
+        payload=PhotoCandidateOpenedPayload(candidate=candidate).model_dump(mode="json"),
+        causation_id=started.event_id,
+    )
+    ledger.commit((started, candidate_event), expected_world_revision=1, expected_deliberation_revision=0)
+    projection = ledger.project()
+    proposal = MediaSelectionProposalCompiler(catalog_version="test-media-selection.1").compile(
+        projection=projection,
+        selection=MediaSelection(candidate_id=candidate.candidate_id, family="life_share"),
+        model="test-flash",
+        raw_output_hash="sha256:" + "a" * 64,
+        normalized_output_hash="sha256:" + "b" * 64,
+    )
+    forged = _event(
+        world_id=world_id,
+        event_id="event:proposal:forged-lineage",
+        event_type="MediaSelectionProposalRecorded",
+        payload=proposal.model_dump(mode="json"),
+        causation_id=started.event_id,
+    )
+    ledger.commit_at_cursor((forged,), expected_cursor=_cursor(projection))
+
+    runtime = MediaSelectionAcceptanceRuntime(
+        ledger=ledger,
+        authorizer=_Authorizer(),
+        sidecar=InMemoryImmutableMediaPayloadStore(),
+        batch_issuer=issuer,
+    )
+
+    with pytest.raises(MediaSelectionAcceptanceError, match="proposal_lineage_invalid"):
+        runtime.pin_proposal(cursor=_cursor(ledger.project()), proposal_event_ref=forged.event_id)

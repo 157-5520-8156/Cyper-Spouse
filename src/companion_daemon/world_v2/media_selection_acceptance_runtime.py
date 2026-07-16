@@ -21,6 +21,8 @@ from .media_selection_proposal import (
 from .media_v2 import (
     ImmutableMediaPayloadStore,
     MediaOpportunityFrozenPayload,
+    PhotoCandidate,
+    PhotoCandidateOpenedPayload,
     PhotoCandidateUnrenderablePayload,
     StoredMediaPayload,
     planning_request_id,
@@ -61,6 +63,55 @@ class MediaSelectionAcceptanceError(ValueError):
     def __init__(self, code: str) -> None:
         self.code = f"media_selection_acceptance.{code}"
         super().__init__(self.code)
+
+
+def _candidate_lineage_is_bound(*, ledger: LedgerPort, candidate: PhotoCandidate) -> bool:
+    """Verify the aggregate still derives from its exact opening envelope.
+
+    Projection references alone prove that IDs once existed, but do not prove
+    that the available aggregate is the same candidate which that opening
+    envelope carried.  Acceptance reads immutable event bytes again so a
+    direct, structurally valid proposal cannot substitute a sibling source or
+    bypass the ``PhotoCandidateOpened`` causation edge.
+    """
+
+    if (
+        candidate.opened_at is None
+        or candidate.opened_event_ref is None
+        or candidate.opened_event_payload_hash is None
+        or not candidate.source_events
+    ):
+        return False
+    opened = ledger.lookup_event_commit(candidate.opened_event_ref)
+    if opened is None:
+        return False
+    opening_event, _opening_commit = opened
+    if (
+        opening_event.world_id != ledger.world_id
+        or opening_event.event_type != "PhotoCandidateOpened"
+        or opening_event.payload_hash != candidate.opened_event_payload_hash
+        or opening_event.logical_time != candidate.opened_at
+    ):
+        return False
+    try:
+        opened_candidate = PhotoCandidateOpenedPayload.model_validate_json(
+            opening_event.payload_json
+        ).candidate.model_copy(
+            update={
+                "opened_event_ref": opening_event.event_id,
+                "opened_event_payload_hash": opening_event.payload_hash,
+            }
+        )
+    except ValueError:
+        return False
+    if opened_candidate != candidate:
+        return False
+    return all(
+        (located := ledger.lookup_event_commit(source.event_ref)) is not None
+        and located[0].world_id == ledger.world_id
+        and located[0].payload_hash == source.payload_hash
+        for source in candidate.source_events
+    )
 
 
 class MediaSelectionProposalRecord:
@@ -118,6 +169,7 @@ class MediaSelectionProposalRecorder:
                 committed.get(source.event_ref) != source.payload_hash
                 for source in candidate.source_events
             )
+            or not _candidate_lineage_is_bound(ledger=self._ledger, candidate=candidate)
             or media_candidate_authority_hash(candidate) != proposal.candidate_authority_hash
         ):
             # The compiler normally establishes these conditions, but this
@@ -208,9 +260,11 @@ class MediaSelectionProposalAuthorityReader:
             or candidate.expires_at is None
             or projection.logical_time is None
             or candidate.expires_at <= projection.logical_time
+            or event.causation_id != candidate.opened_event_ref
+            or not _candidate_lineage_is_bound(ledger=self._ledger, candidate=candidate)
             or media_candidate_authority_hash(candidate) != proposal.candidate_authority_hash
         ):
-            raise MediaSelectionAcceptanceError("candidate_not_current")
+            raise MediaSelectionAcceptanceError("proposal_lineage_invalid")
         return _PinnedMediaSelectionProposal(
             proposal=proposal, event=event, cursor=cursor, issuer=self._issuer
         )
