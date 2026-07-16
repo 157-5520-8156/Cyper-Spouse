@@ -8,6 +8,7 @@ from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.media_selection import MediaSelection, media_selection_hash
 from companion_daemon.world_v2.media_selection_proposal import (
     MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST,
+    MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST,
     MediaSelectionProposalCompiler,
     MediaSelectionProposalRecordedPayload,
     media_candidate_authority_hash,
@@ -15,9 +16,11 @@ from companion_daemon.world_v2.media_selection_proposal import (
 )
 from companion_daemon.world_v2.media_v2 import (
     MediaEvidenceSource,
+    CharacterMediaCandidateContract,
     PhotoCandidate,
     PhotoCandidateExpiredPayload,
     PhotoCandidateUnrenderablePayload,
+    character_media_contract_digest,
 )
 from companion_daemon.world_v2.reducers import ReducerState, reduce_event
 from companion_daemon.world_v2.schemas import CommittedWorldEventRef, LedgerProjection, WorldEvent
@@ -182,6 +185,41 @@ def test_compiler_derives_candidate_authority_and_cursor_coordinates_from_projec
     assert proposal.candidate_id == candidate.candidate_id
     assert proposal.expected_candidate_revision == candidate.entity_revision
     assert proposal.evaluated_ledger_sequence == 2
+
+
+def test_compiler_uses_the_explicit_p2_policy_for_an_ordinary_character_candidate() -> None:
+    source = MediaEvidenceSource(event_ref=SOURCE, payload_hash="a" * 64)
+    contract = CharacterMediaCandidateContract(
+        subject_ref="agent:companion", kind="selfie",
+        allowed_capture_modes=("character_front_camera",),
+        allowed_character_visibility=("identifiable",),
+        authority_digest=character_media_contract_digest(
+            subject_ref="agent:companion", kind="selfie", source_events=(source,),
+            allowed_capture_modes=("character_front_camera",),
+            allowed_character_visibility=("identifiable",),
+        ),
+    )
+    candidate = PhotoCandidate(
+        candidate_id="candidate:character-selection", source_event_refs=(SOURCE,), family="character_media",
+        privacy_ceiling="public", opened_at=NOW, expires_at=NOW + timedelta(hours=1),
+        ecology_category="character_media:selfie", ecology_observed_at=NOW,
+        source_events=(source,), opened_event_ref="event:character-candidate",
+        opened_event_payload_hash="d" * 64, character_media_contract=contract,
+    )
+    projection = LedgerProjection.model_construct(
+        world_id=WORLD, world_revision=2, deliberation_revision=0, ledger_sequence=2,
+        logical_time=NOW, photo_candidates=(candidate,),
+    )
+
+    proposal = MediaSelectionProposalCompiler(catalog_version="media-selection-p2.1").compile(
+        projection=projection,
+        selection=MediaSelection(candidate_id=candidate.candidate_id, family="character_media"),
+        model="test-flash", raw_output_hash="sha256:" + "b" * 64,
+        normalized_output_hash="sha256:" + "c" * 64,
+    )
+
+    assert proposal.policy_digest == MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST
+    assert proposal.selection.family == "character_media"
 
 
 def test_unrenderable_snapshot_closes_the_same_available_candidate_without_substitution() -> None:

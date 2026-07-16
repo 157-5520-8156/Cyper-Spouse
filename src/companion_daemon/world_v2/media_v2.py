@@ -502,7 +502,13 @@ class MediaOpportunity(FrozenModel):
     media_privacy_ceiling: MediaPrivacyCeiling = "ordinary"
     event_snapshot_ref: str = Field(min_length=1, max_length=512)
     event_snapshot_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+    # ``source_event_refs`` bind the fully frozen snapshot.  The candidate's
+    # opening lineage is intentionally separate: P2 may add a fact-bound
+    # appearance or short-lived physical-state record while accepting, but it
+    # may never revise the candidate authority selected by deliberation.
     source_event_refs: tuple[str, ...] = Field(min_length=1, max_length=32)
+    candidate_source_event_refs: tuple[str, ...] = ()
+    snapshot_source_events: tuple[MediaEvidenceSource, ...] = ()
     catalog_version: str = Field(min_length=1, max_length=128)
     media_machine_version: Literal["media-machine.v5"] = "media-machine.v5"
     inspection_contract_version: Literal["media-inspection.v7"] = "media-inspection.v7"
@@ -523,6 +529,21 @@ class MediaOpportunity(FrozenModel):
     def opportunity_sources_are_canonical(self) -> "MediaOpportunity":
         if self.source_event_refs != tuple(sorted(set(self.source_event_refs))):
             raise ValueError("media opportunity source refs must be sorted and unique")
+        candidate_refs = self.candidate_source_event_refs or self.source_event_refs
+        if candidate_refs != tuple(sorted(set(candidate_refs))):
+            raise ValueError("media opportunity candidate source refs must be sorted and unique")
+        if not set(candidate_refs).issubset(self.source_event_refs):
+            raise ValueError("media opportunity snapshot sources must include candidate sources")
+        if self.snapshot_source_events:
+            snapshot_refs = tuple(item.event_ref for item in self.snapshot_source_events)
+            if snapshot_refs != self.source_event_refs:
+                raise ValueError("media opportunity snapshot source hashes must match source refs exactly")
+        if self.family == "character_media" and (
+            not self.candidate_source_event_refs or not self.snapshot_source_events
+        ):
+            raise ValueError("character media opportunity requires explicit snapshot lineage")
+        if self.family == "life_share" and self.snapshot_source_events and candidate_refs != self.source_event_refs:
+            raise ValueError("life-share opportunity may not expand candidate lineage")
         if self.media_lane == "alluring_life" and (
             self.privacy_ceiling != "private" or self.recipient_ref is None
         ):

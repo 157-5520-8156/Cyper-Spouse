@@ -80,9 +80,14 @@ class MediaPlanningRuntime:
             raise MediaPlanningError("frozen snapshot bytes do not satisfy the evidence contract") from exc
         projection = self._ledger.project()
         committed_hashes = {item.event_id: item.payload_hash for item in projection.committed_world_event_refs}
+        candidate_refs = opportunity.candidate_source_event_refs or opportunity.source_event_refs
         if (
             tuple(item.event_ref for item in snapshot.source_events) != opportunity.source_event_refs
-            or tuple(item.event_ref for item in snapshot.source_events) != candidate.source_event_refs
+            or candidate.source_event_refs != candidate_refs
+            or (
+                opportunity.snapshot_source_events
+                and snapshot.source_events != opportunity.snapshot_source_events
+            )
             or any(committed_hashes.get(item.event_ref) != item.payload_hash for item in snapshot.source_events)
         ):
             raise MediaPlanningError("frozen snapshot is not exactly bound to committed source evidence")

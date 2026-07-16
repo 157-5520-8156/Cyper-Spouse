@@ -79,7 +79,7 @@ async def test_worker_does_not_repeat_a_model_call_for_an_unaccepted_candidate_r
 
 
 @pytest.mark.asyncio
-async def test_worker_leaves_a_character_candidate_unselected_until_its_p2_acceptance_lane_exists() -> None:
+async def test_worker_asks_the_model_about_an_ordinary_character_candidate() -> None:
     source = MediaEvidenceSource(event_ref="event:declaration", payload_hash="a" * 64)
     contract = CharacterMediaCandidateContract(
         subject_ref="agent:companion", kind="mirror", allowed_capture_modes=("mirror",),
@@ -98,7 +98,8 @@ async def test_worker_leaves_a_character_candidate_unselected_until_its_p2_accep
     model = _Model()
     ledger = SimpleNamespace(
         project=lambda: SimpleNamespace(
-            logical_time=NOW, photo_candidates=(candidate,), proposal_revisions=(),
+            logical_time=NOW, world_revision=3, deliberation_revision=0, ledger_sequence=3,
+            photo_candidates=(candidate,), proposal_revisions=(),
         ),
     )
     worker = MediaSelectionWorker(
@@ -108,8 +109,8 @@ async def test_worker_leaves_a_character_candidate_unselected_until_its_p2_accep
 
     result = await worker.select_once(logical_time=NOW, actor="worker", trace_id="trace", correlation_id="correlation")
 
-    assert result.reason_code == "media_selection.character_media_not_yet_authorizable"
-    assert model.calls == 0
+    assert result.reason_code == "media_selection.model_declined"
+    assert model.calls == 1
 
 
 @pytest.mark.asyncio

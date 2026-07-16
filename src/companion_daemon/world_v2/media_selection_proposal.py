@@ -35,6 +35,28 @@ MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST = hashlib.sha256(
     ).encode("utf-8")
 ).hexdigest()
 
+# Keep the installed P1 digest readable for persisted proposals.  P2 is an
+# additive, independently named ordinary-character lane; its digest makes a
+# replayed acceptance prove which selection surface was in force.
+MEDIA_SELECTION_P2_PROPOSAL_POLICY_VERSION = "media-selection-proposal.2"
+MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST = hashlib.sha256(
+    json.dumps(
+        {
+            "contract": MEDIA_SELECTION_P2_PROPOSAL_POLICY_VERSION,
+            "candidate": "available_source_bound_character_candidate",
+            "selection": "ordinary_character_preview_only",
+            "model_can": "choose_one_existing_candidate_or_no_op",
+            "model_cannot": (
+                "freeze_opportunity", "allocate_budget", "send_media",
+                "choose_capture_authority", "add_recipient_or_private_basis",
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+
 
 def _canonical(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
@@ -99,7 +121,12 @@ class MediaSelectionProposalRecordedPayload(FrozenModel):
             raise ValueError("media selection proposal selection must bind candidate")
         if self.selection_hash != media_selection_hash(self.selection):
             raise ValueError("media selection proposal selection hash is invalid")
-        if self.policy_digest != MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST:
+        expected_policy = (
+            MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST
+            if self.selection.family == "life_share"
+            else MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST
+        )
+        if self.policy_digest != expected_policy:
             raise ValueError("media selection proposal policy is not installed")
         if self.proposed_change_hash != media_selection_proposed_change_hash(
             change_id=self.change_id,
@@ -160,13 +187,23 @@ class MediaSelectionProposalCompiler:
             or not candidate.source_events
         ):
             raise MediaSelectionProposalError("candidate_not_current")
-        if (
+        p1 = (
             selection.family,
             selection.delivery_mode,
             selection.media_privacy_ceiling,
             selection.expression_charge_ceiling,
-        ) != ("life_share", "preview", "ordinary", "none"):
-            raise MediaSelectionProposalError("p1_public_preview_only")
+        ) == ("life_share", "preview", "ordinary", "none")
+        p2 = (
+            (selection.family, selection.delivery_mode, selection.media_privacy_ceiling,
+             selection.expression_charge_ceiling) == ("character_media", "preview", "ordinary", "none")
+            and selection.recipient_ref is None
+            and selection.private_expression_basis_ref is None
+            and candidate.character_media_contract is not None
+        )
+        if not p1 and not p2:
+            raise MediaSelectionProposalError("ordinary_preview_only")
+        if candidate.family != selection.family:
+            raise MediaSelectionProposalError("selection_family_does_not_match_candidate")
         candidate_hash = media_candidate_authority_hash(candidate)
         selection_hash = media_selection_hash(selection)
         identity = media_digest(
@@ -206,7 +243,10 @@ class MediaSelectionProposalCompiler:
                 selection_hash=selection_hash,
                 catalog_version=self._catalog_version,
             ),
-            policy_digest=MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST,
+            policy_digest=(
+                MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST
+                if p1 else MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST
+            ),
             model=model,
             raw_output_hash=raw_output_hash,
             normalized_output_hash=normalized_output_hash,
@@ -214,7 +254,7 @@ class MediaSelectionProposalCompiler:
 
 
 __all__ = [
-    "MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST",
+    "MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST", "MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST",
     "MEDIA_SELECTION_PROPOSAL_POLICY_VERSION",
     "MediaSelectionProposalRecordedPayload",
     "MediaSelectionProposalCompiler",

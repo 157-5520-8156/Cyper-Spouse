@@ -5418,7 +5418,9 @@ def _media_opportunity_frozen(state: ReducerState, event: WorldEvent) -> Reducer
     if (
         candidate.family != opportunity.family
         or candidate.privacy_ceiling != opportunity.privacy_ceiling
-        or candidate.source_event_refs != opportunity.source_event_refs
+        or candidate.source_event_refs != (
+            opportunity.candidate_source_event_refs or opportunity.source_event_refs
+        )
         or candidate.status != "available"
         or (candidate.expires_at is not None and event.logical_time >= candidate.expires_at)
         or (
@@ -5428,6 +5430,19 @@ def _media_opportunity_frozen(state: ReducerState, event: WorldEvent) -> Reducer
         or event.logical_time >= opportunity.expires_at
     ):
         raise ValueError("media opportunity does not exactly freeze its candidate")
+    if opportunity.snapshot_source_events:
+        committed_hashes = {
+            item.event_id: item.payload_hash for item in state.committed_world_event_refs
+        }
+        if (
+            tuple(item.event_ref for item in opportunity.snapshot_source_events)
+            != opportunity.source_event_refs
+            or any(
+                committed_hashes.get(item.event_ref) != item.payload_hash
+                for item in opportunity.snapshot_source_events
+            )
+        ):
+            raise ValueError("media opportunity snapshot lineage is not committed")
     return state.model_copy(
         update={
             "photo_candidates": _advance_media_candidate(

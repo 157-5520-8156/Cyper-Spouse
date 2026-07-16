@@ -57,12 +57,10 @@ class MediaSelectionWorker:
         # A proposal deliberately leaves a candidate ``available`` until
         # Acceptance.  Do not call the model again for the same aggregate
         # revision while that proposal is waiting to be accepted or closed.
-        # P2 may already discover ordinary character-media candidates, but it
-        # must not let the P1 proposal/Acceptance lane select them until the
-        # matching snapshot compiler and bridge are installed.  Filtering at
-        # this one seam makes the unavailable phase visible without allowing a
-        # model token to reach an authorization contract that cannot honor it.
-        selectable = tuple(item for item in eligible if item.family == "life_share")
+        # Both public life-share and P2 ordinary character candidates are
+        # selectable here; the compiler and authorizer independently close
+        # their permitted authority shapes before any opportunity is frozen.
+        selectable = eligible
         candidates = tuple(
             item for item in sorted(selectable, key=lambda value: value.candidate_id)
             if (item.candidate_id, item.entity_revision) not in pending
@@ -75,11 +73,7 @@ class MediaSelectionWorker:
                     if selectable and any(
                         (item.candidate_id, item.entity_revision) in pending for item in selectable
                     )
-                    else (
-                        "media_selection.character_media_not_yet_authorizable"
-                        if eligible
-                        else "media_selection.no_available_candidates"
-                    )
+                    else "media_selection.no_available_candidates"
                 ),
             )
         cursor = ProjectionCursor(world_revision=projection.world_revision, deliberation_revision=projection.deliberation_revision, ledger_sequence=projection.ledger_sequence)
@@ -119,7 +113,13 @@ class MediaSelectionWorker:
             return MediaSelectionRunResult(status="no_op", reason_code="media_selection.model_declined")
         assert draft.token is not None and draft.model and draft.raw_output_hash and draft.normalized_output_hash
         candidate = tokens[draft.token]
-        proposal = self._compiler.compile(projection=projection, selection=MediaSelection(candidate_id=candidate.candidate_id, family="life_share"), model=draft.model, raw_output_hash=draft.raw_output_hash, normalized_output_hash=draft.normalized_output_hash)
+        proposal = self._compiler.compile(
+            projection=projection,
+            selection=MediaSelection(candidate_id=candidate.candidate_id, family=candidate.family),
+            model=draft.model,
+            raw_output_hash=draft.raw_output_hash,
+            normalized_output_hash=draft.normalized_output_hash,
+        )
         recorded = self._recorder.record(cursor=cursor, proposal=proposal, actor=actor, source=self._source, created_at=logical_time, trace_id=trace_id, correlation_id=correlation_id)
         return MediaSelectionRunResult(status="proposed", proposal_event_ref=recorded.proposal_event_ref)
 
