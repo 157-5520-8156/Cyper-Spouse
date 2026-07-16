@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from typing import Literal
+import hashlib
+import json
 
 from pydantic import Field, model_validator
 
@@ -36,4 +38,8 @@ class MediaSelection(FrozenModel):
         return self
 
 
-__all__ = ["MediaSelection"]
+def media_selection_hash(selection: MediaSelection) -> str:
+    return hashlib.sha256(json.dumps(selection.model_dump(mode="json"), sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+__all__ = ["MediaSelection", "media_selection_hash"]
