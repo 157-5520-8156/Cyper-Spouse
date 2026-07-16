@@ -76,6 +76,7 @@ from .event_media_planner_adapter import (
     EventMediaPlannerAdapter,
     EventMediaPlanningResultStore,
 )
+from .media_evidence_snapshot import MediaEvidenceSnapshotCompiler
 from .event_ecology_media import (
     EcologyDrainResult,
     EcologyPolicy,
@@ -100,6 +101,8 @@ from .image_evidence_runtime import (
     ImageEvidenceDeclarationRuntime,
 )
 from .media_selection_acceptance_runtime import MediaSelectionProposalRecorder
+from .media_selection_acceptance_runtime import MediaSelectionAcceptanceRuntime
+from .media_opportunity_authorizer import MediaOpportunityAuthorizer
 from .media_selection_draft import MediaSelectionDraftAdapter, MediaSelectionDraftModel
 from .media_selection_worker import MediaSelectionRunResult, MediaSelectionWorker
 from .media_payload_reader import MediaSidecarPayloadReader, PlatformAndMediaPayloadReader
@@ -141,6 +144,7 @@ from .schemas import (
     OutcomeObservation,
     ProjectionCursor,
     ProjectionRequest,
+    ProviderMediaGrantBinding,
     RuntimeOutcome,
     WorldEvent,
     WorldProjection,
@@ -180,6 +184,20 @@ class LifeEcologyComposition:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaSelectionAcceptanceComposition:
+    """Explicit provider grant and image-budget facts for P1 Acceptance."""
+
+    grant: ProviderMediaGrantBinding
+    account_id: str
+    amount_limit: int
+    actor: str = "worker:world-v2:media-selection-acceptance"
+
+    def __post_init__(self) -> None:
+        if not self.account_id or not self.actor or self.amount_limit < 0:
+            raise ValueError("media selection acceptance composition is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class WorldV2TurnApplicationConfig:
     """Composition-owned facts for one persistent companion world."""
 
@@ -202,6 +220,7 @@ class WorldV2TurnApplicationConfig:
     event_ecology_worker_actor: str = "worker:world-v2:event-ecology"
     media_selection_worker_actor: str = "worker:world-v2:media-selection"
     media_candidate_maintenance_actor: str = "worker:world-v2:media-candidate-maintenance"
+    media_selection_acceptance: MediaSelectionAcceptanceComposition | None = None
     event_ecology_policy: EcologyPolicy | None = None
     life_ecology: LifeEcologyComposition | None = None
     media_cost_profile: CostProfile | None = None
@@ -269,6 +288,8 @@ class WorldV2TurnApplication:
         media_candidate_maintenance: MediaCandidateMaintenanceRuntime,
         media_candidate_maintenance_actor: str,
         image_evidence: ImageEvidenceDeclarationRuntime,
+        media_selection_acceptance: MediaSelectionAcceptanceRuntime | None,
+        media_selection_acceptance_config: MediaSelectionAcceptanceComposition | None,
         media_delivery: MediaDeliveryRuntime,
         occurrence_content: OccurrenceContentCoordinator,
         activity_plans: ActivityPlanRuntime,
@@ -291,6 +312,8 @@ class WorldV2TurnApplication:
         self._media_candidate_maintenance = media_candidate_maintenance
         self._media_candidate_maintenance_actor = media_candidate_maintenance_actor
         self._image_evidence = image_evidence
+        self._media_selection_acceptance = media_selection_acceptance
+        self._media_selection_acceptance_config = media_selection_acceptance_config
         self._media_delivery = media_delivery
         self._occurrence_content = occurrence_content
         self._activity_plans = activity_plans
@@ -693,6 +716,27 @@ class WorldV2TurnApplication:
             actor=self._media_selection_worker_actor,
             trace_id=trace_id,
             correlation_id=correlation_id,
+        )
+
+    async def accept_media_selection_once(
+        self, *, proposal_event_ref: str, logical_time: datetime, trace_id: str, correlation_id: str,
+    ) -> CommitResult | None:
+        """Accept one pinned P1 proposal only under explicit grant/budget config."""
+
+        runtime, config = self._media_selection_acceptance, self._media_selection_acceptance_config
+        if runtime is None or config is None:
+            return None
+        projection = self._ledger.project()
+        cursor = ProjectionCursor(
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            ledger_sequence=projection.ledger_sequence,
+        )
+        return runtime.accept(
+            handle=runtime.pin_proposal(cursor=cursor, proposal_event_ref=proposal_event_ref),
+            actor=config.actor, source="world-v2:media-selection-acceptance", logical_time=logical_time,
+            created_at=logical_time, trace_id=trace_id, correlation_id=correlation_id,
+            grant=config.grant, account_id=config.account_id, amount_limit=config.amount_limit,
         )
 
     async def expire_media_candidates_once(
@@ -1219,6 +1263,19 @@ def build_sqlite_world_v2_turn_application(
             if ecology_policy is not None and media_selection_model is not None
             else None
         )
+        media_selection_acceptance = (
+            MediaSelectionAcceptanceRuntime(
+                ledger=ledger,
+                authorizer=MediaOpportunityAuthorizer(
+                    ledger=ledger, compiler=MediaEvidenceSnapshotCompiler(ledger=ledger),
+                    catalog_version=ecology_policy.catalog_version,
+                ),
+                sidecar=media_payload_store,
+                batch_issuer=issuer,
+            )
+            if ecology_policy is not None and config.media_selection_acceptance is not None
+            else None
+        )
         activity_lifecycle = (
             ActivityLifecycleWorker(
                 ledger=ledger,
@@ -1278,6 +1335,8 @@ def build_sqlite_world_v2_turn_application(
             media_candidate_maintenance=MediaCandidateMaintenanceRuntime(ledger=ledger),
             media_candidate_maintenance_actor=config.media_candidate_maintenance_actor,
             image_evidence=ImageEvidenceDeclarationRuntime(ledger=ledger),
+            media_selection_acceptance=media_selection_acceptance,
+            media_selection_acceptance_config=config.media_selection_acceptance,
             media_delivery=MediaDeliveryRuntime(ledger=ledger),
             occurrence_content=occurrence_content,
             activity_plans=ActivityPlanRuntime(
@@ -1387,6 +1446,7 @@ def _bootstrap_event(
 
 __all__ = [
     "LifeEcologyComposition",
+    "MediaSelectionAcceptanceComposition",
     "WorldV2TurnApplication",
     "WorldV2TurnApplicationConfig",
     "build_platform_action_executor",
