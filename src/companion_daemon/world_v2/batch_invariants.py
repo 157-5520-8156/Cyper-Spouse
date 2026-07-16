@@ -17,6 +17,11 @@ from .affect_acceptance_manifest import (
     AffectAcceptanceManifest,
     canonical_affect_acceptance_value_hash,
 )
+from .activity_lifecycle_acceptance_manifest import (
+    ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
+    ActivityLifecycleAcceptanceManifest,
+    canonical_activity_lifecycle_acceptance_value_hash,
+)
 from .outcome_acceptance_manifest import (
     OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
     OutcomeAcceptanceManifest,
@@ -40,7 +45,7 @@ from .fact_accepted_contracts import (
     fact_commit_event_payload_hash,
     rehydrate_fact_commit_materialized_v2_json,
 )
-from .life_events import WorldOccurrenceSettledPayload
+from .life_events import ActivityTransitionPayload, WorldOccurrenceSettledPayload
 from .proposal_audit_schemas import (
     ModelResultRecordedPayload,
     ProposalRecordedV2Payload,
@@ -109,6 +114,7 @@ def validate_commit_batch(
         reject_minimal_reply_manifest_without_recorder(events)
         reject_appraisal_acceptance_manifest_without_recorder(events)
         reject_affect_acceptance_manifest_without_recorder(events)
+        reject_activity_lifecycle_acceptance_manifest_without_recorder(events)
         reject_outcome_acceptance_manifest_without_recorder(events)
         reject_interaction_bid_acceptance_manifest_without_recorder(events)
         reject_media_thread_acceptance_manifest_without_recorder(events)
@@ -136,6 +142,11 @@ def validate_commit_batch(
         authorized=accepted_manifest_v3_authorized,
     )
     _validate_authorized_affect_acceptance_manifest_batch(
+        events,
+        expected_world_revision=expected_world_revision,
+        authorized=accepted_manifest_v3_authorized,
+    )
+    _validate_authorized_activity_lifecycle_acceptance_manifest_batch(
         events,
         expected_world_revision=expected_world_revision,
         authorized=accepted_manifest_v3_authorized,
@@ -244,7 +255,10 @@ def validate_commit_batch(
         if len(completions) != 1:
             raise ValueError("AppraisalAccepted must complete its trigger in the same commit")
     for acceptance_index, acceptance in acceptances:
-        if acceptance.get("manifest_version") == MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION:
+        if acceptance.get("manifest_version") in {
+            MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
+            ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
+        }:
             # Dedicated source-bound lane is validated above; it is not a
             # member of the generic typed Thread mutation family.
             continue
@@ -482,6 +496,7 @@ def _validate_acceptance_manifest_v2_batch(events: Sequence[WorldEvent]) -> None
             MINIMAL_REPLY_MANIFEST_VERSION,
             APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
             AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+            ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
             OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
@@ -1162,6 +1177,89 @@ def reject_affect_acceptance_manifest_without_recorder(events: Sequence[WorldEve
         for event in events
     ):
         raise ValueError("affect_acceptance.recorder_capability_required")
+
+
+def reject_activity_lifecycle_acceptance_manifest_without_recorder(
+    events: Sequence[WorldEvent],
+) -> None:
+    if any(
+        event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
+        for event in events
+    ):
+        raise ValueError("activity_lifecycle_acceptance.recorder_capability_required")
+
+
+def _validate_authorized_activity_lifecycle_acceptance_manifest_batch(
+    events: Sequence[WorldEvent], *, expected_world_revision: int, authorized: bool
+) -> None:
+    """Bind the scheduler manifest to precisely one accepted activity effect.
+
+    The proposal was already committed in its own deliberation transaction, so
+    this batch cannot re-read it.  It instead proves the remaining atomic
+    boundary: manifest bytes, envelope, event identity, and the immediately
+    following lifecycle payload all agree.  Reducers then verify the persisted
+    proposal and the plan transition at replay time.
+    """
+
+    manifests = [
+        event
+        for event in events
+        if event.event_type == "AcceptanceRecorded"
+        and event.payload().get("manifest_version")
+        == ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
+    ]
+    if not manifests:
+        return
+    if not authorized:
+        raise ValueError("activity_lifecycle_acceptance.recorder_capability_required")
+    if len(manifests) != 1 or len(events) != 2:
+        raise ValueError("activity_lifecycle_acceptance.accepted_batch_must_be_exact")
+    acceptance, effect = events
+    try:
+        manifest = ActivityLifecycleAcceptanceManifest.model_validate_json(
+            acceptance.payload_json
+        )
+        payload = ActivityTransitionPayload.model_validate_json(effect.payload_json)
+    except Exception as exc:
+        raise ValueError("activity_lifecycle_acceptance.accepted_batch_payload_is_invalid") from exc
+    if (
+        manifest.evaluated_world_revision != expected_world_revision
+        or tuple(event.event_type for event in events)
+        != ("AcceptanceRecorded", manifest.effect_event_type)
+        or acceptance.causation_id != manifest.proposal_event_ref
+        or effect.causation_id != acceptance.event_id
+        or acceptance.event_id != manifest.acceptance_event_ref
+        or effect.event_id != manifest.effect_event_id
+        or effect.payload_hash != manifest.effect_event_payload_hash
+        or payload.acceptance_id != manifest.acceptance_id
+        or payload.activity_lifecycle_proposal_id != manifest.proposal_id
+        or payload.change_id != manifest.accepted_change_id
+        or payload.accepted_change_hash != manifest.accepted_change_hash
+        or canonical_activity_lifecycle_acceptance_value_hash(effect.payload())
+        != manifest.effect_event_payload_hash
+    ):
+        raise ValueError("activity_lifecycle_acceptance.batch_does_not_match_manifest")
+    if any(
+        getattr(effect, field) != getattr(acceptance, field)
+        for field in (
+            "world_id",
+            "logical_time",
+            "created_at",
+            "actor",
+            "source",
+            "trace_id",
+            "correlation_id",
+        )
+    ):
+        raise ValueError("activity_lifecycle_acceptance.envelope_metadata_mismatch")
+    for event in events:
+        expected = domain_idempotency_key(
+            event_type=event.event_type, world_id=event.world_id, payload=event.payload()
+        )
+        if expected is None or event.idempotency_key != expected:
+            raise ValueError("activity_lifecycle_acceptance.event_identity_is_not_deterministic")
 
 
 def reject_outcome_acceptance_manifest_without_recorder(events: Sequence[WorldEvent]) -> None:

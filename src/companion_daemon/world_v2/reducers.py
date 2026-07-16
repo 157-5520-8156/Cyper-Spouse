@@ -3920,22 +3920,17 @@ def _activity_lifecycle_acceptance_manifest_recorded(
 
     manifest = ActivityLifecycleAcceptanceManifest.model_validate_json(event.payload_json)
     current_world_revision = len(state.committed_world_event_refs)
-    proposal_ref = next(
-        (item for item in state.committed_world_event_refs if item.event_id == manifest.proposal_event_ref),
-        None,
-    )
     revision = next(
         (item for item in state.proposal_revisions if item.proposal_id == manifest.proposal_id),
         None,
     )
     if (
-        manifest.evaluated_world_revision != current_world_revision
-        or event.causation_id != manifest.proposal_event_ref
-        or proposal_ref is None
-        or proposal_ref.event_type != "ActivityLifecycleProposalRecorded"
-        or proposal_ref.payload_hash != manifest.proposal_event_payload_hash
-        or revision is None
-        or revision.evaluated_world_revision != manifest.evaluated_world_revision
+            manifest.evaluated_world_revision != current_world_revision
+            or event.causation_id != manifest.proposal_event_ref
+            or revision is None
+            or revision.evaluated_world_revision != manifest.evaluated_world_revision
+            or revision.proposal_event_ref != manifest.proposal_event_ref
+            or revision.proposal_event_payload_hash != manifest.proposal_event_payload_hash
         or any(
             item.acceptance_id == manifest.acceptance_id or item.proposal_id == manifest.proposal_id
             for item in state.acceptance_decisions
@@ -6737,12 +6732,21 @@ def _validate_activity_lifecycle_effect(
         ),
         None,
     )
+    proposal_revision = next(
+        (
+            item
+            for item in state.proposal_revisions
+            if item.proposal_id == payload.activity_lifecycle_proposal_id
+        ),
+        None,
+    )
     if (
         decision is None
+        or proposal_revision is None
         or decision.manifest_version != ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
         or decision.accepted_change_hash != payload.accepted_change_hash
         or decision.accepted_change_id != payload.change_id
-        or payload.reason_ref != f"event:activity-lifecycle-proposal:{payload.activity_lifecycle_proposal_id.removeprefix('proposal:activity-lifecycle:')}"
+        or payload.reason_ref != proposal_revision.proposal_event_ref
     ):
         raise ValueError("activity lifecycle effect does not bind accepted proposal")
 
@@ -6789,10 +6793,11 @@ def _activity_lifecycle_proposal_recorded(state: ReducerState, event: WorldEvent
     if plan is None or plan.owner_actor_ref is None:
         raise ValueError("activity lifecycle proposal plan is unavailable")
     projection = make_projection(
-        state,
         world_id=event.world_id,
         world_revision=len(state.committed_world_event_refs),
-        deliberation_revision=state.deliberation_revision,
+        deliberation_revision=payload.evaluated_deliberation_revision,
+        ledger_sequence=payload.evaluated_ledger_sequence,
+        state=state,
         reducer_bundle_version=REDUCER_BUNDLE_VERSION,
     )
     resolved = ActivityOpeningCatalog(
@@ -6819,6 +6824,8 @@ def _activity_lifecycle_proposal_recorded(state: ReducerState, event: WorldEvent
                 ProposalRevisionRef(
                     proposal_id=payload.proposal_id,
                     evaluated_world_revision=payload.evaluated_world_revision,
+                    proposal_event_ref=event.event_id,
+                    proposal_event_payload_hash=event.payload_hash,
                 ),
             ),
         }

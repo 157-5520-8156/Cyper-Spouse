@@ -970,6 +970,7 @@ class AcceptanceDecisionRef(FrozenModel):
             "appraisal-acceptance.1",
             "affect-acceptance.1",
             "outcome-acceptance.1",
+            "activity-lifecycle-acceptance.2",
             "interaction-bid-acceptance.1",
             "media-delivery-thread-acceptance.1",
         ]
@@ -1209,6 +1210,16 @@ class ExpressionBeatLifecycleEntry(FrozenModel):
 class ProposalRevisionRef(FrozenModel):
     proposal_id: str = Field(min_length=1)
     evaluated_world_revision: int = Field(ge=0)
+    proposal_event_ref: str | None = Field(default=None, min_length=1)
+    proposal_event_payload_hash: str | None = Field(
+        default=None, pattern=r"^[0-9a-f]{64}$"
+    )
+
+    @model_validator(mode="after")
+    def persisted_event_coordinates_are_complete(self) -> "ProposalRevisionRef":
+        if (self.proposal_event_ref is None) != (self.proposal_event_payload_hash is None):
+            raise ValueError("proposal revision event coordinates are incomplete")
+        return self
 
 
 class DueWindow(FrozenModel):

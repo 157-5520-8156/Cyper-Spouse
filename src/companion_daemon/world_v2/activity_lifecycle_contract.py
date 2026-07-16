@@ -36,6 +36,8 @@ def activity_lifecycle_mutation_hash(
     expected_plan_revision: int,
     operation: ActivityLifecycleOperation,
     evaluated_world_revision: int,
+    evaluated_deliberation_revision: int,
+    evaluated_ledger_sequence: int,
     wake_event_ref: str,
     wake_event_payload_hash: str,
     catalog_version: str,
@@ -48,6 +50,8 @@ def activity_lifecycle_mutation_hash(
                 "catalog_hash": catalog_hash,
                 "catalog_version": catalog_version,
                 "change_id": change_id,
+                "evaluated_deliberation_revision": evaluated_deliberation_revision,
+                "evaluated_ledger_sequence": evaluated_ledger_sequence,
                 "evaluated_world_revision": evaluated_world_revision,
                 "expected_plan_revision": expected_plan_revision,
                 "opening_token": opening_token,
@@ -65,6 +69,8 @@ class ActivityLifecycleProposalRecordedPayload(FrozenModel):
     change_id: str = Field(min_length=1, max_length=256)
     transition_id: str = Field(min_length=1, max_length=256)
     evaluated_world_revision: int = Field(ge=0)
+    evaluated_deliberation_revision: int = Field(ge=0)
+    evaluated_ledger_sequence: int = Field(ge=0)
     ecology_trigger_id: str = Field(min_length=1, max_length=256)
     wake_event_ref: str = Field(min_length=1, max_length=512)
     wake_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -92,6 +98,8 @@ class ActivityLifecycleProposalRecordedPayload(FrozenModel):
             expected_plan_revision=self.expected_plan_revision,
             operation=self.operation,
             evaluated_world_revision=self.evaluated_world_revision,
+            evaluated_deliberation_revision=self.evaluated_deliberation_revision,
+            evaluated_ledger_sequence=self.evaluated_ledger_sequence,
             wake_event_ref=self.wake_event_ref,
             wake_event_payload_hash=self.wake_event_payload_hash,
             catalog_version=self.catalog_version,

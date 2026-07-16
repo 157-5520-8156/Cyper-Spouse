@@ -83,7 +83,11 @@ class ActivityLifecycleProposalRecorder:
         trace_id: str,
         correlation_id: str,
     ) -> ActivityLifecycleProposalRecord:
-        if proposal.evaluated_world_revision != cursor.world_revision:
+        if (
+            proposal.evaluated_world_revision != cursor.world_revision
+            or proposal.evaluated_deliberation_revision != cursor.deliberation_revision
+            or proposal.evaluated_ledger_sequence != cursor.ledger_sequence
+        ):
             raise ActivityLifecycleRuntimeError("proposal_cursor_mismatch")
         projection = self._ledger.project_at(cursor)
         if projection.logical_time is None:
@@ -163,11 +167,17 @@ class ActivityLifecycleProposalAuthorityReader:
         if (
             event.world_id != self._ledger.world_id
             or event.event_type != "ActivityLifecycleProposalRecorded"
-            or commit.world_revision > cursor.world_revision
+            or commit.world_revision != cursor.world_revision
+            or commit.deliberation_revision != cursor.deliberation_revision
+            or commit.ledger_sequence != cursor.ledger_sequence
         ):
             raise ActivityLifecycleRuntimeError("proposal_event_unavailable")
         proposal = ActivityLifecycleProposalRecordedPayload.model_validate_json(event.payload_json)
-        if proposal.evaluated_world_revision != cursor.world_revision:
+        if (
+            proposal.evaluated_world_revision != cursor.world_revision
+            or proposal.evaluated_deliberation_revision + 1 != cursor.deliberation_revision
+            or proposal.evaluated_ledger_sequence + 1 != cursor.ledger_sequence
+        ):
             raise ActivityLifecycleRuntimeError("proposal_stale")
         if proposal.proposal_id not in projection.proposal_ids:
             raise ActivityLifecycleRuntimeError("proposal_not_persisted")
