@@ -1,0 +1,295 @@
+"""Durably fan out one verified life/clock wake into the media ecology.
+
+This is deliberately the first, narrow Life Ecology vertical.  It does not
+propose, accept, or materialise a life fact.  Its job is to make the boundary
+between a committed wake and the already source-bound media ecology reliable:
+the wake is verified at a pinned projection, an injected durable trigger store
+atomically owns or joins the run, and only the owner asks the media ecology to
+scan the resulting committed world.
+
+The trigger store is an explicit port because the generic ``TriggerProcess``
+schema has not yet installed a ``life_ecology`` process kind.  Composition may
+not replace it with an in-memory lock: implementations must persist the key
+``(world_id, wake_event_ref, catalog_version)`` and make claim/join atomic.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import datetime
+from typing import Literal, Protocol
+
+from .schema_core import FrozenModel
+
+
+LifeEcologyAvailabilityState = Literal[
+    "installed_and_active",
+    "installed_but_scheduler_disabled",
+    "authority_only",
+    "adapter_only",
+    "paused_by_budget",
+    "blocked_by_missing_capability",
+]
+LifeEcologyRunStatus = Literal[
+    "advanced", "idle", "joined_existing", "deferred", "unavailable", "rejected", "failed_safe",
+]
+LifeEcologyClaimState = Literal["owned", "joined", "completed"]
+
+# A wake remains intentionally narrow.  It is copied from the committed-life
+# vocabulary consumed by EventEcologyMediaCandidateRuntime, not from inbound
+# message or media paths.
+_DURABLE_LIFE_ECOLOGY_WAKE_EVENT_TYPES = frozenset({
+    "ClockAdvanced",
+    "ActivityStarted", "ActivityResumed", "ActivityCompleted", "ActivityAbandoned",
+    "WorldOccurrenceSettled", "ExperienceCommitted", "FactCommitted", "FactCorrected",
+    "NpcRegistered",
+})
+
+
+class LifeEcologyAvailability(FrozenModel):
+    """Installed state, distinct from a quiet/no-opening world outcome."""
+
+    state: LifeEcologyAvailabilityState
+    catalog_version: str = "life-ecology.1"
+
+
+class LifeEcologyRunKey(FrozenModel):
+    """The stable idempotency domain a durable trigger store must protect."""
+
+    world_id: str
+    wake_event_ref: str
+    catalog_version: str
+
+
+class LifeEcologyRunClaim(FrozenModel):
+    trigger_id: str
+    state: LifeEcologyClaimState
+
+
+class LifeEcologyRunResult(FrozenModel):
+    status: LifeEcologyRunStatus
+    trigger_id: str | None = None
+    reason_code: str | None = None
+    media_followup_status: str | None = None
+
+
+class LifeEcologyTriggerStore(Protocol):
+    """Durable, atomic claim/join storage owned by the composition root.
+
+    ``claim_or_join`` must return ``owned`` to exactly one caller for a key.
+    A retry/restart must return ``joined`` while the owner is live or
+    ``completed`` after it records a terminal result.  This port grants no
+    authority to write life facts.
+    """
+
+    async def claim_or_join(
+        self,
+        *,
+        key: LifeEcologyRunKey,
+        trace_id: str,
+        correlation_id: str,
+    ) -> LifeEcologyRunClaim: ...
+
+    async def complete(
+        self, *, key: LifeEcologyRunKey, trigger_id: str, outcome: str
+    ) -> None: ...
+
+
+class MediaEcologyFollowup(Protocol):
+    """The existing source-bound candidate runtime's narrow public operation."""
+
+    def drain_once(
+        self,
+        *,
+        wake_event_ref: str,
+        logical_time: datetime,
+        actor: str,
+        trace_id: str,
+        correlation_id: str,
+    ) -> object: ...
+
+
+class LifeEcologyRuntime:
+    """Advance a single durable wake without becoming a second life writer."""
+
+    def __init__(
+        self,
+        *,
+        ledger,
+        trigger_store: LifeEcologyTriggerStore,
+        media_followup: MediaEcologyFollowup,
+        availability: LifeEcologyAvailability,
+        actor: str = "worker:life-ecology",
+    ) -> None:
+        if not actor:
+            raise ValueError("life ecology runtime requires an actor")
+        self._ledger = ledger
+        self._trigger_store = trigger_store
+        self._media_followup = media_followup
+        self._availability = availability
+        self._actor = actor
+
+    def availability(self) -> LifeEcologyAvailability:
+        return self._availability
+
+    async def advance_once(
+        self, *, wake_event_ref: str, trace_id: str, correlation_id: str
+    ) -> LifeEcologyRunResult:
+        """Claim exactly one verified wake and execute its media follow-up once.
+
+        Later verticals insert catalog, deliberation and acceptance *between*
+        the ownership claim and follow-up.  Until those lanes exist the valid
+        life result is deliberately ``idle``; a media candidate may still be
+        frozen from prior committed authority.
+        """
+
+        availability = self._availability
+        if availability.state != "installed_and_active":
+            return LifeEcologyRunResult(
+                status="unavailable",
+                reason_code=f"life_ecology.{availability.state}",
+            )
+
+        validated = self._validated_wake(wake_event_ref=wake_event_ref)
+        if validated is None:
+            return LifeEcologyRunResult(
+                status="rejected", reason_code="life_ecology.wake_not_exactly_committed"
+            )
+        logical_time = validated
+        key = LifeEcologyRunKey(
+            world_id=self._ledger.world_id,
+            wake_event_ref=wake_event_ref,
+            catalog_version=availability.catalog_version,
+        )
+        try:
+            claim = await self._trigger_store.claim_or_join(
+                key=key, trace_id=trace_id, correlation_id=correlation_id
+            )
+        except Exception:
+            return LifeEcologyRunResult(
+                status="failed_safe", reason_code="life_ecology.trigger_store_unavailable"
+            )
+        if claim.state == "completed":
+            return LifeEcologyRunResult(
+                status="joined_existing",
+                trigger_id=claim.trigger_id,
+                reason_code="life_ecology.run_completed",
+            )
+        if claim.state == "joined":
+            return LifeEcologyRunResult(
+                status="joined_existing",
+                trigger_id=claim.trigger_id,
+                reason_code="life_ecology.run_in_progress",
+            )
+
+        try:
+            media_result = await self._drain_media_once(
+                wake_event_ref=wake_event_ref,
+                logical_time=logical_time,
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+            media_status = getattr(media_result, "status", None)
+            if not isinstance(media_status, str) or not media_status:
+                raise ValueError("media ecology result has no stable status")
+        except Exception:
+            await self._complete_failed_safe(key=key, trigger_id=claim.trigger_id)
+            return LifeEcologyRunResult(
+                status="failed_safe",
+                trigger_id=claim.trigger_id,
+                reason_code="life_ecology.media_followup_failed",
+            )
+
+        try:
+            await self._trigger_store.complete(
+                key=key, trigger_id=claim.trigger_id, outcome="idle"
+            )
+        except Exception:
+            return LifeEcologyRunResult(
+                status="failed_safe",
+                trigger_id=claim.trigger_id,
+                reason_code="life_ecology.trigger_completion_failed",
+                media_followup_status=media_status,
+            )
+        return LifeEcologyRunResult(
+            status="idle", trigger_id=claim.trigger_id, media_followup_status=media_status
+        )
+
+    def _validated_wake(self, *, wake_event_ref: str) -> datetime | None:
+        """Prove the exact immutable wake at the current projection head."""
+
+        projection = self._ledger.project()
+        logical_time = getattr(projection, "logical_time", None)
+        if not isinstance(logical_time, datetime):
+            return None
+        committed = next(
+            (
+                item
+                for item in getattr(projection, "committed_world_event_refs", ())
+                if item.event_id == wake_event_ref
+            ),
+            None,
+        )
+        if (
+            committed is None
+            or committed.event_type not in _DURABLE_LIFE_ECOLOGY_WAKE_EVENT_TYPES
+            or committed.logical_time != logical_time
+        ):
+            return None
+        located = self._ledger.lookup_event_commit(wake_event_ref)
+        if located is None:
+            return None
+        event, commit = located
+        if (
+            event.world_id != self._ledger.world_id
+            or event.event_id != committed.event_id
+            or event.event_type != committed.event_type
+            or event.payload_hash != committed.payload_hash
+            or event.logical_time != committed.logical_time
+            or getattr(commit, "world_revision", -1) != committed.world_revision
+            or committed.world_revision > getattr(projection, "world_revision", -1)
+        ):
+            return None
+        return logical_time
+
+    async def _drain_media_once(
+        self,
+        *,
+        wake_event_ref: str,
+        logical_time: datetime,
+        trace_id: str,
+        correlation_id: str,
+    ) -> object:
+        kwargs = {
+            "wake_event_ref": wake_event_ref,
+            "logical_time": logical_time,
+            "actor": self._actor,
+            "trace_id": trace_id,
+            "correlation_id": correlation_id,
+        }
+        if getattr(self._ledger, "blocks_event_loop", False):
+            return await asyncio.to_thread(self._media_followup.drain_once, **kwargs)
+        return self._media_followup.drain_once(**kwargs)
+
+    async def _complete_failed_safe(self, *, key: LifeEcologyRunKey, trigger_id: str) -> None:
+        try:
+            await self._trigger_store.complete(
+                key=key, trigger_id=trigger_id, outcome="failed_safe"
+            )
+        except Exception:
+            # The result remains fail-safe.  A durable store that could not
+            # record this state must surface recovery rather than manufacture
+            # a life fact in this runtime.
+            return
+
+
+__all__ = [
+    "LifeEcologyAvailability",
+    "LifeEcologyAvailabilityState",
+    "LifeEcologyRunClaim",
+    "LifeEcologyRunKey",
+    "LifeEcologyRunResult",
+    "LifeEcologyRuntime",
+    "LifeEcologyTriggerStore",
+    "MediaEcologyFollowup",
+]
