@@ -16,11 +16,21 @@ from companion_daemon.world_v2.image_evidence_contract import (
     ImageEvidenceV1,
 )
 from companion_daemon.world_v2.media_v2 import (
+    CharacterMediaCandidateContract,
     FrozenMediaEvidenceSnapshot,
     ImageEvidenceIndexEntry,
     ImageEventSnapshot,
     MediaEvidenceSource,
     PhotoCandidate,
+    character_media_contract_digest,
+)
+from companion_daemon.world_v2.appearance_state import (
+    AppearanceStateProjection,
+    VisibleAppearanceAttribute,
+)
+from companion_daemon.world_v2.visible_physical_state import (
+    VisiblePhysicalCue,
+    VisiblePhysicalStateProjection,
 )
 from companion_daemon.world_v2.schemas import CommittedWorldEventRef, ProjectionCursor, WorldEvent
 
@@ -206,3 +216,85 @@ def test_replay_at_same_cursor_is_byte_stable_and_does_not_use_current_projectio
     assert first.snapshot_hash == second.snapshot_hash
     assert first.snapshot_ref == second.snapshot_ref
     assert first.image_event_snapshot_hash == second.image_event_snapshot_hash
+
+
+def test_character_snapshot_freezes_fact_bound_appearance_and_physical_state_at_the_primary_event_time() -> None:
+    source = _event("character-source", {}, event_type="ActivityCompleted")
+    declaration = _event(
+        "character-declaration",
+        ImageEvidenceDeclaredPayload(
+            source_event_ref=source.event_id,
+            source_event_payload_hash=source.payload_hash,
+            source_event_type=source.event_type,
+            source_privacy_ceiling="public",
+            image_evidence=ImageEvidenceV1(
+                visibility="public",
+                activity={"evidence_visibility": "public", "id": "activity:walk", "kind": "walk"},
+                character_media={
+                    "character_ref": "agent:companion",
+                    "present": True,
+                        "capture_capabilities": ("character_front_camera",),
+                },
+            ),
+            declared_at=NOW,
+        ).model_dump(mode="json"),
+        event_type="ImageEvidenceDeclared",
+    )
+    appearance_state = AppearanceStateProjection(
+        appearance_state_id="appearance:agent:companion", subject_ref="agent:companion",
+        entity_revision=1, source_event_ref=source.event_id, source_event_payload_hash=source.payload_hash,
+        source_event_type=source.event_type, valid_from=NOW, visibility="public",
+        visible_attributes=(VisibleAppearanceAttribute(aspect="outfit", description="深色运动外套"),),
+    )
+    appearance_record = _event(
+        "appearance-record", {"state": appearance_state.model_dump(mode="json")},
+        event_type="AppearanceStateRecorded",
+    )
+    physical_state = VisiblePhysicalStateProjection(
+        physical_state_id="visible-physical:agent:companion", subject_ref="agent:companion",
+        entity_revision=1, source_event_ref=source.event_id, source_event_payload_hash=source.payload_hash,
+        source_event_type=source.event_type, valid_from=NOW, valid_until=NOW.replace(hour=13),
+        visibility="public",
+        positive_cues=(VisiblePhysicalCue(cue_id="perspiration", intensity="light", visible_regions=("hair",)),),
+        negative_cues=(),
+    )
+    physical_record = _event(
+        "physical-record", {"state": physical_state.model_dump(mode="json")},
+        event_type="VisiblePhysicalStateRecorded",
+    )
+    ledger = _Ledger(source, declaration, appearance_record, physical_record)
+    ledger.projection.appearance_states = (appearance_state,)
+    ledger.projection.visible_physical_states = (physical_state,)
+    source_events = tuple(sorted((
+        MediaEvidenceSource(event_ref=source.event_id, payload_hash=source.payload_hash),
+        MediaEvidenceSource(event_ref=declaration.event_id, payload_hash=declaration.payload_hash),
+    ), key=lambda item: item.event_ref))
+    contract = CharacterMediaCandidateContract(
+        subject_ref="agent:companion", kind="selfie",
+        allowed_capture_modes=("character_front_camera",),
+        allowed_character_visibility=("identifiable",),
+        authority_digest=character_media_contract_digest(
+            subject_ref="agent:companion", kind="selfie", source_events=source_events,
+            allowed_capture_modes=("character_front_camera",),
+            allowed_character_visibility=("identifiable",),
+        ),
+    )
+    candidate = PhotoCandidate(
+        candidate_id="candidate:character", source_event_refs=tuple(item.event_ref for item in source_events),
+        family="character_media", privacy_ceiling="public", opened_at=NOW, expires_at=NOW.replace(hour=13),
+        ecology_category="character_media:selfie", ecology_observed_at=NOW, source_events=source_events,
+        character_media_contract=contract,
+    )
+
+    compiled = MediaEvidenceSnapshotCompiler(ledger=ledger).compile(_request(candidate, ledger))
+
+    image = compiled.snapshot.image_event_snapshot
+    assert image is not None
+    assert image.character["subject_ref"] == "agent:companion"
+    assert image.character["appearance_state"]["visible_attributes"][0]["description"] == "深色运动外套"
+    assert image.character["visible_physical_state"]["positive_cues"][0]["cue_id"] == "perspiration"
+    assert image.evidence_index["/character/appearance_state/visible_attributes/0/description"].source_event_ref == appearance_record.event_id
+    assert image.evidence_index["/character/visible_physical_state/positive_cues/0/cue_id"].source_event_ref == physical_record.event_id
+    assert {item.event_ref for item in compiled.snapshot.source_events} == {
+        source.event_id, declaration.event_id, appearance_record.event_id, physical_record.event_id,
+    }

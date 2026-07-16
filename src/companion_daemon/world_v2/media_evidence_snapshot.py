@@ -13,6 +13,11 @@ from typing import Literal, Protocol
 
 from .ledger import LedgerPort
 from .image_evidence_contract import ImageEvidenceDeclaredPayload
+from .appearance_state import AppearanceStateRecordedPayload, appearance_state_at
+from .visible_physical_state import (
+    VisiblePhysicalStateRecordedPayload,
+    visible_physical_state_at,
+)
 from .media_v2 import (
     FrozenMediaEvidenceSnapshot,
     ImageEvidenceIndexEntry,
@@ -27,10 +32,12 @@ from .schemas import ProjectionCursor, WorldEvent
 
 
 _PUBLIC_VISIBILITIES = frozenset({"public", "shareable"})
+_PRIVACY_RANK = {"public": 0, "shareable": 1, "personal": 2, "private": 3, "withhold": 4}
 _SUPPORTED_EVENT_TYPES = frozenset({
     "ActivityPlanned", "ActivityStarted", "ActivityResumed", "ActivityCompleted", "ActivityAbandoned",
     "WorldOccurrenceSettled", "ExperienceCommitted", "FactCommitted", "FactCorrected",
-    "FactCommitMaterializedV2", "ImageEvidenceDeclared",
+    "FactCommitMaterializedV2", "ImageEvidenceDeclared", "AppearanceStateRecorded",
+    "VisiblePhysicalStateRecorded",
 })
 _SECTION_FIELDS: dict[str, frozenset[str]] = {
     "location": frozenset({"id", "kind", "country", "region", "city", "publicness", "mirror_available"}),
@@ -135,20 +142,21 @@ class MediaEvidenceSnapshotCompiler:
 
     def compile(self, request: MediaEvidenceCompileRequest) -> CompiledMediaEvidence:
         candidate = request.candidate
-        if candidate.family != "life_share" or candidate.privacy_ceiling not in _PUBLIC_VISIBILITIES:
-            raise MediaEvidenceNotRenderable("p0_requires_public_life_share")
+        if candidate.family not in {"life_share", "character_media"} or candidate.privacy_ceiling not in _PUBLIC_VISIBILITIES:
+            raise MediaEvidenceNotRenderable("media_candidate_requires_public_or_shareable_evidence")
+        if candidate.family == "character_media" and candidate.character_media_contract is None:
+            raise MediaEvidenceNotRenderable("character_media_contract_missing")
         projection = self._ledger.project_at(request.cursor)
         self._require_exact_cursor(projection, request.cursor)
         events = self._load_sources(candidate=candidate, projection=projection, cursor=request.cursor)
-        life_events = tuple(item for item in events if item.event_type != "ImageEvidenceDeclared")
+        life_events = tuple(
+            item for item in events
+            if item.event_type not in {"ImageEvidenceDeclared", "AppearanceStateRecorded", "VisiblePhysicalStateRecorded"}
+        )
         if not life_events:
             raise MediaEvidenceNotRenderable("image_evidence_has_no_life_source")
         primary = max(life_events, key=lambda item: (item.logical_time, item.event_id))
 
-        source_events = tuple(
-            MediaEvidenceSource(event_ref=event.event_id, payload_hash=event.payload_hash)
-            for event in sorted(events, key=lambda item: item.event_id)
-        )
         body: dict[str, object] = {
             "schema_version": "world-image-event-snapshot-v1",
             "event": {
@@ -193,6 +201,22 @@ class MediaEvidenceSnapshotCompiler:
             self._merge_explicit_evidence(
                 target=body, origins=origins, event=event, fallback_visibility=candidate.privacy_ceiling,
             )
+
+        supplemental_events: tuple[WorldEvent, ...] = ()
+        if candidate.family == "character_media":
+            supplemental_events = self._freeze_character_evidence(
+                candidate=candidate,
+                primary=primary,
+                events=events,
+                projection=projection,
+                body=body,
+                origins=origins,
+            )
+
+        source_events = tuple(
+            MediaEvidenceSource(event_ref=event.event_id, payload_hash=event.payload_hash)
+            for event in sorted({event.event_id: event for event in (*events, *supplemental_events)}.values(), key=lambda item: item.event_id)
+        )
 
         # An event envelope proves that something happened, not that there is
         # a photographable fact.  Do not let the downstream planner turn an
@@ -339,6 +363,165 @@ class MediaEvidenceSnapshotCompiler:
             raise MediaEvidenceNotRenderable("readable_text_requires_artifact")
         if "requires_readable_text" in raw and raw["requires_readable_text"] is not False:
             raise MediaEvidenceNotRenderable("malformed_image_evidence")
+
+    def _freeze_character_evidence(
+        self,
+        *,
+        candidate: PhotoCandidate,
+        primary: WorldEvent,
+        events: tuple[WorldEvent, ...],
+        projection: _ProjectionLike,
+        body: dict[str, object],
+        origins: dict[str, tuple[WorldEvent, Literal["public", "shareable"]]],
+    ) -> tuple[WorldEvent, ...]:
+        """Freeze P2 character facts, not a current projection or prompt hint."""
+
+        contract = candidate.character_media_contract
+        if contract is None:  # The outer gate keeps this explicit for type checkers.
+            raise MediaEvidenceNotRenderable("character_media_contract_missing")
+        declaration_event: WorldEvent | None = None
+        declaration: ImageEvidenceDeclaredPayload | None = None
+        for event in events:
+            if event.event_type != "ImageEvidenceDeclared":
+                continue
+            try:
+                parsed = ImageEvidenceDeclaredPayload.model_validate_json(event.payload_json)
+            except ValueError as exc:
+                raise MediaEvidenceNotRenderable("malformed_image_evidence_declaration") from exc
+            character = parsed.image_evidence.character_media
+            if character is None or character.character_ref != contract.subject_ref:
+                continue
+            if not set(contract.allowed_capture_modes) <= set(character.capture_capabilities):
+                continue
+            if not self._character_contract_is_proven(contract=contract, declaration=parsed):
+                continue
+            declaration_event, declaration = event, parsed
+            break
+        if declaration_event is None or declaration is None:
+            raise MediaEvidenceNotRenderable("character_media_contract_not_proven_by_declaration")
+        visibility = _visibility(
+            declaration.image_evidence.visibility,
+            reason="character_media_evidence_not_public_or_shareable",
+        )
+        body["character"] = {
+            "subject_ref": contract.subject_ref,
+            "presence": {"present": True},
+            "capture_authorization": {"allowed_modes": contract.allowed_capture_modes},
+            "candidate_contract": {
+                "kind": contract.kind,
+                "allowed_character_visibility": contract.allowed_character_visibility,
+                "authority_digest": contract.authority_digest,
+            },
+        }
+        origins["/character"] = (declaration_event, visibility)
+        extras: list[WorldEvent] = []
+        appearance = appearance_state_at(
+            tuple(getattr(projection, "appearance_states", ())),
+            subject_ref=contract.subject_ref,
+            at_logical_time=primary.logical_time,
+        )
+        if appearance is not None and self._visible_at_candidate_ceiling(
+            value=appearance.visibility, ceiling=candidate.privacy_ceiling
+        ):
+            record, anchor = self._state_events(
+                projection=projection,
+                state=appearance,
+                event_type="AppearanceStateRecorded",
+                payload_model=AppearanceStateRecordedPayload,
+            )
+            body["character"]["appearance_state"] = appearance.model_dump(mode="python")  # type: ignore[index]
+            origins["/character/appearance_state"] = (record, _visibility(appearance.visibility, reason="appearance_state_not_publishable"))
+            extras.extend((record, anchor))
+        physical = visible_physical_state_at(
+            tuple(getattr(projection, "visible_physical_states", ())),
+            subject_ref=contract.subject_ref,
+            at_logical_time=primary.logical_time,
+        )
+        if physical is not None and self._visible_at_candidate_ceiling(
+            value=physical.visibility, ceiling=candidate.privacy_ceiling
+        ):
+            record, anchor = self._state_events(
+                projection=projection,
+                state=physical,
+                event_type="VisiblePhysicalStateRecorded",
+                payload_model=VisiblePhysicalStateRecordedPayload,
+            )
+            body["character"]["visible_physical_state"] = physical.model_dump(mode="python")  # type: ignore[index]
+            origins["/character/visible_physical_state"] = (record, _visibility(physical.visibility, reason="visible_physical_state_not_publishable"))
+            extras.extend((record, anchor))
+        return tuple(extras)
+
+    @staticmethod
+    def _visible_at_candidate_ceiling(*, value: object, ceiling: object) -> bool:
+        return value in _PUBLIC_VISIBILITIES and _PRIVACY_RANK[value] <= _PRIVACY_RANK[ceiling]
+
+    @staticmethod
+    def _character_contract_is_proven(*, contract, declaration: ImageEvidenceDeclaredPayload) -> bool:  # type: ignore[no-untyped-def]
+        evidence = declaration.image_evidence
+        modes = set(evidence.character_media.capture_capabilities)  # type: ignore[union-attr]
+        if contract.kind == "selfie":
+            return "character_front_camera" in modes
+        if contract.kind == "mirror":
+            return "mirror" in modes and isinstance(evidence.location, dict) and evidence.location.get("mirror_available") is True
+        if contract.kind == "public_checkin":
+            return (
+                bool({"timer_fixed", "requested_helper"}.intersection(modes))
+                and isinstance(evidence.location, dict)
+                and evidence.location.get("publicness") == "public"
+            )
+        if contract.kind == "companion_shot":
+            return "known_companion" in modes and any(
+                item.get("id") != contract.subject_ref
+                and item.get("present") is True
+                and item.get("visibility_permission") in _PUBLIC_VISIBILITIES
+                for item in evidence.participants
+                if isinstance(item, dict)
+            )
+        if contract.kind == "body_detail":
+            detail = evidence.character_media.body_detail  # type: ignore[union-attr]
+            return (
+                detail is not None
+                and bool({"character_front_camera", "character_rear_camera"}.intersection(modes))
+                and any(
+                    item.get("id") == detail.object_ref and item.get("visibility") in _PUBLIC_VISIBILITIES
+                    for item in evidence.objects
+                    if isinstance(item, dict)
+                )
+            )
+        return False
+
+    def _state_events(self, *, projection: _ProjectionLike, state, event_type: str, payload_model):  # type: ignore[no-untyped-def]
+        """Find the exact state record and its separately committed anchor."""
+
+        refs = {item.event_id: item for item in projection.committed_world_event_refs}
+        record: WorldEvent | None = None
+        for ref in refs.values():
+            if getattr(ref, "event_type", None) != event_type:
+                continue
+            found = self._ledger.lookup_event_commit(ref.event_id)
+            if found is None:
+                continue
+            event, _commit = found
+            if event.payload_hash != getattr(ref, "payload_hash", None):
+                continue
+            try:
+                if payload_model.model_validate_json(event.payload_json).state == state:
+                    record = event
+                    break
+            except ValueError:
+                continue
+        if record is None:
+            raise MediaEvidenceNotRenderable("active_state_record_unavailable")
+        anchor_ref = refs.get(state.source_event_ref)
+        anchor_found = self._ledger.lookup_event_commit(state.source_event_ref)
+        if (
+            anchor_ref is None
+            or anchor_found is None
+            or anchor_found[0].payload_hash != state.source_event_payload_hash
+            or getattr(anchor_ref, "payload_hash", None) != state.source_event_payload_hash
+        ):
+            raise MediaEvidenceNotRenderable("active_state_anchor_unavailable")
+        return record, anchor_found[0]
 
     @staticmethod
     def _build_index(
