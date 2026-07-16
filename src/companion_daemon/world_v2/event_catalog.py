@@ -28,6 +28,7 @@ from .activity_lifecycle_acceptance_manifest import ACTIVITY_LIFECYCLE_ACCEPTANC
 from .media_selection_acceptance_manifest import MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
 from .media_selection_proposal import MediaSelectionProposalRecordedPayload
 from .image_evidence_contract import IMAGE_EVIDENCE_PAYLOAD_MODELS
+from .private_image_evidence_contract import RECIPIENT_SCOPED_IMAGE_EVIDENCE_PAYLOAD_MODELS
 from .appearance_state import APPEARANCE_STATE_PAYLOAD_MODELS
 from .visible_physical_state import VISIBLE_PHYSICAL_STATE_PAYLOAD_MODELS
 from .random_authority import RandomDrawRecordedPayload
@@ -338,6 +339,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "ProviderMediaGrantRecorded": ProviderMediaGrantRecordedPayload,
         **MEDIA_V2_PAYLOAD_MODELS,
         **IMAGE_EVIDENCE_PAYLOAD_MODELS,
+        **RECIPIENT_SCOPED_IMAGE_EVIDENCE_PAYLOAD_MODELS,
         **APPEARANCE_STATE_PAYLOAD_MODELS,
         **VISIBLE_PHYSICAL_STATE_PAYLOAD_MODELS,
         "RandomDrawRecorded": RandomDrawRecordedPayload,
@@ -452,6 +454,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "PhotoCandidateUnrenderable": "world_id+candidate_id+expected_revision+reason",
         "PhotoCandidateExpired": "world_id+candidate_id+expected_revision+reason",
         "ImageEvidenceDeclared": "world_id+source_event_ref+source_event_payload_hash",
+        "RecipientScopedImageEvidenceDeclared": "world_id+recipient_ref+source_event_ref+source_event_payload_hash",
         "AppearanceStateRecorded": "world_id+appearance_state_id+entity_revision",
         "VisiblePhysicalStateRecorded": "world_id+physical_state_id+entity_revision",
         "RandomDrawRecorded": "world_id+draw_id",
@@ -911,6 +914,19 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                     "FactCorrected", "FactCommitMaterializedV2",
                 ),
                 evidence_types=("committed_world_event", "accepted_visual_evidence"),
+                successors=("PhotoCandidateOpened",),
+            ),
+            _contract(
+                "RecipientScopedImageEvidenceDeclared",
+                "recipient_scoped_image_evidence_acceptance",
+                "world",
+                "RecipientScopedImageEvidenceDeclaredPayload",
+                allowed_predecessors=(
+                    "ActivityStarted", "ActivityResumed", "ActivityCompleted",
+                    "WorldOccurrenceSettled", "ExperienceCommitted", "FactCommitted",
+                    "FactCorrected", "FactCommitMaterializedV2",
+                ),
+                evidence_types=("committed_world_event", "recipient_scoped_visual_evidence"),
                 successors=("PhotoCandidateOpened",),
             ),
             _contract(

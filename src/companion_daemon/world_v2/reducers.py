@@ -103,6 +103,7 @@ from .image_evidence_contract import (
     DECLARABLE_SOURCE_EVENT_TYPES,
     ImageEvidenceDeclaredPayload,
 )
+from .private_image_evidence_contract import RecipientScopedImageEvidenceDeclaredPayload
 from .appearance_state import (
     APPEARANCE_SOURCE_EVENT_TYPES,
     AppearanceStateProjection,
@@ -5215,6 +5216,30 @@ def _image_evidence_declared(state: ReducerState, event: WorldEvent) -> ReducerS
     return state
 
 
+def _recipient_scoped_image_evidence_declared(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    """Validate P3 private evidence without widening the P0/P2 declaration."""
+
+    payload = RecipientScopedImageEvidenceDeclaredPayload.model_validate_json(event.payload_json)
+    source = next(
+        (item for item in state.committed_world_event_refs if item.event_id == payload.source_event_ref),
+        None,
+    )
+    if (
+        state.logical_time is None
+        or event.logical_time != state.logical_time
+        or payload.declared_at != event.logical_time
+        or event.causation_id != payload.source_event_ref
+        or source is None
+        or source.event_type != payload.source_event_type
+        or source.payload_hash != payload.source_event_payload_hash
+        or source.event_type not in DECLARABLE_SOURCE_EVENT_TYPES
+    ):
+        raise ValueError("recipient-scoped image evidence declaration source is not current")
+    return state
+
+
 def _appearance_state_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     """Project a sparse visible state only from a prior committed source."""
 
@@ -9000,6 +9025,11 @@ _EVENTS = {
         ),
         EventDefinition("PhotoCandidateExpired", RevisionClass.WORLD, _photo_candidate_expired),
         EventDefinition("ImageEvidenceDeclared", RevisionClass.WORLD, _image_evidence_declared),
+        EventDefinition(
+            "RecipientScopedImageEvidenceDeclared",
+            RevisionClass.WORLD,
+            _recipient_scoped_image_evidence_declared,
+        ),
         EventDefinition("AppearanceStateRecorded", RevisionClass.WORLD, _appearance_state_recorded),
         EventDefinition(
             "VisiblePhysicalStateRecorded", RevisionClass.WORLD, _visible_physical_state_recorded
