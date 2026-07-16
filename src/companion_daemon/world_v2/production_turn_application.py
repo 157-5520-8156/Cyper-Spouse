@@ -102,6 +102,7 @@ from .image_evidence_runtime import (
 )
 from .appearance_state import AppearanceStateRecordCommand
 from .appearance_state_runtime import AppearanceStateRuntime
+from .character_media_fact_binder import CharacterMediaCandidateRuntime
 from .media_selection_acceptance_runtime import MediaSelectionProposalRecorder
 from .media_selection_acceptance_runtime import MediaSelectionAcceptanceRuntime
 from .media_opportunity_authorizer import MediaOpportunityAuthorizer
@@ -297,6 +298,7 @@ class WorldV2TurnApplication:
         media_selection_worker_actor: str,
         media_candidate_maintenance: MediaCandidateMaintenanceRuntime,
         media_candidate_maintenance_actor: str,
+        character_media_candidates: CharacterMediaCandidateRuntime,
         image_evidence: ImageEvidenceDeclarationRuntime,
         appearance_states: AppearanceStateRuntime,
         media_selection_acceptance: MediaSelectionAcceptanceRuntime | None,
@@ -322,6 +324,7 @@ class WorldV2TurnApplication:
         self._media_selection_worker_actor = media_selection_worker_actor
         self._media_candidate_maintenance = media_candidate_maintenance
         self._media_candidate_maintenance_actor = media_candidate_maintenance_actor
+        self._character_media_candidates = character_media_candidates
         self._image_evidence = image_evidence
         self._appearance_states = appearance_states
         self._media_selection_acceptance = media_selection_acceptance
@@ -736,6 +739,29 @@ class WorldV2TurnApplication:
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(self._media_ecology.drain_once, **kwargs)
         return self._media_ecology.drain_once(**kwargs)
+
+    async def drain_character_media_candidates_once(
+        self, *, wake_event_ref: str, logical_time: datetime, trace_id: str,
+        correlation_id: str,
+    ) -> tuple[str, ...]:
+        """Open ordinary fact-bound character-media candidates after a declaration.
+
+        This is separate from the life-share ecology because it has a distinct
+        proof matrix (presence and capture capability).  It still only opens
+        candidates; selection, Acceptance, planning and delivery remain
+        separate scheduler seams.
+        """
+
+        kwargs = dict(
+            wake_event_ref=wake_event_ref,
+            logical_time=logical_time,
+            actor=self._event_ecology_worker_actor,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._character_media_candidates.open_once, **kwargs)
+        return self._character_media_candidates.open_once(**kwargs)
 
     async def drain_media_selection_once(
         self, *, logical_time: datetime, trace_id: str, correlation_id: str,
@@ -1403,6 +1429,7 @@ def build_sqlite_world_v2_turn_application(
             media_selection_worker_actor=config.media_selection_worker_actor,
             media_candidate_maintenance=MediaCandidateMaintenanceRuntime(ledger=ledger),
             media_candidate_maintenance_actor=config.media_candidate_maintenance_actor,
+            character_media_candidates=CharacterMediaCandidateRuntime(ledger=ledger),
             image_evidence=ImageEvidenceDeclarationRuntime(ledger=ledger),
             appearance_states=AppearanceStateRuntime(ledger=ledger),
             media_selection_acceptance=media_selection_acceptance,

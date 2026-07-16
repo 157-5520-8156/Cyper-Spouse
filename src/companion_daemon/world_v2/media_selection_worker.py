@@ -57,8 +57,14 @@ class MediaSelectionWorker:
         # A proposal deliberately leaves a candidate ``available`` until
         # Acceptance.  Do not call the model again for the same aggregate
         # revision while that proposal is waiting to be accepted or closed.
+        # P2 may already discover ordinary character-media candidates, but it
+        # must not let the P1 proposal/Acceptance lane select them until the
+        # matching snapshot compiler and bridge are installed.  Filtering at
+        # this one seam makes the unavailable phase visible without allowing a
+        # model token to reach an authorization contract that cannot honor it.
+        selectable = tuple(item for item in eligible if item.family == "life_share")
         candidates = tuple(
-            item for item in sorted(eligible, key=lambda value: value.candidate_id)
+            item for item in sorted(selectable, key=lambda value: value.candidate_id)
             if (item.candidate_id, item.entity_revision) not in pending
         )[:32]
         if not candidates:
@@ -66,8 +72,14 @@ class MediaSelectionWorker:
                 status="no_op",
                 reason_code=(
                     "media_selection.pending_proposal"
-                    if eligible
-                    else "media_selection.no_available_candidates"
+                    if selectable and any(
+                        (item.candidate_id, item.entity_revision) in pending for item in selectable
+                    )
+                    else (
+                        "media_selection.character_media_not_yet_authorizable"
+                        if eligible
+                        else "media_selection.no_available_candidates"
+                    )
                 ),
             )
         cursor = ProjectionCursor(world_revision=projection.world_revision, deliberation_revision=projection.deliberation_revision, ledger_sequence=projection.ledger_sequence)

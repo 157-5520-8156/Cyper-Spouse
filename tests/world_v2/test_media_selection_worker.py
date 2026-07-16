@@ -7,7 +7,12 @@ import json
 
 from companion_daemon.world_v2.media_selection_draft import MediaSelectionDraftAdapter
 from companion_daemon.world_v2.media_selection_worker import MediaSelectionWorker
-from companion_daemon.world_v2.media_v2 import MediaEvidenceSource, PhotoCandidate
+from companion_daemon.world_v2.media_v2 import (
+    CharacterMediaCandidateContract,
+    MediaEvidenceSource,
+    PhotoCandidate,
+    character_media_contract_digest,
+)
 
 NOW = datetime(2026, 7, 16, tzinfo=UTC)
 
@@ -70,6 +75,40 @@ async def test_worker_does_not_repeat_a_model_call_for_an_unaccepted_candidate_r
 
     assert result.status == "no_op"
     assert result.reason_code == "media_selection.pending_proposal"
+    assert model.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_worker_leaves_a_character_candidate_unselected_until_its_p2_acceptance_lane_exists() -> None:
+    source = MediaEvidenceSource(event_ref="event:declaration", payload_hash="a" * 64)
+    contract = CharacterMediaCandidateContract(
+        subject_ref="agent:companion", kind="mirror", allowed_capture_modes=("mirror",),
+        allowed_character_visibility=("identifiable",),
+        authority_digest=character_media_contract_digest(
+            subject_ref="agent:companion", kind="mirror", source_events=(source,),
+            allowed_capture_modes=("mirror",), allowed_character_visibility=("identifiable",),
+        ),
+    )
+    candidate = PhotoCandidate(
+        candidate_id="candidate:character", source_event_refs=(source.event_ref,), family="character_media",
+        privacy_ceiling="public", opened_at=NOW, expires_at=NOW.replace(hour=1),
+        ecology_category="character_media:mirror", ecology_observed_at=NOW, source_events=(source,),
+        character_media_contract=contract,
+    )
+    model = _Model()
+    ledger = SimpleNamespace(
+        project=lambda: SimpleNamespace(
+            logical_time=NOW, photo_candidates=(candidate,), proposal_revisions=(),
+        ),
+    )
+    worker = MediaSelectionWorker(
+        ledger=ledger, draft_adapter=MediaSelectionDraftAdapter(model=model),
+        proposal_recorder=_Recorder(), catalog_version="test.1",
+    )
+
+    result = await worker.select_once(logical_time=NOW, actor="worker", trace_id="trace", correlation_id="correlation")
+
+    assert result.reason_code == "media_selection.character_media_not_yet_authorizable"
     assert model.calls == 0
 
 

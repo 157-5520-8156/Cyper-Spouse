@@ -19,9 +19,11 @@ from .media_v2 import (
     CharacterVisibility,
     MediaEvidenceSource,
     PhotoCandidate,
+    PhotoCandidateOpenedPayload,
     character_media_contract_digest,
     media_digest,
 )
+from .event_identity import domain_idempotency_key
 from .schemas import ProjectionCursor, WorldEvent
 
 
@@ -170,4 +172,71 @@ class CharacterMediaFactBinder:
         return tuple(values)
 
 
-__all__ = ["CharacterMediaFactBinder", "CharacterMediaFactBinderError"]
+class CharacterMediaCandidateRuntime:
+    """Open the binder's immutable candidates after one declaration wake.
+
+    This is a mechanical lifecycle seam: it cannot choose a candidate, create
+    an opportunity or authorize an image.  A later selector still has to make
+    the social choice and Acceptance still owns budget/provider authority.
+    """
+
+    def __init__(self, *, ledger: _Ledger, binder: CharacterMediaFactBinder | None = None) -> None:
+        self._ledger = ledger
+        self._binder = binder or CharacterMediaFactBinder(ledger=ledger)
+
+    def open_once(
+        self, *, wake_event_ref: str, logical_time: datetime, actor: str, trace_id: str,
+        correlation_id: str,
+    ) -> tuple[str, ...]:
+        projection = self._ledger.project()  # type: ignore[attr-defined]
+        if projection.logical_time != logical_time:
+            raise ValueError("character media candidate opening requires current logical time")
+        wake = next(
+            (item for item in projection.committed_world_event_refs if item.event_id == wake_event_ref), None
+        )
+        if wake is None or wake.event_type != "ImageEvidenceDeclared":
+            raise ValueError("character media candidate opening requires an image evidence declaration wake")
+        cursor = ProjectionCursor(
+            world_revision=projection.world_revision,
+            deliberation_revision=projection.deliberation_revision,
+            ledger_sequence=projection.ledger_sequence,
+        )
+        candidates = self._binder.discover(cursor=cursor, logical_time=logical_time)
+        if not candidates:
+            return ()
+        events: list[WorldEvent] = []
+        for candidate in candidates:
+            payload = PhotoCandidateOpenedPayload(candidate=candidate).model_dump(mode="json")
+            event = WorldEvent.from_payload(
+                schema_version="world-v2.1",
+                event_id="event:character-media-candidate:" + media_digest({
+                    "candidate_id": candidate.candidate_id,
+                    "payload": payload,
+                }),
+                event_type="PhotoCandidateOpened",
+                world_id=self._ledger.world_id,
+                logical_time=logical_time,
+                created_at=logical_time,
+                actor=actor,
+                source="world-v2:character-media-candidate",
+                trace_id=trace_id,
+                causation_id=wake_event_ref,
+                correlation_id=correlation_id,
+                idempotency_key=domain_idempotency_key(
+                    event_type="PhotoCandidateOpened", world_id=self._ledger.world_id, payload=payload,
+                ) or "character-media-candidate:" + candidate.candidate_id,
+                payload=payload,
+            )
+            events.append(event)
+        self._ledger.commit_at_cursor(  # type: ignore[attr-defined]
+            tuple(events), expected_cursor=cursor,
+            commit_id="commit:character-media-candidates:" + media_digest([event.event_id for event in events]),
+        )
+        return tuple(candidate.candidate_id for candidate in candidates)
+
+
+__all__ = [
+    "CharacterMediaCandidateRuntime",
+    "CharacterMediaFactBinder",
+    "CharacterMediaFactBinderError",
+]

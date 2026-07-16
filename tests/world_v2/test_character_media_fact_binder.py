@@ -3,7 +3,10 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from types import SimpleNamespace
 
-from companion_daemon.world_v2.character_media_fact_binder import CharacterMediaFactBinder
+from companion_daemon.world_v2.character_media_fact_binder import (
+    CharacterMediaCandidateRuntime,
+    CharacterMediaFactBinder,
+)
 from companion_daemon.world_v2.image_evidence_contract import (
     CharacterMediaEvidenceV1,
     ImageEvidenceDeclaredPayload,
@@ -40,6 +43,10 @@ class _Ledger:
                 ) for index, event in enumerate(events, start=1)
             ),
         )
+        self.commits: list[tuple[tuple[WorldEvent, ...], ProjectionCursor, str]] = []
+
+    def project(self):  # type: ignore[no-untyped-def]
+        return self.projection
 
     def project_at(self, cursor: ProjectionCursor):  # type: ignore[no-untyped-def]
         assert cursor.world_revision == self.projection.world_revision
@@ -48,6 +55,9 @@ class _Ledger:
     def lookup_event_commit(self, event_id: str):  # type: ignore[no-untyped-def]
         event = self._events.get(event_id)
         return None if event is None else (event, object())
+
+    def commit_at_cursor(self, events, *, expected_cursor, commit_id):  # type: ignore[no-untyped-def]
+        self.commits.append((events, expected_cursor, commit_id))
 
 
 def _cursor(ledger: _Ledger) -> ProjectionCursor:
@@ -102,3 +112,33 @@ def test_binder_refuses_to_infer_a_mirror_from_character_presence_alone() -> Non
     ledger = _Ledger(source, declaration)
 
     assert CharacterMediaFactBinder(ledger=ledger).discover(cursor=_cursor(ledger), logical_time=NOW) == ()
+
+
+def test_candidate_runtime_opens_only_the_binder_discovered_candidate_after_its_declaration_wake() -> None:
+    source = _event(event_id="event:activity", event_type="ActivityCompleted", payload={})
+    declaration = _event(
+        event_id="event:declaration", event_type="ImageEvidenceDeclared",
+        payload=ImageEvidenceDeclaredPayload(
+            source_event_ref=source.event_id, source_event_payload_hash=source.payload_hash,
+            source_event_type=source.event_type, source_privacy_ceiling="public", declared_at=NOW,
+            image_evidence=ImageEvidenceV1(
+                visibility="public", activity={"id": "activity:walk"},
+                character_media=CharacterMediaEvidenceV1(
+                    character_ref="agent:companion", present=True,
+                    capture_capabilities=("character_front_camera",),
+                ),
+            ),
+        ).model_dump(mode="json"),
+    )
+    ledger = _Ledger(source, declaration)
+
+    opened = CharacterMediaCandidateRuntime(ledger=ledger).open_once(
+        wake_event_ref=declaration.event_id, logical_time=NOW, actor="worker:character-media",
+        trace_id="trace:character-media", correlation_id="correlation:character-media",
+    )
+
+    assert len(opened) == 1
+    event = ledger.commits[0][0][0]
+    assert event.event_type == "PhotoCandidateOpened"
+    assert event.causation_id == declaration.event_id
+    assert event.payload()["candidate"]["character_media_contract"]["kind"] == "selfie"

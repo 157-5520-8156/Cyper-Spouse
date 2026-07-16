@@ -26,7 +26,10 @@ from companion_daemon.world_v2.activity_plan_runtime import (
     ActivityPlanCommand,
     ActivityPlanTransitionCommand,
 )
-from companion_daemon.world_v2.image_evidence_contract import ImageEvidenceV1
+from companion_daemon.world_v2.image_evidence_contract import (
+    CharacterMediaEvidenceV1,
+    ImageEvidenceV1,
+)
 from companion_daemon.world_v2.image_evidence_runtime import ImageEvidenceDeclarationCommand
 from companion_daemon.world_v2.appearance_state import (
     AppearanceStateRecordCommand,
@@ -604,6 +607,11 @@ async def test_production_life_event_declaration_opens_one_source_bound_candidat
                         "evidence_visibility": "shareable", "id": "activity:declared-ecology",
                         "kind": "walk", "description": "傍晚在公园散步", "phase": "active",
                     },
+                    character_media=CharacterMediaEvidenceV1(
+                        character_ref="agent:companion",
+                        present=True,
+                        capture_capabilities=("character_front_camera",),
+                    ),
                 ),
             ),
             logical_time=NOW, created_at=NOW, trace_id="trace:declared-ecology:evidence",
@@ -613,11 +621,17 @@ async def test_production_life_event_declaration_opens_one_source_bound_candidat
             wake_event_ref=declaration.event_ids[-1], logical_time=NOW,
             trace_id="trace:declared-ecology:worker", correlation_id="correlation:declared-ecology",
         )
+        character_candidates = await app.drain_character_media_candidates_once(
+            wake_event_ref=declaration.event_ids[-1], logical_time=NOW,
+            trace_id="trace:declared-ecology:character-worker",
+            correlation_id="correlation:declared-ecology",
+        )
     finally:
         app.close()
 
     assert result is not None and result.status == "created"
     assert len(result.candidate_ids) == 1
+    assert len(character_candidates) == 1
 
 
 @pytest.mark.asyncio
