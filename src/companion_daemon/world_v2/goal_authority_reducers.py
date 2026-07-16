@@ -172,6 +172,52 @@ V2_GOAL_POLICY_DIGEST = hashlib.sha256(
     json.dumps(_POLICY_ARTIFACT, sort_keys=True, separators=(",", ":")).encode()
 ).hexdigest()
 
+# This is deliberately narrower than the shared V16 authority union.  The
+# union is shared by several domains and preserves versioned wire shapes; it
+# is not itself a capability grant.  In particular a settled event can be a
+# *deliberative basis* for a Goal, but it cannot write a Goal directly.
+_INSTALLED_GOAL_LANES_BY_OPERATION: dict[str, frozenset[str]] = {
+    "open": frozenset({"deliberative", "operator"}),
+    "revise": frozenset({"deliberative", "operator"}),
+    "progress": frozenset({"deliberative"}),
+    "pause": frozenset({"deliberative"}),
+    "resume": frozenset({"deliberative"}),
+    "block": frozenset({"deliberative"}),
+    "unblock": frozenset({"deliberative"}),
+    "complete": frozenset({"deliberative", "operator"}),
+    "abandon": frozenset({"deliberative"}),
+    "compensate": frozenset({"compensation"}),
+}
+_EXPECTED_GOAL_CAUSE_BY_LANE = {
+    "deliberative": DeliberativeCauseAuthority,
+    "operator": DomainOperatorAuthorityBinding,
+    "settlement": SettledEventCauseAuthority,
+    "clock_runtime": ClockCauseAuthority,
+    "compensation": CompensationCauseAuthority,
+}
+
+
+def _require_installed_goal_transition_authority(
+    payload: V2GoalChangedPayload,
+) -> None:
+    """Defend the frozen Goal lane matrix even for bypassed Pydantic payloads.
+
+    Typed proposals are validated before they arrive here, but reducers are a
+    replay boundary too.  Do not let ``model_construct``/legacy deserializers
+    turn a wire-union member into an installed authority.
+    """
+
+    installed_lanes = _INSTALLED_GOAL_LANES_BY_OPERATION.get(payload.operation)
+    if installed_lanes is None:
+        raise ValueError(f"unsupported GoalAuthority operation {payload.operation!r}")
+    if payload.authority_lane not in installed_lanes:
+        raise ValueError(
+            "Goal authority lane is not installed for this operation"
+        )
+    expected_cause = _EXPECTED_GOAL_CAUSE_BY_LANE.get(payload.authority_lane)
+    if expected_cause is None or not isinstance(payload.cause_authority, expected_cause):
+        raise ValueError("Goal authority cause kind does not match its installed lane")
+
 def reduce_v2_goal(
     goals: tuple[V2GoalProjection, ...],
     history: tuple[V2GoalTransitionProjection, ...],
@@ -194,6 +240,7 @@ def reduce_v2_goal(
         or payload.policy_digest != V2_GOAL_POLICY_DIGEST
     ):
         raise ValueError("goal mutation references an uninstalled policy")
+    _require_installed_goal_transition_authority(payload)
     after = payload.goal_after
     if (
         after.origin.accepted_event_ref != event_id
@@ -357,7 +404,10 @@ def reduce_v2_goal(
                 logical_time=logical_time,
             )
         else:
-            raise NotImplementedError("remaining GoalAuthority transitions are test-first pending")
+            # ``V2GoalChangedPayload`` is a closed operation union.  Keep a
+            # stable domain failure here for corrupt/replayed bypass payloads
+            # rather than exposing an implementation-status exception.
+            raise ValueError(f"unsupported GoalAuthority operation {payload.operation!r}")
         updated = tuple(after if item.goal_id == after.goal_id else item for item in goals)
 
     transition = V2GoalTransitionProjection(
@@ -537,6 +587,14 @@ def _resolve_cause(
             raise TypeError("unknown Goal deliberative basis")
         source_privacies: list[str] = []
         for source in basis.sources:
+            if source.source_kind == "character_core":
+                # CharacterCore is intentionally not an installed Goal
+                # deliberative source in this bundle.  Its shared wire shape
+                # is not a capability grant and accepting it would allow a
+                # slow identity revision to impersonate a current outcome.
+                raise ValueError(
+                    "character_core is not an installed Goal deliberative source"
+                )
             committed = next(
                 (item for item in committed_events if item.event_id == source.event_ref),
                 None,
@@ -669,46 +727,13 @@ def _resolve_cause(
             raise ValueError("goal operator cause lacks active exact ActorAuthority")
         return None
     if isinstance(cause, SettledEventCauseAuthority):
-        allowed = {
-            "complete": {
-                "ActivityCompleted",
-                "WorldOccurrenceSettled",
-                "ActionDelivered",
-                "ExecutionReceiptRecorded",
-                "FactCommitted",
-                "FactCorrected",
-            },
-        }
-        if cause.event_type not in allowed.get(payload.operation, set()):
-            raise ValueError("settled event type cannot authorize this goal operation")
-        committed = next(
-            (item for item in committed_events if item.event_id == cause.event_ref), None
+        # A committed settlement remains usable through
+        # ``CommittedEvidenceBasis`` in a later accepted deliberation.  It is
+        # not a direct Goal write lane in the frozen .16 capability matrix.
+        raise ValueError(
+            "goal settlement write authority is not installed; "
+            "use an accepted deliberative committed-evidence basis"
         )
-        if (
-            committed is None
-            or committed.event_type != cause.event_type
-            or committed.world_revision != cause.world_revision
-            or committed.payload_hash != cause.payload_hash
-            or cause.world_revision > payload.evaluated_world_revision
-        ):
-            raise ValueError("goal settlement cause is not prior exact committed authority")
-        if cause.event_type == "WorldOccurrenceSettled":
-            occurrence = next(
-                (
-                    item
-                    for item in world_occurrences
-                    if item.settlement_event_ref == cause.event_ref
-                    and item.settlement_world_revision == cause.world_revision
-                    and item.settlement_payload_hash == cause.payload_hash
-                    and item.status == "settled"
-                    and payload.goal_after.actor_ref in item.participant_refs
-                ),
-                None,
-            )
-            if occurrence is None:
-                raise ValueError("goal settlement lacks exact occurrence authority")
-            return occurrence.visibility
-        return None
     if isinstance(cause, CompensationCauseAuthority):
         target_event = next(
             (
@@ -752,11 +777,10 @@ def _resolve_cause(
             key=_privacy_rank,
         )
     if isinstance(cause, ClockCauseAuthority):
-        if payload.operation != "expire":
-            raise ValueError("Clock authority cannot authorize this Goal operation")
-        return None
-    # Other lanes are added through subsequent red/green slices.
-    raise NotImplementedError("goal cause lane is test-first pending")
+        # Expiry has a separate mechanical payload/reducer; it is never a
+        # V2GoalChanged mutation and cannot be smuggled through this path.
+        raise ValueError("Clock authority is only installed for mechanical Goal expiry")
+    raise ValueError("Goal cause authority kind is not installed")
 
 
 def _resolve_random_draw(

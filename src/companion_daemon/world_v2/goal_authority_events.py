@@ -78,11 +78,12 @@ class V2GoalChangedPayload(V16AuthorizedMutationEnvelope):
             "resume": {"deliberative"},
             "block": {"deliberative"},
             "unblock": {"deliberative"},
-            # A settled occurrence may complete a goal directly when its
-            # exact settlement authority and typed completion evidence agree.
-            # The reducer already verifies that full chain; excluding this
-            # lane here made the otherwise valid settlement path unreachable.
-            "complete": {"deliberative", "operator", "settlement"},
+            # Settlement is evidence, not a Goal write authority.  A
+            # completion is either an accepted deliberative recognition of
+            # that evidence, or an operator re-authorised strict completion.
+            # Keeping the settlement wire shape in the shared cause union
+            # must not accidentally install a direct Goal mutation lane.
+            "complete": {"deliberative", "operator"},
             "abandon": {"deliberative"},
             "compensate": {"compensation"},
         }

@@ -21,6 +21,7 @@ from companion_daemon.world_v2.reducers import ReducerState
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.typed_proposal_families import family_for_mutation
 from companion_daemon.world_v2.goal_authority_reducers import (
+    _INSTALLED_GOAL_LANES_BY_OPERATION,
     V2_GOAL_INTERNAL_BASIS_POLICY_DIGEST,
     V2_GOAL_INTERNAL_BASIS_POLICY_VERSION,
     V2_GOAL_COMPLETION_CONTRACT_POLICY_DIGEST,
@@ -1452,6 +1453,152 @@ def test_progress_rejects_settlement_lane_and_stale_before_image() -> None:
         )
 
 
+def test_goal_lane_matrix_covers_the_typed_contract_and_excludes_settlement_writes() -> None:
+    """The shared cause union must not silently enlarge Goal capabilities."""
+
+    assert set(_INSTALLED_GOAL_LANES_BY_OPERATION) == {
+        "open",
+        "revise",
+        "progress",
+        "pause",
+        "resume",
+        "block",
+        "unblock",
+        "complete",
+        "abandon",
+        "compensate",
+    }
+    assert _INSTALLED_GOAL_LANES_BY_OPERATION["complete"] == {
+        "deliberative",
+        "operator",
+    }
+    assert all(
+        "settlement" not in lanes
+        for lanes in _INSTALLED_GOAL_LANES_BY_OPERATION.values()
+    )
+
+
+def test_goal_replay_rejects_bypassed_settlement_write_lane() -> None:
+    source, occurrence, settled = settled_occurrence(index=10_1)
+    before = goal_projection(
+        revision=1,
+        values=V2GoalValues(
+            outcome_ref="outcome:publish-story",
+            importance_bp=8000,
+            progress_bp=9000,
+            completion_contract=completion_contract(),
+            privacy_class="private",
+            status="active",
+        ),
+        event_ref="event:goal:before-settlement-replay-attack",
+        updated_at=NOW - timedelta(hours=1),
+    )
+    evidence = V2GoalOccurrenceCompletionEvidence(
+        evidence_ref=source.event_id,
+        evidence_world_revision=source.world_revision,
+        evidence_payload_hash=source.payload_hash,
+        evidence_schema_ref="world-occurrence-settlement.1",
+        occurrence_id=occurrence.occurrence_id,
+        occurrence_entity_revision=occurrence.entity_revision,
+        resolved_actor_ref="actor:companion",
+        resolved_outcome_ref="outcome:publish-story",
+        privacy_class="private",
+    )
+    terminal = V2GoalCompletedTerminalReason(
+        contract_id=before.values.completion_contract.contract_id,
+        contract_digest=before.values.completion_contract.contract_digest,
+        completion_evidence_ref=evidence.evidence_ref,
+        privacy_class="private",
+    )
+    after = goal_projection(
+        revision=2,
+        values=before.values.model_copy(
+            update={"status": "completed", "terminal_reason": terminal}
+        ),
+        event_ref="event:goal:settlement-replay-attack",
+    )
+    # ``model_copy`` intentionally bypasses payload validators, simulating a
+    # malformed historical row.  The reducer/replay boundary must still deny
+    # the shared SettledEventCauseAuthority as a direct Goal write.
+    bypassed = goal_payload(
+        after,
+        operation="complete",
+        lane="deliberative",
+        cause=deliberative_occurrence_cause(source, occurrence),
+        before=before,
+        completion_evidence=evidence,
+        terminal_reason=terminal,
+    ).model_copy(
+        update={"authority_lane": "settlement", "cause_authority": settled}
+    )
+    with pytest.raises(ValueError, match="lane is not installed"):
+        reduce_v2_goal(
+            (before,),
+            (),
+            bypassed,
+            event_type="V2GoalCompleted",
+            event_id=after.origin.accepted_event_ref,
+            logical_time=NOW,
+            actor_authorities=(),
+            committed_events=(source,),
+            random_draws=(),
+            world_occurrences=(occurrence,),
+        )
+
+
+def test_character_core_wire_source_is_fail_closed_for_goal_deliberation() -> None:
+    basis = CommittedEvidenceBasis(
+        sources=(
+            CommittedEvidenceSource(
+                source_kind="character_core",
+                event_ref="event:character-core:wire-only",
+                world_revision=7,
+                payload_hash="c" * 64,
+                source_entity_ref="core:companion",
+                source_entity_revision=1,
+            ),
+        )
+    )
+    after = goal_projection(
+        revision=1,
+        values=V2GoalValues(
+            outcome_ref="outcome:character-core-wire-attack",
+            importance_bp=5000,
+            progress_bp=0,
+            privacy_class="private",
+            status="active",
+        ),
+        event_ref="event:goal:character-core-wire-attack",
+    )
+    payload = goal_payload(
+        after,
+        operation="open",
+        lane="deliberative",
+        cause=DeliberativeCauseAuthority(basis=basis),
+        evaluated_world_revision=7,
+    )
+    source = CommittedWorldEventRef(
+        event_id="event:character-core:wire-only",
+        event_type="CharacterCoreRevised",
+        world_revision=7,
+        payload_hash="c" * 64,
+        logical_time=NOW,
+    )
+    with pytest.raises(ValueError, match="not an installed Goal deliberative source"):
+        reduce_v2_goal(
+            (),
+            (),
+            payload,
+            event_type="V2GoalOpened",
+            event_id=after.origin.accepted_event_ref,
+            logical_time=NOW,
+            actor_authorities=(),
+            committed_events=(source,),
+            random_draws=(),
+            world_occurrences=(),
+        )
+
+
 def test_open_rejects_private_other_person_occurrence() -> None:
     source, occurrence, _ = settled_occurrence(index=11)
     occurrence = occurrence.model_copy(update={"participant_refs": ("actor:other",)})
@@ -1654,7 +1801,7 @@ def test_abandon_persists_structured_terminal_reason() -> None:
     assert heads[0].values.terminal_reason == terminal
 
 
-def test_settled_occurrence_can_complete_a_goal_with_exact_completion_evidence() -> None:
+def test_settled_occurrence_cannot_write_goal_completion_directly() -> None:
     source, occurrence, cause = settled_occurrence(index=12)
     contract = completion_contract()
     before = goal_projection(
@@ -1694,32 +1841,19 @@ def test_settled_occurrence_can_complete_a_goal_with_exact_completion_evidence()
         ),
         event_ref="event:goal:settled-completed",
     )
-    payload = goal_payload(
-        after,
-        operation="complete",
-        lane="settlement",
-        cause=cause,
-        before=before,
-        completion_evidence=evidence,
-        terminal_reason=terminal,
-    )
-
-    heads, history = reduce_v2_goal(
-        (before,),
-        (),
-        payload,
-        event_type="V2GoalCompleted",
-        event_id=after.origin.accepted_event_ref,
-        logical_time=NOW,
-        actor_authorities=(),
-        committed_events=(source,),
-        random_draws=(),
-        world_occurrences=(occurrence,),
-    )
-
-    assert heads == (after,)
-    assert history[-1].authority_lane == "settlement"
-    assert history[-1].completion_evidence == evidence
+    # A committed occurrence is sufficient *evidence* for the following
+    # accepted deliberation (covered by the next test), never a direct Goal
+    # mutation authority.  This preserves the frozen two-phase boundary.
+    with pytest.raises(ValueError, match="not allowed in authority lane"):
+        goal_payload(
+            after,
+            operation="complete",
+            lane="settlement",
+            cause=cause,
+            before=before,
+            completion_evidence=evidence,
+            terminal_reason=terminal,
+        )
 
 
 def test_complete_resolves_exact_post_cutoff_occurrence_outcome() -> None:
