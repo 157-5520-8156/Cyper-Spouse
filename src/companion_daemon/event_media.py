@@ -416,6 +416,10 @@ class MediaOpportunity:
     sensual_charge_ceiling: str = "none"
     expression_charge_ceiling: str | None = None
     private_expression_basis: PrivateExpressionBasis | None = None
+    # World v2's P0 bridge installs this as a closed, provenance-checked
+    # allow-list.  The empty default preserves legacy callers until they opt
+    # into the frozen image-event-snapshot contract.
+    allowed_evidence_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1805,6 +1809,9 @@ def _freeze_proposal(
             evidence[pointer] = _resolve_pointer(opportunity.event_snapshot, pointer)
     except (KeyError, IndexError, TypeError, ValueError):
         return NotRenderable(opportunity.opportunity_id, "unknown_evidence_ref")
+    allowed_evidence = set(_allowed_evidence_pointers(opportunity))
+    if any(pointer not in allowed_evidence for pointer in pointers):
+        return NotRenderable(opportunity.opportunity_id, "unapproved_evidence_ref")
     for text_field in (
         "composition",
         "action",
@@ -3104,6 +3111,7 @@ def _planning_messages(
                 f"privacy_ceiling={opportunity.privacy_ceiling}\n"
                 f"sensual_charge_ceiling={opportunity.sensual_charge_ceiling}\n"
                 f"delivery_mode={opportunity.delivery_mode}\n"
+                f"allowed_event_evidence_refs={_stable_json(_allowed_evidence_pointers(opportunity))}\n"
                 f"audience_context={_stable_json(asdict(opportunity.audience_context) if opportunity.audience_context else {})}\n"
                 f"event_snapshot={_stable_json(opportunity.event_snapshot)}\n"
                 f"hard_banned_fingerprints_last_12={_stable_json(recent)}\n"
@@ -3156,6 +3164,7 @@ def _planning_messages_v5(
                 f"privacy_ceiling={opportunity.privacy_ceiling}\n"
                 f"expression_charge_ceiling={_expression_charge_ceiling(opportunity)}\n"
                 f"delivery_mode={opportunity.delivery_mode}\n"
+                f"allowed_event_evidence_refs={_stable_json(_allowed_evidence_pointers(opportunity))}\n"
                 f"audience_context={_stable_json(asdict(opportunity.audience_context) if opportunity.audience_context else {})}\n"
                 f"event_snapshot={_stable_json(opportunity.event_snapshot)}\n"
                 f"private_expression_basis={_stable_json(opportunity.private_expression_basis.__dict__ if opportunity.private_expression_basis else {})}\n"
@@ -3178,6 +3187,35 @@ def _planning_messages_v5(
             ),
         },
     ]
+
+
+def _allowed_evidence_pointers(opportunity: MediaOpportunity) -> tuple[str, ...]:
+    """Return the exact evidence vocabulary exposed to a planning model.
+
+    Legacy opportunities have no provenance index, so preserve their current
+    bounded traversal.  World v2's image-event-snapshot bridge supplies an
+    explicit leaf-only allow-list; in that lane containers and the
+    ``/evidence_index`` metadata must never be selectable as evidence.
+    """
+
+    if opportunity.allowed_evidence_refs:
+        return tuple(sorted(set(opportunity.allowed_evidence_refs)))
+    pointers: list[str] = []
+
+    def visit(value: object, pointer: str = "") -> None:
+        if len(pointers) >= 96:
+            return
+        if pointer:
+            pointers.append(pointer)
+        if isinstance(value, dict):
+            for key, nested in value.items():
+                visit(nested, pointer + "/" + str(key).replace("~", "~0").replace("/", "~1"))
+        elif isinstance(value, list):
+            for index, nested in enumerate(value):
+                visit(nested, pointer + "/" + str(index))
+
+    visit(opportunity.event_snapshot)
+    return tuple(pointers)
 
 
 def _interaction_bid_values(

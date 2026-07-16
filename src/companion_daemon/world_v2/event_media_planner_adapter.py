@@ -17,6 +17,8 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+import sqlite3
+from threading import RLock
 from typing import Mapping, Protocol
 
 from companion_daemon import event_media
@@ -31,6 +33,7 @@ from .media_v2 import (
     StoredMediaPayload,
     canonical_media_json,
     media_digest,
+    media_payload_hash,
     planning_request_id as expected_planning_request_id,
 )
 
@@ -57,6 +60,177 @@ class EventMediaPlanningResultStore(Protocol):
     async def put_if_absent(
         self, *, planning_request_id: str, result: MediaPlanningResult
     ) -> None: ...
+
+
+_RESULT_STORE_SCHEMA_VERSION = "world-v2.event-media-planning-result.v1"
+
+
+class SQLiteEventMediaPlanningResultStore:
+    """Durable, world-scoped terminal receipts for the legacy planner bridge.
+
+    This adapter persists the *complete* World v2 terminal value, including an
+    optional opaque plan sidecar.  It owns no planner policy and deliberately
+    does not resolve the payload reference: a request id can only ever be
+    rebound to byte-for-byte identical canonical result bytes.
+    """
+
+    def __init__(self, *, path: str, world_id: str) -> None:
+        if not path or not world_id:
+            raise ValueError("event-media planning result store needs path and world id")
+        self._world_id = world_id
+        self._lock = RLock()
+        self._connection = sqlite3.connect(path, check_same_thread=False)
+        self._connection.execute(
+            """
+            CREATE TABLE IF NOT EXISTS world_v2_event_media_planning_result (
+                world_id TEXT NOT NULL,
+                planning_request_id TEXT NOT NULL,
+                result_hash TEXT NOT NULL,
+                result_json TEXT NOT NULL,
+                PRIMARY KEY (world_id, planning_request_id)
+            )
+            """
+        )
+        self._connection.commit()
+
+    def close(self) -> None:
+        with self._lock:
+            self._connection.close()
+
+    async def lookup(self, *, planning_request_id: str) -> MediaPlanningResult | None:
+        if not planning_request_id:
+            raise ValueError("planning request id is required")
+        with self._lock:
+            row = self._connection.execute(
+                """
+                SELECT result_hash, result_json
+                FROM world_v2_event_media_planning_result
+                WHERE world_id = ? AND planning_request_id = ?
+                """,
+                (self._world_id, planning_request_id),
+            ).fetchone()
+        if row is None:
+            return None
+        return _decode_result(
+            planning_request_id=planning_request_id,
+            result_hash=str(row[0]),
+            result_json=str(row[1]),
+        )
+
+    async def put_if_absent(
+        self, *, planning_request_id: str, result: MediaPlanningResult
+    ) -> None:
+        if not planning_request_id:
+            raise ValueError("planning request id is required")
+        encoded = _encode_result(planning_request_id=planning_request_id, result=result)
+        result_hash = media_payload_hash(encoded)
+        with self._lock:
+            inserted = self._connection.execute(
+                """
+                INSERT OR IGNORE INTO world_v2_event_media_planning_result
+                    (world_id, planning_request_id, result_hash, result_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (self._world_id, planning_request_id, result_hash, encoded),
+            ).rowcount
+            if inserted == 1:
+                self._connection.commit()
+                return
+            row = self._connection.execute(
+                """
+                SELECT result_hash, result_json
+                FROM world_v2_event_media_planning_result
+                WHERE world_id = ? AND planning_request_id = ?
+                """,
+                (self._world_id, planning_request_id),
+            ).fetchone()
+        if row is None:
+            raise RuntimeError("event-media planning result disappeared during immutable insert")
+        stored = _decode_result(
+            planning_request_id=planning_request_id,
+            result_hash=str(row[0]),
+            result_json=str(row[1]),
+        )
+        if stored != result:
+            raise ValueError("planning request id is already bound to a different immutable terminal result")
+
+
+def _encode_result(*, planning_request_id: str, result: MediaPlanningResult) -> str:
+    """Encode the closed ``MediaPlanningResult`` union with explicit wire version."""
+
+    terminal_request_id = (
+        result.plan.planning_request_id if result.plan is not None
+        else result.not_renderable.planning_request_id if result.not_renderable is not None
+        else None
+    )
+    if terminal_request_id != planning_request_id:
+        raise ValueError("planning result terminal value does not match its request id")
+    plan_payload = result.plan_payload
+    wire: dict[str, object] = {
+        "schema_version": _RESULT_STORE_SCHEMA_VERSION,
+        "planning_request_id": planning_request_id,
+        "plan": result.plan.model_dump(mode="json") if result.plan is not None else None,
+        "not_renderable": (
+            result.not_renderable.model_dump(mode="json")
+            if result.not_renderable is not None else None
+        ),
+        "plan_payload": (
+            {
+                "payload_ref": plan_payload.payload_ref,
+                "payload_hash": plan_payload.payload_hash,
+                "content_type": plan_payload.content_type,
+                "body": plan_payload.body,
+            }
+            if plan_payload is not None else None
+        ),
+    }
+    return canonical_media_json(wire)
+
+
+def _decode_result(
+    *, planning_request_id: str, result_hash: str, result_json: str
+) -> MediaPlanningResult:
+    """Restore and validate a result without trusting SQLite's stored text."""
+
+    if result_hash != media_payload_hash(result_json):
+        raise ValueError("event-media planning result hash does not bind stored bytes")
+    try:
+        value = json.loads(result_json)
+        if not isinstance(value, dict) or set(value) != {
+            "schema_version", "planning_request_id", "plan", "not_renderable", "plan_payload",
+        }:
+            raise ValueError("invalid result wire shape")
+        if (
+            value["schema_version"] != _RESULT_STORE_SCHEMA_VERSION
+            or value["planning_request_id"] != planning_request_id
+        ):
+            raise ValueError("result wire is bound to a different planning request")
+        plan_value = value["plan"]
+        not_renderable_value = value["not_renderable"]
+        payload_value = value["plan_payload"]
+        plan = MediaPlan.model_validate_json(canonical_media_json(plan_value)) if plan_value is not None else None
+        not_renderable = (
+            MediaNotRenderable.model_validate_json(canonical_media_json(not_renderable_value))
+            if not_renderable_value is not None else None
+        )
+        if payload_value is not None and not isinstance(payload_value, dict):
+            raise ValueError("plan payload wire must be an object or null")
+        plan_payload = (
+            StoredMediaPayload(
+                payload_ref=str(payload_value["payload_ref"]),
+                payload_hash=str(payload_value["payload_hash"]),
+                content_type=str(payload_value["content_type"]),
+                body=str(payload_value["body"]),
+            )
+            if payload_value is not None else None
+        )
+        return MediaPlanningResult(
+            plan=plan,
+            not_renderable=not_renderable,
+            plan_payload=plan_payload,
+        )
+    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError("stored event-media planning result is malformed") from exc
 
 
 class EventMediaPlannerAdapter:
@@ -375,4 +549,8 @@ def _reason_code(value: object) -> str:
     return compact[:128] or "legacy_not_renderable"
 
 
-__all__ = ["EventMediaPlanningResultStore", "EventMediaPlannerAdapter"]
+__all__ = [
+    "EventMediaPlanningResultStore",
+    "EventMediaPlannerAdapter",
+    "SQLiteEventMediaPlanningResultStore",
+]
