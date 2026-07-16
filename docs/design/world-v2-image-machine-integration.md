@@ -383,11 +383,16 @@ state.
 
 ### P3：具身和私密媒体
 
-- [ ] `VisiblePhysicalState v1` 与短时过期/反证。
-- [ ] `relationship_media_context` + scoped `PrivateExpressionBasis`。
-- [ ] `AudienceContext` 与关系 stage/表达上限的 Acceptance 检查。
-- [ ] 支持 `ordinary_life`、`alluring_life`、`exclusive_private`；`explicit_reserved` 只保留不可渲染占位。
-- [ ] 私密 lane 只允许 self-authored front camera/mirror，并维持图片机验收的持机关系检查。
+- [x] `VisiblePhysicalState v1` 与短时过期/反证。
+- [x] `relationship_media_context` + scoped `PrivateExpressionBasis`：现有
+  `embodied_state` 与 recipient-scoped `private_transition` 都绑定 event hash；
+  未有来源的 basis 仍拒绝。
+- [x] `AudienceContext` 与关系 stage/表达上限的 Acceptance 检查，并由
+  `media-selection-acceptance.2` 绑定 P3 authorization/context/basis digest。
+- [ ] `exclusive_private`：当前只上线 `alluring_life` preview；`ordinary_life`
+  已由 P0/P2 支持，`explicit_reserved` 继续不可渲染。
+- [x] 已上线的私密 lane 只允许 self-authored front camera/mirror；adapter 对
+  capture、recipient、lane、basis 与 planner result 二次校验。
 
 #### P3 implementation contract: short-lived physical visibility
 
