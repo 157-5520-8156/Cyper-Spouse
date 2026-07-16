@@ -407,6 +407,15 @@ class EventMediaPlannerAdapter:
             # Artifact reuse verification is a later P0 compiler lane.  Until
             # then a bridge cannot turn a textual description into an image.
             return "readable_text_requires_artifact"
+        existing_media = snapshot["existing_media"]
+        assert isinstance(existing_media, list)
+        if existing_media:
+            # The World snapshot deliberately carries an artifact ref/hash,
+            # never a mutable local path.  P0 has no provider-backed lookup
+            # port yet, so exposing this to the legacy planner would let it
+            # treat metadata as a reusable file.  Reject rather than invent a
+            # path or silently switch to a generated image.
+            return "existing_media_lookup_unavailable"
         evidence_index = snapshot["evidence_index"]
         assert isinstance(evidence_index, dict)
         leaves = _snapshot_leaves(snapshot)

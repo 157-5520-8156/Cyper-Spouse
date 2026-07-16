@@ -329,6 +329,34 @@ async def test_bridge_rejects_evidence_index_hash_not_bound_to_outer_sidecar_sou
 
 
 @pytest.mark.asyncio
+async def test_bridge_fails_closed_for_existing_media_without_a_verified_artifact_lookup() -> None:
+    snapshot = _image_snapshot()
+    snapshot["existing_media"] = [{
+        "artifact_ref": "artifact:source-photo",
+        "artifact_hash": "sha256:" + "b" * 64,
+        "accessible": True,
+        "reuse_authorized": True,
+    }]
+    for key in ("artifact_ref", "artifact_hash", "accessible", "reuse_authorized"):
+        snapshot["evidence_index"][f"/existing_media/0/{key}"] = {  # type: ignore[index]
+            "source_event_ref": SOURCE_REF,
+            "source_payload_hash": SOURCE_HASH,
+            "visibility": "shareable",
+        }
+    sidecar, opportunity = _sidecar(snapshot=snapshot)
+    legacy = _LegacyPlanner(event_media.NotRenderable(opportunity.opportunity_id, "should_not_run"))
+    adapter = EventMediaPlannerAdapter(sidecar=sidecar, legacy_planner=legacy, result_store=_ResultStore())
+
+    result = await adapter.plan(
+        opportunity=opportunity, planning_request_id=planning_request_id(opportunity.opportunity_id)
+    )
+
+    assert result.not_renderable is not None
+    assert result.not_renderable.reason_code == "existing_media_lookup_unavailable"
+    assert legacy.calls == []
+
+
+@pytest.mark.asyncio
 async def test_bridge_refuses_a_non_deterministic_request_id_before_reading_sidecar() -> None:
     sidecar, opportunity = _sidecar()
     legacy = _LegacyPlanner(event_media.NotRenderable(opportunity.opportunity_id, "should_not_run"))
