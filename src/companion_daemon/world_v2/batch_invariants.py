@@ -1360,6 +1360,14 @@ def _validate_authorized_media_selection_acceptance_manifest_batch(
         != manifest.opportunity_payload_hash
     ):
         raise ValueError("media_selection_acceptance.batch_does_not_match_manifest")
+    if getattr(manifest, "manifest_version", None) == "media-selection-acceptance.2" and (
+        opportunity.p3_authorization_digest != getattr(manifest, "p3_authorization_digest", None)
+        or opportunity.media_lane not in {"alluring_life", "exclusive_private"}
+        or opportunity.media_privacy_ceiling != "intimate"
+        or opportunity.recipient_ref is None
+        or opportunity.private_expression_basis_ref is None
+    ):
+        raise ValueError("media_selection_acceptance.p3_authorization_does_not_match_opportunity")
     if any(
         getattr(effect, field) != getattr(acceptance, field)
         for effect in (opportunity_event, reservation_event, action_event)

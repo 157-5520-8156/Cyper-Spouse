@@ -14,6 +14,8 @@ from .media_selection_draft import (
     MediaSelectionDraftAdapter,
 )
 from .media_selection_proposal import MediaSelectionProposalCompiler
+from .private_image_evidence_contract import RecipientScopedImageEvidenceDeclaredPayload
+from .relationship_media_context import RelationshipMediaContextResolver
 from .media_candidate_advisory import MediaCandidateAdvisoryCompiler
 from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
@@ -34,6 +36,7 @@ class MediaSelectionWorker:
         self._compiler, self._source = MediaSelectionProposalCompiler(catalog_version=catalog_version), source
         self._advisory = MediaCandidateAdvisoryCompiler()
         self._random = RandomAuthority(ledger=ledger)
+        self._relationship_context_resolver = RelationshipMediaContextResolver()
 
     async def select_once(self, *, logical_time: datetime, actor: str, trace_id: str, correlation_id: str) -> MediaSelectionRunResult:
         projection = self._ledger.project()
@@ -60,7 +63,12 @@ class MediaSelectionWorker:
         # Both public life-share and P2 ordinary character candidates are
         # selectable here; the compiler and authorizer independently close
         # their permitted authority shapes before any opportunity is frozen.
-        selectable = eligible
+        selections = {
+            item.candidate_id: selection
+            for item in eligible
+            if (selection := self._derive_selection(projection=projection, candidate=item)) is not None
+        }
+        selectable = tuple(item for item in eligible if item.candidate_id in selections)
         candidates = tuple(
             item for item in sorted(selectable, key=lambda value: value.candidate_id)
             if (item.candidate_id, item.entity_revision) not in pending
@@ -115,13 +123,54 @@ class MediaSelectionWorker:
         candidate = tokens[draft.token]
         proposal = self._compiler.compile(
             projection=projection,
-            selection=MediaSelection(candidate_id=candidate.candidate_id, family=candidate.family),
+            selection=selections[candidate.candidate_id],
             model=draft.model,
             raw_output_hash=draft.raw_output_hash,
             normalized_output_hash=draft.normalized_output_hash,
         )
         recorded = self._recorder.record(cursor=cursor, proposal=proposal, actor=actor, source=self._source, created_at=logical_time, trace_id=trace_id, correlation_id=correlation_id)
         return MediaSelectionRunResult(status="proposed", proposal_event_ref=recorded.proposal_event_ref)
+
+    def _derive_selection(self, *, projection, candidate) -> MediaSelection | None:  # type: ignore[no-untyped-def]
+        """Derive all P3 authority from ledger facts, never from model output."""
+
+        if candidate.family != "character_media" or candidate.privacy_ceiling != "private":
+            return MediaSelection(candidate_id=candidate.candidate_id, family=candidate.family)
+        contract = candidate.character_media_contract
+        if contract is None or projection.logical_time is None:
+            return None
+        declarations: list[RecipientScopedImageEvidenceDeclaredPayload] = []
+        for source in candidate.source_events:
+            located = self._ledger.lookup_event_commit(source.event_ref)
+            if located is None or located[0].payload_hash != source.payload_hash:
+                return None
+            event, _commit = located
+            if event.event_type != "RecipientScopedImageEvidenceDeclared":
+                continue
+            try:
+                declaration = RecipientScopedImageEvidenceDeclaredPayload.model_validate_json(event.payload_json)
+            except ValueError:
+                return None
+            if (
+                declaration.source_privacy_ceiling == "private"
+                and declaration.image_evidence.character_media is not None
+                and declaration.image_evidence.character_media.character_ref == contract.subject_ref
+            ):
+                declarations.append(declaration)
+        if len(declarations) != 1:
+            return None
+        recipient_ref = declarations[0].recipient_ref
+        context = self._relationship_context_resolver.resolve(
+            projection=projection, character_ref=contract.subject_ref,
+            recipient_ref=recipient_ref, at_logical_time=projection.logical_time,
+        ).context
+        if context is None:
+            return None
+        return MediaSelection(
+            candidate_id=candidate.candidate_id, family="character_media", media_privacy_ceiling="intimate",
+            expression_charge_ceiling="subtle", recipient_ref=recipient_ref,
+            private_expression_basis_ref=context.private_expression_basis.basis_id,
+        )
 
 
 __all__ = ["MediaSelectionRunResult", "MediaSelectionWorker"]
