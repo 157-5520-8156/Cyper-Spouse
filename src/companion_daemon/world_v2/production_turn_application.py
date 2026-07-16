@@ -94,6 +94,7 @@ from .read_only_tool_executor import ReadOnlyToolActionExecutor, ReadOnlyToolTra
 from .read_only_tool_proposal_compiler import ReadOnlyToolProposalCompiler
 from .read_only_tool_query_reader import AuditedReadOnlyToolQueryReader
 from .read_only_tool_trigger_runtime import ReadOnlyToolTriggerRuntime
+from .external_result_trigger_runtime import NoopToolResultDeliberator
 from .runtime import WorldRuntime
 from .projection import ProjectionAuthority
 from .replay_evidence import ReplayEvidence
@@ -631,6 +632,8 @@ def build_sqlite_world_v2_turn_application(
         tool_requested = read_only_tool_model is not None or read_only_tool_transport is not None
         if (read_only_tool_model is None) != (read_only_tool_transport is None):
             raise ValueError("read-only tool model and transport must be explicitly injected together")
+        if tool_requested and config.tool_budget_limit <= 0:
+            raise ValueError("injected read-only tool lane needs a positive deployment budget")
         _bootstrap(ledger=ledger, config=config, now=now, include_tool=tool_requested)
         capsules = context_capsule_compiler_from_ledger(
             ledger=ledger,
@@ -823,6 +826,8 @@ def build_sqlite_world_v2_turn_application(
                     ledger=ledger,
                     authorization_resolver=ProjectionReadOnlyToolAuthorizationResolver(),
                     actor_ref=config.companion_actor_ref,
+                    budget_account_id=config.tool_account_id,
+                    budget_limit=config.tool_budget_limit,
                 ),
                 owner_id=config.tool_worker_owner,
             )
@@ -940,6 +945,8 @@ def build_sqlite_world_v2_turn_application(
             expression_reconsideration_reviewer=expression_reconsideration_reviewer,
             read_only_tool_owner=(config.tool_worker_owner if tool_trigger_runtime is not None else None),
             read_only_tool_trigger_runtime=tool_trigger_runtime,
+            external_result_owner=(config.tool_worker_owner if tool_trigger_runtime is not None else None),
+            external_result_deliberator=(NoopToolResultDeliberator() if tool_trigger_runtime is not None else None),
         )
         media_execution = MediaExecutionRuntime(
             ledger=ledger,

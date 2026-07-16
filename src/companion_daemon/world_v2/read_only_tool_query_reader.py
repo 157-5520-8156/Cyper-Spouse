@@ -8,6 +8,7 @@ from .decision_proposal_authority import DecisionProposalAuthorityReader
 from .ledger import LedgerPort
 from .proposal_envelope import DecisionProposal
 from .read_only_tool_proposal_compiler import tool_query_ref
+from .read_only_tool_authorization import TOOL_NAME_BY_TARGET
 from .schemas import Action, ProjectionCursor
 
 
@@ -67,6 +68,7 @@ class AuditedReadOnlyToolQueryReader:
                     == action.payload_ref
                     and digest == action.payload_hash
                     and str(raw["tool_name"]) == request.tool_name
+                    and request.tool_name == TOOL_NAME_BY_TARGET.get(action.target)
                     and str(raw["target"]) == action.target
                 ):
                     candidates.append((str(raw["tool_name"]), query))

@@ -12,6 +12,11 @@ TOOL_DATA_SCOPE = {
     "tool:web_search": "data:message_content",
     "tool:calendar_read": "data:user_profile",
 }
+TOOL_NAME_BY_TARGET = {
+    "tool:weather": "weather",
+    "tool:web_search": "web_search",
+    "tool:calendar_read": "calendar_read",
+}
 _REQUIRED_VIEWERS = frozenset({"viewer:companion", "viewer:platform_adapter"})
 
 
@@ -91,4 +96,4 @@ def _exact(items: tuple[object, ...], attribute: str, value: str, label: str):
     return matches[0]
 
 
-__all__ = ["TOOL_DATA_SCOPE", "require_read_only_tool_authorization"]
+__all__ = ["TOOL_DATA_SCOPE", "TOOL_NAME_BY_TARGET", "require_read_only_tool_authorization"]

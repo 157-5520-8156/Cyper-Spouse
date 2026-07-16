@@ -16,6 +16,7 @@ from typing import Protocol
 from .decision_proposal_authority import DecisionProposalAuthorityReader
 from .ledger import LedgerPort
 from .read_only_tool import ReadOnlyToolAcceptanceRuntime, ReadOnlyToolProposal
+from .read_only_tool_authorization import TOOL_NAME_BY_TARGET
 from .schema_core import FrozenModel
 from .schemas import Observation, ProjectionCursor, ReadOnlyToolAuthorizationBinding
 
@@ -74,13 +75,17 @@ class ReadOnlyToolProposalCompiler:
         ledger: LedgerPort,
         authorization_resolver: ReadOnlyToolAuthorizationResolver,
         actor_ref: str,
+        budget_account_id: str,
+        budget_limit: int,
     ) -> None:
-        if not actor_ref:
-            raise ValueError("read-only tool compiler actor is required")
+        if not actor_ref or not budget_account_id or budget_limit <= 0:
+            raise ValueError("read-only tool compiler needs actor and deployment budget policy")
         self._ledger = ledger
         self._authority = DecisionProposalAuthorityReader(ledger=ledger)
         self._authorization = authorization_resolver
         self._actor_ref = actor_ref
+        self._budget_account_id = budget_account_id
+        self._budget_limit = budget_limit
 
     @property
     def ledger(self) -> LedgerPort:
@@ -104,6 +109,13 @@ class ReadOnlyToolProposalCompiler:
             authority=authority, cursor=cursor
         )
         raw = change.payload.value()
+        if (
+            raw["budget_account_id"] != self._budget_account_id
+            or raw["budget_limit"] != self._budget_limit
+        ):
+            raise ReadOnlyToolProposalCompilerError("deployment_budget_policy_invalid")
+        if raw["tool_name"] != TOOL_NAME_BY_TARGET.get(raw["target"]):
+            raise ReadOnlyToolProposalCompilerError("tool_target_binding_invalid")
         query = str(raw["query"])
         query_hash = "sha256:" + hashlib.sha256(query.encode()).hexdigest()
         expected_ref = tool_query_ref(
@@ -128,8 +140,8 @@ class ReadOnlyToolProposalCompiler:
             target=str(raw["target"]),
             query_ref=expected_ref,
             query_hash=query_hash,
-            budget_account_id=str(raw["budget_account_id"]),
-            budget_limit=int(raw["budget_limit"]),
+            budget_account_id=self._budget_account_id,
+            budget_limit=self._budget_limit,
             authorization=authorization,
         )
         commit = ReadOnlyToolAcceptanceRuntime(ledger=self._ledger).accept(
