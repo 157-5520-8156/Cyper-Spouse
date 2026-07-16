@@ -91,6 +91,10 @@ from .test_economy import CostProfile
 from .media_execution_runtime import MediaExecutionRuntime, MediaExecutionWorker
 from .media_planning_runtime import MediaPlanningRuntime
 from .media_planning_worker import MediaPlanningRunResult, MediaPlanningWorker
+from .media_candidate_maintenance import (
+    MediaCandidateMaintenanceResult,
+    MediaCandidateMaintenanceRuntime,
+)
 from .media_selection_acceptance_runtime import MediaSelectionProposalRecorder
 from .media_selection_draft import MediaSelectionDraftAdapter, MediaSelectionDraftModel
 from .media_selection_worker import MediaSelectionRunResult, MediaSelectionWorker
@@ -193,6 +197,7 @@ class WorldV2TurnApplicationConfig:
     media_planning_worker_owner: str = "worker:world-v2:media-planning"
     event_ecology_worker_actor: str = "worker:world-v2:event-ecology"
     media_selection_worker_actor: str = "worker:world-v2:media-selection"
+    media_candidate_maintenance_actor: str = "worker:world-v2:media-candidate-maintenance"
     event_ecology_policy: EcologyPolicy | None = None
     life_ecology: LifeEcologyComposition | None = None
     media_cost_profile: CostProfile | None = None
@@ -216,6 +221,7 @@ class WorldV2TurnApplicationConfig:
             "media_planning_worker_owner",
             "event_ecology_worker_actor",
             "media_selection_worker_actor",
+            "media_candidate_maintenance_actor",
             "tool_worker_owner",
         ):
             if not getattr(self, name):
@@ -256,6 +262,8 @@ class WorldV2TurnApplication:
         event_ecology_worker_actor: str,
         media_selection_worker: MediaSelectionWorker | None,
         media_selection_worker_actor: str,
+        media_candidate_maintenance: MediaCandidateMaintenanceRuntime,
+        media_candidate_maintenance_actor: str,
         media_delivery: MediaDeliveryRuntime,
         occurrence_content: OccurrenceContentCoordinator,
         activity_plans: ActivityPlanRuntime,
@@ -275,6 +283,8 @@ class WorldV2TurnApplication:
         self._event_ecology_worker_actor = event_ecology_worker_actor
         self._media_selection_worker = media_selection_worker
         self._media_selection_worker_actor = media_selection_worker_actor
+        self._media_candidate_maintenance = media_candidate_maintenance
+        self._media_candidate_maintenance_actor = media_candidate_maintenance_actor
         self._media_delivery = media_delivery
         self._occurrence_content = occurrence_content
         self._activity_plans = activity_plans
@@ -650,6 +660,26 @@ class WorldV2TurnApplication:
             trace_id=trace_id,
             correlation_id=correlation_id,
         )
+
+    async def expire_media_candidates_once(
+        self, *, logical_time: datetime, trace_id: str, correlation_id: str,
+    ) -> MediaCandidateMaintenanceResult:
+        """Close only due, still-available candidates at the authoritative clock.
+
+        This maintenance seam cannot select a candidate or authorize media; it
+        keeps stale proposal attempts from leaving permanently available
+        aggregates in the ledger.
+        """
+
+        kwargs = dict(
+            logical_time=logical_time,
+            actor=self._media_candidate_maintenance_actor,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._media_candidate_maintenance.expire_once, **kwargs)
+        return self._media_candidate_maintenance.expire_once(**kwargs)
 
     async def advance_life_ecology_once(
         self, *, wake_event_ref: str, trace_id: str, correlation_id: str,
@@ -1211,6 +1241,8 @@ def build_sqlite_world_v2_turn_application(
             event_ecology_worker_actor=config.event_ecology_worker_actor,
             media_selection_worker=media_selection_worker,
             media_selection_worker_actor=config.media_selection_worker_actor,
+            media_candidate_maintenance=MediaCandidateMaintenanceRuntime(ledger=ledger),
+            media_candidate_maintenance_actor=config.media_candidate_maintenance_actor,
             media_delivery=MediaDeliveryRuntime(ledger=ledger),
             occurrence_content=occurrence_content,
             activity_plans=ActivityPlanRuntime(

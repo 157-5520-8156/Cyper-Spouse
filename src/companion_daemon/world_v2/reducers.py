@@ -85,6 +85,7 @@ from .media_v2 import (
     MediaOpportunity,
     MediaPlan,
     PhotoCandidate,
+    PhotoCandidateExpiredPayload,
     PhotoCandidateOpenedPayload,
     PhotoCandidateUnrenderablePayload,
     continuation_trigger_id,
@@ -5107,6 +5108,37 @@ def _photo_candidate_unrenderable(state: ReducerState, event: WorldEvent) -> Red
     )
 
 
+def _photo_candidate_expired(state: ReducerState, event: WorldEvent) -> ReducerState:
+    """Close an available candidate after its immutable selection window."""
+
+    payload = PhotoCandidateExpiredPayload.model_validate_json(event.payload_json)
+    candidate = next(
+        (item for item in state.photo_candidates if item.candidate_id == payload.candidate_id), None
+    )
+    if (
+        state.logical_time is None
+        or event.logical_time != state.logical_time
+        or candidate is None
+        or candidate.status != "available"
+        or candidate.entity_revision != payload.expected_entity_revision
+        or candidate.expires_at is None
+        or candidate.expires_at > event.logical_time
+        or candidate.opened_event_ref is None
+        or candidate.opened_event_payload_hash is None
+    ):
+        raise ValueError("photo candidate expiry is not current")
+    return state.model_copy(
+        update={
+            "photo_candidates": _advance_media_candidate(
+                state.photo_candidates,
+                candidate_id=candidate.candidate_id,
+                expected_status="available",
+                next_status="expired",
+            )
+        }
+    )
+
+
 def _media_selection_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     """Persist a model's P1 candidate choice without granting media effects."""
 
@@ -8790,6 +8822,7 @@ _EVENTS = {
         EventDefinition(
             "PhotoCandidateUnrenderable", RevisionClass.WORLD, _photo_candidate_unrenderable
         ),
+        EventDefinition("PhotoCandidateExpired", RevisionClass.WORLD, _photo_candidate_expired),
         EventDefinition(
             "MediaSelectionProposalRecorded",
             RevisionClass.DELIBERATION,

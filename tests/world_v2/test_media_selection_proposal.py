@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-import hashlib
 
 import pytest
 
@@ -17,6 +16,7 @@ from companion_daemon.world_v2.media_selection_proposal import (
 from companion_daemon.world_v2.media_v2 import (
     MediaEvidenceSource,
     PhotoCandidate,
+    PhotoCandidateExpiredPayload,
     PhotoCandidateUnrenderablePayload,
 )
 from companion_daemon.world_v2.reducers import ReducerState, reduce_event
@@ -212,4 +212,25 @@ def test_unrenderable_snapshot_closes_the_same_available_candidate_without_subst
 
     assert reduced.photo_candidates == (
         candidate.model_copy(update={"entity_revision": 2, "status": "unrenderable"}),
+    )
+
+
+def test_expiry_closes_an_unaccepted_candidate_after_its_fixed_window() -> None:
+    state = _opened_state()
+    candidate = state.photo_candidates[0]
+    assert candidate.expires_at is not None
+    expired_at = candidate.expires_at
+    event = _event(
+        "event:candidate-expired:1",
+        "PhotoCandidateExpired",
+        PhotoCandidateExpiredPayload(
+            candidate_id=candidate.candidate_id,
+            expected_entity_revision=candidate.entity_revision,
+        ).model_dump(mode="json"),
+    ).model_copy(update={"logical_time": expired_at})
+
+    reduced = reduce_event(state.model_copy(update={"logical_time": expired_at}), event)
+
+    assert reduced.photo_candidates == (
+        candidate.model_copy(update={"entity_revision": 2, "status": "expired"}),
     )

@@ -320,6 +320,12 @@ async def test_production_media_selection_is_explicitly_proposal_only_and_noops_
         assert result is not None
         assert result.status == "no_op"
         assert result.reason_code == "media_selection.no_available_candidates"
+        expiry = await app.expire_media_candidates_once(
+            logical_time=selected_at,
+            trace_id="trace:media-expiry",
+            correlation_id="correlation:media-selection",
+        )
+        assert expiry.status == "idle"
         assert app._ledger.project().proposal_ids == ()  # type: ignore[attr-defined]
     finally:
         app.close()

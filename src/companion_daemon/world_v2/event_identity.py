@@ -98,6 +98,13 @@ def _life_identity_components(
             payload.get("expected_entity_revision"),
             payload.get("reason_code"),
         )
+    if event_type == "PhotoCandidateExpired":
+        return (
+            world_id,
+            payload.get("candidate_id"),
+            payload.get("expected_entity_revision"),
+            payload.get("reason_code"),
+        )
     if event_type == "MediaSelectionProposalRecorded":
         return world_id, payload.get("proposal_id")
     if event_type == "MediaOpportunityFrozen":

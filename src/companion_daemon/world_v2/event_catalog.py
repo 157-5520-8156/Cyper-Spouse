@@ -442,6 +442,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "ProviderMediaGrantRecorded": "world_id+grant_id+grant_revision",
         "PhotoCandidateOpened": "world_id+candidate_id",
         "PhotoCandidateUnrenderable": "world_id+candidate_id+expected_revision+reason",
+        "PhotoCandidateExpired": "world_id+candidate_id+expected_revision+reason",
         "MediaSelectionProposalRecorded": "world_id+proposal_id",
         "MediaOpportunityFrozen": "world_id+opportunity_id",
         "MediaPlanRecorded": "world_id+planning_request_id+plan_id",
@@ -878,6 +879,14 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "PhotoCandidateUnrenderablePayload",
                 allowed_predecessors=("MediaSelectionProposalRecorded",),
                 evidence_types=("committed_world_event",),
+            ),
+            _contract(
+                "PhotoCandidateExpired",
+                "media_candidate_maintenance",
+                "world",
+                "PhotoCandidateExpiredPayload",
+                allowed_predecessors=("PhotoCandidateOpened", "MediaSelectionProposalRecorded"),
+                evidence_types=("committed_world_event", "authoritative_clock"),
             ),
             _contract(
                 "MediaSelectionProposalRecorded",
