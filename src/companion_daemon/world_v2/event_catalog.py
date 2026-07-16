@@ -24,6 +24,7 @@ from .commitment_events import COMMITMENT_PAYLOAD_MODELS
 from .character_core_events import CHARACTER_CORE_PAYLOAD_MODELS
 from .fact_events import FACT_PAYLOAD_MODELS
 from .fact_proposal_audit_v2 import FactCommitProposalRecordedPayloadV2
+from .activity_lifecycle_acceptance_manifest import ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
 from .goal_authority_events import (
     V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
     V2_GOAL_PAYLOAD_MODELS,
@@ -153,6 +154,7 @@ class EventContract:
                 INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
                 MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
                 EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
+                ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
             }:
                 raise ValueError("acceptance_manifest.unsupported_manifest_version")
         model = (
@@ -1282,6 +1284,15 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "ActivityPlannedPayload",
                 evidence_types=("observed_message", "active_plan"),
                 successors=("ActivityStarted", "ActivityAbandoned", "WorldOccurrenceCommitted"),
+            ),
+            _contract(
+                "ActivityLifecycleProposalRecorded",
+                "life_ecology_deliberation",
+                "deliberation",
+                "ActivityLifecycleProposalRecordedPayload",
+                allowed_predecessors=("ClockAdvanced", "TriggerProcessClaimed"),
+                evidence_types=("active_plan", "committed_world_event"),
+                successors=("AcceptanceRecorded",),
             ),
             *(
                 _contract(

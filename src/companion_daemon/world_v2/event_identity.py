@@ -15,6 +15,7 @@ from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
 from .expression_plan_manifest import EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION
 from .interaction_bid_acceptance_manifest import INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION
 from .media_thread_acceptance_manifest import MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION
+from .activity_lifecycle_acceptance_manifest import ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
 
 
 def domain_idempotency_key(
@@ -65,6 +66,7 @@ def _life_identity_components(
             OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
             MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
+            ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
         }
     ):
@@ -188,6 +190,8 @@ def _life_identity_components(
         return payload.get("occurrence_id"), payload.get("transition_id")
     if event_type == "OutcomeObservationRecorded":
         return world_id, _nested(payload, "observation", "observation_id")
+    if event_type == "ActivityLifecycleProposalRecorded":
+        return world_id, payload.get("proposal_id")
     if (
         event_type == "ModelResultRecorded"
         and payload.get("model_call_id") is not None
@@ -259,6 +263,16 @@ def _life_identity_components(
     if (
         event_type == "AcceptanceRecorded"
         and payload.get("manifest_version") == OUTCOME_ACCEPTANCE_MANIFEST_VERSION
+    ):
+        return (
+            world_id,
+            payload.get("manifest_version"),
+            payload.get("acceptance_id"),
+            payload.get("manifest_hash"),
+        )
+    if (
+        event_type == "AcceptanceRecorded"
+        and payload.get("manifest_version") == ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
     ):
         return (
             world_id,

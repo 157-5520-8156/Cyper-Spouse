@@ -17,7 +17,7 @@ from pydantic import Field, model_validator
 from .schema_core import FrozenModel
 
 
-ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION = "activity-lifecycle-acceptance.1"
+ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION = "activity-lifecycle-acceptance.2"
 
 ActivityLifecycleEffectEventType = Literal[
     "ActivityStarted",
@@ -54,13 +54,12 @@ def canonical_activity_lifecycle_acceptance_manifest_hash(value: dict[str, objec
 class ActivityLifecycleAcceptanceManifest(FrozenModel):
     """Complete authority binding for one accepted life-ecology activity effect."""
 
-    manifest_version: Literal["activity-lifecycle-acceptance.1"] = (
+    manifest_version: Literal["activity-lifecycle-acceptance.2"] = (
         ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
     )
     status: Literal["accepted"] = "accepted"
     acceptance_id: str = Field(min_length=1, max_length=256)
     acceptance_event_ref: str = Field(min_length=1, max_length=512)
-    acceptance_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
     proposal_id: str = Field(min_length=1, max_length=256)
     proposal_event_ref: str = Field(min_length=1, max_length=512)
     proposal_event_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -81,6 +80,11 @@ class ActivityLifecycleAcceptanceManifest(FrozenModel):
 
     @model_validator(mode="after")
     def self_hash_is_exact(self) -> "ActivityLifecycleAcceptanceManifest":
+        # The acceptance event stores this manifest as its complete payload,
+        # so its payload hash is mechanically derived from this self-hash.
+        # Including that derived hash here would create an unsolvable SHA-256
+        # fixed-point requirement.  The event ref plus manifest hash is the
+        # non-circular binding; the recorder verifies the actual event bytes.
         expected = canonical_activity_lifecycle_acceptance_manifest_hash(
             self.model_dump(mode="json")
         )

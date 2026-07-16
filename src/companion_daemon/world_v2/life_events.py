@@ -55,6 +55,20 @@ class ActivityTransitionPayload(DomainMutationPayload):
     plan_id: str = Field(min_length=1)
     transitioned_at: datetime
     reason_ref: str = Field(min_length=1)
+    acceptance_id: str | None = Field(default=None, min_length=1)
+    activity_lifecycle_proposal_id: str | None = Field(default=None, min_length=1)
+    accepted_change_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+
+    @model_validator(mode="after")
+    def scheduler_acceptance_binding_is_complete(self) -> "ActivityTransitionPayload":
+        values = (
+            self.acceptance_id,
+            self.activity_lifecycle_proposal_id,
+            self.accepted_change_hash,
+        )
+        if any(value is not None for value in values) and not all(value is not None for value in values):
+            raise ValueError("activity lifecycle acceptance binding is incomplete")
+        return self
 
 
 class WorldOccurrenceTerminalPayload(DomainMutationPayload):

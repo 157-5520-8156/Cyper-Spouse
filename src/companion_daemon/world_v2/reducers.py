@@ -159,6 +159,10 @@ from .life_ecology_contract import (
     parse_life_ecology_trigger_ref,
 )
 from .life_ecology_activity import ActivityOpeningCatalog
+from .activity_lifecycle_acceptance_manifest import (
+    ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
+    ActivityLifecycleAcceptanceManifest,
+)
 from .activity_lifecycle_proposal import (
     ACTIVITY_LIFECYCLE_PROPOSAL_POLICY_DIGEST,
 )
@@ -3120,6 +3124,7 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
         AFFECT_ACCEPTANCE_MANIFEST_VERSION,
         OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
+        ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
         INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
         MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION,
     }:
@@ -3138,6 +3143,8 @@ def _acceptance_recorded(state: ReducerState, event: WorldEvent) -> ReducerState
         return _affect_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == OUTCOME_ACCEPTANCE_MANIFEST_VERSION:
         return _outcome_acceptance_manifest_recorded(state, event)
+    if raw.get("manifest_version") == ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION:
+        return _activity_lifecycle_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION:
         return _interaction_bid_acceptance_manifest_recorded(state, event)
     if raw.get("manifest_version") == MEDIA_THREAD_ACCEPTANCE_MANIFEST_VERSION:
@@ -3885,6 +3892,56 @@ def _outcome_acceptance_manifest_recorded(state: ReducerState, event: WorldEvent
         )
     ):
         raise ValueError("outcome acceptance manifest source trigger is not claimed")
+    return state.model_copy(
+        update={
+            "acceptance_decisions": (
+                *state.acceptance_decisions,
+                AcceptanceDecisionRef(
+                    proposal_id=manifest.proposal_id,
+                    evaluated_world_revision=manifest.evaluated_world_revision,
+                    acceptance_id=manifest.acceptance_id,
+                    status="accepted",
+                    accepted_change_id=manifest.accepted_change_id,
+                    accepted_change_hash=manifest.accepted_change_hash,
+                    manifest_version=manifest.manifest_version,
+                    manifest_hash=manifest.manifest_hash,
+                    acceptance_event_ref=event.event_id,
+                    acceptance_event_payload_hash=event.payload_hash,
+                ),
+            )
+        }
+    )
+
+
+def _activity_lifecycle_acceptance_manifest_recorded(
+    state: ReducerState, event: WorldEvent
+) -> ReducerState:
+    """Record the acceptance half of an activity scheduler transition."""
+
+    manifest = ActivityLifecycleAcceptanceManifest.model_validate_json(event.payload_json)
+    current_world_revision = len(state.committed_world_event_refs)
+    proposal_ref = next(
+        (item for item in state.committed_world_event_refs if item.event_id == manifest.proposal_event_ref),
+        None,
+    )
+    revision = next(
+        (item for item in state.proposal_revisions if item.proposal_id == manifest.proposal_id),
+        None,
+    )
+    if (
+        manifest.evaluated_world_revision != current_world_revision
+        or event.causation_id != manifest.proposal_event_ref
+        or proposal_ref is None
+        or proposal_ref.event_type != "ActivityLifecycleProposalRecorded"
+        or proposal_ref.payload_hash != manifest.proposal_event_payload_hash
+        or revision is None
+        or revision.evaluated_world_revision != manifest.evaluated_world_revision
+        or any(
+            item.acceptance_id == manifest.acceptance_id or item.proposal_id == manifest.proposal_id
+            for item in state.acceptance_decisions
+        )
+    ):
+        raise ValueError("activity lifecycle acceptance manifest does not bind persisted proposal")
     return state.model_copy(
         update={
             "acceptance_decisions": (
@@ -6630,6 +6687,7 @@ def _activity_transitioned(
     allow_legacy_unowned_transition: bool = False,
 ) -> ReducerState:
     payload = _validated_life_payload(state, event, ActivityTransitionPayload)
+    _validate_activity_lifecycle_effect(state, event, payload)
     return state.model_copy(
         update={
             "plans": transition_activity(
@@ -6646,6 +6704,47 @@ def _activity_transitioned(
             )
         }
     )
+
+
+def _validate_activity_lifecycle_effect(
+    state: ReducerState, event: WorldEvent, payload: ActivityTransitionPayload
+) -> None:
+    """Require an adjacent accepted manifest for scheduler-originated effects.
+
+    The legacy Activity transition vocabulary remains readable for migration
+    and explicit host operations.  An effect carrying lifecycle acceptance
+    coordinates, however, cannot bypass the proposal → acceptance batch.
+    """
+
+    if payload.activity_lifecycle_proposal_id is None:
+        return
+    if not state.committed_world_event_refs:
+        raise ValueError("activity lifecycle effect requires adjacent acceptance")
+    acceptance_ref = state.committed_world_event_refs[-1]
+    if acceptance_ref.event_type != "AcceptanceRecorded" or event.causation_id != acceptance_ref.event_id:
+        raise ValueError("activity lifecycle effect requires adjacent acceptance")
+    # The acceptance handler has already parsed, self-hash-verified, and
+    # retained a generic decision reference.  Rehydrate the immutable event
+    # bytes here so a different accepted-manifest family cannot authorize it.
+    # Reducers receive no ledger read capability, hence the version and the
+    # retained decision jointly provide the replay-local proof.
+    decision = next(
+        (
+            item
+            for item in state.acceptance_decisions
+            if item.acceptance_id == payload.acceptance_id
+            and item.proposal_id == payload.activity_lifecycle_proposal_id
+        ),
+        None,
+    )
+    if (
+        decision is None
+        or decision.manifest_version != ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
+        or decision.accepted_change_hash != payload.accepted_change_hash
+        or decision.accepted_change_id != payload.change_id
+        or payload.reason_ref != f"event:activity-lifecycle-proposal:{payload.activity_lifecycle_proposal_id.removeprefix('proposal:activity-lifecycle:')}"
+    ):
+        raise ValueError("activity lifecycle effect does not bind accepted proposal")
 
 
 def _activity_lifecycle_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:

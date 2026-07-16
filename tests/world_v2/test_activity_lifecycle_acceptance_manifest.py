@@ -13,7 +13,6 @@ def _manifest():
     return build_activity_lifecycle_acceptance_manifest(
         acceptance_id="acceptance:activity-lifecycle:1",
         acceptance_event_ref="event:acceptance-recorded:1",
-        acceptance_event_payload_hash="a" * 64,
         proposal_id="proposal:activity-lifecycle:1",
         proposal_event_ref="event:activity-lifecycle-proposal:1",
         proposal_event_payload_hash="b" * 64,
