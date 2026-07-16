@@ -68,6 +68,12 @@ from .event_ecology_media import (
     EcologyPolicy,
     EventEcologyMediaCandidateRuntime,
 )
+from .life_ecology_runtime import (
+    LifeEcologyAvailability,
+    LifeEcologyRunResult,
+    LifeEcologyRuntime,
+)
+from .life_ecology_trigger_store import LedgerLifeEcologyTriggerStore
 from .test_economy import CostProfile
 from .media_execution_runtime import MediaExecutionRuntime, MediaExecutionWorker
 from .media_planning_runtime import MediaPlanningRuntime
@@ -120,6 +126,32 @@ from .world_turn_runtime import InboundIdentityResolver, InboundTurn, WorldTurnR
 
 
 @dataclass(frozen=True, slots=True)
+class LifeEcologyComposition:
+    """Explicit production profile for the durable Life Ecology worker.
+
+    A profile owns both the source-bound media policy and the ledger-backed
+    trigger identity.  Leaving it absent keeps embedded hosts and fixtures
+    visibly unavailable instead of silently creating background world work.
+    """
+
+    catalog_version: str
+    media_policy: EcologyPolicy
+    worker_actor: str = "worker:world-v2:life-ecology"
+    lease_seconds: int = 120
+
+    @classmethod
+    def production_v1(cls) -> "LifeEcologyComposition":
+        return cls(
+            catalog_version="life-ecology.1",
+            media_policy=EcologyPolicy(),
+        )
+
+    def __post_init__(self) -> None:
+        if not self.catalog_version or not self.worker_actor or self.lease_seconds <= 0:
+            raise ValueError("life ecology composition is invalid")
+
+
+@dataclass(frozen=True, slots=True)
 class WorldV2TurnApplicationConfig:
     """Composition-owned facts for one persistent companion world."""
 
@@ -141,6 +173,7 @@ class WorldV2TurnApplicationConfig:
     media_planning_worker_owner: str = "worker:world-v2:media-planning"
     event_ecology_worker_actor: str = "worker:world-v2:event-ecology"
     event_ecology_policy: EcologyPolicy | None = None
+    life_ecology: LifeEcologyComposition | None = None
     media_cost_profile: CostProfile | None = None
     tool_account_id: str = "account:world-v2:tool"
     tool_window_id: str = "window:world-v2:tool"
@@ -173,6 +206,12 @@ class WorldV2TurnApplicationConfig:
             raise ValueError("reply recovery policy must not be empty")
         if not self.tool_account_id or not self.tool_window_id or self.tool_budget_limit < 0:
             raise ValueError("tool budget config is invalid")
+        if (
+            self.life_ecology is not None
+            and self.event_ecology_policy is not None
+            and self.event_ecology_policy != self.life_ecology.media_policy
+        ):
+            raise ValueError("life ecology and event ecology policies must agree")
 
 
 class WorldV2TurnApplication:
@@ -191,6 +230,7 @@ class WorldV2TurnApplication:
         media_planning: MediaPlanningRuntime,
         media_planning_worker: MediaPlanningWorker,
         media_ecology: EventEcologyMediaCandidateRuntime | None,
+        life_ecology: LifeEcologyRuntime | None,
         event_ecology_worker_actor: str,
         media_delivery: MediaDeliveryRuntime,
         occurrence_content: OccurrenceContentCoordinator,
@@ -207,6 +247,7 @@ class WorldV2TurnApplication:
         self._media_planning = media_planning
         self._media_planning_worker = media_planning_worker
         self._media_ecology = media_ecology
+        self._life_ecology = life_ecology
         self._event_ecology_worker_actor = event_ecology_worker_actor
         self._media_delivery = media_delivery
         self._occurrence_content = occurrence_content
@@ -306,7 +347,7 @@ class WorldV2TurnApplication:
     ) -> RuntimeOutcome:
         """Create a validated clock command without exposing World v2 schema internals."""
 
-        return await self.advance(
+        outcome = await self.advance(
             ClockObservation(
                 schema_version="world-v2.1",
                 tick_id=tick_id,
@@ -323,6 +364,13 @@ class WorldV2TurnApplication:
                 policy_digest=policy_digest,
             )
         )
+        if self._life_ecology is not None:
+            await self.advance_life_ecology_once(
+                wake_event_ref=f"event:trigger:clock:{tick_id}",
+                trace_id=trace_id,
+                correlation_id=correlation_id,
+            )
+        return outcome
 
     async def receipt(
         self,
@@ -555,6 +603,27 @@ class WorldV2TurnApplication:
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(self._media_ecology.drain_once, **kwargs)
         return self._media_ecology.drain_once(**kwargs)
+
+    async def advance_life_ecology_once(
+        self, *, wake_event_ref: str, trace_id: str, correlation_id: str,
+    ) -> LifeEcologyRunResult:
+        """Advance the explicit, ledger-backed life ecology after one wake.
+
+        This remains a scheduler-only seam.  It is never called from inbound
+        message processing, and its first production profile can only freeze
+        preview media opportunities from durable world evidence.
+        """
+
+        if self._life_ecology is None:
+            return LifeEcologyRunResult(
+                status="unavailable",
+                reason_code="life_ecology.not_configured",
+            )
+        return await self._life_ecology.advance_once(
+            wake_event_ref=wake_event_ref,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
 
     async def approve_media_automatic_delivery(
         self, *, approval: MediaAutomaticDeliveryApproval, trace_id: str,
@@ -1002,13 +1071,36 @@ def build_sqlite_world_v2_turn_application(
             else None
         )
         media_planning = MediaPlanningRuntime(ledger=ledger, sidecar=media_payload_store)
+        ecology_policy = (
+            config.life_ecology.media_policy
+            if config.life_ecology is not None
+            else config.event_ecology_policy
+        )
         media_ecology = (
             EventEcologyMediaCandidateRuntime(
                 ledger=ledger,
                 sidecar=media_payload_store,
-                policy=config.event_ecology_policy,
+                policy=ecology_policy,
             )
-            if config.event_ecology_policy is not None
+            if ecology_policy is not None
+            else None
+        )
+        life_ecology = (
+            LifeEcologyRuntime(
+                ledger=ledger,
+                trigger_store=LedgerLifeEcologyTriggerStore(
+                    ledger=ledger,
+                    owner_id=config.life_ecology.worker_actor,
+                    lease_seconds=config.life_ecology.lease_seconds,
+                ),
+                media_followup=media_ecology,
+                availability=LifeEcologyAvailability(
+                    state="installed_and_active",
+                    catalog_version=config.life_ecology.catalog_version,
+                ),
+                actor=config.life_ecology.worker_actor,
+            )
+            if config.life_ecology is not None and media_ecology is not None
             else None
         )
         return WorldV2TurnApplication(
@@ -1027,6 +1119,7 @@ def build_sqlite_world_v2_turn_application(
                 owner_id=config.media_planning_worker_owner,
             ),
             media_ecology=media_ecology,
+            life_ecology=life_ecology,
             event_ecology_worker_actor=config.event_ecology_worker_actor,
             media_delivery=MediaDeliveryRuntime(ledger=ledger),
             occurrence_content=occurrence_content,
@@ -1136,6 +1229,7 @@ def _bootstrap_event(
 
 
 __all__ = [
+    "LifeEcologyComposition",
     "WorldV2TurnApplication",
     "WorldV2TurnApplicationConfig",
     "build_platform_action_executor",

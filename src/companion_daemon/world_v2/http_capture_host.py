@@ -49,6 +49,7 @@ from .projection import (
     ProjectionGrant,
 )
 from .production_turn_application import (
+    LifeEcologyComposition,
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
@@ -470,6 +471,7 @@ def build_http_v2_capture_host(
             companion_actor_ref="agent:companion",
             reply_target=f"user:{primary_user_id}",
             action_pump_owner="pump:http-v2-capture",
+            life_ecology=LifeEcologyComposition.production_v1(),
         ),
         identities=HttpCaptureIdentityResolver(primary_user_id=primary_user_id),
         router=_HttpCaptureRouter(),

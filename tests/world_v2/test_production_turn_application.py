@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 import json
 from pathlib import Path
 
@@ -26,6 +26,8 @@ from companion_daemon.world_v2.activity_plan_runtime import (
     ActivityPlanTransitionCommand,
 )
 from companion_daemon.world_v2.event_ecology_media import EcologyPolicy
+from companion_daemon.world_v2.life_ecology_runtime import LifeEcologyRunResult
+from companion_daemon.world_v2.production_turn_application import LifeEcologyComposition
 from companion_daemon.world_v2.schemas import ClockObservation, ProjectionCursor
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn
@@ -219,6 +221,60 @@ def _config() -> WorldV2TurnApplicationConfig:
         reply_target="user:user.1",
         action_pump_owner="pump:production-turn-application",
     )
+
+
+def _life_ecology_config() -> WorldV2TurnApplicationConfig:
+    return WorldV2TurnApplicationConfig(
+        world_id="world:life-ecology-production",
+        companion_actor_ref="agent:companion",
+        reply_target="user:user.1",
+        action_pump_owner="pump:life-ecology-production",
+        life_ecology=LifeEcologyComposition.production_v1(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_production_life_ecology_profile_claims_one_clock_wake_without_writing_life_facts(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "life-ecology.sqlite"
+    app = build_sqlite_world_v2_turn_application(
+        path=path,
+        config=_life_ecology_config(),
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_InvalidModel(),
+        quick_recovery=_InvalidQuick(),
+        transport=_Transport(),
+        now=NOW,
+    )
+    try:
+        await app.tick(
+            tick_id="life-ecology:1",
+            logical_time_from=NOW,
+            logical_time_to=NOW + timedelta(minutes=1),
+            observed_at=NOW + timedelta(minutes=1),
+            trace_id="trace:life-ecology",
+            causation_id="scheduler:life-ecology",
+            correlation_id="correlation:life-ecology",
+            reason="test",
+        )
+        first = await app.advance_life_ecology_once(
+            wake_event_ref="event:trigger:clock:life-ecology:1",
+            trace_id="trace:life-ecology",
+            correlation_id="correlation:life-ecology",
+        )
+        second = await app.advance_life_ecology_once(
+            wake_event_ref="event:trigger:clock:life-ecology:1",
+            trace_id="trace:life-ecology",
+            correlation_id="correlation:life-ecology",
+        )
+        assert isinstance(first, LifeEcologyRunResult)
+        assert first.status == "joined_existing"
+        assert first.reason_code == "life_ecology.run_completed"
+        assert second.status == "joined_existing"
+    finally:
+        app.close()
 
 
 @pytest.mark.asyncio

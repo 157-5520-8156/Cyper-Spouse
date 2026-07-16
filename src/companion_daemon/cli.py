@@ -13,6 +13,7 @@ from companion_daemon.world_v2.appraisal_chat_model_adapter import AppraisalDraf
 from companion_daemon.world_v2.affect_chat_model_adapter import AffectDraftDeliberationAdapter
 from companion_daemon.world_v2.deliberation import ModelRoute, RouteRequest
 from companion_daemon.world_v2.production_turn_application import (
+    LifeEcologyComposition,
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
@@ -85,6 +86,7 @@ async def run_simulation(text: str, fake: bool, *, thinking: bool = False) -> No
             companion_actor_ref="agent:companion",
             reply_target=f"user:{settings.primary_user_id}",
             action_pump_owner="pump:companion-simulator-v2",
+            life_ecology=LifeEcologyComposition.production_v1(),
         ),
         identities=SimulatorIdentityResolver(canonical_user_id=settings.primary_user_id),
         router=_SimulationRouter(thinking=thinking),

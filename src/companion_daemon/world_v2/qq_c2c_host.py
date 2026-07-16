@@ -25,6 +25,7 @@ from .chat_model_deliberation_adapter import ChatCompletionModel, RoutedChatMode
 from .deliberation import ModelRoute, RouteRequest
 from .platform_host import PlatformClockTick, PlatformInbound, WorldV2PlatformHost
 from .production_turn_application import (
+    LifeEcologyComposition,
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
@@ -328,6 +329,7 @@ def build_qq_c2c_host(
             companion_actor_ref="agent:companion",
             reply_target=qq_c2c_target(recipient_id),
             action_pump_owner="pump:qq-c2c-v2",
+            life_ecology=LifeEcologyComposition.production_v1(),
         ),
         identities=QQC2CIdentityResolver(
             recipient_id=recipient_id, canonical_user_id=settings.primary_user_id
