@@ -24,7 +24,9 @@
 > `test_event_media_planner_adapter.py` 与
 > `test_production_turn_application.py`。其中生产测试覆盖 SQLite 上的
 > `活动→ImageEvidenceDeclared→角色候选→Selection Proposal→Acceptance→V2
-> snapshot`；图片桥接测试还覆盖 P2 capture 越权拒绝。
+> snapshot`，以及 P3 的
+> `私密活动→RecipientScopedImageEvidenceDeclared→private 角色候选`；图片
+> 桥接测试还覆盖 P2 capture 越权拒绝与 P3 recipient/basis 绑定。
 
 ## 结论
 

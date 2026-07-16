@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from typing import Protocol
 
 from .image_evidence_contract import ImageEvidenceDeclaredPayload
+from .private_image_evidence_contract import RecipientScopedImageEvidenceDeclaredPayload
 from .media_v2 import (
     CharacterCaptureMode,
     CharacterMediaCandidateContract,
@@ -64,13 +65,18 @@ class CharacterMediaFactBinder:
         existing = {item.candidate_id for item in getattr(projection, "photo_candidates", ())}
         discovered: list[PhotoCandidate] = []
         for ref in projection.committed_world_event_refs:
-            if ref.event_type != "ImageEvidenceDeclared":
+            if ref.event_type not in {"ImageEvidenceDeclared", "RecipientScopedImageEvidenceDeclared"}:
                 continue
             declaration_event = self._event_at(ref.event_id, committed=committed)
             if declaration_event is None:
                 continue
             try:
-                declaration = ImageEvidenceDeclaredPayload.model_validate_json(declaration_event.payload_json)
+                if declaration_event.event_type == "ImageEvidenceDeclared":
+                    declaration = ImageEvidenceDeclaredPayload.model_validate_json(declaration_event.payload_json)
+                else:
+                    declaration = RecipientScopedImageEvidenceDeclaredPayload.model_validate_json(
+                        declaration_event.payload_json
+                    )
             except ValueError:
                 continue
             character = declaration.image_evidence.character_media
@@ -83,7 +89,7 @@ class CharacterMediaFactBinder:
                 MediaEvidenceSource(event_ref=source_event.event_id, payload_hash=source_event.payload_hash),
                 MediaEvidenceSource(event_ref=declaration_event.event_id, payload_hash=declaration_event.payload_hash),
             ), key=lambda item: item.event_ref))
-            for kind, modes, visibility in self._contracts(declaration=declaration):
+            for kind, modes, visibility in self._contracts(evidence=declaration.image_evidence):
                 contract = CharacterMediaCandidateContract(
                     subject_ref=character.character_ref,
                     kind=kind,
@@ -132,15 +138,27 @@ class CharacterMediaFactBinder:
 
     @staticmethod
     def _contracts(
-        *, declaration: ImageEvidenceDeclaredPayload,
+        *, evidence,
     ) -> tuple[tuple[CharacterMediaKind, tuple[CharacterCaptureMode, ...], tuple[CharacterVisibility, ...]], ...]:
-        evidence = declaration.image_evidence
         character = evidence.character_media
         assert character is not None
-        if evidence.visibility not in _PUBLIC_VISIBILITIES:
-            return ()
         modes = set(character.capture_capabilities)
         values: list[tuple[CharacterMediaKind, tuple[CharacterCaptureMode, ...], tuple[CharacterVisibility, ...]]] = []
+        # P3 deliberately exposes only self-authored capture facts.  It does
+        # not inherit P2's public helper/companion and body-detail lanes.
+        if evidence.visibility == "private":
+            if "character_front_camera" in modes:
+                values.append(("selfie", ("character_front_camera",), ("identifiable",)))
+            if "mirror" in modes and isinstance(evidence.location, dict) and evidence.location.get("mirror_available") is True:
+                values.append(("mirror", ("mirror",), ("identifiable",)))
+            return tuple(values)
+        # A recipient-scoped personal declaration may be useful to a future
+        # non-intimate product lane, but it is not evidence for P3.  Do not
+        # leave an unselectable candidate behind by treating it as private.
+        if evidence.visibility == "personal":
+            return ()
+        if evidence.visibility not in _PUBLIC_VISIBILITIES:
+            return ()
         if "character_front_camera" in modes:
             values.append(("selfie", ("character_front_camera",), ("identifiable",)))
         if "mirror" in modes and isinstance(evidence.location, dict) and evidence.location.get("mirror_available") is True:
@@ -194,7 +212,9 @@ class CharacterMediaCandidateRuntime:
         wake = next(
             (item for item in projection.committed_world_event_refs if item.event_id == wake_event_ref), None
         )
-        if wake is None or wake.event_type != "ImageEvidenceDeclared":
+        if wake is None or wake.event_type not in {
+            "ImageEvidenceDeclared", "RecipientScopedImageEvidenceDeclared",
+        }:
             raise ValueError("character media candidate opening requires an image evidence declaration wake")
         cursor = ProjectionCursor(
             world_revision=projection.world_revision,

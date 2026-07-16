@@ -100,6 +100,10 @@ from .image_evidence_runtime import (
     ImageEvidenceDeclarationCommand,
     ImageEvidenceDeclarationRuntime,
 )
+from .private_image_evidence_runtime import (
+    RecipientScopedImageEvidenceDeclarationCommand,
+    RecipientScopedImageEvidenceDeclarationRuntime,
+)
 from .appearance_state import AppearanceStateRecordCommand
 from .appearance_state_runtime import AppearanceStateRuntime
 from .visible_physical_state import VisiblePhysicalStateRecordCommand
@@ -302,6 +306,7 @@ class WorldV2TurnApplication:
         media_candidate_maintenance_actor: str,
         character_media_candidates: CharacterMediaCandidateRuntime,
         image_evidence: ImageEvidenceDeclarationRuntime,
+        recipient_scoped_image_evidence: RecipientScopedImageEvidenceDeclarationRuntime,
         appearance_states: AppearanceStateRuntime,
         visible_physical_states: VisiblePhysicalStateRuntime,
         media_selection_acceptance: MediaSelectionAcceptanceRuntime | None,
@@ -329,6 +334,7 @@ class WorldV2TurnApplication:
         self._media_candidate_maintenance_actor = media_candidate_maintenance_actor
         self._character_media_candidates = character_media_candidates
         self._image_evidence = image_evidence
+        self._recipient_scoped_image_evidence = recipient_scoped_image_evidence
         self._appearance_states = appearance_states
         self._visible_physical_states = visible_physical_states
         self._media_selection_acceptance = media_selection_acceptance
@@ -622,6 +628,33 @@ class WorldV2TurnApplication:
             return await asyncio.to_thread(self._image_evidence.declare, **kwargs)
         return self._image_evidence.declare(**kwargs)
 
+    async def declare_recipient_scoped_image_evidence(
+        self,
+        command: RecipientScopedImageEvidenceDeclarationCommand,
+        *,
+        logical_time: datetime,
+        created_at: datetime,
+        trace_id: str,
+        correlation_id: str,
+    ) -> CommitResult:
+        """Write P3 visual evidence without exposing source bytes to the host.
+
+        The separate method keeps P0/P2 public evidence unable to acquire a
+        recipient or private visibility merely through a new optional field.
+        """
+
+        kwargs = dict(
+            command=command,
+            logical_time=logical_time,
+            created_at=created_at,
+            actor=self._event_ecology_worker_actor,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._recipient_scoped_image_evidence.declare, **kwargs)
+        return self._recipient_scoped_image_evidence.declare(**kwargs)
+
     async def record_appearance_state(
         self,
         command: AppearanceStateRecordCommand,
@@ -776,12 +809,13 @@ class WorldV2TurnApplication:
         self, *, wake_event_ref: str, logical_time: datetime, trace_id: str,
         correlation_id: str,
     ) -> tuple[str, ...]:
-        """Open ordinary fact-bound character-media candidates after a declaration.
+        """Open source-bound character-media candidates after a declaration.
 
         This is separate from the life-share ecology because it has a distinct
-        proof matrix (presence and capture capability).  It still only opens
-        candidates; selection, Acceptance, planning and delivery remain
-        separate scheduler seams.
+        proof matrix (presence and capture capability).  It accepts the
+        isolated recipient-scoped P3 declaration wire as well as P2; it still
+        only opens candidates, leaving selection, Acceptance, planning and
+        delivery to separate scheduler seams.
         """
 
         kwargs = dict(
@@ -1463,6 +1497,7 @@ def build_sqlite_world_v2_turn_application(
             media_candidate_maintenance_actor=config.media_candidate_maintenance_actor,
             character_media_candidates=CharacterMediaCandidateRuntime(ledger=ledger),
             image_evidence=ImageEvidenceDeclarationRuntime(ledger=ledger),
+            recipient_scoped_image_evidence=RecipientScopedImageEvidenceDeclarationRuntime(ledger=ledger),
             appearance_states=AppearanceStateRuntime(ledger=ledger),
             visible_physical_states=VisiblePhysicalStateRuntime(ledger=ledger),
             media_selection_acceptance=media_selection_acceptance,

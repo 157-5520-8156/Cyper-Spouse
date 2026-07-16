@@ -31,6 +31,10 @@ from companion_daemon.world_v2.image_evidence_contract import (
     ImageEvidenceV1,
 )
 from companion_daemon.world_v2.image_evidence_runtime import ImageEvidenceDeclarationCommand
+from companion_daemon.world_v2.private_image_evidence_contract import RecipientScopedImageEvidenceV1
+from companion_daemon.world_v2.private_image_evidence_runtime import (
+    RecipientScopedImageEvidenceDeclarationCommand,
+)
 from companion_daemon.world_v2.appearance_state import (
     AppearanceStateRecordCommand,
     VisibleAppearanceAttribute,
@@ -899,6 +903,75 @@ async def test_production_p2_character_selection_acceptance_freezes_a_v2_snapsho
     assert opportunity.family == "character_media"
     assert opportunity.candidate_source_event_refs == projection.photo_candidates[0].source_event_refs
     assert frozen is not None and '"world-image-event-snapshot-v2"' in frozen.body
+
+
+@pytest.mark.asyncio
+async def test_production_p3_declaration_opens_only_a_private_character_candidate(
+    tmp_path: Path,
+) -> None:
+    """P3 reaches the production candidate seam without widening P2 evidence."""
+
+    config = WorldV2TurnApplicationConfig(
+        world_id="world:production-p3-private-candidate",
+        companion_actor_ref="agent:companion", reply_target="user:user.1",
+        action_pump_owner="pump:production-p3-private-candidate",
+    )
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "world-v2-production-p3-private-candidate.sqlite", config=config,
+        identities=_Identities(), router=_Router(), main_model=_InvalidModel(),
+        quick_recovery=_InvalidQuick(), transport=_Transport(), now=NOW,
+    )
+    try:
+        await app.respond(InboundTurn(
+            platform="test", platform_user_id="user.1", platform_message_id="message:production-p3",
+            text="今晚我想自己待一会儿。", observed_at=NOW, trace_id="trace:production-p3:inbound",
+        ))
+        plan = await app.plan_activity(ActivityPlanCommand(
+            command_id="command:production-p3:plan", world_id=config.world_id,
+            source_observation_id="observation:test:user.1:message:production-p3",
+            plan_id="plan:production-p3", activity_id="activity:production-p3", activity_kind="wind_down",
+            importance_bp=4_000, location_ref="location:home", participant_refs=("agent:companion",),
+            privacy_class="private",
+        ), logical_time=NOW, created_at=NOW, trace_id="trace:production-p3:plan",
+            causation_id="cause:production-p3:plan", correlation_id="correlation:production-p3")
+        started = await app.transition_activity(ActivityPlanTransitionCommand(
+            command_id="command:production-p3:start", world_id=config.world_id,
+            source_observation_id="observation:test:user.1:message:production-p3",
+            plan_id="plan:production-p3", operation="start",
+        ), logical_time=NOW, created_at=NOW, trace_id="trace:production-p3:start",
+            causation_id=plan.event_ids[-1], correlation_id="correlation:production-p3")
+        declaration = await app.declare_recipient_scoped_image_evidence(
+            RecipientScopedImageEvidenceDeclarationCommand(
+                command_id="command:production-p3:evidence", source_event_ref=started.event_ids[-1],
+                recipient_ref="user:user.1",
+                image_evidence=RecipientScopedImageEvidenceV1(
+                    visibility="private",
+                    activity={
+                        "evidence_visibility": "private", "id": "activity:production-p3",
+                        "kind": "wind_down", "description": "在家放松", "phase": "active",
+                    },
+                    character_media=CharacterMediaEvidenceV1(
+                        character_ref="agent:companion", present=True,
+                        capture_capabilities=("character_front_camera",),
+                    ),
+                ),
+            ),
+            logical_time=NOW, created_at=NOW, trace_id="trace:production-p3:evidence",
+            correlation_id="correlation:production-p3",
+        )
+        candidates = await app.drain_character_media_candidates_once(
+            wake_event_ref=declaration.event_ids[-1], logical_time=NOW,
+            trace_id="trace:production-p3:candidates", correlation_id="correlation:production-p3",
+        )
+        projection = app._ledger.project()  # type: ignore[attr-defined]
+    finally:
+        app.close()
+
+    assert len(candidates) == 1
+    candidate = projection.photo_candidates[0]
+    assert candidate.family == "character_media"
+    assert candidate.privacy_ceiling == "private"
+    assert declaration.event_ids[-1] in candidate.source_event_refs
 
 
 @pytest.mark.asyncio
