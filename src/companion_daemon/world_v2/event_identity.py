@@ -107,6 +107,12 @@ def _life_identity_components(
         )
     if event_type == "ImageEvidenceDeclared":
         return world_id, payload.get("source_event_ref"), payload.get("source_event_payload_hash")
+    if event_type == "AppearanceStateRecorded":
+        return (
+            world_id,
+            _nested(payload, "state", "appearance_state_id"),
+            _nested(payload, "state", "entity_revision"),
+        )
     if event_type == "RandomDrawRecorded":
         return world_id, payload.get("draw_id")
     if event_type == "MediaSelectionProposalRecorded":

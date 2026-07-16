@@ -486,6 +486,7 @@ class InternalProjectionReader:
             updated_at=updated_at,
             projection_policy_version="world-v2-internal-projection.1",
             pending_actions=pending_actions,
+            appearance_states=projection.appearance_states,
             budget_accounts=budget_accounts,
             budget_reservations=active_reservations,
             pending_external_observations=pending_external,
