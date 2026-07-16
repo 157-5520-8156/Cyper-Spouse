@@ -28,6 +28,7 @@ from .activity_lifecycle_acceptance_manifest import ACTIVITY_LIFECYCLE_ACCEPTANC
 from .media_selection_acceptance_manifest import MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
 from .media_selection_proposal import MediaSelectionProposalRecordedPayload
 from .image_evidence_contract import IMAGE_EVIDENCE_PAYLOAD_MODELS
+from .random_authority import RandomDrawRecordedPayload
 from .goal_authority_events import (
     V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
     V2_GOAL_PAYLOAD_MODELS,
@@ -335,6 +336,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         "ProviderMediaGrantRecorded": ProviderMediaGrantRecordedPayload,
         **MEDIA_V2_PAYLOAD_MODELS,
         **IMAGE_EVIDENCE_PAYLOAD_MODELS,
+        "RandomDrawRecorded": RandomDrawRecordedPayload,
         "MediaSelectionProposalRecorded": MediaSelectionProposalRecordedPayload,
         **INTERACTION_BID_PAYLOAD_MODELS,
         **MEDIA_DELIVERY_THREAD_PAYLOAD_MODELS,
@@ -446,6 +448,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "PhotoCandidateUnrenderable": "world_id+candidate_id+expected_revision+reason",
         "PhotoCandidateExpired": "world_id+candidate_id+expected_revision+reason",
         "ImageEvidenceDeclared": "world_id+source_event_ref+source_event_payload_hash",
+        "RandomDrawRecorded": "world_id+draw_id",
         "MediaSelectionProposalRecorded": "world_id+proposal_id",
         "MediaOpportunityFrozen": "world_id+opportunity_id",
         "MediaPlanRecorded": "world_id+planning_request_id+plan_id",
@@ -904,6 +907,7 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 evidence_types=("committed_world_event", "accepted_visual_evidence"),
                 successors=("PhotoCandidateOpened",),
             ),
+            _contract("RandomDrawRecorded", "random_authority", "world", "RandomDrawRecordedPayload", evidence_types=("frozen_candidate_set",)),
             _contract(
                 "MediaSelectionProposalRecorded",
                 "media_selection_deliberation",

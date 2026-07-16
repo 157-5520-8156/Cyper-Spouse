@@ -103,6 +103,7 @@ from .image_evidence_contract import (
     DECLARABLE_SOURCE_EVENT_TYPES,
     ImageEvidenceDeclaredPayload,
 )
+from .random_authority import RandomDrawRecordedPayload
 from .appraisal_reducers import (
     accept_appraisal,
     contradict_appraisal,
@@ -5163,6 +5164,12 @@ def _image_evidence_declared(state: ReducerState, event: WorldEvent) -> ReducerS
         raise ValueError("image evidence declaration source is not current")
     return state
 
+def _random_draw_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    RandomDrawRecordedPayload.model_validate_json(event.payload_json)
+    if state.logical_time is None or event.logical_time != state.logical_time:
+        raise ValueError("random draw requires authoritative logical time")
+    return state
+
 
 def _media_selection_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     """Persist a model's P1 candidate choice without granting media effects."""
@@ -8849,6 +8856,7 @@ _EVENTS = {
         ),
         EventDefinition("PhotoCandidateExpired", RevisionClass.WORLD, _photo_candidate_expired),
         EventDefinition("ImageEvidenceDeclared", RevisionClass.WORLD, _image_evidence_declared),
+        EventDefinition("RandomDrawRecorded", RevisionClass.WORLD, _random_draw_recorded),
         EventDefinition(
             "MediaSelectionProposalRecorded",
             RevisionClass.DELIBERATION,
