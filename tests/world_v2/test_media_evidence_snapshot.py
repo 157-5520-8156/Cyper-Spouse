@@ -108,12 +108,8 @@ def test_compiler_never_resolves_value_refs_or_infers_a_visual_description() -> 
     ledger = _Ledger(event)
     candidate = PhotoCandidate(candidate_id="candidate:opaque", source_event_refs=(event.event_id,), family="life_share", privacy_ceiling="public")
 
-    image = MediaEvidenceSnapshotCompiler(ledger=ledger).compile(_request(candidate, ledger)).snapshot.image_event_snapshot
-
-    assert image is not None
-    assert image.objects == ()
-    assert "noodles" not in str(image.model_dump(mode="json"))
-    assert "value_ref" not in str(image.model_dump(mode="json"))
+    with pytest.raises(MediaEvidenceNotRenderable, match="no_visual_evidence"):
+        MediaEvidenceSnapshotCompiler(ledger=ledger).compile(_request(candidate, ledger))
 
 
 @pytest.mark.parametrize(

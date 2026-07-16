@@ -168,6 +168,16 @@ class MediaEvidenceSnapshotCompiler:
                 target=body, origins=origins, event=event, fallback_visibility=candidate.privacy_ceiling,
             )
 
+        # An event envelope proves that something happened, not that there is
+        # a photographable fact.  Do not let the downstream planner turn an
+        # otherwise empty snapshot into a generic lifestyle image: at least
+        # one concrete, source-indexed visual slice must have been committed.
+        if not any(
+            body[name]
+            for name in ("location", "activity", "participants", "objects", "environment", "existing_media")
+        ):
+            raise MediaEvidenceNotRenderable("no_visual_evidence")
+
         evidence_index = self._build_index(body=body, origins=origins)
         snapshot = FrozenMediaEvidenceSnapshot(
             source_events=source_events,
