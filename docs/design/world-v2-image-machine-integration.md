@@ -368,6 +368,40 @@ state.
 - [ ] 支持 `ordinary_life`、`alluring_life`、`exclusive_private`；`explicit_reserved` 只保留不可渲染占位。
 - [ ] 私密 lane 只允许 self-authored front camera/mirror，并维持图片机验收的持机关系检查。
 
+#### P3 implementation contract: short-lived physical visibility
+
+``VisiblePhysicalState`` is a separate, source-bound, short-lived fact Module;
+it is neither a health profile nor an erotic inference.  Its two public
+operations are recording a state through a runtime that derives source
+coordinates from the ledger, and resolving the version active at a historical
+logical time.  Ecology, selection and the image bridge must not each infer
+their own cue from activity prose.
+
+- A version has a subject, exact source ref/hash/type, `valid_from` and a
+  mandatory short `valid_until` (policy-bounded; default proposal is four
+  hours), positive cues and/or structured negative cues.
+- Positive cues use one canonical closed vocabulary: `perspiration`, `flush`,
+  `recovering_breath`, `damp_hair`, `rain_damp_fabric`, `sleepy_face`,
+  `posture_fatigue`, `muscle_tension`, with `light`, `moderate` or `marked`
+  intensity.  Injury, illness, intoxication and sexual/arousal semantics are
+  outside this fact domain.
+- Negative cues (`dry`, `dry_hair`, `settled_breathing`,
+  `clear_complexion`, `rested_posture`, `relaxed_muscles`) are explicit
+  counter-evidence, not free text.  Reducers reject incompatible positive and
+  negative cues in overlapping regions.  A negative-only or explicit-clear
+  state remains meaningful and must be frozen as such; it is never a private
+  expression basis.
+- At snapshot compilation, only the state active at the *selected life
+  event's* logical time may be frozen, with the state-record event and its
+  anchor both included in the source set and evidence index.  No active state
+  means the image machine may take its own bounded visual fallback; a present
+  clear state forbids inferring a cue from activity intensity.
+
+P3 private authorization is deliberately a later, separate gate.  A positive
+world-fact cue can be one input to a scoped private basis, but neither a
+physical state nor a relationship stage creates private media or delivery
+authority by itself.
+
 ### P4：投递与长期反馈
 
 - [ ] 复用现有 `MediaDeliveryShared → media_delivery_interaction` trigger，在真实送达后才建互动 Bid/线程。
