@@ -5,7 +5,7 @@ import hashlib
 
 import pytest
 
-from authorization_test_support import enforcement_tool_ledger
+from perception_test_support import perception_authorized_ledger
 from companion_daemon.world_v2.event_identity import domain_idempotency_key
 from companion_daemon.world_v2.perception import PerceptionAcceptanceRuntime, PerceptionProposal
 from companion_daemon.world_v2.perception_executor import PerceptionActionExecutor
@@ -116,23 +116,17 @@ class Provider:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("analysis_kind", "data_scope"),
-    (("vision", "data:image_content"), ("transcription", "data:audio_content")),
-)
+@pytest.mark.parametrize("analysis_kind", ("vision", "transcription"))
 async def test_injected_perception_provider_is_source_bound_private_and_result_triggered_once(
-    monkeypatch, analysis_kind, data_scope
+    monkeypatch, analysis_kind
 ) -> None:
-    ledger, auth = enforcement_tool_ledger(
+    ledger, auth = perception_authorized_ledger(
         monkeypatch,
         world_id=WORLD,
         now=NOW,
         actor="agent:companion",
         subject="user:primary",
-        target=f"perception:{analysis_kind}",
-        capability_kind="perception_tool",
-        action_scope="perception_tool",
-        data_scope=data_scope,
+        analysis_kind=analysis_kind,
     )
     source = _source(ledger)
     input_body = "image-bytes-as-sidecar-token"
@@ -182,16 +176,13 @@ async def test_injected_perception_provider_is_source_bound_private_and_result_t
 async def test_perception_executor_fails_closed_without_final_pump_authorization(
     monkeypatch,
 ) -> None:
-    ledger, auth = enforcement_tool_ledger(
+    ledger, auth = perception_authorized_ledger(
         monkeypatch,
         world_id=WORLD,
         now=NOW,
         actor="agent:companion",
         subject="user:primary",
-        target="perception:vision",
-        capability_kind="perception_tool",
-        action_scope="perception_tool",
-        data_scope="data:image_content",
+        analysis_kind="vision",
     )
     source = _source(ledger)
     proposal = PerceptionProposal(
