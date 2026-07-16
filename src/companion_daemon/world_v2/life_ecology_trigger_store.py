@@ -18,31 +18,20 @@ import re
 
 from .errors import ConcurrencyConflict, IdempotencyConflict
 from .event_identity import domain_idempotency_key
-from .life_ecology_runtime import (
+from .life_ecology_contract import (
+    LIFE_ECOLOGY_PROCESS_KIND,
+    LIFE_ECOLOGY_WAKE_EVENT_TYPES,
     LifeEcologyRunClaim,
     LifeEcologyRunKey,
+    life_ecology_trigger_id,
+    life_ecology_trigger_ref,
+    parse_life_ecology_trigger_ref,
+    validate_life_ecology_run_key,
 )
 from .schemas import ClaimLease, TriggerProcess, WorldEvent
 
 
-LIFE_ECOLOGY_PROCESS_KIND = "life_ecology"
-LIFE_ECOLOGY_WAKE_EVENT_TYPES = frozenset(
-    {
-        "ClockAdvanced",
-        "ActivityStarted",
-        "ActivityResumed",
-        "ActivityCompleted",
-        "ActivityAbandoned",
-        "WorldOccurrenceSettled",
-        "ExperienceCommitted",
-        "FactCommitted",
-        "FactCorrected",
-        "NpcRegistered",
-    }
-)
-_CATALOG_VERSION = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
 _OUTCOME = re.compile(r"[a-z0-9][a-z0-9._-]{0,127}\Z")
-_MAX_WAKE_EVENT_REF_LENGTH = 512
 _MAX_CAS_RETRIES = 8
 
 
@@ -52,72 +41,6 @@ def _digest(value: object) -> str:
             "utf-8"
         )
     ).hexdigest()
-
-
-def _require_key(key: LifeEcologyRunKey) -> None:
-    if not isinstance(key.world_id, str) or not key.world_id or len(key.world_id) > 512:
-        raise ValueError("life ecology world_id is outside the storage contract")
-    if (
-        not isinstance(key.wake_event_ref, str)
-        or not key.wake_event_ref
-        or len(key.wake_event_ref) > _MAX_WAKE_EVENT_REF_LENGTH
-    ):
-        raise ValueError("life ecology wake_event_ref is outside the storage contract")
-    if not isinstance(key.catalog_version, str) or not _CATALOG_VERSION.fullmatch(
-        key.catalog_version
-    ):
-        raise ValueError("life ecology catalog_version is invalid")
-
-
-def life_ecology_trigger_id(*, world_id: str, wake_event_ref: str, catalog_version: str) -> str:
-    """Stable TriggerProcess identity for exactly one source wake/version."""
-
-    key = LifeEcologyRunKey(
-        world_id=world_id,
-        wake_event_ref=wake_event_ref,
-        catalog_version=catalog_version,
-    )
-    _require_key(key)
-    return "trigger:life-ecology:" + _digest(
-        {
-            "contract": "life-ecology-trigger.1",
-            "world_id": world_id,
-            "wake_event_ref": wake_event_ref,
-            "catalog_version": catalog_version,
-        }
-    )
-
-
-def life_ecology_trigger_ref(*, wake_event_ref: str, catalog_version: str) -> str:
-    key = LifeEcologyRunKey(
-        world_id="world:validation",
-        wake_event_ref=wake_event_ref,
-        catalog_version=catalog_version,
-    )
-    _require_key(key)
-    return f"life-ecology:{catalog_version}:{wake_event_ref}"
-
-
-def parse_life_ecology_trigger_ref(trigger_ref: str) -> tuple[str, str] | None:
-    """Return ``(catalog_version, wake_event_ref)`` only for canonical refs."""
-
-    if not isinstance(trigger_ref, str) or not trigger_ref.startswith("life-ecology:"):
-        return None
-    remainder = trigger_ref.removeprefix("life-ecology:")
-    catalog_version, separator, wake_event_ref = remainder.partition(":")
-    if not separator:
-        return None
-    try:
-        _require_key(
-            LifeEcologyRunKey(
-                world_id="world:validation",
-                wake_event_ref=wake_event_ref,
-                catalog_version=catalog_version,
-            )
-        )
-    except ValueError:
-        return None
-    return catalog_version, wake_event_ref
 
 
 class LedgerLifeEcologyTriggerStore:
@@ -152,7 +75,7 @@ class LedgerLifeEcologyTriggerStore:
     async def claim_or_join(
         self, *, key: LifeEcologyRunKey, trace_id: str, correlation_id: str
     ) -> LifeEcologyRunClaim:
-        _require_key(key)
+        validate_life_ecology_run_key(key)
         if key.world_id != self._ledger.world_id:
             raise ValueError("life ecology run key belongs to another world")
         if not isinstance(trace_id, str) or not trace_id:
@@ -242,7 +165,7 @@ class LedgerLifeEcologyTriggerStore:
     async def complete(
         self, *, key: LifeEcologyRunKey, trigger_id: str, outcome: str
     ) -> None:
-        _require_key(key)
+        validate_life_ecology_run_key(key)
         if key.world_id != self._ledger.world_id:
             raise ValueError("life ecology run key belongs to another world")
         if not isinstance(outcome, str) or not _OUTCOME.fullmatch(outcome):
@@ -447,4 +370,5 @@ __all__ = [
     "life_ecology_trigger_id",
     "life_ecology_trigger_ref",
     "parse_life_ecology_trigger_ref",
+    "validate_life_ecology_run_key",
 ]

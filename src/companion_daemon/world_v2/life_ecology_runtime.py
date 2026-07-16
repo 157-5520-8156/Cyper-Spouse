@@ -7,9 +7,9 @@ the wake is verified at a pinned projection, an injected durable trigger store
 atomically owns or joins the run, and only the owner asks the media ecology to
 scan the resulting committed world.
 
-The trigger store is an explicit port because the generic ``TriggerProcess``
-schema has not yet installed a ``life_ecology`` process kind.  Composition may
-not replace it with an in-memory lock: implementations must persist the key
+The trigger store is an explicit port despite the installed ``life_ecology``
+``TriggerProcess`` kind.  Composition may not replace it with an in-memory
+lock: implementations must persist the key
 ``(world_id, wake_event_ref, catalog_version)`` and make claim/join atomic.
 """
 
@@ -19,6 +19,12 @@ import asyncio
 from datetime import datetime
 from typing import Literal, Protocol
 
+from .life_ecology_contract import (
+    LIFE_ECOLOGY_WAKE_EVENT_TYPES,
+    LifeEcologyClaimState as LifeEcologyClaimState,  # noqa: F401
+    LifeEcologyRunClaim,
+    LifeEcologyRunKey,
+)
 from .schema_core import FrozenModel
 
 
@@ -33,37 +39,14 @@ LifeEcologyAvailabilityState = Literal[
 LifeEcologyRunStatus = Literal[
     "advanced", "idle", "joined_existing", "deferred", "unavailable", "rejected", "failed_safe",
 ]
-LifeEcologyClaimState = Literal["owned", "joined", "completed"]
-
 # A wake remains intentionally narrow.  It is copied from the committed-life
 # vocabulary consumed by EventEcologyMediaCandidateRuntime, not from inbound
 # message or media paths.
-_DURABLE_LIFE_ECOLOGY_WAKE_EVENT_TYPES = frozenset({
-    "ClockAdvanced",
-    "ActivityStarted", "ActivityResumed", "ActivityCompleted", "ActivityAbandoned",
-    "WorldOccurrenceSettled", "ExperienceCommitted", "FactCommitted", "FactCorrected",
-    "NpcRegistered",
-})
-
-
 class LifeEcologyAvailability(FrozenModel):
     """Installed state, distinct from a quiet/no-opening world outcome."""
 
     state: LifeEcologyAvailabilityState
     catalog_version: str = "life-ecology.1"
-
-
-class LifeEcologyRunKey(FrozenModel):
-    """The stable idempotency domain a durable trigger store must protect."""
-
-    world_id: str
-    wake_event_ref: str
-    catalog_version: str
-
-
-class LifeEcologyRunClaim(FrozenModel):
-    trigger_id: str
-    state: LifeEcologyClaimState
 
 
 class LifeEcologyRunResult(FrozenModel):
@@ -232,7 +215,7 @@ class LifeEcologyRuntime:
         )
         if (
             committed is None
-            or committed.event_type not in _DURABLE_LIFE_ECOLOGY_WAKE_EVENT_TYPES
+            or committed.event_type not in LIFE_ECOLOGY_WAKE_EVENT_TYPES
             or committed.logical_time != logical_time
         ):
             return None

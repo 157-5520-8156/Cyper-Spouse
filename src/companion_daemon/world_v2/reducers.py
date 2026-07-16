@@ -153,6 +153,11 @@ from .minimal_reply_events import (
     MessagePayloadStoredPayload,
 )
 from .life_content_events import LifeContentRecordedPayload
+from .life_ecology_contract import (
+    LIFE_ECOLOGY_WAKE_EVENT_TYPES,
+    life_ecology_trigger_id,
+    parse_life_ecology_trigger_ref,
+)
 from .expression_payload_events import ExpressionPayloadDescriptorRecordedPayload
 from .minimal_reply_manifest import (
     MINIMAL_REPLY_MANIFEST_VERSION,
@@ -6374,12 +6379,6 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             ),
             None,
         )
-        from .life_ecology_trigger_store import (
-            LIFE_ECOLOGY_WAKE_EVENT_TYPES,
-            life_ecology_trigger_id,
-            parse_life_ecology_trigger_ref,
-        )
-
         parsed_ref = parse_life_ecology_trigger_ref(process.trigger_ref)
         if (
             source is None
