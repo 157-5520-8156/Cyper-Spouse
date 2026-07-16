@@ -94,6 +94,19 @@ class _NoOpMediaSelectionModel:
         return '{"decision":"no_op"}'
 
 
+class _SelectingMediaSelectionModel:
+    """Select only an opaque token offered by the production selection seam."""
+
+    model = "test-media-selection"
+
+    async def complete(self, messages, *, temperature: float = 0.2):  # type: ignore[no-untyped-def]
+        assert temperature == 0.2
+        capsule = json.loads(messages[-1]["content"])
+        return json.dumps(
+            {"decision": "select", "token": capsule["candidates"][0]["token"]}
+        )
+
+
 class _CapturingDraftChatModel(_DraftChatModel):
     """Keep the exact model request so a production turn can assert Context."""
 
@@ -601,6 +614,116 @@ async def test_production_life_event_declaration_opens_one_source_bound_candidat
 
     assert result is not None and result.status == "created"
     assert len(result.candidate_ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_production_p1_selection_acceptance_commits_the_source_bound_planning_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The installed production seams preserve P1's proposal/acceptance split.
+
+    This deliberately uses the real SQLite composition, evidence compiler,
+    candidate ecology, selector and acceptance runtime.  Provider-grant
+    verification itself belongs to its domain-authorization contract tests;
+    patching it here lets this test isolate the production wiring of the
+    four-effect accepted batch.
+    """
+
+    config = WorldV2TurnApplicationConfig(
+        world_id="world:production-p1-selection-acceptance",
+        companion_actor_ref="agent:companion",
+        reply_target="user:user.1",
+        action_pump_owner="pump:production-p1-selection-acceptance",
+        event_ecology_policy=EcologyPolicy(max_candidates_per_drain=1),
+        media_selection_acceptance=MediaSelectionAcceptanceComposition(
+            grant=ProviderMediaGrantBinding(grant_id="grant:production-media", grant_revision=1),
+            account_id="account:production-media",
+            account_window_id="window:production-media",
+            account_limit=5,
+            amount_limit=1,
+        ),
+    )
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "world-v2-production-p1-selection.sqlite",
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_InvalidModel(),
+        quick_recovery=_InvalidQuick(),
+        transport=_Transport(),
+        media_selection_model=_SelectingMediaSelectionModel(),
+        now=NOW,
+    )
+    try:
+        await app.respond(InboundTurn(
+            platform="test", platform_user_id="user.1", platform_message_id="message:production-p1",
+            text="傍晚我想去公园走走。", observed_at=NOW, trace_id="trace:production-p1:inbound",
+        ))
+        plan = await app.plan_activity(
+            ActivityPlanCommand(
+                command_id="command:production-p1:plan", world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:production-p1",
+                plan_id="plan:production-p1", activity_id="activity:production-p1",
+                activity_kind="walk", importance_bp=4_000, location_ref="location:park",
+                participant_refs=("agent:companion",), privacy_class="shareable",
+            ),
+            logical_time=NOW, created_at=NOW, trace_id="trace:production-p1:plan",
+            causation_id="cause:production-p1:plan", correlation_id="correlation:production-p1",
+        )
+        started = await app.transition_activity(
+            ActivityPlanTransitionCommand(
+                command_id="command:production-p1:start", world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:production-p1",
+                plan_id="plan:production-p1", operation="start",
+            ),
+            logical_time=NOW, created_at=NOW, trace_id="trace:production-p1:start",
+            causation_id=plan.event_ids[-1], correlation_id="correlation:production-p1",
+        )
+        declaration = await app.declare_image_evidence(
+            ImageEvidenceDeclarationCommand(
+                command_id="command:production-p1:evidence", source_event_ref=started.event_ids[-1],
+                image_evidence=ImageEvidenceV1(
+                    visibility="shareable",
+                    activity={
+                        "evidence_visibility": "shareable", "id": "activity:production-p1",
+                        "kind": "walk", "description": "傍晚在公园散步", "phase": "active",
+                    },
+                ),
+            ),
+            logical_time=NOW, created_at=NOW, trace_id="trace:production-p1:evidence",
+            correlation_id="correlation:production-p1",
+        )
+        ecology = await app.drain_media_ecology_once(
+            wake_event_ref=declaration.event_ids[-1], logical_time=NOW,
+            trace_id="trace:production-p1:ecology", correlation_id="correlation:production-p1",
+        )
+        assert ecology is not None and ecology.status == "created"
+        selection = await app.drain_media_selection_once(
+            logical_time=NOW, trace_id="trace:production-p1:selection",
+            correlation_id="correlation:production-p1",
+        )
+        assert selection is not None and selection.status == "proposed"
+        assert selection.proposal_event_ref is not None
+        monkeypatch.setattr(
+            "companion_daemon.world_v2.reducers.require_provider_media_grant",
+            lambda **_kwargs: object(),
+        )
+        accepted = await app.accept_media_selection_once(
+            proposal_event_ref=selection.proposal_event_ref, logical_time=NOW,
+            trace_id="trace:production-p1:acceptance", correlation_id="correlation:production-p1",
+        )
+        projection = app._ledger.project()  # type: ignore[attr-defined]
+    finally:
+        app.close()
+
+    assert accepted is not None
+    assert len(accepted.event_ids) == 4
+    assert [candidate.status for candidate in projection.photo_candidates] == ["selected"]
+    assert len(projection.media_opportunities) == 1
+    assert len(projection.budget_reservations) == 1
+    assert len(projection.actions) == 1
+    assert projection.actions[0].kind == "media_planning"
+    assert projection.actions[0].budget_reservation_id == projection.budget_reservations[0].reservation_id
 
 
 @pytest.mark.asyncio

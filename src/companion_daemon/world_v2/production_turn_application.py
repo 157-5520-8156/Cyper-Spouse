@@ -734,6 +734,35 @@ class WorldV2TurnApplication:
         runtime, config = self._media_selection_acceptance, self._media_selection_acceptance_config
         if runtime is None or config is None:
             return None
+        kwargs = dict(
+            runtime=runtime,
+            config=config,
+            proposal_event_ref=proposal_event_ref,
+            logical_time=logical_time,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._accept_media_selection, **kwargs)
+        return self._accept_media_selection(**kwargs)
+
+    def _accept_media_selection(
+        self,
+        *,
+        runtime: MediaSelectionAcceptanceRuntime,
+        config: MediaSelectionAcceptanceComposition,
+        proposal_event_ref: str,
+        logical_time: datetime,
+        trace_id: str,
+        correlation_id: str,
+    ) -> CommitResult:
+        """Pin and accept inside one synchronous ledger turn.
+
+        The cursor must be derived in the same worker turn as the pin/commit;
+        callers may therefore offload the whole method for SQLite without
+        exposing a stale cursor window across the event-loop boundary.
+        """
+
         projection = self._ledger.project()
         cursor = ProjectionCursor(
             world_revision=projection.world_revision,
