@@ -430,9 +430,10 @@ authority by itself.
 
 ### P4：投递与长期反馈
 
-- [ ] 复用现有 `MediaDeliveryShared → media_delivery_interaction` trigger，在真实送达后才建互动 Bid/线程。
-- [ ] 让表达层仅消费 `snapshot + MediaPlan + MediaInspection.observed_summary`，不从 prompt 猜画面。
-- [ ] 统计候选→机会→生成→发送→回应的漏斗、失败原因、视觉重复和成本；Evaluator 只做离线诊断，不在线替角色决策。
+- [x] 复用现有 `MediaDeliveryShared → media_delivery_interaction` trigger，在真实送达后才建互动 Bid/线程。
+- [x] 表达/投递路径消费冻结 sidecar 与 inspection record，不从 prompt 回读画面。
+- [x] `MediaFunnelEvaluator` 统计候选、机会 lane、计划、检查、送达、送达后互动与 image cost；它只读 projection，不在线替角色决策。
+- [ ] 基于真实长期用户数据的失败原因、视觉重复和体验校准仍是外部验证项。
 
 ## 9. 验收场景
 
