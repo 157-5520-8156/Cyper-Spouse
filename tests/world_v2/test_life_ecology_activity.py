@@ -141,6 +141,40 @@ def test_catalog_is_deterministic_and_binds_tokens_to_the_pinned_plan_revision()
     assert first.openings[0].opening_token != changed.openings[0].opening_token
 
 
+def test_catalog_resolves_only_an_offered_token_at_the_exact_pinned_plan_revision() -> None:
+    catalog = _catalog()
+    projection = _projection(_plan("reading", entity_revision=2))
+    result = catalog.openings_for(projection=projection, wake_event_ref=WAKE_REF)
+
+    resolved = catalog.resolve_opening(
+        projection=projection,
+        wake_event_ref=WAKE_REF,
+        opening_token=result.openings[0].opening_token,
+    )
+
+    assert resolved is not None
+    assert resolved.plan_id == "reading"
+    assert resolved.plan_revision == 2
+    assert resolved.operation == "start"
+    assert resolved.catalog_hash == result.catalog_hash
+    assert (
+        catalog.resolve_opening(
+            projection=projection,
+            wake_event_ref=WAKE_REF,
+            opening_token="0" * 64,
+        )
+        is None
+    )
+    assert (
+        catalog.resolve_opening(
+            projection=_projection(_plan("reading", entity_revision=3)),
+            wake_event_ref=WAKE_REF,
+            opening_token=result.openings[0].opening_token,
+        )
+        is None
+    )
+
+
 def test_catalog_allows_only_abstract_companion_owned_plans_on_the_first_vertical() -> None:
     result = _catalog().openings_for(
         projection=_projection(

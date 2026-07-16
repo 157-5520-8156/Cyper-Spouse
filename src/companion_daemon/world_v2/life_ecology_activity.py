@@ -80,6 +80,17 @@ class ActivityOpening(FrozenModel):
     safe_summary: str = Field(min_length=1, max_length=160)
 
 
+class ResolvedActivityOpening(FrozenModel):
+    """Authority-only resolution of an opaque catalog token."""
+
+    opening_token: str = Field(pattern=r"^[0-9a-f]{64}$")
+    plan_id: str = Field(min_length=1)
+    plan_revision: int = Field(ge=1)
+    operation: ActivityOpeningOperation
+    catalog_version: str = Field(min_length=1)
+    catalog_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 class ActivityOpeningCatalogResult(FrozenModel):
     """Complete immutable outcome of one catalog scan.
 
@@ -231,6 +242,46 @@ class ActivityOpeningCatalog:
             blocked_capabilities=canonical_blocks,
         )
 
+    def resolve_opening(
+        self,
+        *,
+        projection: LedgerProjection,
+        wake_event_ref: str,
+        opening_token: str,
+    ) -> ResolvedActivityOpening | None:
+        """Resolve an offered token without accepting a caller plan identity."""
+
+        catalog = self.openings_for(projection=projection, wake_event_ref=wake_event_ref)
+        if catalog.status != "openings_available" or opening_token not in {
+            item.opening_token for item in catalog.openings
+        }:
+            return None
+        for plan in sorted(projection.plans, key=lambda item: item.plan_id):
+            if not self._is_companion_live_plan(plan) or self._missing_capabilities(plan):
+                continue
+            for operation in self._operations_for(plan, logical_time=projection.logical_time):
+                token = _digest(
+                    {
+                        "world_id": projection.world_id,
+                        "wake_event_ref": wake_event_ref,
+                        "plan_id": plan.plan_id,
+                        "plan_revision": plan.entity_revision,
+                        "operation": operation,
+                        "catalog_version": self._catalog_version,
+                        "catalog_hash": catalog.catalog_hash,
+                    }
+                )
+                if token == opening_token:
+                    return ResolvedActivityOpening(
+                        opening_token=token,
+                        plan_id=plan.plan_id,
+                        plan_revision=plan.entity_revision,
+                        operation=operation,
+                        catalog_version=catalog.catalog_version,
+                        catalog_hash=catalog.catalog_hash,
+                    )
+        raise AssertionError("activity opening catalog advertised an unresolvable token")
+
     def _result(
         self,
         *,
@@ -342,4 +393,5 @@ __all__ = [
     "ActivityOpeningCatalogStatus",
     "ActivityOpeningOperation",
     "MissingActivityCapability",
+    "ResolvedActivityOpening",
 ]
