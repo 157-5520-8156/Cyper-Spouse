@@ -573,6 +573,7 @@ class MediaOpportunity(FrozenModel):
     ecology_observed_at: datetime | None = None
     recipient_ref: str | None = Field(default=None, min_length=1, max_length=256)
     private_expression_basis_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    p3_authorization_digest: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     selection_proposal_id: str | None = Field(default=None, min_length=1, max_length=256)
     selection_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     selected_candidate_revision: int | None = Field(default=None, ge=1)
@@ -597,18 +598,21 @@ class MediaOpportunity(FrozenModel):
             raise ValueError("character media opportunity requires explicit snapshot lineage")
         if self.family == "life_share" and self.snapshot_source_events and candidate_refs != self.source_event_refs:
             raise ValueError("life-share opportunity may not expand candidate lineage")
-        if self.media_lane == "alluring_life" and (
-            self.privacy_ceiling != "private" or self.recipient_ref is None
-        ):
-            raise ValueError("alluring life requires a private ceiling and frozen recipient")
-        if self.media_lane == "exclusive_private" and (
-            self.privacy_ceiling != "private"
+        private_lane = self.media_lane in {"alluring_life", "exclusive_private"}
+        if private_lane and (
+            self.family != "character_media"
+            or self.delivery_mode != "preview"
+            or self.privacy_ceiling != "private"
+            or self.media_privacy_ceiling != "intimate"
             or self.recipient_ref is None
             or self.private_expression_basis_ref is None
+            or self.p3_authorization_digest is None
         ):
-            raise ValueError("exclusive private requires recipient-specific private-expression basis")
-        if self.media_lane not in {"exclusive_private"} and self.private_expression_basis_ref is not None:
-            raise ValueError("private-expression basis may only authorize exclusive-private media")
+            raise ValueError("private character media requires recipient-scoped P3 authorization")
+        if not private_lane and (
+            self.private_expression_basis_ref is not None or self.p3_authorization_digest is not None
+        ):
+            raise ValueError("private media authorization may only authorize a private character lane")
         selection_coordinates = (
             self.selection_proposal_id,
             self.selection_hash,

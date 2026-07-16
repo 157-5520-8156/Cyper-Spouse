@@ -13,6 +13,7 @@ from .media_opportunity_authorizer import MediaOpportunityAuthorizer
 from .media_evidence_snapshot import MediaEvidenceNotRenderable
 from .media_selection_acceptance_manifest import (
     build_media_selection_acceptance_manifest,
+    build_media_selection_acceptance_manifest_v2,
 )
 from .media_selection_proposal import (
     MediaSelectionProposalRecordedPayload,
@@ -381,7 +382,7 @@ class MediaSelectionAtomicRecorder:
             recovery_policy="effect_once",
         )
         action_payload = {"action": action.model_dump(mode="json")}
-        manifest = build_media_selection_acceptance_manifest(
+        manifest_values = dict(
             acceptance_id=acceptance_id,
             acceptance_event_ref=acceptance_event_id,
             proposal_id=proposal.proposal_id,
@@ -411,6 +412,31 @@ class MediaSelectionAtomicRecorder:
             ).hexdigest(),
             policy_digest=proposal.policy_digest,
         )
+        is_p3 = (
+            proposal.selection.family == "character_media"
+            and proposal.selection.media_privacy_ceiling == "intimate"
+        )
+        if is_p3:
+            p3_authorization = getattr(
+                getattr(compiled, "snapshot", None), "private_media_authorization", None
+            )
+            if (
+                p3_authorization is None
+                or opportunity.p3_authorization_digest != p3_authorization.authorization_digest
+                or opportunity.media_lane not in {"alluring_life", "exclusive_private"}
+                or compiled.snapshot.image_event_snapshot is None
+                or compiled.snapshot.image_event_snapshot.schema_version != "world-image-event-snapshot-v3"
+            ):
+                raise MediaSelectionAcceptanceError("p3_authorization_invalid")
+            manifest = build_media_selection_acceptance_manifest_v2(
+                **manifest_values,
+                p3_authorization_digest=p3_authorization.authorization_digest,
+                relationship_context_digest=p3_authorization.relationship_context_digest,
+                private_basis_digest=p3_authorization.private_basis_digest,
+                snapshot_schema_version="world-image-event-snapshot-v3",
+            )
+        else:
+            manifest = build_media_selection_acceptance_manifest(**manifest_values)
         common = {
             "schema_version": "world-v2.1",
             "world_id": self._ledger.world_id,

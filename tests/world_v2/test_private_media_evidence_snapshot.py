@@ -9,6 +9,9 @@ from companion_daemon.world_v2.media_v2 import (
     PhotoCandidate,
     character_media_contract_digest,
 )
+from companion_daemon.world_v2.media_evidence_snapshot import MediaEvidenceSnapshotCompiler
+from companion_daemon.world_v2.media_opportunity_authorizer import MediaOpportunityAuthorizer
+from companion_daemon.world_v2.media_selection import MediaSelection
 from companion_daemon.world_v2.private_image_evidence_contract import (
     RecipientScopedImageEvidenceDeclaredPayload,
     RecipientScopedImageEvidenceV1,
@@ -153,3 +156,19 @@ def test_private_compiler_freezes_recipient_context_and_keeps_authorization_oute
     assert "/character/visible_physical_state/positive_cues/0/cue_id" in snapshot.evidence_index, tuple(
         key for key in snapshot.evidence_index if "visible_physical" in key
     )
+
+    projection.photo_candidates = (candidate,)
+    opportunity, authorized = MediaOpportunityAuthorizer(
+        ledger=_Ledger(projection, events), compiler=MediaEvidenceSnapshotCompiler(ledger=_Ledger(projection, events)),
+        catalog_version="test-p3.1",
+    ).authorize(
+        cursor=ProjectionCursor(world_revision=4, deliberation_revision=0, ledger_sequence=4),
+        selection=MediaSelection(
+            candidate_id=candidate.candidate_id, family="character_media", media_privacy_ceiling="intimate",
+            expression_charge_ceiling="subtle", recipient_ref="user:1",
+            private_expression_basis_ref=context.private_expression_basis.basis_id,
+        ),
+        category=candidate.ecology_category or "private", observed_at=NOW, expires_at=candidate.expires_at,
+    )
+    assert opportunity.media_lane == "alluring_life"
+    assert opportunity.p3_authorization_digest == authorized.snapshot.private_media_authorization.authorization_digest

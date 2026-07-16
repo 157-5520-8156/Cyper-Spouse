@@ -251,7 +251,7 @@ class MediaSelectionProposalCompiler:
         p3 = (
             _is_p3_selection(selection)
             and candidate.character_media_contract is not None
-            and candidate.privacy_ceiling in {"personal", "private"}
+            and candidate.privacy_ceiling == "private"
         )
         if not p1 and not p2 and not p3:
             raise MediaSelectionProposalError("unsupported_selection_surface")

@@ -9,9 +9,13 @@
 > 的候选选择/接受批次，以及 P2 的普通角色公开 preview 已接入 World v2
 > 生产组装。P2 的角色合同、AppearanceState 和可选短时身体状态会在
 > pinned event time 冻结；capture/合同授权留在外层 sidecar，不作为图片
-> 规划证据。P3 的 `VisiblePhysicalState` 事实域已实现，但私密 lane、
-> `relationship_media_context` 和 `PrivateExpressionBasis` 仍未开放，不能
-> 把本文件的 P3/P4 清单误读为已经上线的能力。
+> 规划证据。P3 现已开放一个窄的、可回放的 recipient-scoped 路径：私密
+> 视觉事实声明、关系阶段与**正向**短时身体状态会冻结为 V3 sidecar，外层
+> 授权和 `media-selection-acceptance.2` 绑定其 digest。当前只可形成
+> `alluring_life` preview，且只支持 `embodied_state` basis；关系私下互动、
+> 共同仪式、private transition/coverage 与 `exclusive_private` 仍 fail-closed。
+> `suggestive_private` / `explicit_reserved` 未接入 World v2，不能把本文件
+> 的后续 P3/P4 清单误读为已经上线的能力。
 
 > 当前验证入口：`tests/world_v2/test_media_evidence_snapshot.py`、
 > `test_media_opportunity_authorizer.py`、

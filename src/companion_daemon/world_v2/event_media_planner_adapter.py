@@ -24,9 +24,11 @@ from threading import RLock
 from typing import Mapping, Protocol
 
 from companion_daemon import event_media
+from companion_daemon.media_eligibility import PrivateExpressionBasis
 
 from .media_v2 import (
     CharacterMediaSnapshotAuthorization,
+    PrivateMediaSnapshotAuthorization,
     FrozenMediaEvidenceSnapshot,
     ImmutableMediaPayloadStore,
     MediaNotRenderable,
@@ -46,7 +48,9 @@ _OPPORTUNITY_CONTENT_TYPE = "application/vnd.world-v2.media-opportunity+json"
 _PLAN_CONTENT_TYPE = "application/vnd.world-v2.media-plan+json"
 _P0_IMAGE_EVENT_SCHEMA = "world-image-event-snapshot-v1"
 _P2_IMAGE_EVENT_SCHEMA = "world-image-event-snapshot-v2"
+_P3_IMAGE_EVENT_SCHEMA = "world-image-event-snapshot-v3"
 _PUBLIC_VISIBILITIES = frozenset({"public", "shareable"})
+_RECIPIENT_SCOPED_VISIBILITIES = frozenset({"personal", "private"})
 _STRUCTURAL_SNAPSHOT_KEYS = frozenset({"schema_version", "evidence_index"})
 
 
@@ -287,16 +291,19 @@ class EventMediaPlannerAdapter:
         if error is not None:
             return self._not_renderable(opportunity, planning_request_id, error)
         assert snapshot is not None
+        p3_authorization = self._p3_authorization_from_sidecar(opportunity) if lane == "p3" else None
+        if lane == "p3" and p3_authorization is None:
+            return self._not_renderable(opportunity, planning_request_id, "p3_private_authorization_missing")
         legacy_opportunity = event_media.MediaOpportunity(
             opportunity_id=opportunity.opportunity_id,
             family=opportunity.family,
-            privacy_ceiling="ordinary",
+            privacy_ceiling=("intimate" if lane == "p3" else "ordinary"),
             event_snapshot=snapshot,
             delivery_mode="preview",
             expression_requirements=(),
-            audience_context=None,
-            expression_charge_ceiling="none",
-            private_expression_basis=None,
+            audience_context=(self._p3_audience(snapshot) if lane == "p3" else None),
+            expression_charge_ceiling=(p3_authorization.expression_charge_ceiling if p3_authorization is not None else "none"),
+            private_expression_basis=(self._p3_basis(snapshot) if lane == "p3" else None),
             allowed_evidence_refs=tuple(sorted(_snapshot_leaves(snapshot))),
         )
         try:
@@ -341,6 +348,19 @@ class EventMediaPlannerAdapter:
             and bool(opportunity.snapshot_source_events)
         ):
             return "p2"
+        if (
+            opportunity.family == "character_media"
+            and opportunity.delivery_mode == "preview"
+            and opportunity.privacy_ceiling == "private"
+            and opportunity.media_privacy_ceiling == "intimate"
+            and opportunity.media_lane in {"alluring_life", "exclusive_private"}
+            and opportunity.recipient_ref is not None
+            and opportunity.private_expression_basis_ref is not None
+            and opportunity.p3_authorization_digest is not None
+            and bool(opportunity.candidate_source_event_refs)
+            and bool(opportunity.snapshot_source_events)
+        ):
+            return "p3"
         return None
 
     async def _store_terminal(
@@ -400,6 +420,10 @@ class EventMediaPlannerAdapter:
             )
             if error is not None:
                 return None, error
+        if lane == "p3":
+            error = self._validate_p3_outer_authorization(opportunity=opportunity, evidence=evidence)
+            if error is not None:
+                return None, error
         snapshot = raw.get("image_event_snapshot")
         if not isinstance(snapshot, dict):
             return None, "missing_image_event_snapshot"
@@ -407,6 +431,41 @@ class EventMediaPlannerAdapter:
             snapshot=snapshot, source_hashes=source_hashes, lane=lane,
         )
         return (snapshot, error) if error is not None else (snapshot, None)
+
+    @staticmethod
+    def _validate_p3_outer_authorization(
+        *, opportunity: MediaOpportunity, evidence: FrozenMediaEvidenceSnapshot,
+    ) -> str | None:
+        authorization = evidence.private_media_authorization
+        if authorization is None or evidence.complete_candidate is None:
+            return "p3_private_authorization_missing"
+        try:
+            candidate = PhotoCandidate.model_validate_json(canonical_media_json(evidence.complete_candidate))
+        except ValueError:
+            return "p3_complete_candidate_malformed"
+        snapshot = evidence.image_event_snapshot
+        context = getattr(snapshot, "relationship_media_context", None)
+        contract = candidate.character_media_contract
+        if (
+            snapshot is None or snapshot.schema_version != _P3_IMAGE_EVENT_SCHEMA
+            or context is None or contract is None
+            or candidate.candidate_id != opportunity.candidate_id
+            or candidate.entity_revision != authorization.candidate_revision
+            or candidate.source_event_refs != opportunity.candidate_source_event_refs
+            or authorization.candidate_id != candidate.candidate_id
+            or authorization.candidate_contract_digest != contract.authority_digest
+            or authorization.recipient_ref != opportunity.recipient_ref
+            or authorization.media_lane != opportunity.media_lane
+            or authorization.authorization_digest != opportunity.p3_authorization_digest
+            or authorization.relationship_context_digest != context.authority_digest
+            or authorization.private_basis_digest != context.private_expression_basis.basis_digest
+            or context.audience.recipient_ref != opportunity.recipient_ref
+            or context.private_expression_basis.basis_id != opportunity.private_expression_basis_ref
+            or authorization.source_event_refs != opportunity.source_event_refs
+            or not set(authorization.allowed_capture_modes) <= {"character_front_camera", "mirror"}
+        ):
+            return "p3_private_authorization_mismatch"
+        return None
 
     @staticmethod
     def _validate_p2_outer_authorization(
@@ -450,7 +509,10 @@ class EventMediaPlannerAdapter:
             "event", "source", "location", "activity", "environment", "character",
             "visual_requirements", "evidence_index",
         )
-        expected_schema = _P0_IMAGE_EVENT_SCHEMA if lane == "p0" else _P2_IMAGE_EVENT_SCHEMA
+        expected_schema = (
+            _P0_IMAGE_EVENT_SCHEMA if lane == "p0" else _P2_IMAGE_EVENT_SCHEMA
+            if lane == "p2" else _P3_IMAGE_EVENT_SCHEMA
+        )
         if snapshot.get("schema_version") != expected_schema:
             return "unsupported_image_event_snapshot"
         if lane == "p2" and (
@@ -466,7 +528,7 @@ class EventMediaPlannerAdapter:
             return "malformed_image_event_snapshot"
         if not isinstance(snapshot.get("existing_media"), list):
             return "malformed_image_event_snapshot"
-        if snapshot.get("relationship_media_context") is not None:
+        if lane != "p3" and snapshot.get("relationship_media_context") is not None:
             # P0 must not allow relationship/audience information into the
             # legacy planner, even if an upstream writer accidentally froze it.
             return "p0_private_media_context_not_authorized"
@@ -502,13 +564,18 @@ class EventMediaPlannerAdapter:
                 entry.get("source_payload_hash"),
                 entry.get("visibility"),
             )
+            allowed_visibilities = (
+                _RECIPIENT_SCOPED_VISIBILITIES if lane == "p3" else _PUBLIC_VISIBILITIES
+            )
             if (
                 not isinstance(ref, str)
                 or not isinstance(payload_hash, str)
-                or visibility not in _PUBLIC_VISIBILITIES
+                or visibility not in allowed_visibilities
                 or source_hashes.get(ref) != payload_hash
             ):
                 return "malformed_image_event_snapshot"
+        if lane == "p3" and not isinstance(snapshot.get("relationship_media_context"), dict):
+            return "p3_relationship_media_context_missing"
         return None
 
     def _translate_legacy_result(
@@ -534,7 +601,7 @@ class EventMediaPlannerAdapter:
             or legacy_plan.snapshot_hash != inner_hash
         ):
             return self._not_renderable(opportunity, planning_request_id, "legacy_plan_binding_mismatch")
-        if opportunity.family == "character_media":
+        if opportunity.family == "character_media" and opportunity.media_lane == "ordinary_life":
             authorization = self._p2_authorization_from_sidecar(opportunity)
             if authorization is None:
                 return self._not_renderable(opportunity, planning_request_id, "p2_character_authorization_missing")
@@ -547,6 +614,22 @@ class EventMediaPlannerAdapter:
                 or legacy_plan.private_expression_basis is not None
             ):
                 return self._not_renderable(opportunity, planning_request_id, "p2_legacy_plan_exceeds_authorization")
+        if opportunity.family == "character_media" and opportunity.media_lane in {"alluring_life", "exclusive_private"}:
+            authorization = self._p3_authorization_from_sidecar(opportunity)
+            context = image_event_snapshot.get("relationship_media_context")
+            lane = getattr(legacy_plan.media_lane, "lane", "")
+            if (
+                authorization is None
+                or not isinstance(context, dict)
+                or legacy_plan.privacy != "intimate"
+                or legacy_plan.capture_mode not in authorization.allowed_capture_modes
+                or lane != authorization.media_lane
+                or legacy_plan.private_expression_basis is None
+                or legacy_plan.private_expression_basis.kind != "embodied_state"
+                or legacy_plan.private_expression_basis.evidence_ref != "/character/visible_physical_state"
+                or legacy_plan.private_expression_basis.recipient_ref != opportunity.recipient_ref
+            ):
+                return self._not_renderable(opportunity, planning_request_id, "p3_legacy_plan_exceeds_authorization")
         body = canonical_media_json(legacy_plan.to_payload())
         payload_ref = "sidecar:media-plan:" + media_digest({
             "opportunity_id": opportunity.opportunity_id,
@@ -573,7 +656,7 @@ class EventMediaPlannerAdapter:
             schema_version=legacy_plan.version,
             media_machine_version=opportunity.media_machine_version,
             inspection_contract_version=opportunity.inspection_contract_version,
-            media_lane="ordinary_life",
+            media_lane=(opportunity.media_lane if opportunity.media_lane != "ordinary_life" else "ordinary_life"),
             plan_payload_ref=payload.payload_ref,
             plan_payload_hash=payload.payload_hash,
             frozen_at=frozen_at,
@@ -620,6 +703,40 @@ class EventMediaPlannerAdapter:
             ).character_media_authorization
         except (TypeError, ValueError, json.JSONDecodeError):
             return None
+
+    def _p3_authorization_from_sidecar(
+        self, opportunity: MediaOpportunity,
+    ) -> PrivateMediaSnapshotAuthorization | None:
+        record = self._sidecar.read_exact(payload_ref=opportunity.event_snapshot_ref)
+        if record is None or record.payload_hash != opportunity.event_snapshot_hash:
+            return None
+        try:
+            return FrozenMediaEvidenceSnapshot.model_validate_json(record.body).private_media_authorization
+        except (TypeError, ValueError, json.JSONDecodeError):
+            return None
+
+    @staticmethod
+    def _p3_audience(snapshot: Mapping[str, object]) -> event_media.AudienceContext:
+        context = snapshot.get("relationship_media_context")
+        if not isinstance(context, Mapping) or not isinstance(context.get("audience"), Mapping):
+            raise ValueError("p3 relationship context is missing")
+        audience = context["audience"]
+        return event_media.AudienceContext(
+            recipient_ref=str(audience.get("recipient_ref") or ""),
+            relationship_stage=str(audience.get("relationship_stage") or ""),
+        )
+
+    @staticmethod
+    def _p3_basis(snapshot: Mapping[str, object]) -> PrivateExpressionBasis:
+        context = snapshot.get("relationship_media_context")
+        if not isinstance(context, Mapping) or not isinstance(context.get("private_expression_basis"), Mapping):
+            raise ValueError("p3 private basis is missing")
+        basis = context["private_expression_basis"]
+        return PrivateExpressionBasis(
+            kind=str(basis.get("kind") or ""),
+            evidence_refs=(str(basis.get("evidence_ref") or ""),),
+            required_charge=str(basis.get("required_charge") or ""),
+        )
 
 
 def _snapshot_leaves(value: object, pointer: str = "") -> set[str]:
