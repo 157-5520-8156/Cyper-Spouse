@@ -197,11 +197,6 @@ class EventEcologyMediaCandidateRuntime:
         candidates = self._discover(projection=projection, logical_time=logical_time)
         if not candidates:
             return EcologyDrainResult(status="idle")
-        if not self._policy.direct_preview_compatibility:
-            # Base ecology selects no visible media opportunity.  This keeps
-            # the former direct-freeze path behind an explicit migration flag
-            # until the P1 authorizer owns selection and approval.
-            return EcologyDrainResult(status="idle")
         events: list[WorldEvent] = []
         candidate_ids: list[str] = []
         opportunity_ids: list[str] = []
@@ -221,6 +216,24 @@ class EventEcologyMediaCandidateRuntime:
                 candidate_id=candidate_id, source_event_refs=selected.source_event_refs,
                 family="life_share", privacy_ceiling=selected.privacy_ceiling,
             )
+            candidate_payload = PhotoCandidateOpenedPayload(candidate=candidate).model_dump(mode="json")
+            previous = events[-1].event_id if events else f"event:ecology-wake:{projection.ledger_sequence}"
+            candidate_event = WorldEvent.from_payload(
+                schema_version="world-v2.1", event_id=_event_id(role="candidate", stable=candidate_id),
+                event_type="PhotoCandidateOpened", world_id=self._ledger.world_id,
+                logical_time=logical_time, created_at=logical_time, actor=actor,
+                source="world-v2:event-ecology", trace_id=trace_id, causation_id=previous,
+                correlation_id=correlation_id,
+                idempotency_key=_identity(event_type="PhotoCandidateOpened", world_id=self._ledger.world_id, payload=candidate_payload),
+                payload=candidate_payload,
+            )
+            events.append(candidate_event)
+            candidate_ids.append(candidate_id)
+            if not self._policy.direct_preview_compatibility:
+                # P1's normal path exposes source-bound candidates only.  A
+                # separate selector/authorizer decides whether any becomes a
+                # frozen opportunity; ecology itself never chooses a photo.
+                continue
             try:
                 compiled = self._compiler.compile(MediaEvidenceCompileRequest(
                     candidate=candidate, category=selected.category, cursor=_cursor(projection),
@@ -246,30 +259,18 @@ class EventEcologyMediaCandidateRuntime:
                 ecology_category=selected.category, ecology_observed_at=selected.observed_at,
                 expires_at=selected.expires_at,
             )
-            candidate_payload = PhotoCandidateOpenedPayload(candidate=candidate).model_dump(mode="json")
             opportunity_payload = MediaOpportunityFrozenPayload(opportunity=opportunity).model_dump(mode="json")
-            previous = events[-1].event_id if events else f"event:ecology-wake:{projection.ledger_sequence}"
-            events.extend((
-                WorldEvent.from_payload(
-                    schema_version="world-v2.1", event_id=_event_id(role="candidate", stable=candidate_id),
-                    event_type="PhotoCandidateOpened", world_id=self._ledger.world_id,
-                    logical_time=logical_time, created_at=logical_time, actor=actor,
-                    source="world-v2:event-ecology", trace_id=trace_id, causation_id=previous,
-                    correlation_id=correlation_id,
-                    idempotency_key=_identity(event_type="PhotoCandidateOpened", world_id=self._ledger.world_id, payload=candidate_payload),
-                    payload=candidate_payload,
-                ),
+            events.append(
                 WorldEvent.from_payload(
                     schema_version="world-v2.1", event_id=_event_id(role="opportunity", stable=opportunity_id),
                     event_type="MediaOpportunityFrozen", world_id=self._ledger.world_id,
                     logical_time=logical_time, created_at=logical_time, actor=actor,
                     source="world-v2:event-ecology", trace_id=trace_id,
-                    causation_id=_event_id(role="candidate", stable=candidate_id), correlation_id=correlation_id,
+                    causation_id=candidate_event.event_id, correlation_id=correlation_id,
                     idempotency_key=_identity(event_type="MediaOpportunityFrozen", world_id=self._ledger.world_id, payload=opportunity_payload),
                     payload=opportunity_payload,
-                ),
-            ))
-            candidate_ids.append(candidate_id)
+                )
+            )
             opportunity_ids.append(opportunity_id)
         self._ledger.commit_at_cursor(
             tuple(events), expected_cursor=_cursor(projection),

@@ -339,7 +339,9 @@ def test_ecology_does_not_keep_the_direct_freeze_path_enabled_by_default() -> No
         trace_id="trace:default", correlation_id="correlation:default",
     )
 
-    assert result.status == "idle"
+    assert result.status == "created"
+    assert len(result.candidate_ids) == 1
+    assert result.opportunity_ids == ()
     assert compiler.requests == []
-    assert ledger.commits == []
-    assert ledger.commits == []
+    assert len(ledger.commits) == 1
+    assert [event.event_type for event in ledger.commits[0][0]] == ["PhotoCandidateOpened"]
