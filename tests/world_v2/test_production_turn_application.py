@@ -28,6 +28,10 @@ from companion_daemon.world_v2.activity_plan_runtime import (
 )
 from companion_daemon.world_v2.image_evidence_contract import ImageEvidenceV1
 from companion_daemon.world_v2.image_evidence_runtime import ImageEvidenceDeclarationCommand
+from companion_daemon.world_v2.appearance_state import (
+    AppearanceStateRecordCommand,
+    VisibleAppearanceAttribute,
+)
 from companion_daemon.world_v2.event_ecology_media import EcologyPolicy
 from companion_daemon.world_v2.life_ecology_runtime import LifeEcologyRunResult
 from companion_daemon.world_v2.production_turn_application import LifeEcologyComposition
@@ -614,6 +618,73 @@ async def test_production_life_event_declaration_opens_one_source_bound_candidat
 
     assert result is not None and result.status == "created"
     assert len(result.candidate_ids) == 1
+
+
+@pytest.mark.asyncio
+async def test_production_application_records_a_sparse_source_bound_appearance_state(
+    tmp_path: Path,
+) -> None:
+    config = WorldV2TurnApplicationConfig(
+        world_id="world:production-appearance-state",
+        companion_actor_ref="agent:companion",
+        reply_target="user:user.1",
+        action_pump_owner="pump:production-appearance-state",
+    )
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "world-v2-production-appearance.sqlite",
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_InvalidModel(),
+        quick_recovery=_InvalidQuick(),
+        transport=_Transport(),
+        now=NOW,
+    )
+    try:
+        await app.respond(InboundTurn(
+            platform="test", platform_user_id="user.1", platform_message_id="message:appearance",
+            text="我去公园走走。", observed_at=NOW, trace_id="trace:appearance:inbound",
+        ))
+        plan = await app.plan_activity(
+            ActivityPlanCommand(
+                command_id="command:appearance:plan", world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:appearance",
+                plan_id="plan:appearance", activity_id="activity:appearance", activity_kind="walk",
+                importance_bp=4_000, location_ref="location:park", participant_refs=("agent:companion",),
+                privacy_class="shareable",
+            ),
+            logical_time=NOW, created_at=NOW, trace_id="trace:appearance:plan",
+            causation_id="cause:appearance:plan", correlation_id="correlation:appearance",
+        )
+        started = await app.transition_activity(
+            ActivityPlanTransitionCommand(
+                command_id="command:appearance:start", world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:appearance",
+                plan_id="plan:appearance", operation="start",
+            ),
+            logical_time=NOW, created_at=NOW, trace_id="trace:appearance:start",
+            causation_id=plan.event_ids[-1], correlation_id="correlation:appearance",
+        )
+        recorded = await app.record_appearance_state(
+            AppearanceStateRecordCommand(
+                command_id="command:appearance:record", source_event_ref=started.event_ids[-1],
+                subject_ref="agent:companion", visibility="shareable",
+                visible_attributes=(
+                    VisibleAppearanceAttribute(
+                        aspect="outfit", description="深色运动外套",
+                    ),
+                ),
+            ),
+            logical_time=NOW, created_at=NOW, trace_id="trace:appearance:record",
+            correlation_id="correlation:appearance",
+        )
+        projection = app._ledger.project()  # type: ignore[attr-defined]
+    finally:
+        app.close()
+
+    assert recorded.event_ids
+    assert projection.appearance_states[0].source_event_ref == started.event_ids[-1]
+    assert projection.appearance_states[0].visible_attributes[0].description == "深色运动外套"
 
 
 @pytest.mark.asyncio

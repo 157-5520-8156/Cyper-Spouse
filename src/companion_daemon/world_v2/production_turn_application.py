@@ -100,6 +100,8 @@ from .image_evidence_runtime import (
     ImageEvidenceDeclarationCommand,
     ImageEvidenceDeclarationRuntime,
 )
+from .appearance_state import AppearanceStateRecordCommand
+from .appearance_state_runtime import AppearanceStateRuntime
 from .media_selection_acceptance_runtime import MediaSelectionProposalRecorder
 from .media_selection_acceptance_runtime import MediaSelectionAcceptanceRuntime
 from .media_opportunity_authorizer import MediaOpportunityAuthorizer
@@ -296,6 +298,7 @@ class WorldV2TurnApplication:
         media_candidate_maintenance: MediaCandidateMaintenanceRuntime,
         media_candidate_maintenance_actor: str,
         image_evidence: ImageEvidenceDeclarationRuntime,
+        appearance_states: AppearanceStateRuntime,
         media_selection_acceptance: MediaSelectionAcceptanceRuntime | None,
         media_selection_acceptance_config: MediaSelectionAcceptanceComposition | None,
         media_delivery: MediaDeliveryRuntime,
@@ -320,6 +323,7 @@ class WorldV2TurnApplication:
         self._media_candidate_maintenance = media_candidate_maintenance
         self._media_candidate_maintenance_actor = media_candidate_maintenance_actor
         self._image_evidence = image_evidence
+        self._appearance_states = appearance_states
         self._media_selection_acceptance = media_selection_acceptance
         self._media_selection_acceptance_config = media_selection_acceptance_config
         self._media_delivery = media_delivery
@@ -610,6 +614,34 @@ class WorldV2TurnApplication:
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(self._image_evidence.declare, **kwargs)
         return self._image_evidence.declare(**kwargs)
+
+    async def record_appearance_state(
+        self,
+        command: AppearanceStateRecordCommand,
+        *,
+        logical_time: datetime,
+        created_at: datetime,
+        trace_id: str,
+        correlation_id: str,
+    ) -> CommitResult:
+        """Append one sparse, source-bound visible state through the host seam.
+
+        Hosts may identify a source event and visible attributes, but cannot
+        supply its payload hash, source type, visibility ceiling or revision;
+        the appearance runtime resolves each of those from the ledger.
+        """
+
+        kwargs = dict(
+            command=command,
+            logical_time=logical_time,
+            created_at=created_at,
+            actor=self._event_ecology_worker_actor,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._appearance_states.record, **kwargs)
+        return self._appearance_states.record(**kwargs)
 
     async def replace_activity(
         self,
@@ -1372,6 +1404,7 @@ def build_sqlite_world_v2_turn_application(
             media_candidate_maintenance=MediaCandidateMaintenanceRuntime(ledger=ledger),
             media_candidate_maintenance_actor=config.media_candidate_maintenance_actor,
             image_evidence=ImageEvidenceDeclarationRuntime(ledger=ledger),
+            appearance_states=AppearanceStateRuntime(ledger=ledger),
             media_selection_acceptance=media_selection_acceptance,
             media_selection_acceptance_config=config.media_selection_acceptance,
             media_delivery=MediaDeliveryRuntime(ledger=ledger),
