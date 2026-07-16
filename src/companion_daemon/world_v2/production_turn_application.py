@@ -798,7 +798,7 @@ class WorldV2TurnApplication:
     async def drain_media_selection_once(
         self, *, logical_time: datetime, trace_id: str, correlation_id: str,
     ) -> MediaSelectionRunResult | None:
-        """Ask the bounded P1 selector whether an available candidate matters.
+        """Ask the bounded preview selector whether an available candidate matters.
 
         This is intentionally a proposal-only scheduler seam.  A model can
         select one opaque candidate token or decline; it cannot authorize a
@@ -819,7 +819,7 @@ class WorldV2TurnApplication:
     async def accept_media_selection_once(
         self, *, proposal_event_ref: str, logical_time: datetime, trace_id: str, correlation_id: str,
     ) -> CommitResult | None:
-        """Accept one pinned P1 proposal only under explicit grant/budget config."""
+        """Accept one pinned ordinary-preview proposal under explicit grant/budget config."""
 
         runtime, config = self._media_selection_acceptance, self._media_selection_acceptance_config
         if runtime is None or config is None:

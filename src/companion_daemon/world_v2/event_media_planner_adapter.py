@@ -1,4 +1,4 @@
-"""P0 one-way bridge from frozen World v2 evidence to ``event_media``.
+"""Frozen ordinary-preview bridge from World v2 evidence to ``event_media``.
 
 This Module is intentionally *not* a World reader.  Its sole public seam is
 the World v2 ``MediaPlanner`` interface: it opens an already immutable
@@ -6,7 +6,9 @@ opportunity sidecar, validates the embedded ``world-image-event-snapshot-v1``
 contract, and asks the legacy image planner to interpret exactly those bytes.
 
 It does not compile snapshots, choose candidates, create prompts, or read a
-projection.  P0 admits only public/shareable ``life_share`` preview media.
+projection.  It admits public/shareable P0 ``life_share`` and fact-bound P2
+``character_media`` preview media; P2 authorization remains outer-sidecar
+data and never reaches the legacy planner's snapshot.
 The result-store seam is deliberately required for live use: without a
 durable idempotency lookup the bridge reports unavailable rather than risking
 another planner call after a crash.

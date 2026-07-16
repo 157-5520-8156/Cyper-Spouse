@@ -1,4 +1,4 @@
-"""Pinned P1 acceptance: selection proposal → frozen preview planning Action."""
+"""Pinned ordinary-preview acceptance: selection proposal → frozen planning Action."""
 
 from __future__ import annotations
 
