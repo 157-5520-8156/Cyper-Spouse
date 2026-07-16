@@ -76,6 +76,8 @@ class PhotoCandidate(FrozenModel):
     ecology_category: str | None = Field(default=None, min_length=1, max_length=128)
     ecology_observed_at: datetime | None = None
     source_events: tuple[MediaEvidenceSource, ...] = ()
+    opened_event_ref: str | None = Field(default=None, min_length=1, max_length=512)
+    opened_event_payload_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
     @model_validator(mode="after")
     def lifecycle_coordinates_are_closed(self) -> "PhotoCandidate":
@@ -97,6 +99,10 @@ class PhotoCandidate(FrozenModel):
                 raise ValueError("photo candidate expiry must follow opening")
         elif self.source_events:
             raise ValueError("legacy photo candidate cannot carry source hashes without lifecycle coordinates")
+        if (self.opened_event_ref is None) != (self.opened_event_payload_hash is None):
+            raise ValueError("photo candidate opening event coordinates are incomplete")
+        if self.opened_event_ref is not None and self.opened_at is None:
+            raise ValueError("candidate opening event requires P1 lifecycle coordinates")
         return self
 
 

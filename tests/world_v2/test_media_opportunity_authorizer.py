@@ -23,6 +23,8 @@ CANDIDATE = PhotoCandidate(
     ecology_category="activity_process",
     ecology_observed_at=NOW,
     source_events=(MediaEvidenceSource(event_ref="event:1", payload_hash="a" * 64),),
+    opened_event_ref="event:photo-candidate:1",
+    opened_event_payload_hash="b" * 64,
 )
 
 

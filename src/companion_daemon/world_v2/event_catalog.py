@@ -25,6 +25,7 @@ from .character_core_events import CHARACTER_CORE_PAYLOAD_MODELS
 from .fact_events import FACT_PAYLOAD_MODELS
 from .fact_proposal_audit_v2 import FactCommitProposalRecordedPayloadV2
 from .activity_lifecycle_acceptance_manifest import ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
+from .media_selection_proposal import MediaSelectionProposalRecordedPayload
 from .goal_authority_events import (
     V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
     V2_GOAL_PAYLOAD_MODELS,
@@ -330,6 +331,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         ),
         "ProviderMediaGrantRecorded": ProviderMediaGrantRecordedPayload,
         **MEDIA_V2_PAYLOAD_MODELS,
+        "MediaSelectionProposalRecorded": MediaSelectionProposalRecordedPayload,
         **INTERACTION_BID_PAYLOAD_MODELS,
         **MEDIA_DELIVERY_THREAD_PAYLOAD_MODELS,
         "BudgetReserved": _payload_model(
@@ -437,6 +439,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "BudgetAccountConfigured": "account_id+window_id",
         "ProviderMediaGrantRecorded": "world_id+grant_id+grant_revision",
         "PhotoCandidateOpened": "world_id+candidate_id",
+        "MediaSelectionProposalRecorded": "world_id+proposal_id",
         "MediaOpportunityFrozen": "world_id+opportunity_id",
         "MediaPlanRecorded": "world_id+planning_request_id+plan_id",
         "MediaNotRenderableRecorded": "world_id+planning_request_id+not_renderable",
@@ -864,6 +867,15 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "world",
                 "PhotoCandidateOpenedPayload",
                 evidence_types=("committed_world_event",),
+            ),
+            _contract(
+                "MediaSelectionProposalRecorded",
+                "media_selection_deliberation",
+                "deliberation",
+                "MediaSelectionProposalRecordedPayload",
+                allowed_predecessors=("PhotoCandidateOpened",),
+                evidence_types=("committed_world_event",),
+                successors=("AcceptanceRecorded",),
             ),
             _contract(
                 "MediaOpportunityFrozen",

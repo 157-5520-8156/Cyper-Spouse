@@ -25,6 +25,8 @@ class MediaOpportunityAuthorizer:
             or candidate.ecology_category is None
             or candidate.ecology_observed_at is None
             or not candidate.source_events
+            or candidate.opened_event_ref is None
+            or candidate.opened_event_payload_hash is None
         ):
             raise ValueError("media_authorizer.candidate_is_not_p1_source_bound")
         if getattr(projection, "logical_time", None) is None or projection.logical_time >= candidate.expires_at:

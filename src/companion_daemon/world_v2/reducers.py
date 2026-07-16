@@ -240,6 +240,10 @@ from .life_events import (
     WorldOccurrenceSettledPayload,
     WorldOccurrenceTerminalPayload,
 )
+from .media_selection_proposal import (
+    MediaSelectionProposalRecordedPayload,
+    media_candidate_authority_hash,
+)
 from .life_reducers import (
     activate_occurrence,
     commit_experience,
@@ -4993,7 +4997,60 @@ def _photo_candidate_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
         raise ValueError("P1 photo candidate source hashes do not bind committed world events")
     if candidate.opened_at is not None and candidate.opened_at != event.logical_time:
         raise ValueError("P1 photo candidate opening time must be authoritative")
+    if candidate.opened_at is not None:
+        candidate = candidate.model_copy(
+            update={"opened_event_ref": event.event_id, "opened_event_payload_hash": event.payload_hash}
+        )
     return state.model_copy(update={"photo_candidates": (*state.photo_candidates, candidate)})
+
+
+def _media_selection_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
+    """Persist a model's P1 candidate choice without granting media effects."""
+
+    if state.logical_time is None or event.logical_time != state.logical_time:
+        raise ValueError("media selection proposal requires authoritative logical time")
+    payload = MediaSelectionProposalRecordedPayload.model_validate_json(event.payload_json)
+    if payload.evaluated_world_revision != len(state.committed_world_event_refs):
+        raise ValueError("media selection proposal must evaluate the current world revision")
+    if payload.proposal_id in state.proposal_ids:
+        raise ValueError("media selection proposal identity is already registered")
+    candidate = next(
+        (item for item in state.photo_candidates if item.candidate_id == payload.candidate_id), None
+    )
+    if (
+        candidate is None
+        or candidate.status != "available"
+        or candidate.entity_revision != payload.expected_candidate_revision
+        or candidate.opened_at is None
+        or candidate.expires_at is None
+        or candidate.expires_at <= event.logical_time
+        or candidate.opened_event_ref is None
+        or candidate.opened_event_payload_hash is None
+        or media_candidate_authority_hash(candidate) != payload.candidate_authority_hash
+    ):
+        raise ValueError("media selection proposal candidate is not current")
+    committed_hashes = {
+        item.event_id: item.payload_hash for item in state.committed_world_event_refs
+    }
+    if any(
+        committed_hashes.get(source.event_ref) != source.payload_hash
+        for source in candidate.source_events
+    ):
+        raise ValueError("media selection proposal candidate source evidence is unavailable")
+    return state.model_copy(
+        update={
+            "proposal_ids": (*state.proposal_ids, payload.proposal_id),
+            "proposal_revisions": (
+                *state.proposal_revisions,
+                ProposalRevisionRef(
+                    proposal_id=payload.proposal_id,
+                    evaluated_world_revision=payload.evaluated_world_revision,
+                    proposal_event_ref=event.event_id,
+                    proposal_event_payload_hash=event.payload_hash,
+                ),
+            ),
+        }
+    )
 
 
 def _advance_media_candidate(
@@ -8598,6 +8655,11 @@ _EVENTS = {
             "ProviderMediaGrantRecorded", RevisionClass.WORLD, _provider_media_grant_recorded
         ),
         EventDefinition("PhotoCandidateOpened", RevisionClass.WORLD, _photo_candidate_opened),
+        EventDefinition(
+            "MediaSelectionProposalRecorded",
+            RevisionClass.DELIBERATION,
+            _media_selection_proposal_recorded,
+        ),
         EventDefinition("MediaOpportunityFrozen", RevisionClass.WORLD, _media_opportunity_frozen),
         EventDefinition("MediaPlanRecorded", RevisionClass.WORLD, _media_plan_recorded),
         EventDefinition(
