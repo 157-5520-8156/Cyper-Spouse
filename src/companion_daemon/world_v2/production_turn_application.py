@@ -17,6 +17,8 @@ import json
 from pathlib import Path
 from typing import Literal, Mapping
 
+from companion_daemon import event_media
+
 from .accepted_ledger_batch import AcceptedLedgerBatchIssuer
 from .action_pump import ActionExecutor, ActionPumpResult
 from .activity_plan_runtime import (
@@ -63,6 +65,10 @@ from .ledger_payload_reader import LedgerAuthorizedPayloadReader
 from .life_content_store import SQLiteImmutableLifeContentStore
 from .expression_payload_store import SQLiteImmutableExpressionPayloadStore
 from .media_v2 import MediaPlanner, SQLiteImmutableMediaPayloadStore
+from .event_media_planner_adapter import (
+    EventMediaPlannerAdapter,
+    EventMediaPlanningResultStore,
+)
 from .event_ecology_media import (
     EcologyDrainResult,
     EcologyPolicy,
@@ -143,7 +149,10 @@ class LifeEcologyComposition:
     def production_v1(cls) -> "LifeEcologyComposition":
         return cls(
             catalog_version="life-ecology.1",
-            media_policy=EcologyPolicy(),
+            # P0 still uses the legacy direct-freeze ecology lane, but the
+            # opt-in lives in the named production profile rather than a
+            # default policy.  P1 replaces it with an authorizer.
+            media_policy=EcologyPolicy(direct_preview_compatibility=True),
         )
 
     def __post_init__(self) -> None:
@@ -708,6 +717,8 @@ def build_sqlite_world_v2_turn_application(
     transport: PlatformTransport,
     media_transport: MediaProviderTransport | None = None,
     media_planner: MediaPlanner | None = None,
+    legacy_event_media_planner: event_media.MediaPlanner | None = None,
+    event_media_result_store: EventMediaPlanningResultStore | None = None,
     advisory_compiler: AdvisoryCompiler | None = None,
     appraisal_model: DeliberationModelAdapter | None = None,
     affect_model: DeliberationModelAdapter | None = None,
@@ -728,6 +739,8 @@ def build_sqlite_world_v2_turn_application(
     dispatch requests; it never receives a runtime or ledger writer.
     """
 
+    if media_planner is not None and legacy_event_media_planner is not None:
+        raise ValueError("inject either a World v2 media planner or legacy event-media planner, not both")
     issuer = AcceptedLedgerBatchIssuer()
     ledger = SQLiteWorldLedger(path=path, world_id=config.world_id, accepted_batch_issuer=issuer)
     life_content_store = SQLiteImmutableLifeContentStore(path=str(path), world_id=config.world_id)
@@ -1071,6 +1084,13 @@ def build_sqlite_world_v2_turn_application(
             else None
         )
         media_planning = MediaPlanningRuntime(ledger=ledger, sidecar=media_payload_store)
+        composed_media_planner = media_planner
+        if legacy_event_media_planner is not None and event_media_result_store is not None:
+            composed_media_planner = EventMediaPlannerAdapter(
+                sidecar=media_payload_store,
+                legacy_planner=legacy_event_media_planner,
+                result_store=event_media_result_store,
+            )
         ecology_policy = (
             config.life_ecology.media_policy
             if config.life_ecology is not None
@@ -1115,7 +1135,10 @@ def build_sqlite_world_v2_turn_application(
             media_planning_worker=MediaPlanningWorker(
                 ledger=ledger,
                 runtime=media_planning,
-                planner=media_planner,
+                # An injected legacy planner is not executable without a
+                # durable lookup store; leaving this unavailable is safer than
+                # retrying an untracked provider call after a restart.
+                planner=composed_media_planner,
                 owner_id=config.media_planning_worker_owner,
             ),
             media_ecology=media_ecology,

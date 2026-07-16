@@ -38,6 +38,7 @@ MediaFamily = Literal["life_share", "character_media"]
 MediaDeliveryMode = Literal["preview", "automatic"]
 MediaCandidateStatus = Literal["available", "selected", "planned", "unrenderable"]
 MediaLane = Literal["ordinary_life", "alluring_life", "exclusive_private", "explicit_reserved"]
+MediaPrivacyCeiling = Literal["ordinary", "personal", "intimate"]
 
 
 class PhotoCandidate(FrozenModel):
@@ -336,7 +337,10 @@ class MediaOpportunity(FrozenModel):
     candidate_id: str = Field(min_length=1, max_length=256)
     family: MediaFamily
     delivery_mode: MediaDeliveryMode
+    # World visibility ceiling.  It deliberately remains distinct from the
+    # image machine's intimacy ceiling below for replay compatibility.
     privacy_ceiling: PrivacyClass
+    media_privacy_ceiling: MediaPrivacyCeiling = "ordinary"
     event_snapshot_ref: str = Field(min_length=1, max_length=512)
     event_snapshot_hash: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
     source_event_refs: tuple[str, ...] = Field(min_length=1, max_length=32)
@@ -344,6 +348,11 @@ class MediaOpportunity(FrozenModel):
     media_machine_version: Literal["media-machine.v5"] = "media-machine.v5"
     inspection_contract_version: Literal["media-inspection.v7"] = "media-inspection.v7"
     media_lane: MediaLane = "ordinary_life"
+    # Ecology-only selection coordinates.  They are not a visual prompt and
+    # give cooldown/replay logic a durable category without inspecting image
+    # sidecar prose from legacy releases.
+    ecology_category: str | None = Field(default=None, min_length=1, max_length=128)
+    ecology_observed_at: datetime | None = None
     recipient_ref: str | None = Field(default=None, min_length=1, max_length=256)
     private_expression_basis_ref: str | None = Field(default=None, min_length=1, max_length=512)
     expires_at: datetime
@@ -563,7 +572,7 @@ def media_delivery_id(*, action_id: str, receipt_id: str) -> str:
 
 
 __all__ = [
-    "MEDIA_V2_PAYLOAD_MODELS", "PhotoCandidate", "MediaEvidenceSource", "ImageEvidenceIndexEntry", "ImageEventSnapshot", "FrozenMediaEvidenceSnapshot", "MediaOpportunity", "MediaPlan", "MediaNotRenderable", "MediaArtifact", "MediaInspectionRecord", "MediaPreview", "MediaRepairAuthorization", "MediaAutomaticDeliveryApproval", "MediaDeliveryShared",
+    "MEDIA_V2_PAYLOAD_MODELS", "PhotoCandidate", "MediaEvidenceSource", "ImageEvidenceIndexEntry", "ImageEventSnapshot", "FrozenMediaEvidenceSnapshot", "MediaPrivacyCeiling", "MediaOpportunity", "MediaPlan", "MediaNotRenderable", "MediaArtifact", "MediaInspectionRecord", "MediaPreview", "MediaRepairAuthorization", "MediaAutomaticDeliveryApproval", "MediaDeliveryShared",
     "PhotoCandidateOpenedPayload", "MediaOpportunityFrozenPayload", "MediaPlanRecordedPayload", "MediaNotRenderableRecordedPayload", "MediaRenderArtifactRecordedPayload", "MediaInspectionRecordedPayload", "MediaPreviewGeneratedPayload", "MediaPreviewFailedPayload", "MediaRepairAuthorizedPayload", "MediaAutomaticDeliveryApprovedPayload", "MediaDeliverySharedPayload",
     "StoredMediaPayload", "ImmutableMediaPayloadStore", "InMemoryImmutableMediaPayloadStore", "SQLiteImmutableMediaPayloadStore",
     "MediaPlanner", "MediaPlanningResult", "media_digest", "media_payload_hash", "planning_request_id", "continuation_trigger_id", "media_repair_trigger_id", "media_repair_attempt_id", "media_repair_action_id", "media_repair_reservation_id", "media_delivery_action_id", "media_delivery_reservation_id", "media_delivery_id",

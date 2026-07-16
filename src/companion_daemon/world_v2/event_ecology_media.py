@@ -15,23 +15,24 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-import json
 from typing import Literal, Protocol
 
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
 from .media_v2 import (
-    FrozenMediaEvidenceSnapshot,
     ImmutableMediaPayloadStore,
-    MediaEvidenceSource,
     MediaOpportunity,
     MediaOpportunityFrozenPayload,
     PhotoCandidate,
     PhotoCandidateOpenedPayload,
     StoredMediaPayload,
-    canonical_media_json,
     media_digest,
-    media_payload_hash,
+)
+from .media_evidence_snapshot import (
+    CompiledMediaEvidence,
+    MediaEvidenceCompileRequest,
+    MediaEvidenceNotRenderable,
+    MediaEvidenceSnapshotCompiler,
 )
 from .schemas import ProjectionCursor, WorldEvent
 
@@ -87,6 +88,9 @@ class EcologyPolicy:
     category_cooldown: timedelta = timedelta(hours=6)
     default_expiry: timedelta = timedelta(hours=48)
     fleeting_expiry: timedelta = timedelta(hours=12)
+    # The former one-step candidate → preview path is migration-only.  P1
+    # replaces it with selection and authorization in Deliberation.
+    direct_preview_compatibility: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,9 +108,14 @@ class EcologyCandidate:
 
 @dataclass(frozen=True, slots=True)
 class EcologyDrainResult:
-    status: Literal["created", "idle"]
+    status: Literal["created", "idle", "not_renderable"]
     candidate_ids: tuple[str, ...] = ()
     opportunity_ids: tuple[str, ...] = ()
+    reason_code: str | None = None
+
+
+class _MediaEvidenceCompiler(Protocol):
+    def compile(self, request: MediaEvidenceCompileRequest) -> CompiledMediaEvidence: ...
 
 
 class _ProjectionLike(Protocol):
@@ -166,8 +175,10 @@ class EventEcologyMediaCandidateRuntime:
     def __init__(
         self, *, ledger: LedgerPort, sidecar: ImmutableMediaPayloadStore,
         policy: EcologyPolicy = EcologyPolicy(),
+        compiler: _MediaEvidenceCompiler | None = None,
     ) -> None:
         self._ledger, self._sidecar, self._policy = ledger, sidecar, policy
+        self._compiler = compiler or MediaEvidenceSnapshotCompiler(ledger=ledger)
 
     def drain_once(
         self, *, wake_event_ref: str, logical_time: datetime, actor: str, trace_id: str, correlation_id: str,
@@ -186,6 +197,11 @@ class EventEcologyMediaCandidateRuntime:
         candidates = self._discover(projection=projection, logical_time=logical_time)
         if not candidates:
             return EcologyDrainResult(status="idle")
+        if not self._policy.direct_preview_compatibility:
+            # Base ecology selects no visible media opportunity.  This keeps
+            # the former direct-freeze path behind an explicit migration flag
+            # until the P1 authorizer owns selection and approval.
+            return EcologyDrainResult(status="idle")
         events: list[WorldEvent] = []
         candidate_ids: list[str] = []
         opportunity_ids: list[str] = []
@@ -197,41 +213,37 @@ class EventEcologyMediaCandidateRuntime:
                 "sources": selected.source_event_refs,
             })
             opportunity_id = "media-opportunity:ecology:" + media_digest({
-                "candidate_id": candidate_id, "snapshot": selected.source_payload_hashes,
+                "candidate_id": candidate_id,
+                "compiler_contract": "world-image-event-snapshot-v1",
+                "snapshot": selected.source_payload_hashes,
             })
-            snapshot = FrozenMediaEvidenceSnapshot(
-                source_events=tuple(
-                    MediaEvidenceSource(event_ref=ref, payload_hash=digest)
-                    for ref, digest in zip(selected.source_event_refs, selected.source_payload_hashes, strict=True)
-                ),
-                # This object is intentionally evidence coordinates rather
-                # than a prompt.  Every value came from a committed head and
-                # is bound again by ``source_events`` above.
-                complete_candidate={
-                    "ecology_contract_version": self._policy.catalog_version,
-                    "candidate_id": candidate_id,
-                    "category": selected.category,
-                    "observed_at": selected.observed_at.isoformat(),
-                    "frozen_at": logical_time.isoformat(),
-                    "evidence_context": selected.context,
-                },
-            )
-            snapshot_body = canonical_media_json(snapshot.model_dump(mode="json"))
-            snapshot_ref = "sidecar:media-ecology:" + candidate_id
-            snapshot_hash = media_payload_hash(snapshot_body)
-            self._sidecar.put_if_absent(StoredMediaPayload(
-                payload_ref=snapshot_ref, payload_hash=snapshot_hash,
-                content_type="application/vnd.world-v2.media-opportunity+json", body=snapshot_body,
-            ))
             candidate = PhotoCandidate(
                 candidate_id=candidate_id, source_event_refs=selected.source_event_refs,
                 family="life_share", privacy_ceiling=selected.privacy_ceiling,
             )
+            try:
+                compiled = self._compiler.compile(MediaEvidenceCompileRequest(
+                    candidate=candidate, category=selected.category, cursor=_cursor(projection),
+                ))
+            except MediaEvidenceNotRenderable as exc:
+                # Do not substitute a generic image when a source cannot be
+                # rendered.  No partial candidate/opportunity batch is
+                # committed before the future suppression state machine exists.
+                return EcologyDrainResult(status="not_renderable", reason_code=exc.reason_code)
+            snapshot_body = compiled.snapshot_body
+            snapshot_ref = compiled.snapshot_ref
+            snapshot_hash = compiled.snapshot_hash
+            self._sidecar.put_if_absent(StoredMediaPayload(
+                payload_ref=snapshot_ref, payload_hash=snapshot_hash,
+                content_type="application/vnd.world-v2.media-opportunity+json", body=snapshot_body,
+            ))
             opportunity = MediaOpportunity(
                 opportunity_id=opportunity_id, candidate_id=candidate_id, family="life_share",
                 delivery_mode="preview", privacy_ceiling=selected.privacy_ceiling,
+                media_privacy_ceiling="ordinary",
                 event_snapshot_ref=snapshot_ref, event_snapshot_hash=snapshot_hash,
                 source_event_refs=selected.source_event_refs, catalog_version=self._policy.catalog_version,
+                ecology_category=selected.category, ecology_observed_at=selected.observed_at,
                 expires_at=selected.expires_at,
             )
             candidate_payload = PhotoCandidateOpenedPayload(candidate=candidate).model_dump(mode="json")
@@ -382,17 +394,8 @@ class EventEcologyMediaCandidateRuntime:
             # guessed from prose or image output.
             if opportunity.catalog_version != self._policy.catalog_version:
                 continue
-            stored = self._sidecar.read_exact(payload_ref=opportunity.event_snapshot_ref)
-            if stored is None or stored.payload_hash != opportunity.event_snapshot_hash:
-                continue
-            try:
-                body = json.loads(stored.body)
-                complete = body.get("complete_candidate")
-                category = complete.get("category") if isinstance(complete, dict) else None
-                frozen_at = complete.get("frozen_at") if isinstance(complete, dict) else None
-                at = datetime.fromisoformat(frozen_at) if isinstance(frozen_at, str) else None
-            except (TypeError, ValueError, json.JSONDecodeError):
-                continue
+            category = opportunity.ecology_category
+            at = opportunity.ecology_observed_at
             if category in _ECOLOGY_CATEGORY_SET and at is not None and at.tzinfo is not None:
                 values.append((category, at))
         return tuple(values)

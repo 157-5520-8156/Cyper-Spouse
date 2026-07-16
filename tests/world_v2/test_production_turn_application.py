@@ -379,7 +379,10 @@ async def test_production_ecology_runs_only_after_a_durable_life_wake_and_only_o
         companion_actor_ref="agent:companion",
         reply_target="user:user.1",
         action_pump_owner="pump:production-ecology",
-        event_ecology_policy=EcologyPolicy(max_candidates_per_drain=1),
+        event_ecology_policy=EcologyPolicy(
+            max_candidates_per_drain=1,
+            direct_preview_compatibility=True,
+        ),
     )
     app = build_sqlite_world_v2_turn_application(
         path=tmp_path / "world-v2-ecology.sqlite",

@@ -12,6 +12,7 @@ from companion_daemon.world_v2.event_ecology_media import (
     EventEcologyMediaCandidateRuntime,
 )
 from companion_daemon.world_v2.media_v2 import InMemoryImmutableMediaPayloadStore
+from companion_daemon.world_v2.media_v2 import media_payload_hash
 from companion_daemon.world_v2.schemas import CommittedWorldEventRef, ProjectionCursor
 
 
@@ -78,6 +79,31 @@ def _origin(ref: str, *, at: datetime = NOW):
     return SimpleNamespace(accepted_event_ref=ref, accepted_at=at)
 
 
+class _Compiler:
+    """Narrow ecology fake; the compiler's pin/provenance contract is tested separately."""
+
+    def __init__(self) -> None:
+        self.requests = []
+
+    def compile(self, request):  # type: ignore[no-untyped-def]
+        self.requests.append(request)
+        body = json.dumps(
+            {
+                "image_event_snapshot": {
+                    "schema_version": "world-image-event-snapshot-v1",
+                    "category": request.category,
+                }
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return SimpleNamespace(
+            snapshot_body=body,
+            snapshot_ref="sidecar:test-compiled:" + request.candidate.candidate_id,
+            snapshot_hash=media_payload_hash(body),
+        )
+
+
 def test_ecology_derives_diverse_candidates_only_from_existing_shareable_authority() -> None:
     active = _ref("activity", "ActivityStarted", at=NOW - timedelta(minutes=10))
     result = _ref("result", "WorldOccurrenceSettled", at=NOW - timedelta(minutes=8))
@@ -132,9 +158,14 @@ def test_ecology_derives_diverse_candidates_only_from_existing_shareable_authori
     )
     ledger = _Ledger(projection)
     store = InMemoryImmutableMediaPayloadStore()
+    compiler = _Compiler()
     runtime = EventEcologyMediaCandidateRuntime(
         ledger=ledger, sidecar=store,
-        policy=EcologyPolicy(max_candidates_per_drain=8, max_opportunities_per_day=8),
+        policy=EcologyPolicy(
+            max_candidates_per_drain=8, max_opportunities_per_day=8,
+            direct_preview_compatibility=True,
+        ),
+        compiler=compiler,
     )
 
     result_value = runtime.drain_once(
@@ -153,20 +184,13 @@ def test_ecology_derives_diverse_candidates_only_from_existing_shareable_authori
         store.read_exact(payload_ref=item.event_snapshot_ref).body  # type: ignore[union-attr]
         for item in projection.media_opportunities
     ]
-    categories = {json.loads(body)["complete_candidate"]["category"] for body in snapshots}
+    categories = {json.loads(body)["image_event_snapshot"]["category"] for body in snapshots}
     assert categories == {
         "activity_process", "npc_shared_outcome", "shared_experience", "place_environment", "object_or_food",
     }
     # Snapshot contains only declared coordinates.  In particular it did not
     # manufacture weather prose, food description, an NPC name, or a pose.
-    environment_snapshot = next(
-        json.loads(body)["complete_candidate"] for body in snapshots
-        if json.loads(body)["complete_candidate"]["category"] == "place_environment"
-    )
-    assert environment_snapshot["evidence_context"] == {
-        "predicate_code": "environment.weather", "subject_ref": "world:outside",
-        "value_hash": "d" * 64, "value_ref": "fact-value:rain",
-    }
+    assert {request.category for request in compiler.requests} == categories
 
 
 def test_ecology_is_replay_safe_and_category_cooldown_uses_persisted_opportunities() -> None:
@@ -179,7 +203,12 @@ def test_ecology_is_replay_safe_and_category_cooldown_uses_persisted_opportuniti
     )
     projection = _projection(refs=(first,), plans=(plan_one,))
     ledger = _Ledger(projection)
-    runtime = EventEcologyMediaCandidateRuntime(ledger=ledger, sidecar=InMemoryImmutableMediaPayloadStore())
+    runtime = EventEcologyMediaCandidateRuntime(
+        ledger=ledger,
+        sidecar=InMemoryImmutableMediaPayloadStore(),
+        policy=EcologyPolicy(direct_preview_compatibility=True),
+        compiler=_Compiler(),
+    )
 
     created = runtime.drain_once(
         wake_event_ref=first.event_id, logical_time=NOW, actor="worker:event-ecology",
@@ -222,7 +251,12 @@ def test_ecology_recovers_an_older_committed_wake_at_the_current_logical_time() 
     later = NOW + timedelta(minutes=5)
     projection.logical_time = later
     ledger = _Ledger(projection)
-    runtime = EventEcologyMediaCandidateRuntime(ledger=ledger, sidecar=InMemoryImmutableMediaPayloadStore())
+    runtime = EventEcologyMediaCandidateRuntime(
+        ledger=ledger,
+        sidecar=InMemoryImmutableMediaPayloadStore(),
+        policy=EcologyPolicy(direct_preview_compatibility=True),
+        compiler=_Compiler(),
+    )
 
     result = runtime.drain_once(
         wake_event_ref=wake.event_id, logical_time=later, actor="worker:event-ecology",
@@ -272,10 +306,40 @@ def test_ecology_fails_closed_before_any_ledger_write_when_snapshot_sidecar_is_u
             del payload_ref
             return None
 
-    runtime = EventEcologyMediaCandidateRuntime(ledger=ledger, sidecar=_UnavailableSidecar())
+    runtime = EventEcologyMediaCandidateRuntime(
+        ledger=ledger,
+        sidecar=_UnavailableSidecar(),
+        policy=EcologyPolicy(direct_preview_compatibility=True),
+        compiler=_Compiler(),
+    )
     with pytest.raises(OSError, match="sidecar offline"):
         runtime.drain_once(
             wake_event_ref=source.event_id, logical_time=NOW, actor="worker:event-ecology",
             trace_id="trace:sidecar", correlation_id="correlation:sidecar",
         )
+
+
+def test_ecology_does_not_keep_the_direct_freeze_path_enabled_by_default() -> None:
+    source = _ref("default-disabled", "ActivityStarted")
+    projection = _projection(
+        refs=(source,),
+        plans=(SimpleNamespace(
+            status="active", authority_origin=_origin(source.event_id), privacy_class="shareable",
+            last_transitioned_at=NOW, activity_kind="walk", location_ref="location:park",
+            participant_refs=("companion:celia",),
+        ),),
+    )
+    ledger = _Ledger(projection)
+    compiler = _Compiler()
+
+    result = EventEcologyMediaCandidateRuntime(
+        ledger=ledger, sidecar=InMemoryImmutableMediaPayloadStore(), compiler=compiler,
+    ).drain_once(
+        wake_event_ref=source.event_id, logical_time=NOW, actor="worker:event-ecology",
+        trace_id="trace:default", correlation_id="correlation:default",
+    )
+
+    assert result.status == "idle"
+    assert compiler.requests == []
+    assert ledger.commits == []
     assert ledger.commits == []
