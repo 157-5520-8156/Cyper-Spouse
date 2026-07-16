@@ -96,6 +96,7 @@ async def test_injected_tool_lane_compiles_enforced_request_then_settles_a_real_
     ))
     compiled = ReadOnlyToolProposalCompiler(
         ledger=ledger, authorization_resolver=ProjectionReadOnlyToolAuthorizationResolver(), actor_ref="agent:companion",
+        budget_account_id="account:tool", budget_limit=5,
     ).accept(world_id=WORLD, cursor=audited.cursor, proposal_id=proposal.proposal_id, actor="worker:tool", source="test")
     assert compiled.status == "accepted"
     provider = Provider()
