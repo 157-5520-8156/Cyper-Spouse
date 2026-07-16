@@ -19,6 +19,7 @@ from companion_daemon.world_v2.media_selection_acceptance_runtime import (
 )
 from companion_daemon.world_v2.media_selection_proposal import MediaSelectionProposalCompiler
 from companion_daemon.world_v2.media_v2 import (
+    CharacterMediaCandidateContract,
     InMemoryImmutableMediaPayloadStore,
     MediaEvidenceSource,
     MediaOpportunity,
@@ -26,6 +27,7 @@ from companion_daemon.world_v2.media_v2 import (
     PhotoCandidateOpenedPayload,
     canonical_media_json,
     media_payload_hash,
+    character_media_contract_digest,
 )
 from companion_daemon.world_v2.schemas import (
     BudgetAccount,
@@ -206,6 +208,109 @@ def test_real_ledger_acceptance_commits_one_selected_candidate_and_planning_acti
     assert replayed.media_opportunities[0].selected_candidate_revision == candidate.entity_revision
     assert replayed.actions[0].kind == "media_planning"
     assert replayed.actions[0].budget_reservation_id == replayed.budget_reservations[0].reservation_id
+
+
+def test_real_ledger_acceptance_preserves_p2_candidate_and_snapshot_lineages(monkeypatch) -> None:
+    """P2 may add frozen snapshot facts without replacing selected lineage."""
+
+    world_id = "world:media-selection-acceptance-p2"
+    issuer = AcceptedLedgerBatchIssuer()
+    ledger = WorldLedger.in_memory(world_id=world_id, accepted_batch_issuer=issuer)
+    clock = _event(
+        world_id=world_id, event_id="event:clock:media-selection-p2", event_type="ClockAdvanced",
+        payload={
+            "logical_time_from": (NOW - timedelta(seconds=1)).isoformat(),
+            "logical_time_to": NOW.isoformat(),
+        }, causation_id="cause:clock",
+    )
+    ledger.commit((clock,), expected_world_revision=0, expected_deliberation_revision=0)
+    started = _event(
+        world_id=world_id, event_id="event:world-started:media-selection-p2",
+        event_type="WorldStarted", payload={}, causation_id="cause:world-started",
+    )
+    account = BudgetAccount(
+        account_id="account:media-selection-p2", category="image", window_id="window:media-selection-p2", limit=5
+    )
+    account_event = _event(
+        world_id=world_id, event_id="event:account:media-selection-p2", event_type="BudgetAccountConfigured",
+        payload={"account": account.model_dump(mode="json")}, causation_id=started.event_id,
+    )
+    ledger.commit((started, account_event), expected_world_revision=1, expected_deliberation_revision=0)
+    source = MediaEvidenceSource(event_ref=started.event_id, payload_hash=started.payload_hash)
+    contract = CharacterMediaCandidateContract(
+        subject_ref="agent:companion", kind="selfie",
+        allowed_capture_modes=("character_front_camera",),
+        allowed_character_visibility=("identifiable",),
+        authority_digest=character_media_contract_digest(
+            subject_ref="agent:companion", kind="selfie", source_events=(source,),
+            allowed_capture_modes=("character_front_camera",),
+            allowed_character_visibility=("identifiable",),
+        ),
+    )
+    candidate = PhotoCandidate(
+        candidate_id="candidate:media-selection-p2", source_event_refs=(started.event_id,),
+        family="character_media", privacy_ceiling="shareable", opened_at=NOW,
+        expires_at=NOW + timedelta(hours=1), ecology_category="character_media:selfie",
+        ecology_observed_at=NOW, source_events=(source,), character_media_contract=contract,
+    )
+    candidate_event = _event(
+        world_id=world_id, event_id="event:candidate:media-selection-p2", event_type="PhotoCandidateOpened",
+        payload=PhotoCandidateOpenedPayload(candidate=candidate).model_dump(mode="json"),
+        causation_id=account_event.event_id,
+    )
+    ledger.commit_at_cursor((candidate_event,), expected_cursor=_cursor(ledger.project()))
+    projection = ledger.project()
+    proposal = MediaSelectionProposalCompiler(catalog_version="test-media-selection-p2.1").compile(
+        projection=projection,
+        selection=MediaSelection(candidate_id=candidate.candidate_id, family="character_media"),
+        model="test-flash", raw_output_hash="sha256:" + "a" * 64,
+        normalized_output_hash="sha256:" + "b" * 64,
+    )
+    recorded = MediaSelectionProposalRecorder(ledger=ledger).record(
+        cursor=_cursor(projection), proposal=proposal, actor="worker:media-selection",
+        source="test:media-selection", created_at=NOW, trace_id="trace:media-selection",
+        correlation_id="correlation:media-selection",
+    )
+
+    class _P2Authorizer:
+        def authorize(self, *, cursor, selection, category, observed_at, expires_at):  # type: ignore[no-untyped-def]
+            del cursor, observed_at
+            body = canonical_media_json({"schema_version": "test-frozen-image-evidence.p2"})
+            compiled = SimpleNamespace(
+                snapshot_ref="sidecar:test:media-selection-p2", snapshot_hash=media_payload_hash(body),
+                snapshot_body=body,
+            )
+            return MediaOpportunity(
+                opportunity_id="opportunity:test:media-selection-p2", candidate_id=selection.candidate_id,
+                family="character_media", delivery_mode="preview", privacy_ceiling="shareable",
+                media_privacy_ceiling="ordinary", event_snapshot_ref=compiled.snapshot_ref,
+                event_snapshot_hash=compiled.snapshot_hash, source_event_refs=(started.event_id,),
+                candidate_source_event_refs=(started.event_id,), snapshot_source_events=(source,),
+                catalog_version="test-media-selection-p2.1", ecology_category=category,
+                ecology_observed_at=NOW, expires_at=expires_at,
+            ), compiled
+
+    monkeypatch.setattr(
+        "companion_daemon.world_v2.reducers.require_provider_media_grant", lambda **_kwargs: object()
+    )
+    runtime = MediaSelectionAcceptanceRuntime(
+        ledger=ledger, authorizer=_P2Authorizer(), sidecar=InMemoryImmutableMediaPayloadStore(),
+        batch_issuer=issuer,
+    )
+    runtime.accept(
+        handle=runtime.pin_proposal(cursor=_cursor(ledger.project()), proposal_event_ref=recorded.proposal_event_ref),
+        actor="worker:media-selection", source="test:media-selection", logical_time=NOW, created_at=NOW,
+        trace_id="trace:media-selection", correlation_id="correlation:media-selection",
+        grant=ProviderMediaGrantBinding(grant_id="grant:test", grant_revision=1), account_id=account.account_id,
+        amount_limit=1,
+    )
+
+    replayed = ledger.project()
+    opportunity = replayed.media_opportunities[0]
+    assert replayed.photo_candidates[0].status == "selected"
+    assert opportunity.family == "character_media"
+    assert opportunity.candidate_source_event_refs == candidate.source_event_refs
+    assert opportunity.snapshot_source_events == candidate.source_events
 
 
 def test_pin_rejects_selection_proposal_not_caused_by_its_candidate_opening() -> None:
