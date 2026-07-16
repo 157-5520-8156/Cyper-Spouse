@@ -26,6 +26,13 @@ from .activity_plan_runtime import (
     ActivityPlanRuntime,
     ActivityPlanTransitionCommand,
 )
+from .activity_lifecycle_draft import ActivityLifecycleDraftAdapter, ActivityLifecycleDraftModel
+from .activity_lifecycle_runtime import (
+    ActivityLifecycleAcceptanceRuntime,
+    ActivityLifecycleProposalRecorder,
+)
+from .activity_lifecycle_worker import ActivityLifecycleWorker
+from .life_ecology_activity import ActivityOpeningCatalog
 from .deferred_reply_runtime import DeferredReplyRuntime, ReplyLaterCommand
 from .affect_trigger_runtime import AffectTriggerRunResult
 from .fact_draft_adapter import FactDraftChatModel, FactObservationProposalAdapter
@@ -726,6 +733,7 @@ def build_sqlite_world_v2_turn_application(
     interaction_bid_model: DeliberationModelAdapter | None = None,
     fact_model: FactDraftChatModel | None = None,
     memory_model: FactMemoryDraftChatModel | None = None,
+    activity_lifecycle_model: ActivityLifecycleDraftModel | None = None,
     read_only_tool_model: DeliberationModelAdapter | None = None,
     read_only_tool_transport: ReadOnlyToolTransport | None = None,
     expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
@@ -1105,6 +1113,20 @@ def build_sqlite_world_v2_turn_application(
             if ecology_policy is not None
             else None
         )
+        activity_lifecycle = (
+            ActivityLifecycleWorker(
+                ledger=ledger,
+                catalog=ActivityOpeningCatalog(owner_actor_ref=config.companion_actor_ref),
+                draft_adapter=ActivityLifecycleDraftAdapter(model=activity_lifecycle_model),
+                proposal_recorder=ActivityLifecycleProposalRecorder(ledger=ledger),
+                acceptance_runtime=ActivityLifecycleAcceptanceRuntime(
+                    ledger=ledger, batch_issuer=issuer
+                ),
+                ecology_catalog_version=config.life_ecology.catalog_version,
+            )
+            if config.life_ecology is not None and activity_lifecycle_model is not None
+            else None
+        )
         life_ecology = (
             LifeEcologyRuntime(
                 ledger=ledger,
@@ -1114,6 +1136,7 @@ def build_sqlite_world_v2_turn_application(
                     lease_seconds=config.life_ecology.lease_seconds,
                 ),
                 media_followup=media_ecology,
+                activity_followup=activity_lifecycle,
                 availability=LifeEcologyAvailability(
                     state="installed_and_active",
                     catalog_version=config.life_ecology.catalog_version,
