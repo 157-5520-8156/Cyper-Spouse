@@ -6064,6 +6064,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "affect_deliberation",
         "outcome_deliberation",
         "expression_reconsideration",
+        "life_ecology",
     }:
         if (
             state.logical_time is None
@@ -6106,6 +6107,7 @@ def _trigger_process_claimed(state: ReducerState, event: WorldEvent) -> ReducerS
         "affect_deliberation",
         "outcome_deliberation",
         "expression_reconsideration",
+        "life_ecology",
     }:
         raise ValueError("appraisal trigger must be opened before it is claimed")
     return state.model_copy(update={"trigger_processes": (*state.trigger_processes, process)})
@@ -6363,6 +6365,36 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             )
         ):
             raise ValueError("expression reconsideration trigger is not eligible")
+    if process.process_kind == "life_ecology":
+        source = next(
+            (
+                item
+                for item in state.committed_world_event_refs
+                if item.event_id == process.source_evidence_ref
+            ),
+            None,
+        )
+        from .life_ecology_trigger_store import (
+            LIFE_ECOLOGY_WAKE_EVENT_TYPES,
+            life_ecology_trigger_id,
+            parse_life_ecology_trigger_ref,
+        )
+
+        parsed_ref = parse_life_ecology_trigger_ref(process.trigger_ref)
+        if (
+            source is None
+            or source.event_type not in LIFE_ECOLOGY_WAKE_EVENT_TYPES
+            or parsed_ref is None
+            or parsed_ref[1] != process.source_evidence_ref
+            or process.trigger_id
+            != life_ecology_trigger_id(
+                world_id=event.world_id,
+                wake_event_ref=parsed_ref[1],
+                catalog_version=parsed_ref[0],
+            )
+            or event.causation_id != source.event_id
+        ):
+            raise ValueError("life ecology trigger is not bound to its committed wake")
     if any(item.trigger_id == process.trigger_id for item in state.trigger_processes):
         raise ValueError(f"trigger {process.trigger_id!r} already exists")
     return state.model_copy(update={"trigger_processes": (*state.trigger_processes, process)})

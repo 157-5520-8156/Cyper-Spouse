@@ -555,6 +555,7 @@ class TriggerProcess(FrozenModel):
         "media_repair",
         "media_delivery_interaction",
         "external_result_deliberation",
+        "life_ecology",
     ]
     source_evidence_ref: str | None = None
     state: Literal["open", "claimed", "terminal"]
@@ -580,6 +581,7 @@ class TriggerProcess(FrozenModel):
                 "media_repair",
                 "media_delivery_interaction",
                 "external_result_deliberation",
+                "life_ecology",
             }
             and self.source_evidence_ref is not None
         ):

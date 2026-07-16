@@ -380,6 +380,7 @@ def _life_identity_components(
             "media_delivery_interaction",
             "expression_reconsideration",
             "external_result_deliberation",
+            "life_ecology",
         }:
             attempts = process.get("attempt_ids")
             attempt_id = attempts[-1] if isinstance(attempts, list) and attempts else None
