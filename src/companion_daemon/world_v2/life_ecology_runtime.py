@@ -54,6 +54,7 @@ class LifeEcologyRunResult(FrozenModel):
     trigger_id: str | None = None
     reason_code: str | None = None
     media_followup_status: str | None = None
+    activity_followup_status: str | None = None
 
 
 class LifeEcologyTriggerStore(Protocol):
@@ -92,6 +93,21 @@ class MediaEcologyFollowup(Protocol):
     ) -> object: ...
 
 
+class ActivityLifecycleFollowup(Protocol):
+    """Optional model/acceptance lane installed by composition, never implicit."""
+
+    async def advance_once(
+        self,
+        *,
+        wake_event_ref: str,
+        trigger_id: str,
+        logical_time: datetime,
+        actor: str,
+        trace_id: str,
+        correlation_id: str,
+    ) -> object: ...
+
+
 class LifeEcologyRuntime:
     """Advance a single durable wake without becoming a second life writer."""
 
@@ -101,6 +117,7 @@ class LifeEcologyRuntime:
         ledger,
         trigger_store: LifeEcologyTriggerStore,
         media_followup: MediaEcologyFollowup,
+        activity_followup: ActivityLifecycleFollowup | None = None,
         availability: LifeEcologyAvailability,
         actor: str = "worker:life-ecology",
     ) -> None:
@@ -109,6 +126,7 @@ class LifeEcologyRuntime:
         self._ledger = ledger
         self._trigger_store = trigger_store
         self._media_followup = media_followup
+        self._activity_followup = activity_followup
         self._availability = availability
         self._actor = actor
 
@@ -165,6 +183,27 @@ class LifeEcologyRuntime:
                 reason_code="life_ecology.run_in_progress",
             )
 
+        activity_status: str | None = None
+        if self._activity_followup is not None:
+            try:
+                activity_result = await self._advance_activity_once(
+                    wake_event_ref=wake_event_ref,
+                    trigger_id=claim.trigger_id,
+                    logical_time=logical_time,
+                    trace_id=trace_id,
+                    correlation_id=correlation_id,
+                )
+                activity_status = getattr(activity_result, "status", None)
+                if not isinstance(activity_status, str) or not activity_status:
+                    raise ValueError("activity lifecycle result has no stable status")
+            except Exception:
+                await self._complete_failed_safe(key=key, trigger_id=claim.trigger_id)
+                return LifeEcologyRunResult(
+                    status="failed_safe",
+                    trigger_id=claim.trigger_id,
+                    reason_code="life_ecology.activity_followup_failed",
+                )
+
         try:
             media_result = await self._drain_media_once(
                 wake_event_ref=wake_event_ref,
@@ -181,6 +220,7 @@ class LifeEcologyRuntime:
                 status="failed_safe",
                 trigger_id=claim.trigger_id,
                 reason_code="life_ecology.media_followup_failed",
+                activity_followup_status=activity_status,
             )
 
         try:
@@ -193,9 +233,13 @@ class LifeEcologyRuntime:
                 trigger_id=claim.trigger_id,
                 reason_code="life_ecology.trigger_completion_failed",
                 media_followup_status=media_status,
+                activity_followup_status=activity_status,
             )
         return LifeEcologyRunResult(
-            status="idle", trigger_id=claim.trigger_id, media_followup_status=media_status
+            status="advanced" if activity_status == "transitioned" else "idle",
+            trigger_id=claim.trigger_id,
+            media_followup_status=media_status,
+            activity_followup_status=activity_status,
         )
 
     def _validated_wake(self, *, wake_event_ref: str) -> datetime | None:
@@ -257,6 +301,25 @@ class LifeEcologyRuntime:
             return await asyncio.to_thread(self._media_followup.drain_once, **kwargs)
         return self._media_followup.drain_once(**kwargs)
 
+    async def _advance_activity_once(
+        self,
+        *,
+        wake_event_ref: str,
+        trigger_id: str,
+        logical_time: datetime,
+        trace_id: str,
+        correlation_id: str,
+    ) -> object:
+        assert self._activity_followup is not None
+        return await self._activity_followup.advance_once(
+            wake_event_ref=wake_event_ref,
+            trigger_id=trigger_id,
+            logical_time=logical_time,
+            actor=self._actor,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+
     async def _complete_failed_safe(self, *, key: LifeEcologyRunKey, trigger_id: str) -> None:
         try:
             await self._trigger_store.complete(
@@ -270,6 +333,7 @@ class LifeEcologyRuntime:
 
 
 __all__ = [
+    "ActivityLifecycleFollowup",
     "LifeEcologyAvailability",
     "LifeEcologyAvailabilityState",
     "LifeEcologyRunClaim",

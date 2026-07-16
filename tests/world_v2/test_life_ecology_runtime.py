@@ -95,6 +95,19 @@ class _Media:
         return SimpleNamespace(status=self.status)
 
 
+class _Activity:
+    def __init__(self, *, status: str = "no_op", raises: bool = False) -> None:
+        self.status = status
+        self.raises = raises
+        self.calls = []
+
+    async def advance_once(self, **kwargs):  # type: ignore[no-untyped-def]
+        self.calls.append(kwargs)
+        if self.raises:
+            raise RuntimeError("activity failed")
+        return SimpleNamespace(status=self.status)
+
+
 @pytest.mark.asyncio
 async def test_life_ecology_rejects_a_wake_that_is_not_exactly_committed() -> None:
     event = _event("clock")
@@ -191,6 +204,51 @@ async def test_life_ecology_owns_one_valid_durable_wake_then_fans_out_once_and_r
         "correlation_id": "correlation:run",
     }]
     assert trigger_store.completed[0][2] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_life_ecology_runs_an_explicit_activity_followup_before_media_and_reports_advance() -> None:
+    event = _event("clock")
+    trigger_store, media, activity = _TriggerStore(), _Media(status="created"), _Activity(status="transitioned")
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=media,
+        activity_followup=activity,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id, trace_id="trace:activity", correlation_id="correlation:activity"
+    )
+
+    assert result.status == "advanced"
+    assert result.activity_followup_status == "transitioned"
+    assert activity.calls[0]["trigger_id"] == f"life-ecology:{event.event_id}"
+    assert len(media.calls) == 1
+    assert trigger_store.completed[0][2] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_life_ecology_fails_safe_without_media_when_activity_followup_fails() -> None:
+    event = _event("clock")
+    trigger_store, media, activity = _TriggerStore(), _Media(), _Activity(raises=True)
+    runtime = LifeEcologyRuntime(
+        ledger=_Ledger(event),
+        trigger_store=trigger_store,
+        media_followup=media,
+        activity_followup=activity,
+        availability=LifeEcologyAvailability(state="installed_and_active"),
+    )
+
+    result = await runtime.advance_once(
+        wake_event_ref=event.event_id, trace_id="trace:activity-fail", correlation_id="correlation:activity-fail"
+    )
+
+    assert result.status == "failed_safe"
+    assert result.reason_code == "life_ecology.activity_followup_failed"
+    assert media.calls == []
+    assert trigger_store.completed[0][2] == "failed_safe"
 
 
 @pytest.mark.asyncio
