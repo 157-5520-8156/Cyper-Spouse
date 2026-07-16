@@ -11,6 +11,10 @@ from companion_daemon.world_v2.media_evidence_snapshot import (
     MediaEvidenceNotRenderable,
     MediaEvidenceSnapshotCompiler,
 )
+from companion_daemon.world_v2.image_evidence_contract import (
+    ImageEvidenceDeclaredPayload,
+    ImageEvidenceV1,
+)
 from companion_daemon.world_v2.media_v2 import (
     FrozenMediaEvidenceSnapshot,
     ImageEvidenceIndexEntry,
@@ -99,6 +103,46 @@ def test_compiler_freezes_only_explicit_public_image_evidence_with_leaf_provenan
     assert compiled.image_event_snapshot_hash != compiled.snapshot_hash
     assert len(compiled.evidence_index_digest) == 64
     assert ledger.project_at_calls == 1
+
+
+def test_compiler_freezes_evidence_from_a_declaration_not_from_its_life_event_payload() -> None:
+    source = _event("declared-source", {})
+    declaration = _event(
+        "declaration",
+        ImageEvidenceDeclaredPayload(
+            source_event_ref=source.event_id,
+            source_event_payload_hash=source.payload_hash,
+            source_event_type=source.event_type,
+            source_privacy_ceiling="shareable",
+            image_evidence=ImageEvidenceV1(
+                visibility="shareable",
+                activity={
+                    "evidence_visibility": "shareable",
+                    "id": "activity:walk",
+                    "kind": "walk",
+                    "description": "雨后散步",
+                    "phase": "completed",
+                },
+            ),
+            declared_at=NOW,
+        ).model_dump(mode="json"),
+        event_type="ImageEvidenceDeclared",
+    )
+    ledger = _Ledger(source, declaration)
+    candidate = PhotoCandidate(
+        candidate_id="candidate:declared",
+        source_event_refs=tuple(sorted((source.event_id, declaration.event_id))),
+        family="life_share",
+        privacy_ceiling="shareable",
+    )
+
+    compiled = MediaEvidenceSnapshotCompiler(ledger=ledger).compile(_request(candidate, ledger))
+
+    image = compiled.snapshot.image_event_snapshot
+    assert image is not None
+    assert image.event["event_id"] == source.event_id
+    assert image.activity["description"] == "雨后散步"
+    assert image.evidence_index["/activity/description"].source_event_ref == declaration.event_id
 
 
 def test_compiler_never_resolves_value_refs_or_infers_a_visual_description() -> None:

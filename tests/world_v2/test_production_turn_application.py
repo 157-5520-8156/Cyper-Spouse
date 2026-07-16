@@ -487,12 +487,11 @@ async def test_production_ecology_runs_only_after_a_durable_life_wake_and_only_o
     finally:
         app.close()
 
-    # An explicit legacy compatibility switch cannot fabricate a generic
-    # photo when the source event has no committed visual evidence.
-    assert result is not None and result.status == "not_renderable"
-    assert result.reason_code == "no_visual_evidence"
-    assert replay is not None and replay.status == "not_renderable"
-    assert replay.reason_code == "no_visual_evidence"
+    # Even an explicit legacy compatibility switch cannot turn a bare life
+    # event into a picture candidate.  Production-capable ecology waits for a
+    # separately accepted, source-bound visual declaration.
+    assert result is not None and result.status == "idle"
+    assert replay is not None and replay.status == "idle"
     ledger = SQLiteWorldLedger(path=tmp_path / "world-v2-ecology.sqlite", world_id=config.world_id)
     try:
         projection = ledger.project()

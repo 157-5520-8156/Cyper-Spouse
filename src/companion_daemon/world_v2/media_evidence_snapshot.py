@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from .ledger import LedgerPort
+from .image_evidence_contract import ImageEvidenceDeclaredPayload
 from .media_v2 import (
     FrozenMediaEvidenceSnapshot,
     ImageEvidenceIndexEntry,
@@ -29,6 +30,7 @@ _PUBLIC_VISIBILITIES = frozenset({"public", "shareable"})
 _SUPPORTED_EVENT_TYPES = frozenset({
     "ActivityPlanned", "ActivityStarted", "ActivityResumed", "ActivityCompleted", "ActivityAbandoned",
     "WorldOccurrenceSettled", "ExperienceCommitted", "FactCommitted", "FactCorrected",
+    "FactCommitMaterializedV2", "ImageEvidenceDeclared",
 })
 _SECTION_FIELDS: dict[str, frozenset[str]] = {
     "location": frozenset({"id", "kind", "country", "region", "city", "publicness", "mirror_available"}),
@@ -138,7 +140,10 @@ class MediaEvidenceSnapshotCompiler:
         projection = self._ledger.project_at(request.cursor)
         self._require_exact_cursor(projection, request.cursor)
         events = self._load_sources(candidate=candidate, projection=projection, cursor=request.cursor)
-        primary = max(events, key=lambda item: (item.logical_time, item.event_id))
+        life_events = tuple(item for item in events if item.event_type != "ImageEvidenceDeclared")
+        if not life_events:
+            raise MediaEvidenceNotRenderable("image_evidence_has_no_life_source")
+        primary = max(life_events, key=lambda item: (item.logical_time, item.event_id))
 
         source_events = tuple(
             MediaEvidenceSource(event_ref=event.event_id, payload_hash=event.payload_hash)
@@ -163,7 +168,28 @@ class MediaEvidenceSnapshotCompiler:
             "/source": (primary, candidate.privacy_ceiling),
             "/visual_requirements": (primary, candidate.privacy_ceiling),
         }
+        event_by_ref = {event.event_id: event for event in events}
         for event in sorted(events, key=lambda item: (item.logical_time, item.event_id)):
+            if event.event_type == "ImageEvidenceDeclared":
+                try:
+                    declaration = ImageEvidenceDeclaredPayload.model_validate_json(event.payload_json)
+                except ValueError as exc:
+                    raise MediaEvidenceNotRenderable("malformed_image_evidence_declaration") from exc
+                source = event_by_ref.get(declaration.source_event_ref)
+                if (
+                    source is None
+                    or source.event_type != declaration.source_event_type
+                    or source.payload_hash != declaration.source_event_payload_hash
+                ):
+                    raise MediaEvidenceNotRenderable("image_evidence_anchor_unavailable")
+                self._merge_explicit_evidence(
+                    target=body,
+                    origins=origins,
+                    event=event,
+                    fallback_visibility=candidate.privacy_ceiling,
+                    raw=declaration.image_evidence.planner_payload(),
+                )
+                continue
             self._merge_explicit_evidence(
                 target=body, origins=origins, event=event, fallback_visibility=candidate.privacy_ceiling,
             )
@@ -243,10 +269,11 @@ class MediaEvidenceSnapshotCompiler:
 
     def _merge_explicit_evidence(
         self, *, target: dict[str, object], origins: dict[str, tuple[WorldEvent, Literal["public", "shareable"]]],
-        event: WorldEvent, fallback_visibility: Literal["public", "shareable"],
+        event: WorldEvent, fallback_visibility: Literal["public", "shareable"], raw: object | None = None,
     ) -> None:
-        payload = event.payload()
-        raw = payload.get("image_evidence")
+        if raw is None:
+            payload = event.payload()
+            raw = payload.get("image_evidence")
         if raw is None:
             # In particular, ``value_ref`` / ``value_hash`` never give this
             # compiler authority to read a fact payload or invent its content.

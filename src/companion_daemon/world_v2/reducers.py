@@ -99,6 +99,10 @@ from .media_v2 import (
     media_digest,
     planning_request_id,
 )
+from .image_evidence_contract import (
+    DECLARABLE_SOURCE_EVENT_TYPES,
+    ImageEvidenceDeclaredPayload,
+)
 from .appraisal_reducers import (
     accept_appraisal,
     contradict_appraisal,
@@ -5139,6 +5143,27 @@ def _photo_candidate_expired(state: ReducerState, event: WorldEvent) -> ReducerS
     )
 
 
+def _image_evidence_declared(state: ReducerState, event: WorldEvent) -> ReducerState:
+    """Validate source lineage; declaration bytes remain in the immutable ledger."""
+
+    payload = ImageEvidenceDeclaredPayload.model_validate_json(event.payload_json)
+    source = next(
+        (item for item in state.committed_world_event_refs if item.event_id == payload.source_event_ref),
+        None,
+    )
+    if (
+        state.logical_time is None
+        or event.logical_time != state.logical_time
+        or payload.declared_at != event.logical_time
+        or source is None
+        or source.event_type != payload.source_event_type
+        or source.payload_hash != payload.source_event_payload_hash
+        or source.event_type not in DECLARABLE_SOURCE_EVENT_TYPES
+    ):
+        raise ValueError("image evidence declaration source is not current")
+    return state
+
+
 def _media_selection_proposal_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     """Persist a model's P1 candidate choice without granting media effects."""
 
@@ -8823,6 +8848,7 @@ _EVENTS = {
             "PhotoCandidateUnrenderable", RevisionClass.WORLD, _photo_candidate_unrenderable
         ),
         EventDefinition("PhotoCandidateExpired", RevisionClass.WORLD, _photo_candidate_expired),
+        EventDefinition("ImageEvidenceDeclared", RevisionClass.WORLD, _image_evidence_declared),
         EventDefinition(
             "MediaSelectionProposalRecorded",
             RevisionClass.DELIBERATION,

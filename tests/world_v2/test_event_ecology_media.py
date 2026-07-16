@@ -13,7 +13,11 @@ from companion_daemon.world_v2.event_ecology_media import (
 )
 from companion_daemon.world_v2.media_v2 import InMemoryImmutableMediaPayloadStore
 from companion_daemon.world_v2.media_v2 import media_payload_hash
-from companion_daemon.world_v2.schemas import CommittedWorldEventRef, ProjectionCursor
+from companion_daemon.world_v2.image_evidence_contract import (
+    ImageEvidenceDeclaredPayload,
+    ImageEvidenceV1,
+)
+from companion_daemon.world_v2.schemas import CommittedWorldEventRef, ProjectionCursor, WorldEvent
 
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
@@ -66,6 +70,16 @@ class _Ledger:
         self._projection.world_revision += len(events)
 
 
+class _LedgerWithDeclarationLookup(_Ledger):
+    def __init__(self, projection: SimpleNamespace, *events: WorldEvent) -> None:
+        super().__init__(projection)
+        self._events = {event.event_id: event for event in events}
+
+    def lookup_event_commit(self, event_id: str):  # type: ignore[no-untyped-def]
+        event = self._events.get(event_id)
+        return None if event is None else (event, object())
+
+
 def _projection(*, refs, plans=(), occurrences=(), experiences=(), facts=(), npcs=()):  # type: ignore[no-untyped-def]
     return SimpleNamespace(
         world_revision=10, deliberation_revision=0, ledger_sequence=10, logical_time=NOW,
@@ -77,6 +91,23 @@ def _projection(*, refs, plans=(), occurrences=(), experiences=(), facts=(), npc
 
 def _origin(ref: str, *, at: datetime = NOW):
     return SimpleNamespace(accepted_event_ref=ref, accepted_at=at)
+
+
+def _world_event(event_id: str, event_type: str, payload: dict[str, object]) -> WorldEvent:
+    return WorldEvent.from_payload(
+        schema_version="world-v2.1", event_id=event_id, event_type=event_type,
+        world_id="world:event-ecology", logical_time=NOW, created_at=NOW,
+        actor="test:ecology", source="test:ecology", trace_id="trace:ecology",
+        causation_id="cause:ecology", correlation_id="correlation:ecology",
+        idempotency_key="identity:" + event_id, payload=payload,
+    )
+
+
+def _event_ref(event: WorldEvent, *, revision: int) -> CommittedWorldEventRef:
+    return CommittedWorldEventRef(
+        event_id=event.event_id, event_type=event.event_type, world_revision=revision,
+        payload_hash=event.payload_hash, logical_time=event.logical_time,
+    )
 
 
 class _Compiler:
@@ -101,7 +132,62 @@ class _Compiler:
             snapshot_body=body,
             snapshot_ref="sidecar:test-compiled:" + request.candidate.candidate_id,
             snapshot_hash=media_payload_hash(body),
-        )
+    )
+
+
+def test_production_capable_ecology_requires_one_exact_visual_declaration() -> None:
+    source = _world_event("event:declared-activity", "ActivityCompleted", {})
+    source_ref = _event_ref(source, revision=1)
+    plan = SimpleNamespace(
+        status="completed", authority_origin=_origin(source.event_id, at=NOW),
+        privacy_class="shareable", last_transitioned_at=NOW,
+        activity_kind="walk", location_ref="location:park", participant_refs=("companion:celia",),
+    )
+    projection = _projection(refs=(source_ref,), plans=(plan,))
+    without_declaration = _LedgerWithDeclarationLookup(projection, source)
+    runtime = EventEcologyMediaCandidateRuntime(
+        ledger=without_declaration, sidecar=InMemoryImmutableMediaPayloadStore(), policy=EcologyPolicy(),
+    )
+
+    assert runtime.drain_once(
+        wake_event_ref=source.event_id, logical_time=NOW, actor="worker:event-ecology",
+        trace_id="trace:ecology", correlation_id="correlation:ecology",
+    ).status == "idle"
+
+    declaration = _world_event(
+        "event:declared-activity:evidence",
+        "ImageEvidenceDeclared",
+        ImageEvidenceDeclaredPayload(
+            source_event_ref=source.event_id,
+            source_event_payload_hash=source.payload_hash,
+            source_event_type=source.event_type,
+            source_privacy_ceiling="shareable",
+            image_evidence=ImageEvidenceV1(
+                visibility="shareable",
+                activity={
+                    "evidence_visibility": "shareable", "id": "activity:walk",
+                    "kind": "walk", "description": "雨后散步", "phase": "completed",
+                },
+            ),
+            declared_at=NOW,
+        ).model_dump(mode="json"),
+    )
+    projection.committed_world_event_refs = (source_ref, _event_ref(declaration, revision=2))
+    with_declaration = _LedgerWithDeclarationLookup(projection, source, declaration)
+    runtime = EventEcologyMediaCandidateRuntime(
+        ledger=with_declaration, sidecar=InMemoryImmutableMediaPayloadStore(), policy=EcologyPolicy(),
+    )
+
+    result = runtime.drain_once(
+        wake_event_ref=source.event_id, logical_time=NOW, actor="worker:event-ecology",
+        trace_id="trace:ecology", correlation_id="correlation:ecology",
+    )
+
+    assert result.status == "created"
+    candidate_event = with_declaration.commits[0][0][0]
+    assert candidate_event.payload()["candidate"]["source_event_refs"] == sorted(
+        (source.event_id, declaration.event_id)
+    )
 
 
 def test_ecology_derives_diverse_candidates_only_from_existing_shareable_authority() -> None:

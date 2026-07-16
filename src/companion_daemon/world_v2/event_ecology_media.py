@@ -19,6 +19,7 @@ from typing import Literal, Protocol
 
 from .event_identity import domain_idempotency_key
 from .ledger import LedgerPort
+from .image_evidence_contract import ImageEvidenceDeclaredPayload
 from .media_v2 import (
     ImmutableMediaPayloadStore,
     MediaOpportunity,
@@ -291,6 +292,7 @@ class EventEcologyMediaCandidateRuntime:
 
     def _discover(self, *, projection: _ProjectionLike, logical_time: datetime) -> tuple[EcologyCandidate, ...]:
         refs = {item.event_id: item for item in projection.committed_world_event_refs}
+        declarations = self._declared_visual_sources(projection=projection, refs=refs)
         existing_sources = {item.source_event_refs for item in projection.photo_candidates}
         historical = self._historical_categories(projection=projection)
         daily = sum(
@@ -316,6 +318,21 @@ class EventEcologyMediaCandidateRuntime:
                 if committed is None:
                     return
                 selected_refs.append((committed.event_id, committed.payload_hash))
+            if declarations is not None:
+                declaration_visibilities: list[Literal["public", "shareable"]] = []
+                for source_ref in sources:
+                    declaration = declarations.get(source_ref)
+                    if declaration is None:
+                        # A production ledger can discover a candidate only
+                        # after a separate accepted visual declaration.  This
+                        # prevents bare activity/fact envelopes from turning
+                        # into generic lifestyle pictures later.
+                        return
+                    declaration_ref, declaration_hash, declaration_visibility = declaration
+                    selected_refs.append((declaration_ref, declaration_hash))
+                    declaration_visibilities.append(declaration_visibility)
+                if allowed == "shareable" and "public" in declaration_visibilities:
+                    allowed = "public"
             # A category cooldown is recorded in the ordinary media projection;
             # it survives replay/restart without a shadow mutable history.
             if any(
@@ -397,6 +414,54 @@ class EventEcologyMediaCandidateRuntime:
         # independent of Python iteration order.
         ordered = sorted(discovered, key=lambda item: (-item.observed_at.timestamp(), item.category, item.source_event_refs))
         return tuple(ordered[: self._policy.max_candidates_per_drain])
+
+    def _declared_visual_sources(
+        self, *, projection: _ProjectionLike, refs: dict[str, object],
+    ) -> dict[str, tuple[str, str, Literal["public", "shareable"]]] | None:
+        """Return declarations by their exact source, or legacy ``None``.
+
+        Real ledgers provide immutable event lookup; embedded historical test
+        adapters that cannot inspect declaration bytes retain the former
+        candidate-discovery behavior only as a compatibility surface.  The
+        production SQLite ledger always takes the declaration-required branch.
+        """
+
+        lookup = getattr(self._ledger, "lookup_event_commit", None)
+        if not callable(lookup):
+            return None
+        declared: dict[str, tuple[str, str, Literal["public", "shareable"]]] = {}
+        ambiguous: set[str] = set()
+        for ref in projection.committed_world_event_refs:
+            if getattr(ref, "event_type", None) != "ImageEvidenceDeclared":
+                continue
+            located = lookup(ref.event_id)
+            if located is None:
+                continue
+            event, _commit = located
+            if event.payload_hash != getattr(ref, "payload_hash", None):
+                continue
+            try:
+                payload = ImageEvidenceDeclaredPayload.model_validate_json(event.payload_json)
+            except ValueError:
+                continue
+            source = refs.get(payload.source_event_ref)
+            if (
+                source is None
+                or getattr(source, "event_type", None) != payload.source_event_type
+                or getattr(source, "payload_hash", None) != payload.source_event_payload_hash
+            ):
+                continue
+            if payload.source_event_ref in declared:
+                ambiguous.add(payload.source_event_ref)
+                continue
+            declared[payload.source_event_ref] = (
+                event.event_id,
+                event.payload_hash,
+                payload.image_evidence.visibility,
+            )
+        for source_ref in ambiguous:
+            declared.pop(source_ref, None)
+        return declared
 
     def _historical_categories(self, *, projection: _ProjectionLike) -> tuple[tuple[EcologyCategory, datetime], ...]:
         values: list[tuple[EcologyCategory, datetime]] = []

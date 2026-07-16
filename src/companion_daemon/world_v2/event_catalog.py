@@ -27,6 +27,7 @@ from .fact_proposal_audit_v2 import FactCommitProposalRecordedPayloadV2
 from .activity_lifecycle_acceptance_manifest import ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION
 from .media_selection_acceptance_manifest import MEDIA_SELECTION_ACCEPTANCE_MANIFEST_VERSION
 from .media_selection_proposal import MediaSelectionProposalRecordedPayload
+from .image_evidence_contract import IMAGE_EVIDENCE_PAYLOAD_MODELS
 from .goal_authority_events import (
     V2_GOAL_MECHANICAL_PAYLOAD_MODELS,
     V2_GOAL_PAYLOAD_MODELS,
@@ -333,6 +334,7 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
         ),
         "ProviderMediaGrantRecorded": ProviderMediaGrantRecordedPayload,
         **MEDIA_V2_PAYLOAD_MODELS,
+        **IMAGE_EVIDENCE_PAYLOAD_MODELS,
         "MediaSelectionProposalRecorded": MediaSelectionProposalRecordedPayload,
         **INTERACTION_BID_PAYLOAD_MODELS,
         **MEDIA_DELIVERY_THREAD_PAYLOAD_MODELS,
@@ -443,6 +445,7 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "PhotoCandidateOpened": "world_id+candidate_id",
         "PhotoCandidateUnrenderable": "world_id+candidate_id+expected_revision+reason",
         "PhotoCandidateExpired": "world_id+candidate_id+expected_revision+reason",
+        "ImageEvidenceDeclared": "world_id+source_event_ref+source_event_payload_hash",
         "MediaSelectionProposalRecorded": "world_id+proposal_id",
         "MediaOpportunityFrozen": "world_id+opportunity_id",
         "MediaPlanRecorded": "world_id+planning_request_id+plan_id",
@@ -887,6 +890,19 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "PhotoCandidateExpiredPayload",
                 allowed_predecessors=("PhotoCandidateOpened", "MediaSelectionProposalRecorded"),
                 evidence_types=("committed_world_event", "authoritative_clock"),
+            ),
+            _contract(
+                "ImageEvidenceDeclared",
+                "image_evidence_acceptance",
+                "world",
+                "ImageEvidenceDeclaredPayload",
+                allowed_predecessors=(
+                    "ActivityStarted", "ActivityResumed", "ActivityCompleted",
+                    "WorldOccurrenceSettled", "ExperienceCommitted", "FactCommitted",
+                    "FactCorrected", "FactCommitMaterializedV2",
+                ),
+                evidence_types=("committed_world_event", "accepted_visual_evidence"),
+                successors=("PhotoCandidateOpened",),
             ),
             _contract(
                 "MediaSelectionProposalRecorded",

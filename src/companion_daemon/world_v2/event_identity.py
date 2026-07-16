@@ -105,6 +105,8 @@ def _life_identity_components(
             payload.get("expected_entity_revision"),
             payload.get("reason_code"),
         )
+    if event_type == "ImageEvidenceDeclared":
+        return world_id, payload.get("source_event_ref"), payload.get("source_event_payload_hash")
     if event_type == "MediaSelectionProposalRecorded":
         return world_id, payload.get("proposal_id")
     if event_type == "MediaOpportunityFrozen":
