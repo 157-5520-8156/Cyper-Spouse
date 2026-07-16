@@ -29,6 +29,7 @@ class MediaSelectionDraftModel(Protocol):
 class MediaCandidateChoice(FrozenModel):
     token: str = Field(min_length=1, max_length=512)
     safe_summary: str = Field(min_length=1, max_length=480)
+    advisory: dict[str, object] = Field(default_factory=dict)
 
 
 class MediaSelectionCapsule(FrozenModel):

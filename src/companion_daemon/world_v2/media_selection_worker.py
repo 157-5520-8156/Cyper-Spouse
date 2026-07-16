@@ -14,6 +14,7 @@ from .media_selection_draft import (
     MediaSelectionDraftAdapter,
 )
 from .media_selection_proposal import MediaSelectionProposalCompiler
+from .media_candidate_advisory import MediaCandidateAdvisoryCompiler
 from .schema_core import FrozenModel
 from .schemas import ProjectionCursor
 
@@ -30,6 +31,7 @@ class MediaSelectionWorker:
     def __init__(self, *, ledger, draft_adapter: MediaSelectionDraftAdapter, proposal_recorder: MediaSelectionProposalRecorder, catalog_version: str, source: str = "world-v2:media-selection") -> None:  # type: ignore[no-untyped-def]
         self._ledger, self._draft, self._recorder = ledger, draft_adapter, proposal_recorder
         self._compiler, self._source = MediaSelectionProposalCompiler(catalog_version=catalog_version), source
+        self._advisory = MediaCandidateAdvisoryCompiler()
 
     async def select_once(self, *, logical_time: datetime, actor: str, trace_id: str, correlation_id: str) -> MediaSelectionRunResult:
         projection = self._ledger.project()
@@ -70,7 +72,14 @@ class MediaSelectionWorker:
         # The token is deliberately distinct from the candidate id: model text
         # cannot become an authority-bearing identifier by coincidence.
         tokens = {"media-candidate:" + hashlib.sha256(item.candidate_id.encode()).hexdigest(): item for item in candidates}
-        draft = await self._draft.deliberate(capsule=MediaSelectionCapsule(candidates=tuple(MediaCandidateChoice(token=token, safe_summary="一件已确认、可选择但不必分享的生活事件") for token in sorted(tokens))))
+        draft = await self._draft.deliberate(capsule=MediaSelectionCapsule(candidates=tuple(
+            MediaCandidateChoice(
+                token=token,
+                safe_summary="一件已确认、可选择但不必分享的生活事件",
+                advisory=self._advisory.compile(projection=projection, candidate=tokens[token]).model_material(),
+            )
+            for token in sorted(tokens)
+        )))
         if draft.decision == "no_op":
             return MediaSelectionRunResult(status="no_op", reason_code="media_selection.model_declined")
         assert draft.token is not None and draft.model and draft.raw_output_hash and draft.normalized_output_hash
