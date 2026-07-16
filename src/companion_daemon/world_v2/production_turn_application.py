@@ -156,10 +156,11 @@ class LifeEcologyComposition:
     def production_v1(cls) -> "LifeEcologyComposition":
         return cls(
             catalog_version="life-ecology.1",
-            # P0 still uses the legacy direct-freeze ecology lane, but the
-            # opt-in lives in the named production profile rather than a
-            # default policy.  P1 replaces it with an authorizer.
-            media_policy=EcologyPolicy(direct_preview_compatibility=True),
+            # Production P1 publishes evidence-backed candidates only.  An
+            # opportunity, budget reservation, and planning Action can arise
+            # only from the separately accepted selection path; the old
+            # direct-freeze route remains an explicit migration/test switch.
+            media_policy=EcologyPolicy(direct_preview_compatibility=False),
         )
 
     def __post_init__(self) -> None:
@@ -626,8 +627,8 @@ class WorldV2TurnApplication:
         """Advance the explicit, ledger-backed life ecology after one wake.
 
         This remains a scheduler-only seam.  It is never called from inbound
-        message processing, and its first production profile can only freeze
-        preview media opportunities from durable world evidence.
+        message processing, and production publishes only source-bound media
+        candidates from durable world evidence.
         """
 
         if self._life_ecology is None:
