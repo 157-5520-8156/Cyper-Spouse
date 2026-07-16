@@ -57,9 +57,56 @@ MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST = hashlib.sha256(
     ).encode("utf-8")
 ).hexdigest()
 
+# P3 is still selection-only. The proposer can name an already-issued
+# recipient/basis token, but cannot choose a lane, capture authority, or any
+# visual instruction; those are re-derived at accepted cursor time.
+MEDIA_SELECTION_P3_PROPOSAL_POLICY_VERSION = "media-selection-proposal.3"
+MEDIA_SELECTION_P3_PROPOSAL_POLICY_DIGEST = hashlib.sha256(
+    json.dumps(
+        {
+            "contract": MEDIA_SELECTION_P3_PROPOSAL_POLICY_VERSION,
+            "candidate": "available_source_bound_recipient_scoped_character_candidate",
+            "selection": "recipient_scoped_private_character_preview",
+            "model_can": "choose_existing_candidate_recipient_and_basis_token",
+            "model_cannot": (
+                "freeze_opportunity", "allocate_budget", "send_media", "choose_lane",
+                "choose_capture_authority", "invent_relationship_context",
+            ),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+).hexdigest()
+
 
 def _canonical(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, allow_nan=False, sort_keys=True, separators=(",", ":"))
+
+
+def _selection_policy_digest(selection: MediaSelection) -> str:
+    if selection.family == "life_share":
+        return MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST
+    if (
+        selection.delivery_mode == "preview"
+        and selection.media_privacy_ceiling == "ordinary"
+        and selection.expression_charge_ceiling == "none"
+        and selection.recipient_ref is None
+        and selection.private_expression_basis_ref is None
+    ):
+        return MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST
+    return MEDIA_SELECTION_P3_PROPOSAL_POLICY_DIGEST
+
+
+def _is_p3_selection(selection: MediaSelection) -> bool:
+    return (
+        selection.family == "character_media"
+        and selection.delivery_mode == "preview"
+        and selection.media_privacy_ceiling == "intimate"
+        and selection.expression_charge_ceiling in {"subtle", "charged", "veiled"}
+        and selection.recipient_ref is not None
+        and selection.private_expression_basis_ref is not None
+    )
 
 
 def media_candidate_authority_hash(candidate: PhotoCandidate) -> str:
@@ -121,13 +168,14 @@ class MediaSelectionProposalRecordedPayload(FrozenModel):
             raise ValueError("media selection proposal selection must bind candidate")
         if self.selection_hash != media_selection_hash(self.selection):
             raise ValueError("media selection proposal selection hash is invalid")
-        expected_policy = (
-            MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST
-            if self.selection.family == "life_share"
-            else MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST
-        )
+        expected_policy = _selection_policy_digest(self.selection)
         if self.policy_digest != expected_policy:
             raise ValueError("media selection proposal policy is not installed")
+        if (
+            self.policy_digest == MEDIA_SELECTION_P3_PROPOSAL_POLICY_DIGEST
+            and not _is_p3_selection(self.selection)
+        ):
+            raise ValueError("media selection proposal P3 selection shape is invalid")
         if self.proposed_change_hash != media_selection_proposed_change_hash(
             change_id=self.change_id,
             candidate_id=self.candidate_id,
@@ -200,8 +248,13 @@ class MediaSelectionProposalCompiler:
             and selection.private_expression_basis_ref is None
             and candidate.character_media_contract is not None
         )
-        if not p1 and not p2:
-            raise MediaSelectionProposalError("ordinary_preview_only")
+        p3 = (
+            _is_p3_selection(selection)
+            and candidate.character_media_contract is not None
+            and candidate.privacy_ceiling in {"personal", "private"}
+        )
+        if not p1 and not p2 and not p3:
+            raise MediaSelectionProposalError("unsupported_selection_surface")
         if candidate.family != selection.family:
             raise MediaSelectionProposalError("selection_family_does_not_match_candidate")
         candidate_hash = media_candidate_authority_hash(candidate)
@@ -245,7 +298,8 @@ class MediaSelectionProposalCompiler:
             ),
             policy_digest=(
                 MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST
-                if p1 else MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST
+                if p1 else MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST if p2
+                else MEDIA_SELECTION_P3_PROPOSAL_POLICY_DIGEST
             ),
             model=model,
             raw_output_hash=raw_output_hash,
@@ -255,7 +309,8 @@ class MediaSelectionProposalCompiler:
 
 __all__ = [
     "MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST", "MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST",
-    "MEDIA_SELECTION_PROPOSAL_POLICY_VERSION",
+    "MEDIA_SELECTION_P3_PROPOSAL_POLICY_DIGEST", "MEDIA_SELECTION_PROPOSAL_POLICY_VERSION",
+    "MEDIA_SELECTION_P3_PROPOSAL_POLICY_VERSION",
     "MediaSelectionProposalRecordedPayload",
     "MediaSelectionProposalCompiler",
     "MediaSelectionProposalError",

@@ -9,6 +9,7 @@ from companion_daemon.world_v2.media_selection import MediaSelection, media_sele
 from companion_daemon.world_v2.media_selection_proposal import (
     MEDIA_SELECTION_PROPOSAL_POLICY_DIGEST,
     MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST,
+    MEDIA_SELECTION_P3_PROPOSAL_POLICY_DIGEST,
     MediaSelectionProposalCompiler,
     MediaSelectionProposalRecordedPayload,
     media_candidate_authority_hash,
@@ -220,6 +221,46 @@ def test_compiler_uses_the_explicit_p2_policy_for_an_ordinary_character_candidat
 
     assert proposal.policy_digest == MEDIA_SELECTION_P2_PROPOSAL_POLICY_DIGEST
     assert proposal.selection.family == "character_media"
+
+
+def test_compiler_records_p3_as_recipient_scoped_selection_not_lane_authority() -> None:
+    source = MediaEvidenceSource(event_ref=SOURCE, payload_hash="a" * 64)
+    contract = CharacterMediaCandidateContract(
+        subject_ref="agent:companion", kind="selfie",
+        allowed_capture_modes=("character_front_camera",),
+        allowed_character_visibility=("identifiable",),
+        authority_digest=character_media_contract_digest(
+            subject_ref="agent:companion", kind="selfie", source_events=(source,),
+            allowed_capture_modes=("character_front_camera",),
+            allowed_character_visibility=("identifiable",),
+        ),
+    )
+    candidate = PhotoCandidate(
+        candidate_id="candidate:character-private-selection", source_event_refs=(SOURCE,),
+        family="character_media", privacy_ceiling="private", opened_at=NOW,
+        expires_at=NOW + timedelta(hours=1), ecology_category="character_media:selfie",
+        ecology_observed_at=NOW, source_events=(source,),
+        opened_event_ref="event:character-private-candidate", opened_event_payload_hash="d" * 64,
+        character_media_contract=contract,
+    )
+    projection = LedgerProjection.model_construct(
+        world_id=WORLD, world_revision=2, deliberation_revision=0, ledger_sequence=2,
+        logical_time=NOW, photo_candidates=(candidate,),
+    )
+
+    proposal = MediaSelectionProposalCompiler(catalog_version="media-selection-p3.1").compile(
+        projection=projection,
+        selection=MediaSelection(
+            candidate_id=candidate.candidate_id, family="character_media",
+            media_privacy_ceiling="intimate", expression_charge_ceiling="subtle",
+            recipient_ref="user:1", private_expression_basis_ref="basis:embodied:physical:1",
+        ),
+        model="test-flash", raw_output_hash="sha256:" + "b" * 64,
+        normalized_output_hash="sha256:" + "c" * 64,
+    )
+
+    assert proposal.policy_digest == MEDIA_SELECTION_P3_PROPOSAL_POLICY_DIGEST
+    assert proposal.selection.recipient_ref == "user:1"
 
 
 def test_unrenderable_snapshot_closes_the_same_available_candidate_without_substitution() -> None:
