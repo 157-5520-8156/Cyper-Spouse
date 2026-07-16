@@ -149,6 +149,7 @@ EXTERNAL_CAPABILITIES: tuple[ExternalCapability, ...] = (
         installed_closure=(
             "source_bound_request",
             "acceptance_budget",
+            "enforcement_authorization",
             "provider_adapter",
             "tool_result_projection",
             "deterministic_result_trigger",

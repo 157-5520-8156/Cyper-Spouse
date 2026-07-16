@@ -28,6 +28,7 @@ def test_remaining_capability_verticals_are_explicit_and_fail_closed() -> None:
         assert "source_bound_request" in capability.missing_closure
     assert external_capability("read_only_tool").availability == "adapter_only"
     assert "production_request_deliberation" in external_capability("read_only_tool").missing_closure
+    assert "enforcement_authorization" in external_capability("read_only_tool").installed_closure
 
 
 def test_catalogue_has_no_implicit_or_duplicate_external_capabilities() -> None:

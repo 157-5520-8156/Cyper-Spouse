@@ -404,6 +404,24 @@ class ProviderMediaGrantBinding(FrozenModel):
     grant_revision: int = Field(ge=1)
 
 
+class ReadOnlyToolAuthorizationBinding(FrozenModel):
+    """Exact enforcement authorization consumed by one read-only tool Action.
+
+    Tool execution may inspect user-derived query material even when it cannot
+    mutate the outside world.  Pinning all three authorization revisions makes
+    that disclosure explicit, while the pump re-checks their current state
+    immediately before every dispatch or recovery lookup.
+    """
+
+    subject_ref: str = Field(min_length=1)
+    capability_grant_id: str = Field(min_length=1)
+    capability_grant_revision: int = Field(ge=1)
+    consent_id: str = Field(min_length=1)
+    consent_revision: int = Field(ge=1)
+    privacy_policy_id: str = Field(min_length=1)
+    privacy_policy_revision: int = Field(ge=1)
+
+
 class MediaDeliveryApprovalBinding(FrozenModel):
     """Immutable Action reference to one operator delivery-approval revision."""
 
@@ -434,6 +452,7 @@ class Action(FrozenModel):
     expression_plan_id: str | None = Field(default=None, min_length=1)
     expression_beat_id: str | None = Field(default=None, min_length=1)
     provider_media_grant: ProviderMediaGrantBinding | None = None
+    read_only_tool_authorization: ReadOnlyToolAuthorizationBinding | None = None
     media_delivery_approval: MediaDeliveryApprovalBinding | None = None
     idempotency_key: str = Field(min_length=1)
     not_before: datetime | None = None
@@ -460,6 +479,11 @@ class Action(FrozenModel):
                 raise ValueError("provider media Action requires an exact provider media grant")
         elif self.provider_media_grant is not None:
             raise ValueError("only provider media Actions may carry a provider media grant")
+        if self.kind == "read_only_tool":
+            if self.layer != "read_only_tool" or self.read_only_tool_authorization is None:
+                raise ValueError("read-only tool Action requires exact enforcement authorization")
+        elif self.read_only_tool_authorization is not None:
+            raise ValueError("only read-only tool Actions may carry tool authorization")
         if self.kind == "media_delivery":
             if self.layer != "external_action" or self.media_delivery_approval is None:
                 raise ValueError("media delivery Action requires an exact operator approval")

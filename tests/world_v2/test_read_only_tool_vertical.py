@@ -16,6 +16,7 @@ from companion_daemon.world_v2.read_only_tool import (
 from companion_daemon.world_v2.read_only_tool_executor import ReadOnlyToolActionExecutor
 from companion_daemon.world_v2.runtime import WorldRuntime
 from companion_daemon.world_v2.schemas import BudgetAccount, Observation, WorldEvent
+from authorization_test_support import enforcement_tool_ledger
 
 
 NOW = datetime(2026, 7, 16, 12, 0, tzinfo=UTC)
@@ -62,7 +63,11 @@ def _source(ledger: WorldLedger) -> WorldEvent:
         ) or "test:tool-question",
         payload=observation.model_dump(mode="json"),
     )
-    ledger.commit((source,), expected_world_revision=0, expected_deliberation_revision=0)
+    projection = ledger.project()
+    ledger.commit(
+        (source,), expected_world_revision=projection.world_revision,
+        expected_deliberation_revision=projection.deliberation_revision,
+    )
     account = BudgetAccount(account_id="account:tool", category="tool", window_id="test", limit=20)
     ledger.commit(
         (
@@ -82,8 +87,8 @@ def _source(ledger: WorldLedger) -> WorldEvent:
                 payload={"account": account.model_dump(mode="json")},
             ),
         ),
-        expected_world_revision=1,
-        expected_deliberation_revision=0,
+        expected_world_revision=ledger.project().world_revision,
+        expected_deliberation_revision=ledger.project().deliberation_revision,
     )
     return source
 
@@ -110,13 +115,15 @@ class Provider:
 
 
 @pytest.mark.asyncio
-async def test_source_bound_tool_request_settles_result_and_opens_one_result_trigger() -> None:
-    ledger = WorldLedger.in_memory(world_id=WORLD)
+async def test_source_bound_tool_request_settles_result_and_opens_one_result_trigger(monkeypatch) -> None:
+    ledger, authorization = enforcement_tool_ledger(
+        monkeypatch, world_id=WORLD, now=NOW, actor="agent:companion", subject="user:primary"
+    )
     source = _source(ledger)
     proposal = ReadOnlyToolProposal(
         proposal_id="proposal:tool:1",
         source_event_ref=source.event_id,
-        source_world_revision=1,
+        source_world_revision=ledger.lookup_event_commit(source.event_id)[1].world_revision,
         source_payload_hash=source.payload_hash,
         tool_name="weather",
         target="tool:weather",
@@ -124,6 +131,7 @@ async def test_source_bound_tool_request_settles_result_and_opens_one_result_tri
         query_hash=_hash('{"city":"Shanghai"}'),
         budget_account_id="account:tool",
         budget_limit=5,
+        authorization=authorization,
     )
     ReadOnlyToolAcceptanceRuntime(ledger=ledger).accept(
         proposal=proposal,
@@ -166,17 +174,19 @@ async def test_source_bound_tool_request_settles_result_and_opens_one_result_tri
 
 
 @pytest.mark.asyncio
-async def test_tool_executor_recovery_lookup_keeps_the_same_result_descriptor() -> None:
+async def test_tool_executor_recovery_lookup_keeps_the_same_result_descriptor(monkeypatch) -> None:
     provider = Provider()
     executor = ReadOnlyToolActionExecutor(queries=Queries(), transport=provider)
     # The executor's recovery contract is tested through a fully shaped
     # Action in the acceptance path above; reuse that immutable shape here.
-    ledger = WorldLedger.in_memory(world_id=WORLD)
+    ledger, authorization = enforcement_tool_ledger(
+        monkeypatch, world_id=WORLD, now=NOW, actor="agent:companion", subject="user:primary"
+    )
     source = _source(ledger)
     proposal = ReadOnlyToolProposal(
         proposal_id="proposal:tool:recovery",
         source_event_ref=source.event_id,
-        source_world_revision=1,
+        source_world_revision=ledger.lookup_event_commit(source.event_id)[1].world_revision,
         source_payload_hash=source.payload_hash,
         tool_name="weather",
         target="tool:weather",
@@ -184,6 +194,7 @@ async def test_tool_executor_recovery_lookup_keeps_the_same_result_descriptor() 
         query_hash=_hash('{"city":"Shanghai"}'),
         budget_account_id="account:tool",
         budget_limit=5,
+        authorization=authorization,
     )
     ReadOnlyToolAcceptanceRuntime(ledger=ledger).accept(
         proposal=proposal, actor="worker", source="test", logical_time=NOW,
@@ -195,3 +206,34 @@ async def test_tool_executor_recovery_lookup_keeps_the_same_result_descriptor() 
     assert recovered is not None
     assert recovered.result_ref == "result:weather:1"
     assert recovered.result_hash == _hash('{"condition":"sunny"}')
+
+
+@pytest.mark.asyncio
+async def test_tool_executor_rejects_a_revoked_capability_on_final_projection(monkeypatch) -> None:
+    ledger, authorization = enforcement_tool_ledger(
+        monkeypatch, world_id=WORLD, now=NOW, actor="agent:companion", subject="user:primary"
+    )
+    source = _source(ledger)
+    proposal = ReadOnlyToolProposal(
+        proposal_id="proposal:tool:revoked", source_event_ref=source.event_id,
+        source_world_revision=ledger.lookup_event_commit(source.event_id)[1].world_revision,
+        source_payload_hash=source.payload_hash, tool_name="weather", target="tool:weather",
+        query_ref="payload:tool:weather:revoked", query_hash=_hash('{"city":"Shanghai"}'),
+        budget_account_id="account:tool", budget_limit=5, authorization=authorization,
+    )
+    ReadOnlyToolAcceptanceRuntime(ledger=ledger).accept(
+        proposal=proposal, actor="worker", source="test", logical_time=NOW,
+        created_at=NOW, trace_id="trace:tool", correlation_id="conversation:tool",
+    )
+    projection = ledger.project()
+    capability = projection.capability_grants[0]
+    revoked = capability.model_copy(
+        update={"values": capability.values.model_copy(update={"state": "revoked"})}
+    )
+    final_projection = projection.model_copy(update={"capability_grants": (revoked,)})
+    executor = ReadOnlyToolActionExecutor(queries=Queries(), transport=Provider())
+
+    with pytest.raises(ValueError, match="tool capability is not enforcement eligible and active"):
+        await executor.assert_dispatch_authorized(
+            action=projection.actions[0], projection=final_projection
+        )

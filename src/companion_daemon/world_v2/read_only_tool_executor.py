@@ -9,7 +9,8 @@ from typing import Protocol
 
 from .action_pump import ActionExecutor
 from .read_only_tool import ToolQueryReader
-from .schemas import Action, DispatchPending, ProviderReceipt
+from .read_only_tool_authorization import require_read_only_tool_authorization
+from .schemas import Action, DispatchPending, LedgerProjection, ProviderReceipt
 
 
 def _digest(value: object) -> str:
@@ -51,6 +52,21 @@ class ReadOnlyToolActionExecutor(ActionExecutor):
             raise ValueError("read-only tool transport provider is required")
         self._queries = queries
         self._transport = transport
+        self._dispatch_authorizations: set[tuple[str, str, int]] = set()
+
+    async def assert_dispatch_authorized(
+        self, *, action: Action, projection: LedgerProjection
+    ) -> None:
+        """Require a current enforcement grant on ActionPump's final read."""
+
+        binding = require_read_only_tool_authorization(
+            action=action,
+            projection=projection,
+            logical_time=projection.logical_time or action.logical_time,
+        )
+        self._dispatch_authorizations.add(
+            (action.action_id, binding.capability_grant_id, binding.capability_grant_revision)
+        )
 
     async def dispatch(self, action: Action) -> ProviderReceipt | DispatchPending | None:
         tool_name, query_ref, query_hash, body = await self._query(action)
@@ -88,6 +104,15 @@ class ReadOnlyToolActionExecutor(ActionExecutor):
     async def _query(self, action: Action) -> tuple[str, str, str, str]:
         if action.kind != "read_only_tool" or action.layer != "read_only_tool":
             raise ValueError("read-only tool executor received another Action kind")
+        binding = action.read_only_tool_authorization
+        if binding is None:
+            raise ValueError("read-only tool Action lacks enforcement authorization binding")
+        authority_key = (action.action_id, binding.capability_grant_id, binding.capability_grant_revision)
+        if authority_key not in self._dispatch_authorizations:
+            raise ValueError("read-only tool dispatch was not authorized by ActionPump")
+        # A final-projection verification is consumed by one provider RPC or
+        # lookup.  Recovery must obtain a fresh check after any revocation.
+        self._dispatch_authorizations.remove(authority_key)
         tool_name, query_ref, query_hash, body = await self._queries.resolve(action)
         if query_ref != action.payload_ref or query_hash != action.payload_hash:
             raise ValueError("resolved query does not bind authorized Action payload")

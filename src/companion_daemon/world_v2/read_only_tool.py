@@ -23,11 +23,13 @@ from .schemas import (
     CommitResult,
     ExternalObservation,
     ProjectionCursor,
+    ReadOnlyToolAuthorizationBinding,
     ReadOnlyToolRequestProjection,
     ToolResultProjection,
     TriggerProcess,
     WorldEvent,
 )
+from .read_only_tool_authorization import require_read_only_tool_authorization
 
 
 READ_ONLY_TOOL_CONTRACT_VERSION = "read-only-tool.1"
@@ -56,6 +58,7 @@ class ReadOnlyToolProposal(FrozenModel):
     query_hash: str = Field(min_length=64, max_length=71)
     budget_account_id: str = Field(min_length=1)
     budget_limit: int = Field(ge=0)
+    authorization: ReadOnlyToolAuthorizationBinding
 
     @property
     def request_id(self) -> str:
@@ -149,10 +152,16 @@ class ReadOnlyToolAcceptanceRuntime:
             target=proposal.target,
             payload_ref=proposal.query_ref,
             payload_hash=proposal.query_hash,
+            read_only_tool_authorization=proposal.authorization,
             idempotency_key="read-only-tool:" + _digest({"request": request.request_id}),
             budget_reservation_id=reservation.reservation_id,
             state="authorized",
             recovery_policy="result_lookup",
+        )
+        require_read_only_tool_authorization(
+            action=action,
+            projection=self._ledger.project_at(cursor),
+            logical_time=logical_time,
         )
         definitions = (
             ("ToolRequestAccepted", {"request": request.model_dump(mode="json")}, "request"),
