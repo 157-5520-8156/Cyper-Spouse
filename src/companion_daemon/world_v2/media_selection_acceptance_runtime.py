@@ -23,7 +23,6 @@ from .media_v2 import (
     MediaOpportunityFrozenPayload,
     PhotoCandidateUnrenderablePayload,
     StoredMediaPayload,
-    media_digest,
     planning_request_id,
 )
 from .schemas import (
@@ -98,6 +97,33 @@ class MediaSelectionProposalRecorder:
         projection = self._ledger.project_at(cursor)
         if projection.logical_time is None:
             raise MediaSelectionAcceptanceError("logical_time_missing")
+        candidate = next(
+            (item for item in projection.photo_candidates if item.candidate_id == proposal.candidate_id),
+            None,
+        )
+        committed = {
+            item.event_id: item.payload_hash for item in projection.committed_world_event_refs
+        }
+        if (
+            candidate is None
+            or candidate.status != "available"
+            or candidate.entity_revision != proposal.expected_candidate_revision
+            or candidate.opened_at is None
+            or candidate.expires_at is None
+            or candidate.expires_at <= projection.logical_time
+            or candidate.opened_event_ref is None
+            or candidate.opened_event_payload_hash is None
+            or committed.get(candidate.opened_event_ref) != candidate.opened_event_payload_hash
+            or any(
+                committed.get(source.event_ref) != source.payload_hash
+                for source in candidate.source_events
+            )
+            or media_candidate_authority_hash(candidate) != proposal.candidate_authority_hash
+        ):
+            # The compiler normally establishes these conditions, but this
+            # recorder is also a persistence boundary.  It must never turn a
+            # forged/stale proposal into an event with a placeholder lineage.
+            raise MediaSelectionAcceptanceError("proposal_candidate_not_current")
         payload = proposal.model_dump(mode="json")
         event = WorldEvent.from_payload(
             schema_version="world-v2.1",
@@ -109,14 +135,7 @@ class MediaSelectionProposalRecorder:
             actor=actor,
             source=source,
             trace_id=trace_id,
-            causation_id=(
-                next(
-                    item.opened_event_ref
-                    for item in projection.photo_candidates
-                    if item.candidate_id == proposal.candidate_id
-                )
-                or "missing"
-            ),
+            causation_id=candidate.opened_event_ref,
             correlation_id=correlation_id,
             idempotency_key=_identity(
                 event_type="MediaSelectionProposalRecorded", world_id=self._ledger.world_id, payload=payload

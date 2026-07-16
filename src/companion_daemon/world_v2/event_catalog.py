@@ -893,7 +893,9 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 "media_acceptance",
                 "world",
                 "MediaOpportunityFrozenPayload",
-                allowed_predecessors=("PhotoCandidateOpened",),
+                # Legacy P0 froze directly from an opened candidate; P1's
+                # accepted batch correctly places this after Acceptance.
+                allowed_predecessors=("PhotoCandidateOpened", "AcceptanceRecorded"),
                 evidence_types=("frozen_media_snapshot",),
             ),
             _contract(

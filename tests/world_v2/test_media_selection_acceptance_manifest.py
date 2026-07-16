@@ -165,11 +165,21 @@ def test_real_ledger_acceptance_commits_one_selected_candidate_and_planning_acti
         model="test-flash", raw_output_hash="sha256:" + "a" * 64,
         normalized_output_hash="sha256:" + "b" * 64,
     )
-    record = MediaSelectionProposalRecorder(ledger=ledger).record(
+    recorder = MediaSelectionProposalRecorder(ledger=ledger)
+    with pytest.raises(ValueError, match="proposal_candidate_not_current"):
+        recorder.record(
+            cursor=_cursor(projection),
+            proposal=proposal.model_copy(update={"expected_candidate_revision": 2}),
+            actor="worker:media-selection", source="test:media-selection", created_at=NOW,
+            trace_id="trace:media-selection", correlation_id="correlation:media-selection",
+        )
+    record = recorder.record(
         cursor=_cursor(projection), proposal=proposal, actor="worker:media-selection",
         source="test:media-selection", created_at=NOW, trace_id="trace:media-selection",
         correlation_id="correlation:media-selection",
     )
+    proposal_event, _proposal_commit = ledger.lookup_event_commit(record.proposal_event_ref)  # type: ignore[misc]
+    assert proposal_event.causation_id == candidate_event.event_id
     # Provider-grant semantics are covered elsewhere; this isolates the
     # accepted-batch wiring while keeping both runtime and reducer consistent.
     monkeypatch.setattr(
