@@ -58,6 +58,77 @@ class MediaEvidenceSource(FrozenModel):
     payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class ImageEvidenceIndexEntry(FrozenModel):
+    """Provenance for one planner-readable RFC 6901 snapshot leaf."""
+
+    source_event_ref: str = Field(min_length=1, max_length=512)
+    source_payload_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    visibility: PrivacyClass
+
+
+class ImageEventSnapshot(FrozenModel):
+    """Versioned, immutable World → image-machine event slice.
+
+    This is deliberately data, not a prompt.  Every non-structural value the
+    image planner may read is bound through ``evidence_index`` to one member of
+    the enclosing ``FrozenMediaEvidenceSnapshot.source_events`` tuple.
+    """
+
+    schema_version: Literal["world-image-event-snapshot-v1"] = "world-image-event-snapshot-v1"
+    event: dict[str, object]
+    source: dict[str, object]
+    location: dict[str, object]
+    activity: dict[str, object]
+    participants: tuple[dict[str, object], ...]
+    objects: tuple[dict[str, object], ...]
+    environment: dict[str, object]
+    character: dict[str, object]
+    existing_media: tuple[dict[str, object], ...]
+    visual_requirements: dict[str, object]
+    relationship_media_context: None = None
+    evidence_index: dict[str, ImageEvidenceIndexEntry]
+
+    @model_validator(mode="after")
+    def planner_readable_leaves_have_exact_provenance(self) -> "ImageEventSnapshot":
+        """Keep the index a closed allow-list instead of advisory metadata."""
+
+        def escape(token: str) -> str:
+            return token.replace("~", "~0").replace("/", "~1")
+
+        def leaves(value: object, pointer: str) -> set[str]:
+            if isinstance(value, dict):
+                result: set[str] = set()
+                for key, nested in value.items():
+                    result |= leaves(nested, pointer + "/" + escape(key))
+                return result
+            if isinstance(value, tuple):
+                result = set()
+                for index, nested in enumerate(value):
+                    result |= leaves(nested, pointer + "/" + str(index))
+                return result
+            return {pointer}
+
+        # ``schema_version`` and the absence-only relationship slot are wire
+        # structure, not image facts.  Everything else is planner-readable.
+        readable = {
+            "event": self.event,
+            "source": self.source,
+            "location": self.location,
+            "activity": self.activity,
+            "participants": self.participants,
+            "objects": self.objects,
+            "environment": self.environment,
+            "character": self.character,
+            "existing_media": self.existing_media,
+            "visual_requirements": self.visual_requirements,
+        }
+        expected = set().union(*(leaves(value, "/" + key) for key, value in readable.items()))
+        supplied = set(self.evidence_index)
+        if expected != supplied:
+            raise ValueError("image evidence index must cover exactly every planner-readable snapshot leaf")
+        return self
+
+
 class FrozenMediaEvidenceSnapshot(FrozenModel):
     """The only ledger-independent bytes that planning may read.
 
@@ -75,12 +146,20 @@ class FrozenMediaEvidenceSnapshot(FrozenModel):
     location: dict[str, object] | None = None
     visible_physical_state: dict[str, object] | None = None
     recipient_context: dict[str, object] | None = None
+    image_event_snapshot: ImageEventSnapshot | None = None
 
     @model_validator(mode="after")
     def source_events_are_canonical(self) -> "FrozenMediaEvidenceSnapshot":
         refs = tuple(item.event_ref for item in self.source_events)
         if refs != tuple(sorted(set(refs))):
             raise ValueError("media evidence snapshot source events must be sorted and unique")
+        if self.image_event_snapshot is not None:
+            source_hashes = {item.event_ref: item.payload_hash for item in self.source_events}
+            for pointer, entry in self.image_event_snapshot.evidence_index.items():
+                if not pointer.startswith("/"):
+                    raise ValueError("image evidence index key must be an RFC 6901 pointer")
+                if source_hashes.get(entry.source_event_ref) != entry.source_payload_hash:
+                    raise ValueError("image evidence index must bind an outer snapshot source")
         return self
 
 
@@ -484,7 +563,7 @@ def media_delivery_id(*, action_id: str, receipt_id: str) -> str:
 
 
 __all__ = [
-    "MEDIA_V2_PAYLOAD_MODELS", "PhotoCandidate", "MediaEvidenceSource", "FrozenMediaEvidenceSnapshot", "MediaOpportunity", "MediaPlan", "MediaNotRenderable", "MediaArtifact", "MediaInspectionRecord", "MediaPreview", "MediaRepairAuthorization", "MediaAutomaticDeliveryApproval", "MediaDeliveryShared",
+    "MEDIA_V2_PAYLOAD_MODELS", "PhotoCandidate", "MediaEvidenceSource", "ImageEvidenceIndexEntry", "ImageEventSnapshot", "FrozenMediaEvidenceSnapshot", "MediaOpportunity", "MediaPlan", "MediaNotRenderable", "MediaArtifact", "MediaInspectionRecord", "MediaPreview", "MediaRepairAuthorization", "MediaAutomaticDeliveryApproval", "MediaDeliveryShared",
     "PhotoCandidateOpenedPayload", "MediaOpportunityFrozenPayload", "MediaPlanRecordedPayload", "MediaNotRenderableRecordedPayload", "MediaRenderArtifactRecordedPayload", "MediaInspectionRecordedPayload", "MediaPreviewGeneratedPayload", "MediaPreviewFailedPayload", "MediaRepairAuthorizedPayload", "MediaAutomaticDeliveryApprovedPayload", "MediaDeliverySharedPayload",
     "StoredMediaPayload", "ImmutableMediaPayloadStore", "InMemoryImmutableMediaPayloadStore", "SQLiteImmutableMediaPayloadStore",
     "MediaPlanner", "MediaPlanningResult", "media_digest", "media_payload_hash", "planning_request_id", "continuation_trigger_id", "media_repair_trigger_id", "media_repair_attempt_id", "media_repair_action_id", "media_repair_reservation_id", "media_delivery_action_id", "media_delivery_reservation_id", "media_delivery_id",
