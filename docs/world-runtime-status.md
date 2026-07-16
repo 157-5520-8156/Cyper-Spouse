@@ -1,169 +1,138 @@
-# 世界运行时状态、已改动与后续设计
+# World v2 运行时状态与验收边界
 
-更新时间：2026-07-11
+> 更新时间：2026-07-16
+> 口径：本文件记录**当前代码和自动化证据**，不是目标架构的承诺书。冻结设计见
+> [`world-v2-refactor-plan.md`](world-v2-refactor-plan.md)。旧 WorldKernel 设计见
+> [`world-kernel.md`](world-kernel.md)，仅作迁移和历史诊断参考。
 
-## 一句话结论
+## 结论
 
-世界模式已经是虚拟生活事实与核心线上行动的唯一写模型：角色的生活、已发生经历、用户
-关系、短期情绪调制、未完成行动和小屋读投影均从 `WorldKernel` 事件账本重建。
+World v2 已经拥有可运行、可回放的独立账本纵切：`WorldRuntime` 接收 observation、
+追加受版本约束的事件、重建 projection、编译 Context Capsule，并让已授权 Action 经过
+receipt/unknown/recovery 生命周期。HTTP 已接入该宿主；兼容配置下的 QQ 私聊纯文本也会走
+该路径。
 
-这不等于把旧系统逐字复刻进世界：旧 `MoodState`、生活运行时和社交任务不再参与世界
-决策；其中一部分保留为纯分类器或平台 I/O，图片与表情能力则已按独立 Action 链重建。
-
-## 项目运行原则（后续开发的硬约束）
-
-本项目从现在起以世界模式为唯一目标运行时。旧系统不再作为功能回退、A/B 分支或新增
-能力的实现路径；它仅保留为历史数据、迁移参考和少数可提取的无状态算法来源。
-
-所有新功能必须按以下顺序设计：
-
-```text
-领域命令 → 世界事件 → reducer / 规则 → 读投影 → Action 与外部结算 → 适配器展示或投递
-```
-
-因此，“先接回旧模块，之后再迁移”不是可接受的临时方案。若旧模块有价值，应先将其拆为
-纯分类、规则、种子配置或 I/O 适配器，再接入 `WorldKernel`。
+这**不等于**整个产品已经完全切换到 v2，更不等于已证明“人味优于裸聊”。Dashboard/Godot
+主展示、全部 QQ/NapCat/OneBot 形态、真实可恢复图片 provider 的部署，以及真人/真实模型
+盲评仍是未关闭的工作。旧 `WorldKernel`、`CompanionEngine` 和旧行为表也仍存在于兼容与
+归档区域；它们不能被描述为 v2 的当前写权威。
 
 ## 当前权威边界
 
 ```text
-入站消息 / 面板命令 / 逻辑时钟 / 外部回执
-                    │
-                    ▼
-              WorldKernel
-        （追加事件 + 乐观并发）
-                    │
-                    ├─ 当前世界投影：日程、NPC、需求、关系、通信、决策、线程
-                    ├─ 对话上下文：事实、经历、SelfCoreProjection、行为约束
-                    ├─ 投递投影：outbox + turn trace + world action
-                    └─ 展示投影：世界控制台、小屋兼容快照、日历
+HTTP / 兼容 QQ C2C 文本 / 离线 harness
+                  │
+                  ▼
+  WorldV2PlatformHost / HttpV2CaptureHost / QQC2CHost
+                  │
+                  ▼
+             WorldTurnRuntime
+      (WorldRuntime ingest / advance / settle)
+                  │
+                  ▼
+  WorldLedger → deterministic ReducerState → viewer projections
+                  │                  │
+                  │                  ├─ Situation / Context Capsule / Advisory
+                  │                  └─ Action, Budget, Receipt, recovery
+                  ▼
+       transport / media provider / read-only projection adapter
 ```
 
-`outbox_messages` 与 `turn_traces` 仍保留，但只保存平台投递与审计记录；它们不能单独
-授权“发生过什么”或“下一步应该做什么”。
+- `WorldRuntime` 和 v2 Ledger 是 **已迁移入口** 中世界事实、Action 和 receipt 的唯一写
+  路径；adapter 不能直接写 reducer 或旧行为表。
+- 旧 `WorldKernel` 不是 v2 的替代账本，也不是 v2 机制的实现依据。它仍服务于尚未迁移的
+  旧入口、历史数据和兼容代码，因而“全产品唯一写模型”目前尚不能宣称成立。
+- `event_media` 是图片机的 public seam。图片机只能返回 provider 结果；机会、批准、预算、
+  投递和 `MediaDeliveryShared` 均由 v2 账本决定。
+- Dashboard 的 v2 room endpoint 只读、受 operator gate 保护，并且在 v2 host 冷启动时
+  fail closed；这不是 Dashboard/Godot 主展示已经迁移的证明。
 
-## 已完成
+## 阶段状态
 
-### 世界生活与可引用事实
+| Phase | 现状 | 已有证据 | 未关闭的边界 |
+| --- | --- | --- | --- |
+| 0 冻结与隔离 | 部分完成 | v2 package、proposal grammar、reverse architecture guard | 旧运行时仍存在；默认部署切换尚未完成 |
+| 1 Schema / interface | 已完成（代码层） | typed schemas、event catalog、runtime contract tests | 不能以 schema 存在推断每个 adapter 已接入 |
+| 2 Ledger / projection | 已完成核心纵切 | SQLite replay、revision/CAS、source-bound Fact/Experience/Memory/Core、Goal/Location/Resource/Attention fixtures | 其他业务域仍按逐条 authority vertical 继续收口 |
+| 3 Situation / matrix | 部分完成 | deterministic Capsule、budget slices、advisory、matrix catalog tests | 仍有 unavailable/private slices，需继续验证所有生产决策均消费同一 revision |
+| 4 Deliberation / acceptance | 部分完成 | source-bound proposal/manifest/atomic recorder、appraisal/affect/outcome/media thread lanes | 不应把未开放的 proposal family 或 fallback 当作已完成行为能力 |
+| 5 Action / recovery | 部分完成 | Action lifecycle、lease、unknown reconciliation、expression/deferred-reply tests | reaction/typing/sticker 仍是 adapter-only；不是可用生产 grammar |
+| 6 Media preview | 部分完成 | freeze → plan → render/inspect → preview → approval/delivery/recovery fixtures | 真正部署的 durable provider、operator approval 和 production transport 覆盖仍需验证 |
+| 7 平台与展示 | 部分完成 | HTTP v2、兼容 QQ C2C text v2、v2 dashboard read DTO | NapCat/OneBot 其他形态、Dashboard/Godot 默认读路径未迁移 |
+| 8 Evaluator / 清理 | 部分完成 | frozen scenario corpus、mechanism baseline、test-economy、blind artifact pipeline | synthetic/offline 证据不能替代真实模型、真人盲评或线上 SLO |
 
-- 逻辑时钟、活动计划/开始/中断/完成/取消、NPC、资源、长期目标均为世界事件。
-- 活动完成后只能经过结果提议、规则校验、提交，才生成 `ExperienceCommitted`。
-- 用户直接、可确认的事实进入 `FactConfirmed`；模型候选与模型原文只作为审计记录。
-- 对话回复只能引用已提交的事实或经历；计划、失败投递、未提交候选不能被说成已发生。
+“已完成（代码层）”仅表示对应 v2 contract 已有回放/攻击/合同测试；它不表示所有平台已经
+默认启用，也不表示已经获得外部体验数据。
 
-### 通信与行动
+## 已闭合的 v2 机械事实
 
-- 入站消息、已读/延迟/免打扰、输入开始/停止、延迟回复、对话余波、外发消息均有世界
-  Action 或通信事件。
-- 所有外发行动都有成功、失败、取消、过期或未知终态；进程中断且缺少平台回执时保持
-  `unknown`，不自动重发或伪造送达。
-- 世界模式不调用旧的随机时序和基于 `MoodState` 的 ghost window。
-- `WorldBehaviorPolicy` 只读取世界投影，并输出通信状态与主动性门禁；其规则版本随事件
-  记录，不重新引入旧情绪逻辑。
-- 旧口吻惯性和潜台词由 `expression_guidance()` 即时导出；它不写入私密记忆，也不把散文
-  式心理活动变成世界事实。
-- 浏览器控制台不能提交外部结果、模型结果、用户消息或确认事实；外部回执只能由适配器
-  持有的内核入口结算。
+下列结论有相应的 `tests/world_v2`、冻结 scenario 或静态 guard 证据，且不依赖旧
+WorldKernel：
 
-### 关系、情绪与心理决策
+- observation、clock、external result、proposal、acceptance、budget reservation、Action 和
+  receipt 都可以在 v2 ledger 中留下可重建的事件链；重复 ingress 和冲突 payload 会被拒绝。
+- 事实、经历、记忆候选、人格核心及 v16 的 Goal/Location/Resource/Attention 都有 source
+  binding、privacy、migration/replay 或 authority fixtures。它们不是“模型说过一次”就自动
+  成为世界事实。
+- appraisal、private impression、Affect episode、relationship、thread、commitment、world
+  occurrence/NPC 后果已经有独立 v2 reducer/trigger 路径。其存在不代表所有情绪判断都必然
+  被模型正确识别；只代表被接受的结构化结果可追踪、可消费、可回放。
+- 表达 Action 与 receipt 结算、用户插话后的剩余 beat reconsideration、`reply_later` 的
+  terminal lifecycle 均已有 v2 合同。未投递 beat 不得被当作已说过。
+- 媒体默认 preview；只有被批准且收到 delivery receipt 才可形成 `MediaDeliveryShared` 和
+  后续互动 trigger。inspection repair 被限制为同一 frozen plan 的一次修复。
+- 固定 corpus 的 deterministic replay、测试经济 trace 与机制 baseline 已在 CI 侧可运行。
 
-- 用户是世界实体，关系以尊重、可靠性、亲近度等可解释维度投影。
-- `TurnAppraised` 驱动关系变化、需求变化与 `EmotionModulated`；旧九维情绪状态不再写入。
-- “想联系但决定收住”使用 `DecisionDeferred/Resolved` 与有期限的复核 Action，不保存
-  散文式私密记忆。
-- 已送达的问题才开启 `ConversationThreadOpened`；用户回应后按纯分类器结算，逻辑超时
-  则变为 `ConversationThreadExpired`。开放线程会阻止追加主动消息。
+具体 mechanism-to-evidence 映射在
+[`configs/mechanism_closure.yaml`](../configs/mechanism_closure.yaml)，该文件不是产品能力
+清单：`partial`、`adapter-only`、`not-wired` 与“external evidence pending”都是有意保留的
+负面状态，不能被汇总成“已闭环”。
 
-### 上下文、面板与旧表隔离
+## 尚不能宣称的结论
 
-- `WorldKernel.conversation_context()` 是世界回复的唯一上下文读模型，提供可引用事实、
-  经历、关系/需求/情绪调制、开放线程与确定性 `SelfCoreProjection`。
-- `debug_snapshot()` 在世界模式只使用 `daemon_dashboard_projection()`；小屋渲染保持原样，
-  但其地点、动作、手机状态与原因来自世界投影。
-- 旧生活、日历、计划、社交任务和记忆写入口在世界模式下受保护，误调用会失败。
+以下事项缺少足够证据，必须保持未完成：
 
-### 多媒体与受限 NPC 互动
+1. **默认运行时已全量 v2。** HTTP 与一类 QQ C2C 入口有迁移证据，但不是全平台切换；未迁移
+   内容形态必须显式归档或拒绝，而不是双写。
+2. **所有世界模块已被物尽其用。** 有 authority/reducer 不等于每种 proposal family 都在真实
+   ingress 后被 deliberation 选择；应以 source → decision consumer → Action → settlement →
+   next-turn consumption 的 trace 逐项验收。
+3. **图片机已可安全自动投递。** 本地 planning/preview/repair 合同可用；真实 provider、审批
+   样本、失效策略和部署 receipt 仍需分别验收。
+4. **情绪已经达到“难以察觉是 AI”。** 目前证明的是可追踪的 affect/relationship/state
+   机制和离线场景，不是长期真人校准、讽刺/权力差异理解或语言自然度的外部证明。
+5. **热启动、冷启动和首 Action P95 达标。** test-economy 和 trace schema 已存在；真实部署的
+   queue/provider 数据、SLO 分位数和回归基线尚未采集。
+6. **Dashboard/Godot 只读消费 v2 projection。** 仅有 v2 room DTO seam；默认可视化链路仍需
+   迁移并做 privacy/redaction 回归。
 
-- `WorldMediaPolicy` 用世界关系、需求、边界与用户请求授权图片；媒体生成和媒体投递是
-  两个独立 Action，只有成功投递才产生 `MediaShared`。
-- 表情包选择不读取旧 mood：`StickerSelected` 与 sticker delivery Action 分别记录选择和
-  投递结算。
-- 带 NPC 的种子活动会产生 `NpcInteractionCommitted`，继承活动模板的地点、时段、资源、
-  可用性和频率限制。
+## 验收与后续工作顺序
 
-## 有意保留但不拥有世界事实的代码
+下一轮工作应以可观察的闭环而非继续堆模型规则为准：
 
-| 类别 | 保留内容 | 世界模式中的位置 |
-| --- | --- | --- |
-| 文本分类 | 互动事件识别、问题回应识别、文本清洗 | 仅输出候选标签；结果必须写入世界事件 |
-| 平台适配 | QQ/OneBot、消息合并、实际发送、回执获取 | I/O 执行层；不得直接写世界投影或旧行为表 |
-| 历史归档 | `MoodState`、`life_runtime`、`social_tasks` 等 | 不再承载新功能；仅供迁移参考和历史诊断 |
-| 投递记录 | outbox、turn trace | 世界 Action 的事务性投递投影 |
+1. 对每个仍标为 `partial` 的 production lane，补齐可执行的 source、consumer、Action、
+   receipt/recovery 和 next-turn trace，或者把它明确保留为 archive/adapter-only。
+2. 迁移 Dashboard/Godot 与剩余平台 adapter 到 `project()` / `WorldRuntime`；迁移期间不允许
+   同一 observation 同时写旧账本和 v2 账本。
+3. 在有 durable provider 与 operator approval 后，做真实媒体 preview 样本和恢复演练；此前
+   不默认开启自动 delivery。
+4. 收集与版本绑定的真实模型评审、真人长期会话和线上 latency/cost trace。只有这些证据满足
+   `world-v2-refactor-plan.md` 的统计门槛，才可声称 v2 不低于裸聊或达到目标 SLO。
 
-## 有意不迁入的旧能力
+建议的本地验证入口：
 
-| 能力 | 当前处理 | 原因 |
-| --- | --- | --- |
-| 旧口吻惯性与散文心理活动 | 不作为持久行为状态 | 不可解释且容易被误当成事实 |
-| 墙钟随机抖动、ghost window | 不启用 | 会破坏逻辑时钟与回放确定性 |
-
-这些能力不会偷偷写旧状态；其中可解释的部分已由下一节的世界规则替代。
-
-## 下一阶段设计
-
-### 1. 多媒体 Action 闭环（已完成）
-
-```text
-MediaRequested
-→ ActionScheduled(image_generation)
-→ ActionAttempted
-→ ExternalResultRecorded
-→ ActionSettled
-→ MediaShared
+```bash
+uv run pytest tests/world_v2 -q
+uv run python scripts/verify_world_v2_scenarios.py
+uv run python scripts/verify_mechanism_catalog.py
+uv run ruff check src/companion_daemon/world_v2 tests/world_v2
 ```
 
-- 请求识别保留为纯解析器。
-- 是否允许图片由世界关系、边界和用户请求决定。
-- 图片文件、生成失败、投递失败和外部回执均被记录；没有 `MediaShared` 就不能说“发了图”。
+完整仓库测试若被未迁移或用户工作区中的独立模块阻断，应单独记录其错误；不得把“v2
+子集通过”写成“全仓库验收通过”。
 
-表情包采用同样的外发 Action，但不把“选了某个表情”解释成情绪事实。
+## 旧文档处置
 
-### 2. `CommunicationPolicy`（已完成）
-
-`WorldBehaviorPolicy` 已将通信约束收敛为纯规则模块，输入仅来自世界投影：
-
-- 活动可中断性、精力、边界、当前开放行动；
-- 用户消息紧急度、开放问题线程、未完成承诺；
-- 输出 `reply_now / seen / deferred / do_not_disturb`、原因、逻辑截止时间。
-
-规则结果必须通过通信事件与 Action 落账；不要重新引入随机延迟或墙钟驱动的 ghost 状态。
-
-### 3. 互动后果规则表（已完成首版）
-
-`WorldInteractionRules` 已将关系与需求变化从内联映射收敛为版本化规则表：
-
-- 输入：`TurnAppraised`、外发投递结果、用户回应线程、修复尝试；
-- 输出：关系维度、需求、情绪调制、主动性限制；
-- 每条变化保留 `rule_version` 与原因事件，保证回放可解释。
-
-### 4. 受限 NPC 生活互动（已完成首版）
-
-NPC 不调用 LLM。当前只允许按种子中的地点、可用时段、模板、频率与主角资源参与活动：
-
-```text
-NPC 可用性 + 世界活动 + 频率/资源规则
-→ NpcInteractionCommitted
-→ 关系/需求/已提交经历变化
-```
-
-## 启用与验收门槛
-
-- 任意回复的事实引用可追到 `FactConfirmed` 或 `ExperienceCommitted`。
-- 任意外发消息可追到命令、世界 Action、outbox、回执和终态。
-- 任意小屋状态可追到世界投影与事件。
-- 删除读模型并重建后，状态哈希、日程、经历、通信、行动与展示投影一致。
-- 世界模式下旧行为表写入被自动测试拒绝。
-- 未知投递在获得可验证平台回执前不能变为已送达。
-
-关联文档：[旧行为运行时盘点与迁移清单](legacy-behavior-runtime-inventory.md)、
-[WorldKernel 设计说明](world-kernel.md)。
+本文替代早期“世界模式已是全产品唯一 WorldKernel 写模型”的状态性表述。早期
+`world-kernel.md`、旧行为盘点与遗留设计文件仍有价值：它们说明需要隔离的旧写路径和不可
+回迁的语义；但它们不是 World v2 当前运行时权威或 Phase 1–8 的完成证明。

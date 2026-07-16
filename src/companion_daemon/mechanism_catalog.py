@@ -14,6 +14,9 @@ ACTION_TERMINAL_STATES = frozenset(
     {"delivered", "failed", "cancelled", "expired", "unknown"}
 )
 MECHANISM_STATUSES = frozenset({"closed", "partial", "structure", "deferred"})
+RUNTIME_ACTIVATIONS = frozenset(
+    {"default", "limited-production", "harness", "not-wired"}
+)
 _REQUIRED_FIELDS = (
     "sources",
     "events",
@@ -25,6 +28,7 @@ _REQUIRED_FIELDS = (
     "adapters",
     "tests",
 )
+_V2_REQUIRED_FIELDS = ("phase", "runtime_activation", "limitations")
 
 
 class CatalogValidationError(ValueError):
@@ -49,13 +53,15 @@ def verify_mechanism_catalog(
     if not isinstance(raw, dict):
         raise CatalogValidationError("catalog root must be a mapping")
     schema_version = raw.get("schema_version")
-    if schema_version != 1:
+    if schema_version not in {1, 2}:
         raise CatalogValidationError(f"unsupported schema_version: {schema_version!r}")
     mechanisms = raw.get("mechanisms")
     if not isinstance(mechanisms, list) or not mechanisms:
         raise CatalogValidationError("mechanisms must be a non-empty list")
 
     errors: list[str] = []
+    if schema_version == 2:
+        _verify_v2_runtime_authority(raw, errors)
     world_only_scopes = _validated_string_list(
         raw, "world_only_scopes", label="catalog", errors=errors
     )
@@ -71,6 +77,7 @@ def verify_mechanism_catalog(
     if len(legacy_behavior_writers) != len(set(legacy_behavior_writers)):
         errors.append("catalog.legacy_behavior_writers must not contain duplicates")
     production_emissions = _production_event_emissions(repo_root, errors)
+    v2_event_literals = _v2_event_literals(repo_root, errors) if schema_version == 2 else set()
     seen_ids: set[str] = set()
     for index, mechanism in enumerate(mechanisms):
         label = f"mechanisms[{index}]"
@@ -95,6 +102,8 @@ def verify_mechanism_catalog(
                 errors.append(f"{label}.{field} must be a list")
             elif any(not isinstance(item, str) or not item.strip() for item in value):
                 errors.append(f"{label}.{field} entries must be non-empty strings")
+        if schema_version == 2:
+            _verify_v2_mechanism_fields(mechanism, label=label, errors=errors)
 
         actions = _string_list(mechanism.get("actions"))
         terminal_states = set(_string_list(mechanism.get("terminal_states")))
@@ -139,12 +148,23 @@ def verify_mechanism_catalog(
                     reducer_node = resolved
                 reducer_consumption.update(_consumed_event_names(reducer_node))
         for event_name in events:
-            if event_name not in reducer_consumption:
-                errors.append(
-                    f"{label}.events {event_name} is not consumed by declared reducers"
-                )
-            if event_name not in production_emissions:
-                errors.append(f"{label}.events {event_name} has no production emission")
+            if schema_version == 2:
+                # V2 reducers are registered through a catalog and several
+                # event families are expanded from typed payload registries.
+                # The v1 AST heuristic (a direct `event_type ==` comparison
+                # plus a tuple literal emission) would incorrectly call those
+                # live paths absent.  Require the event to be present in the
+                # installed v2 source artifact instead; individual evidence
+                # tests remain mandatory per mechanism.
+                if event_name not in v2_event_literals:
+                    errors.append(f"{label}.events {event_name} is not present in world_v2 source")
+            else:
+                if event_name not in reducer_consumption:
+                    errors.append(
+                        f"{label}.events {event_name} is not consumed by declared reducers"
+                    )
+                if event_name not in production_emissions:
+                    errors.append(f"{label}.events {event_name} has no production emission")
         for node_id in _string_list(mechanism.get("tests")):
             _verify_test_node(label, node_id, repo_root, errors)
 
@@ -168,6 +188,59 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [item for item in value if isinstance(item, str) and item.strip()]
+
+
+def _verify_v2_runtime_authority(raw: dict[str, Any], errors: list[str]) -> None:
+    """Require the deployment caveats that make a v2 closure catalog honest.
+
+    Version 1 catalogs only proved that a list of old-world mechanisms named
+    files and tests.  A v2 catalog must additionally state which runtime owns
+    routed writes and whether its evidence is production, harness-only, or
+    still external.  This is deliberately metadata validation: it prevents a
+    mechanically green catalog from silently becoming a product-completion
+    claim.
+    """
+
+    authority = raw.get("runtime_authority")
+    if not isinstance(authority, dict):
+        errors.append("catalog.runtime_authority must be a mapping for schema_version=2")
+        return
+    canonical = authority.get("canonical_v2_write_model")
+    if not isinstance(canonical, str) or "world_v2" not in canonical:
+        errors.append("catalog.runtime_authority.canonical_v2_write_model must name world_v2")
+    hosts = authority.get("v2_ingress_hosts")
+    if not _string_list(hosts):
+        errors.append("catalog.runtime_authority.v2_ingress_hosts must not be empty")
+    activation = authority.get("deployment_activation")
+    if activation not in RUNTIME_ACTIVATIONS:
+        errors.append(
+            "catalog.runtime_authority.deployment_activation must be one of "
+            f"{sorted(RUNTIME_ACTIVATIONS)}"
+        )
+    for field in ("legacy_status", "external_evidence"):
+        if not isinstance(authority.get(field), str) or not authority[field].strip():
+            errors.append(f"catalog.runtime_authority.{field} must be a non-empty string")
+
+
+def _verify_v2_mechanism_fields(
+    mechanism: dict[str, Any], *, label: str, errors: list[str]
+) -> None:
+    for field in _V2_REQUIRED_FIELDS:
+        if field not in mechanism:
+            errors.append(f"{label}.{field} is required for schema_version=2")
+    phase = mechanism.get("phase")
+    if not isinstance(phase, int) or isinstance(phase, bool) or not 0 <= phase <= 8:
+        errors.append(f"{label}.phase must be an integer from 0 through 8")
+    activation = mechanism.get("runtime_activation")
+    if activation not in RUNTIME_ACTIVATIONS:
+        errors.append(
+            f"{label}.runtime_activation must be one of {sorted(RUNTIME_ACTIVATIONS)}"
+        )
+    limitations = mechanism.get("limitations")
+    if not isinstance(limitations, list) or not limitations:
+        errors.append(f"{label}.limitations must be a non-empty list")
+    elif any(not isinstance(item, str) or not item.strip() for item in limitations):
+        errors.append(f"{label}.limitations entries must be non-empty strings")
 
 
 def _validated_string_list(
@@ -236,6 +309,28 @@ def _production_event_emissions(repo_root: Path, errors: list[str]) -> set[str]:
         visitor.visit(tree)
         emitted.update(visitor.emitted)
     return emitted
+
+
+def _v2_event_literals(repo_root: Path, errors: list[str]) -> set[str]:
+    """Return string literals in the installed v2 artifact.
+
+    This deliberately stays static: the verifier must not instantiate a world
+    or import a live adapter merely to check documentation.  It is used only by
+    schema v2, whose per-mechanism tests and reducer paths are separately
+    checked above.
+    """
+
+    source_root = repo_root / "src" / "companion_daemon" / "world_v2"
+    if not source_root.is_dir():
+        errors.append("catalog world_v2 source root is missing")
+        return set()
+    literals: set[str] = set()
+    for path in sorted(source_root.rglob("*.py")):
+        tree = _parse_python(path, errors, label="world_v2 source")
+        if tree is None:
+            continue
+        literals.update(_string_literals(tree))
+    return literals
 
 
 class _EventEmissionVisitor(ast.NodeVisitor):

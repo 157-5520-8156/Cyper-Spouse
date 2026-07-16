@@ -11,9 +11,37 @@ def test_repository_mechanism_catalog_is_complete_and_traceable() -> None:
         repo_root=Path.cwd(),
     )
 
-    assert report.schema_version == 1
+    assert report.schema_version == 2
     assert report.mechanism_count >= 12
     assert report.errors == ()
+
+
+def test_v2_catalog_requires_runtime_scope_and_explicit_limitations(tmp_path: Path) -> None:
+    catalog = tmp_path / "catalog.yaml"
+    catalog.write_text(
+        """
+schema_version: 2
+world_only_scopes: [src/example.py]
+legacy_behavior_writers: [save_mood_state]
+mechanisms:
+  - id: incomplete-v2-mechanism
+    status: deferred
+    sources: []
+    events: []
+    reducers: []
+    projections: []
+    decision_consumers: []
+    actions: []
+    terminal_states: []
+    adapters: []
+    tests: []
+""".strip()
+    )
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src/example.py").write_text("# reducer\n")
+
+    with pytest.raises(CatalogValidationError, match="runtime_authority"):
+        verify_mechanism_catalog(catalog, repo_root=tmp_path)
 
 
 def test_closed_action_mechanism_requires_every_action_terminal_state(tmp_path: Path) -> None:

@@ -1,22 +1,33 @@
-schema_version: 1
+# Machine-readable evidence index for World v2.
+#
+# `closed` means the named *narrow v2 mechanism* has code-level/replay evidence.
+# It never means every product adapter is default-enabled or that external human
+# evaluation has been completed.  See docs/world-runtime-status.md for the
+# corresponding deployment and evaluation limits.
+schema_version: 2
 terminal_state_vocabulary: [delivered, failed, cancelled, expired, unknown]
+runtime_authority:
+  canonical_v2_write_model: companion_daemon.world_v2.runtime::WorldRuntime
+  v2_ingress_hosts:
+    - companion_daemon.world_v2.http_capture_host::HttpV2CaptureHost
+    - companion_daemon.world_v2.qq_c2c_host::QQC2CHost
+  deployment_activation: limited-production
+  legacy_status: archive-and-unmigrated-adapters-remain
+  external_evidence: pending
+
+# These are paths that must not reach a legacy behavior writer.  They are v2
+# application seams, not a claim that the old Engine has disappeared.
 world_only_scopes:
-  - src/companion_daemon/runtime.py::build_companion_engine
-  - src/companion_daemon/engine.py::CompanionEngine._handle_world_message
-  - src/companion_daemon/engine.py::CompanionEngine._world_proactive_tick
-  - src/companion_daemon/world.py
-  - src/companion_daemon/world_affect.py
-  - src/companion_daemon/world_affinity.py
-  - src/companion_daemon/world_behavior.py
-  - src/companion_daemon/world_conversation.py
-  - src/companion_daemon/world_interaction_rules.py
-  - src/companion_daemon/world_media.py
-  - src/companion_daemon/world_relationship.py
-  - src/companion_daemon/character_deliberation.py
-  - src/companion_daemon/context_assembler.py
-  - src/companion_daemon/action_coordinator.py
-  - src/companion_daemon/outbound_policy.py
-  - src/companion_daemon/tool_action.py
+  - src/companion_daemon/world_v2/runtime.py
+  - src/companion_daemon/world_v2/world_turn_runtime.py
+  - src/companion_daemon/world_v2/platform_host.py
+  - src/companion_daemon/world_v2/http_capture_host.py
+  - src/companion_daemon/world_v2/qq_c2c_host.py
+  - src/companion_daemon/world_v2/qq_c2c_onebot_app.py
+  - src/companion_daemon/world_v2/platform_action_executor.py
+  - src/companion_daemon/world_v2/media_execution_runtime.py
+  - src/companion_daemon/world_v2/room_projection.py
+  - src/companion_daemon/world_v2/dashboard_projection_adapter.py
 legacy_behavior_writers:
   - CompanionStore.save_incoming
   - CompanionStore.queue_outgoing
@@ -61,195 +72,291 @@ legacy_behavior_writers:
   - advance_life_runtime
   - maybe_apply_planned_life_result
   - synchronize_life_runtime
+
 mechanisms:
-  - id: world-ledger-and-projections
+  - id: v2-ledger-projection-replay
+    phase: 2
     status: closed
-    sources: [WorldSeed, Command, ExternalResult]
-    events: [WorldStarted, ExternalResultRecorded]
-    reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [world_snapshot, projection_checkpoints]
-    decision_consumers: [WorldKernel]
+    runtime_activation: limited-production
+    limitations: [only-routed-v2-ingress-is-covered]
+    sources: [Observation, ClockObservation, ExternalObservation]
+    events: [ObservationRecorded, ClockAdvanced, ExternalObservationRecorded]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [ReducerState, viewer-projection, semantic-hash]
+    decision_consumers: [WorldRuntime, SituationCompiler]
     actions: []
     terminal_states: []
-    adapters: [world-console]
-    tests: [tests/test_world_kernel.py::test_rebuilding_projection_from_the_ledger_matches_live_projection]
+    adapters: [http-v2, qq-c2c-v2, offline-harness]
+    tests:
+      - tests/world_v2/test_runtime_contract.py::test_duplicate_ingest_joins_one_trigger_and_advances_world_once
+      - tests/world_v2/test_runtime_contract.py::test_clock_advance_is_effect_once_and_rejects_time_reversal
+      - tests/world_v2/test_scenario_runner.py::test_runner_executes_a_real_v2_turn_then_exports_verified_replay
 
-  - id: character-deliberation
+  - id: source-bound-fact-experience-memory-core
+    phase: 2
     status: closed
-    sources: [Situation, CharacterCore, UserRequest, Affect, Relationship]
-    events: [UserRequestAppraised, MotiveConflictEvaluated, StanceSelected]
-    reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [turn_deliberation]
-    decision_consumers: [CharacterDeliberation]
+    runtime_activation: harness
+    limitations: [not-every-production-deliberation-path-has-been-proven-to-consume-every-authority]
+    sources: [accepted-proposal, committed-occurrence, receipt, operator-authority]
+    events: [FactCommittedV2, ExperienceCommitted, CharacterCoreInitialized]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [facts, experiences, memory-candidates, character-core]
+    decision_consumers: [SituationCompiler, ContextCapsule]
     actions: []
     terminal_states: []
     adapters: []
-    tests: [tests/test_character_deliberation.py::test_no_advice_is_a_weighted_request_and_character_may_disagree_gently]
+    tests:
+      - tests/world_v2/test_fact_authority.py::test_fact_commit_is_typed_persistent_and_zero_cascade
+      - tests/world_v2/test_experience_authority.py::test_experience_commit_is_typed_exact_immutable_and_zero_cascade
+      - tests/world_v2/test_memory_candidate_authority.py::test_ledger_memory_open_accept_is_typed_and_zero_cascade
+      - tests/world_v2/test_character_core_authority.py::test_ledger_character_core_initialize_is_typed_replayable_and_zero_cascade
 
-  - id: affect-and-affinity
-    status: partial
-    sources: [TurnAppraisal, SettledInteraction, LogicalTime]
-    events: [AffectCommitted, AffinityInteractionSettled]
-    reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [affect, affinity]
-    decision_consumers: [CharacterDeliberation, ExpressionPlanner]
-    actions: []
-    terminal_states: []
-    adapters: []
-    tests: [tests/test_world_affinity.py::test_world_records_affinity_only_when_a_turn_is_delivered]
-
-  - id: sourced-memory-and-context
-    status: partial
-    sources: [CharacterFact, UserFact, CommittedExperience, CurrentScene]
-    events: [FactConfirmed, ExperienceCommitted, CharacterCoreChanged, CharacterCoreChangeRejected]
-    reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [character_core, user_profile, current_scene, retrieved_experiences]
-    decision_consumers: [ContextAssembler, reply-model]
-    actions: []
-    terminal_states: []
-    adapters: []
-    tests: [tests/test_context_assembler.py::test_assembler_exposes_exact_five_layers_with_character_and_item_budgets, tests/test_character_core_evolution.py::test_world_commits_versioned_core_change_only_after_repeated_lived_evidence]
-
-  - id: communication-attention-and-turns
-    status: partial
-    sources: [UserMessageObserved, CurrentActivity, Affect, Relationship]
-    events: [InputMergeCandidateObserved, InputMergeSettled, MessageAttentionDecided, TurnProcessingClaimed, TurnProcessingSettled]
-    reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [input_merges, turns, communication]
-    decision_consumers: [QQMessageCoalescer, CompanionEngine]
-    actions: [reply-later]
-    terminal_states: [delivered, failed, cancelled, expired, unknown]
-    adapters: [qq-official, napcat, onebot, http]
-    tests: [tests/test_world_conversation_experience.py::test_non_interruptible_activity_is_an_advisory_not_a_pre_model_veto, tests/test_world_input_merge.py::test_pending_input_merge_is_auditable_and_recovers_after_engine_restart]
-
-  - id: segmented-outbound-actions
+  - id: v16-situation-constituents
+    phase: 2
     status: closed
-    sources: [ExpressionPlanned, UserInterjection, PlatformReceipt]
-    events: [ActionSegmentsPlanned, ActionSegmentDispatchClaimed, ActionSegmentSettled]
-    reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [outbox, delivered_conversation]
-    decision_consumers: [ActionCoordinator, platform-sender]
-    actions: [reply, media, reaction, proactive]
-    terminal_states: [delivered, failed, cancelled, expired, unknown]
-    adapters: [qq-official, napcat, onebot, http]
-    tests: [tests/test_action_coordinator.py::test_unknown_segment_blocks_later_segments_until_receipt_reconciliation]
-
-  - id: shared-outbound-policy
-    status: partial
-    sources: [OutboundCandidate, Cooldowns, UnansweredBudget, GenerationLease]
-    events: [OutboundActionAllowed, OutboundActionRejected, OutboundSoftGateOverridden, ControlledTransgressionCommitted]
-    reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [outbound_budget, generation_locks, controlled_transgressions]
-    decision_consumers: [ActionCoordinator, proactive-scheduler]
-    actions: [reply, pulse, life-share, follow-up, media, reaction, tool]
-    terminal_states: [delivered, failed, cancelled, expired, unknown]
-    adapters: [qq-official, napcat, onebot]
-    tests: [tests/test_outbound_policy.py::test_every_outbound_kind_passes_through_all_shared_guards]
-
-  - id: unified-world-cost-ledger
-    status: closed
-    sources: [ExternalActionCandidate, LogicalDay, AutomaticPolicy, CacheKey]
-    events: [CostReservationDecided, CostReservationSettled, CostReservationReleased]
-    reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [cost_ledger]
-    decision_consumers: [WorldKernel, external-action-coordinator]
+    runtime_activation: harness
+    limitations: [availability-in-a-real-user-world-depends-on-installed-authority-heads]
+    sources: [operator-authority, accepted-proposal, logical-clock]
+    events: [V2GoalOpened, V2LocationChanged, V2ResourceStateAdjusted, V2AttentionChanged]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [goals, location, resources, attention]
+    decision_consumers: [SituationCompiler, Deliberation]
     actions: []
     terminal_states: []
     adapters: []
-    tests: [tests/test_world_cost_integration.py::test_every_external_action_is_cost_reserved_and_terminally_settled]
+    tests:
+      - tests/world_v2/test_goal_authority_v16.py::test_goal_hashes_normalize_equivalent_datetime_offsets
+      - tests/world_v2/test_location_integration_v16.py::test_location_typed_roundtrip_reopen_rebuild_and_project_at
+      - tests/world_v2/test_resource_authority_v16.py::test_reducer_is_zero_cascade_and_rejects_duplicate_transition_identity
+      - tests/world_v2/test_attention_authority_v16.py::test_replay_state_validator_requires_exact_committed_event_and_head
 
-  - id: virtual-life-and-goals
+  - id: situation-context-and-advisory
+    phase: 3
     status: partial
-    sources: [WorldSeed, LogicalTime, UserEvent, GoalPriority]
-    events: [ActivityPlanned, ActivityCompleted, GoalProgressed, ExperienceCommitted]
-    reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [agenda, goals, experiences]
-    decision_consumers: [WorldKernel, life-share-planner]
-    actions: [life-share]
-    terminal_states: [delivered, failed, cancelled, expired, unknown]
-    adapters: [proactive-scheduler]
-    tests: [tests/test_world_kernel.py::test_week_long_life_simulation_rebuilds_deterministically]
+    runtime_activation: limited-production
+    limitations: [some-context-slices-remain-explicitly-unavailable, full-production-consumption-coverage-not-proven]
+    sources: [InternalWorldSnapshot, source-bound-authority-heads, advisory-adapters]
+    events: [ObservationRecorded, ClockAdvanced]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [SituationProjection, ContextCapsule, InnerAdvisory]
+    decision_consumers: [WorldTurnRuntime, proposal-workers]
+    actions: []
+    terminal_states: []
+    adapters: [internal]
+    tests:
+      - tests/world_v2/test_situation_compiler_v16.py::test_compile_is_order_invariant_source_bound_and_explicit_about_missing_heads
+      - tests/world_v2/test_situation_compiler_v16.py::test_viewer_budget_truncates_stable_prefix_without_changing_internal_hash
+      - tests/world_v2/test_advisory_compiler.py::test_compiles_source_bound_rejectable_advisory_without_mutation_ports
 
-  - id: multimedia-analysis-and-generation
+  - id: appraisal-affect-relationship-impression
+    phase: 3
     status: partial
-    sources: [AttachmentObserved, MediaRequest, PrivacyDecision]
-    events: [MediaRequested, MediaGenerated, MediaShared, ReactionSelected, ReactionShared]
-    reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [media_actions, attachment_summaries, reactions]
-    decision_consumers: [multimodal-analyzer, image-generator, CharacterDeliberation]
-    actions: [vision, transcription, image-generation, media-delivery]
-    terminal_states: [delivered, failed, cancelled, expired, unknown]
-    adapters: [qq-official, napcat, onebot]
-    tests: [tests/test_world_kernel.py::test_media_generation_and_delivery_are_separate_world_actions, tests/test_world_reaction.py::test_reaction_is_selected_scheduled_and_shared_only_after_adapter_receipt]
+    runtime_activation: harness
+    limitations: [semantic-recognition-quality-and-long-term-human-calibration-are-not-proven]
+    sources: [observed-message, committed-world-occurrence, settled-interaction]
+    events: [AppraisalAccepted, AffectEpisodeOpened, PrivateImpressionAccepted, RelationshipSignalAccepted]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [appraisals, affect, private-impressions, relationship]
+    decision_consumers: [AffectDeliberationWorker, ContextCapsule, ExpressionPlanner]
+    actions: []
+    terminal_states: []
+    adapters: [internal]
+    tests:
+      - tests/world_v2/test_appraisal_authority.py::test_accepted_appraisal_can_open_affect_through_an_independent_authority_path
+      - tests/world_v2/test_private_impression_authority.py::test_private_impression_is_appraisal_bound_and_visible_only_to_internal_context
+      - tests/world_v2/test_affect_module.py::test_resolve_is_explicit_sourced_and_terminal
 
-  - id: attachment-retention
-    status: structure
-    sources: [AttachmentObserved, UserDeletionRequest, LogicalTime]
+  - id: life-npc-outcome-continuity
+    phase: 2
+    status: partial
+    runtime_activation: harness
+    limitations: [world-occurrence-to-everyday-production-dialogue-coverage-is-not-complete]
+    sources: [logical-clock, accepted-activity-plan, occurrence-receipt, npc-appraisal]
+    events: [ActivityPlanned, WorldOccurrenceSettled, ExperienceCommitted]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [activities, world-occurrences, life-content, experiences]
+    decision_consumers: [OutcomeProposalWorker, NpcWorldAppraisalTriggerRuntime, SituationCompiler]
+    actions: [life-content]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [offline-harness]
+    tests:
+      - tests/world_v2/test_occurrence_content_coordinator.py::test_coordinator_commits_complete_sidecar_backed_candidate_matrix
+      - tests/world_v2/test_outcome_e2e_recovery_replay.py::test_outcome_restart_recovers_full_world_to_affect_and_next_turn_context
+      - tests/world_v2/test_npc_world_appraisal_trigger_runtime.py::test_settled_npc_event_can_create_a_source_bound_companion_appraisal
+
+  - id: proposal-acceptance-manifests
+    phase: 4
+    status: partial
+    runtime_activation: limited-production
+    limitations: [only-registered-production-families-are-authorized, fallback-remains-narrower-than-normal-generation]
+    sources: [ContextCapsule, InnerAdvisory, model-result, deterministic-proposal-identity]
+    events: [ProposalRecorded, ModelResultRecorded, AcceptanceRecorded]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [proposal-audit, acceptance-history, trigger-processes]
+    decision_consumers: [AcceptanceRuntime, atomic-recorders]
+    actions: []
+    terminal_states: []
+    adapters: [model-adapter]
+    tests:
+      - tests/world_v2/test_production_proposal_grammar.py::test_catalogue_is_closed_and_every_reachable_change_has_all_three_authority_descriptors
+      - tests/world_v2/test_acceptance_manifest.py::test_accepted_shape_binds_effect_event_ref_longer_than_256
+      - tests/world_v2/test_accepted_ledger_batch.py::test_issuer_requires_a_v3_acceptance_followed_by_effects
+
+  - id: expression-beats-deferred-replies
+    phase: 5
+    status: partial
+    runtime_activation: limited-production
+    limitations: [reaction-typing-and-sticker-remain-adapter-only, no-claim-that-all-interrupt-behavior-is-live]
+    sources: [accepted-expression-plan, user-interjection, platform-receipt]
+    events: [ExpressionPlanAccepted, ExpressionBeatAuthorized, ExpressionBeatSettled]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [expression-plans, beats, deferred-replies]
+    decision_consumers: [ExpressionLifecycleRuntime, ExpressionReconsiderationRuntime]
+    actions: [reply, reply-later]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [http-v2, qq-c2c-v2]
+    tests:
+      - tests/world_v2/test_expression_lifecycle_runtime.py::test_multibeat_plan_completes_only_after_the_last_independent_receipt
+      - tests/world_v2/test_expression_action_capabilities.py::test_production_chat_grammar_rejects_an_adapter_only_reaction_even_when_its_beat_is_well_bound
+      - tests/world_v2/test_deferred_reply_runtime.py::test_delivered_reply_later_fulfills_exact_private_commitment
+
+  - id: action-budget-receipt-recovery
+    phase: 5
+    status: closed
+    runtime_activation: limited-production
+    limitations: [only-actions-routed-through-v2-executors-are-covered]
+    sources: [accepted-action-intent, budget-policy, provider-receipt]
+    events: [BudgetReserved, ActionAuthorized, ActionClaimed, ActionDispatchStarted, ActionDelivered, ActionFailed, ActionUnknown]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [actions, budget-ledger, receipts, reconciliation]
+    decision_consumers: [ActionPump, PlatformActionExecutor]
+    actions: [reply, media-planning, media-render, media-delivery]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [http-v2, qq-c2c-v2, fake-transport]
+    tests:
+      - tests/world_v2/test_action_lifecycle.py::test_unknown_is_terminal_and_a_later_delivery_cannot_reopen_the_action
+      - tests/world_v2/test_action_lifecycle.py::test_atomic_settlement_survives_sqlite_restart
+      - tests/world_v2/test_action_pump.py::test_non_idempotent_started_action_becomes_unknown_without_redispatch
+
+  - id: media-preview-and-approval
+    phase: 6
+    status: partial
+    runtime_activation: limited-production
+    limitations: [real-durable-provider-and-operator-approval-evidence-pending, automatic-delivery-not-globally-enabled]
+    sources: [committed-life-event, frozen-opportunity, provider-result, operator-approval, delivery-receipt]
+    events: [MediaOpportunityFrozen, MediaPlanRecorded, MediaPreviewGenerated, MediaDeliveryShared]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [media-candidates, media-plans, inspection, preview, media-deliveries]
+    decision_consumers: [MediaPlanningWorker, MediaExecutionWorker, MediaDeliveryRuntime]
+    actions: [media-planning, media-render, media-inspection, media-delivery]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [event-media-public-seam, explicit-durable-provider]
+    tests:
+      - tests/world_v2/test_media_v2_planning.py::test_render_inspection_preview_are_receipt_bound_and_preview_can_never_be_delivery
+      - tests/world_v2/test_media_v2_planning.py::test_repairable_inspection_has_one_source_bound_repair_then_second_failure_is_terminal
+      - tests/world_v2/test_media_delivery_approval.py::test_share_materializes_only_after_delivered_receipt
+      - tests/world_v2/test_media_provider_results.py::test_worker_only_materializes_provider_bytes_bound_to_terminal_receipt
+
+  - id: http-v2-ingress
+    phase: 7
+    status: closed
+    runtime_activation: limited-production
+    limitations: [HTTP-only; does-not-prove-other-platform-migrations]
+    sources: [HTTP-message, HTTP-receipt, HTTP-clock]
+    events: [ObservationRecorded, ActionDelivered]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [v2-http-capture, action-outcome]
+    decision_consumers: [HttpV2CaptureHost]
+    actions: [reply]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [http-v2]
+    tests:
+      - tests/world_v2/test_http_v2_host_migration.py::test_http_capture_host_runs_one_v2_ingress_action_tick_and_duplicate_without_legacy_write
+      - tests/world_v2/test_http_v2_host_migration.py::test_http_migration_blackbox_does_not_grant_the_new_path_legacy_authority
+
+  - id: qq-c2c-v2-ingress
+    phase: 7
+    status: partial
+    runtime_activation: limited-production
+    limitations: [compatible-private-text-only, unsupported-shapes-are-archived-or-rejected, not-a-full-QQ-NapCat-OneBot-migration]
+    sources: [QQ-C2C-text, QQ-receipt, scheduler-tick]
+    events: [ObservationRecorded, ActionDelivered]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [v2-qq-c2c, action-outcome]
+    decision_consumers: [QQC2CHost]
+    actions: [reply]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [qq-c2c-v2]
+    tests:
+      - tests/world_v2/test_qq_c2c_host_migration.py::test_qq_c2c_host_runs_text_ingress_and_restart_recovery_without_a_legacy_sender
+      - tests/world_v2/test_qq_c2c_host_migration.py::test_cli_migration_gate_archives_unsupported_or_explicitly_archived_qq_shapes
+      - tests/world_v2/test_qq_c2c_host_migration.py::test_napcat_v2_branch_never_builds_a_legacy_engine_and_rejects_unsupported_content
+
+  - id: room-dashboard-viewer-projection
+    phase: 7
+    status: partial
+    runtime_activation: limited-production
+    limitations: [read-only-v2-room-endpoint-exists, default-dashboard-and-godot-consumers-not-fully-migrated]
+    sources: [v2-viewer-request, internal-room-projection]
+    events: [WorldStarted]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [RoomProjection, dashboard-public-dto]
+    decision_consumers: [RoomProjectionMaterializer, DashboardProjectionAdapter]
+    actions: []
+    terminal_states: []
+    adapters: [http-dashboard-v2]
+    tests:
+      - tests/world_v2/test_room_projection_materialization.py::test_room_redacts_private_situation_and_preview_media
+      - tests/world_v2/test_dashboard_projection_adapter.py::test_dashboard_adapter_is_a_read_only_projection_consumer
+      - tests/world_v2/test_http_v2_host_migration.py::test_http_dashboard_room_route_is_operator_gated_and_returns_only_the_v2_public_dto
+
+  - id: offline-mechanism-evaluation
+    phase: 8
+    status: closed
+    runtime_activation: harness
+    limitations: [mechanism-baseline-is-not-human-likeness-or-real-network-evidence]
+    sources: [frozen-scenario-corpus, replay-traces, test-economy-profile]
+    events: [ModelResultRecorded, ActionDelivered]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [scenario-manifest, mechanism-baseline, cost-latency-trace]
+    decision_consumers: [scenario-verifier, test-economy-gate]
+    actions: []
+    terminal_states: []
+    adapters: [offline-harness]
+    tests:
+      - tests/world_v2/test_scenario_runner.py::test_suite_manifest_is_hash_bound_and_explicitly_not_human_evaluation
+      - tests/world_v2/test_test_economy.py::test_mechanical_gate_never_requires_real_network_evidence_to_pass_offline
+      - tests/world_v2/test_test_economy.py::test_latency_exporter_reports_percentiles_and_warm_speed_without_fake_network_slo
+
+  - id: blind-external-evaluation
+    phase: 8
+    status: deferred
+    runtime_activation: not-wired
+    limitations: [requires-real-model-outputs-independent-reviewers-and-eventually-human-longitudinal-data]
+    sources: [blinded-real-model-output, independent-review, human-longitudinal-session]
     events: []
     reducers: []
-    projections: [attachment_manifest]
-    decision_consumers: [multimodal-analyzer, retention-cleaner]
+    projections: [signed-evaluation-report]
+    decision_consumers: [release-gate]
     actions: []
     terminal_states: []
-    adapters: [qq-official, napcat, onebot]
-    tests: [tests/test_attachment_cache.py::test_cached_attachment_expires_after_thirty_days_by_default]
+    adapters: [external-evaluator]
+    tests:
+      - tests/world_v2/test_formal_evaluation_pipeline.py::test_synthetic_pipeline_exercises_bundle_bootstrap_report_but_can_never_claim_real_evidence
 
-  - id: confirmed-tool-actions
-    status: structure
-    sources: [ToolProposal, UserConfirmation, ToolAuthorization]
-    events: [ToolProposed, ToolAuthorized, ExternalResultRecorded]
-    reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [tool_actions]
-    decision_consumers: [tool-coordinator]
-    actions: [tool-execution]
-    terminal_states: [delivered, failed, cancelled, expired, unknown]
-    adapters: [fake-tool]
-    tests: [tests/test_tool_action.py::test_authorized_fake_tool_execution_records_result_settlement_and_safe_summary]
-
-  - id: qq-single-outbound-owner
-    status: structure
-    sources: [RuntimeConfiguration, ProcessLease]
-    events: []
-    reducers: []
-    projections: [qq-outbound-owner-lock]
-    decision_consumers: [qq-official-cli, napcat-cli, onebot-cli]
-    actions: [qq-send]
-    terminal_states: [delivered, failed, cancelled, expired, unknown]
-    adapters: [qq-official, napcat, onebot]
-    tests: [tests/test_process_lock.py::test_single_instance_lock_rejects_second_live_owner]
-
-  - id: wechat-platform-seam
-    status: structure
-    sources: [FakeOutboundEnvelope, ScriptedFakeSettlement]
-    events: []
-    reducers: []
-    projections: [fake-wechat-dispatches, fake-wechat-receipts]
-    decision_consumers: [OutboundPlatformAdapter-contract-test]
-    actions: [fake-wechat-send]
-    terminal_states: [delivered, failed, cancelled, expired, unknown]
-    adapters: [disabled, fake-wechat]
-    tests: [tests/test_wechat_adapter.py::test_fake_wechat_adapter_satisfies_contract_without_a_live_account]
-
-  - id: long-horizon-replay
+  - id: legacy-dual-authority-isolation
+    phase: 0
     status: partial
-    sources: [WorldLedger, RecordedExternalResults, LogicalTime]
-    events: [ClockAdvanced, ActivityCompleted]
-    reducers: [src/companion_daemon/world.py::reduce_event]
-    projections: [world_snapshot, ledger_hash]
-    decision_consumers: [replay-auditor]
+    runtime_activation: limited-production
+    limitations: [legacy-paths-remain-for-unmigrated-adapters-and-history, global-default-cutover-not-complete]
+    sources: [v2-platform-ingress, architecture-guard]
+    events: [ObservationRecorded]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [architecture-audit]
+    decision_consumers: [platform-architecture-guard]
     actions: []
     terminal_states: []
-    adapters: []
-    tests: [tests/test_world_kernel.py::test_two_week_world_replay_has_no_duplicate_experiences_or_open_actions]
-
-  - id: observability-and-human-evaluation
-    status: structure
-    sources: [WorldLedger, DialogueScenario, HumanAnnotation, VersionedJSONLLedger]
-    events: []
-    reducers: []
-    projections: [five_turn_variant_comparison, persisted_evaluation_report, dialogue_evaluation, world_overview]
-    decision_consumers: [human-reviewer, regression-gate]
-    actions: []
-    terminal_states: []
-    adapters: [world-console, evaluation-cli]
-    tests: [tests/test_experience_evaluation_cli.py::test_cli_records_two_five_turn_variants_then_writes_comparison_report, tests/test_experience_evaluation.py::test_ab_report_keeps_surface_diversity_diagnostic_separate_from_human_judgment, tests/test_world_replays.py::test_world_replay_preserves_appraisal_and_settled_action]
+    adapters: [http-v2, qq-c2c-v2]
+    tests:
+      - tests/world_v2/test_platform_reverse_architecture_guard.py::test_selected_v2_platform_paths_do_not_reach_legacy_runtime_authority
+      - tests/world_v2/test_http_v2_host_migration.py::test_http_migration_blackbox_does_not_grant_the_new_path_legacy_authority
