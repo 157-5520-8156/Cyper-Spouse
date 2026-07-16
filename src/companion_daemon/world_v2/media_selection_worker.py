@@ -1,0 +1,55 @@
+"""Orchestrate one bounded P1 candidate choice into a persisted Proposal."""
+
+from __future__ import annotations
+
+import hashlib
+from datetime import datetime
+from typing import Literal
+
+from .media_selection import MediaSelection
+from .media_selection_acceptance_runtime import MediaSelectionProposalRecorder
+from .media_selection_draft import (
+    MediaCandidateChoice,
+    MediaSelectionCapsule,
+    MediaSelectionDraftAdapter,
+)
+from .media_selection_proposal import MediaSelectionProposalCompiler
+from .schema_core import FrozenModel
+from .schemas import ProjectionCursor
+
+
+class MediaSelectionRunResult(FrozenModel):
+    status: Literal["proposed", "no_op", "blocked"]
+    proposal_event_ref: str | None = None
+    reason_code: str | None = None
+
+
+class MediaSelectionWorker:
+    """Persist a model's bounded selection; Acceptance remains a separate seam."""
+
+    def __init__(self, *, ledger, draft_adapter: MediaSelectionDraftAdapter, proposal_recorder: MediaSelectionProposalRecorder, catalog_version: str, source: str = "world-v2:media-selection") -> None:  # type: ignore[no-untyped-def]
+        self._ledger, self._draft, self._recorder = ledger, draft_adapter, proposal_recorder
+        self._compiler, self._source = MediaSelectionProposalCompiler(catalog_version=catalog_version), source
+
+    async def select_once(self, *, logical_time: datetime, actor: str, trace_id: str, correlation_id: str) -> MediaSelectionRunResult:
+        projection = self._ledger.project()
+        if projection.logical_time != logical_time:
+            return MediaSelectionRunResult(status="blocked", reason_code="media_selection.logical_time_not_current")
+        cursor = ProjectionCursor(world_revision=projection.world_revision, deliberation_revision=projection.deliberation_revision, ledger_sequence=projection.ledger_sequence)
+        candidates = tuple(item for item in projection.photo_candidates if item.status == "available" and item.opened_at is not None and item.expires_at is not None and item.expires_at > logical_time and item.source_events)
+        if not candidates:
+            return MediaSelectionRunResult(status="no_op", reason_code="media_selection.no_available_candidates")
+        # The token is deliberately distinct from the candidate id: model text
+        # cannot become an authority-bearing identifier by coincidence.
+        tokens = {"media-candidate:" + hashlib.sha256(item.candidate_id.encode()).hexdigest(): item for item in candidates}
+        draft = await self._draft.deliberate(capsule=MediaSelectionCapsule(candidates=tuple(MediaCandidateChoice(token=token, safe_summary="一件已确认、可选择但不必分享的生活事件") for token in sorted(tokens))))
+        if draft.decision == "no_op":
+            return MediaSelectionRunResult(status="no_op", reason_code="media_selection.model_declined")
+        assert draft.token is not None and draft.model and draft.raw_output_hash and draft.normalized_output_hash
+        candidate = tokens[draft.token]
+        proposal = self._compiler.compile(projection=projection, selection=MediaSelection(candidate_id=candidate.candidate_id, family="life_share"), model=draft.model, raw_output_hash=draft.raw_output_hash, normalized_output_hash=draft.normalized_output_hash)
+        recorded = self._recorder.record(cursor=cursor, proposal=proposal, actor=actor, source=self._source, created_at=logical_time, trace_id=trace_id, correlation_id=correlation_id)
+        return MediaSelectionRunResult(status="proposed", proposal_event_ref=recorded.proposal_event_ref)
+
+
+__all__ = ["MediaSelectionRunResult", "MediaSelectionWorker"]
