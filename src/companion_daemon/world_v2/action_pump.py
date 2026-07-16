@@ -488,6 +488,8 @@ class ActionPump:
             error_class=receipt.error_class,
             observed_at=receipt.received_at,
             raw_payload_hash=receipt.raw_payload_hash,
+            result_ref=receipt.result_ref,
+            result_hash=receipt.result_hash,
         )
 
     async def _expired_observation(self, action: Action) -> ExternalObservation:
