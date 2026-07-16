@@ -32,6 +32,7 @@ def test_installed_family_manifest_owns_all_current_typed_proposals() -> None:
         "proposal-contract:interaction-bid.1",
         "proposal-contract:memory-candidate.1",
         "proposal-contract:outcome-legacy.1",
+        "proposal-contract:private-impression.1",
         "proposal-contract:relationship.1",
         "proposal-contract:thread.1",
         "proposal-contract:v2-attention.1",
@@ -48,6 +49,9 @@ def test_installed_family_manifest_owns_all_current_typed_proposals() -> None:
     )
     assert family_for_mutation("PrivateCommitmentBroken").contract_ref == (
         "proposal-contract:commitment.1"
+    )
+    assert family_for_mutation("PrivateImpressionAccepted").contract_ref == (
+        "proposal-contract:private-impression.1"
     )
     assert family_for_mutation("PrivateCommitmentDeadlineBroken") is None
     assert family_for_mutation("CharacterCoreRevised").contract_ref == (
