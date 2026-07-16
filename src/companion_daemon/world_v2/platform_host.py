@@ -14,7 +14,7 @@ from datetime import datetime
 import json
 from typing import Literal, Mapping, Protocol
 
-from .dashboard_projection_adapter import DashboardRoomProjectionDTO
+from .dashboard_projection_adapter import DashboardPublicProjectionDTO, DashboardRoomProjectionDTO
 from .production_turn_application import WorldV2TurnApplication
 from .schemas import ProjectionRequest
 
@@ -169,6 +169,12 @@ class DashboardProjectionCapture(Protocol):
     def capture(self, request: ProjectionRequest) -> DashboardRoomProjectionDTO: ...
 
 
+class DashboardPublicProjectionCapture(Protocol):
+    """Composition-owned public Dashboard read capability."""
+
+    def capture(self, request: ProjectionRequest) -> DashboardPublicProjectionDTO: ...
+
+
 class WorldV2PlatformHost:
     """A platform process facade with one dependency: ``WorldV2TurnApplication``.
 
@@ -182,9 +188,11 @@ class WorldV2PlatformHost:
         *,
         application: WorldV2TurnApplication,
         dashboard_capture: DashboardProjectionCapture | None = None,
+        dashboard_public_capture: DashboardPublicProjectionCapture | None = None,
     ) -> None:
         self._application = application
         self._dashboard_capture = dashboard_capture
+        self._dashboard_public_capture = dashboard_public_capture
 
     async def inbound(self, message: PlatformInbound):
         """Process a normalized provider message exactly once by source identity."""
@@ -306,6 +314,13 @@ class WorldV2PlatformHost:
             raise RuntimeError("dashboard capture is not configured for this platform host")
         return self._dashboard_capture.capture(request)
 
+    def capture_dashboard_public(self, request: ProjectionRequest) -> DashboardPublicProjectionDTO:
+        """Capture the dedicated public Dashboard contract at one cursor."""
+
+        if self._dashboard_public_capture is None:
+            raise RuntimeError("dashboard public capture is not configured for this platform host")
+        return self._dashboard_public_capture.capture(request)
+
     def close(self) -> None:
         """Close the composition-owned persistent application once the host stops."""
 
@@ -315,6 +330,7 @@ class WorldV2PlatformHost:
 __all__ = [
     "PlatformClockTick",
     "DashboardProjectionCapture",
+    "DashboardPublicProjectionCapture",
     "PlatformInbound",
     "PlatformInboundTransport",
     "PlatformReceipt",

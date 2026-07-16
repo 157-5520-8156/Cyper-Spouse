@@ -16,7 +16,7 @@ from .affect_math import relative_baseline_saturation_bp
 from .ledger import LedgerPort
 from .proposal_audit_schemas import ModelResultAuditProjection, ProposalAuditProjection
 from .acceptance_manifest import AcceptanceManifestRefV2
-from .room_projection import RoomProjectionMaterializer
+from .room_projection import DashboardPublicProjectionMaterializer, RoomProjectionMaterializer
 from .schemas import (
     Action,
     AffectAggregateProjection,
@@ -101,6 +101,7 @@ class ProjectionGrant:
             "platform_adapter": "platform-v1",
             "dashboard_operator": "operator-default-v1",
             "room_renderer": "room-public-v1",
+            "dashboard_public": "dashboard-public-v1",
             "evaluator": "evaluator-redacted-v1",
         }
         allowed_permissions = {
@@ -114,6 +115,7 @@ class ProjectionGrant:
                 }
             ),
             "room_renderer": frozenset(),
+            "dashboard_public": frozenset(),
             "evaluator": frozenset({"projection:evaluator:trace"}),
         }
         if self.viewer_kind not in profiles:
@@ -970,6 +972,8 @@ class ProjectionCompiler:
             )
         if request.viewer_kind == "room_renderer":
             return RoomProjectionMaterializer.materialize(projection)
+        if request.viewer_kind == "dashboard_public":
+            return DashboardPublicProjectionMaterializer.materialize(projection)
         counts: dict[str, int] = {}
         if "projection:evaluator:trace" in permissions:
             for action in projection.actions:

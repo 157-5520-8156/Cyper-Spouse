@@ -156,6 +156,7 @@ def _scan_http_entry(repository_root: Path) -> tuple[PlatformArchitectureViolati
         "world_v2_tick",
         "world_v2_drain",
         "world_v2_public_room",
+        "world_v2_dashboard_public",
     )
     violations = list(
         scan_v2_platform_source(

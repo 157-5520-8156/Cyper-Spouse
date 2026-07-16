@@ -270,7 +270,9 @@ class ProjectionRequest(FrozenModel):
     schema_version: SchemaVersion
     request_id: str = Field(min_length=1)
     world_id: str = Field(min_length=1)
-    viewer_kind: Literal["platform_adapter", "dashboard_operator", "room_renderer", "evaluator"]
+    viewer_kind: Literal[
+        "platform_adapter", "dashboard_operator", "room_renderer", "dashboard_public", "evaluator"
+    ]
     viewer_id: str = Field(min_length=1)
     permissions: frozenset[
         Literal[
@@ -300,6 +302,7 @@ class ProjectionRequest(FrozenModel):
         "platform-v1",
         "operator-default-v1",
         "room-public-v1",
+        "dashboard-public-v1",
         "evaluator-redacted-v1",
     ]
 
@@ -793,6 +796,30 @@ class RoomProjectionView(FrozenModel):
     approved_media_refs: tuple[str, ...] = ()
 
 
+class PublicAgendaProjection(FrozenModel):
+    """One already-accepted, externally displayable future activity.
+
+    This is deliberately not a calendar record: it has no plan identifier,
+    participant, location, evidence, rationale, or closing time.  The
+    dashboard adapter later maps ``activity`` to a shipped public label.
+    """
+
+    activity: str = Field(min_length=1)
+    status: Literal["scheduled", "active"]
+    starts_at: datetime
+
+
+class DashboardPublicProjectionView(FrozenModel):
+    """Fixed public facts consumed only by the Dashboard DTO compiler."""
+
+    view_kind: Literal["dashboard_public"] = "dashboard_public"
+    situation: PublicSituationProjection = Field(default_factory=PublicSituationProjection)
+    agenda: tuple[PublicAgendaProjection, ...] = ()
+    # There is intentionally no generic free-text notice channel.  New notice
+    # kinds must first gain a separately accepted, public world projection.
+    notice_kinds: tuple[str, ...] = ()
+
+
 class NamedCount(FrozenModel):
     name: str = Field(min_length=1)
     count: int = Field(ge=0)
@@ -805,7 +832,11 @@ class EvaluatorProjectionView(FrozenModel):
 
 
 ViewerProjection = (
-    PlatformProjectionView | OperatorProjectionView | RoomProjectionView | EvaluatorProjectionView
+    PlatformProjectionView
+    | OperatorProjectionView
+    | RoomProjectionView
+    | DashboardPublicProjectionView
+    | EvaluatorProjectionView
 )
 
 
@@ -814,7 +845,9 @@ class WorldProjection(FrozenModel):
     world_id: str
     world_revision: int = Field(ge=0)
     ledger_sequence: int = Field(ge=0)
-    viewer_kind: Literal["platform_adapter", "dashboard_operator", "room_renderer", "evaluator"]
+    viewer_kind: Literal[
+        "platform_adapter", "dashboard_operator", "room_renderer", "dashboard_public", "evaluator"
+    ]
     redaction_policy: str = Field(min_length=1)
     projection_policy_version: str = "world-v2-projection-policy.1"
     reducer_bundle_version: str = Field(min_length=1)

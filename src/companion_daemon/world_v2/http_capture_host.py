@@ -36,6 +36,9 @@ from .platform_action_executor import (
 from .platform_host import PlatformClockTick, PlatformInbound, WorldV2PlatformHost
 from .dashboard_projection_adapter import (
     DashboardProjectionAdapter,
+    DashboardPublicProjectionAdapter,
+    DashboardPublicProjectionDTO,
+    DashboardPublicRouteCatalog,
     DashboardRoomProjectionDTO,
     DashboardRoomRouteCatalog,
 )
@@ -53,6 +56,7 @@ from .schemas import ProjectionRequest
 
 
 _DASHBOARD_VIEWER_ID: Final = "dashboard:http-v2-room"
+_DASHBOARD_PUBLIC_VIEWER_ID: Final = "dashboard:http-v2-public"
 
 
 class _HttpDashboardPrincipalVerifier:
@@ -63,8 +67,9 @@ class _HttpDashboardPrincipalVerifier:
     projection request after it receives the host object.
     """
 
-    def __init__(self, *, world_id: str) -> None:
+    def __init__(self, *, world_id: str, principal_id: str = _DASHBOARD_VIEWER_ID) -> None:
         self._world_id = world_id
+        self._principal_id = principal_id
         self._credential = object()
 
     @property
@@ -75,14 +80,14 @@ class _HttpDashboardPrincipalVerifier:
         if credential is not self._credential:
             raise PermissionError("dashboard projection credential is not composition-owned")
         return AuthenticatedProjectionPrincipal(
-            principal_id=_DASHBOARD_VIEWER_ID,
+            principal_id=self._principal_id,
             world_id=self._world_id,
             authentication_context="world-v2:http-dashboard-composition.1",
         )
 
 
 class _HttpDashboardRequestIssuer:
-    """Mint only the fixed public-room request used by the dashboard route."""
+    """Mint exactly one fixed viewer capability owned by HTTP composition."""
 
     def __init__(
         self,
@@ -90,22 +95,28 @@ class _HttpDashboardRequestIssuer:
         world_id: str,
         issuer: ProjectionCapabilityIssuer,
         credential: object,
+        viewer_id: str,
+        viewer_kind: str,
+        redaction_policy: str,
     ) -> None:
         self._world_id = world_id
         self._issuer = issuer
         self._credential = credential
+        self._viewer_id = viewer_id
+        self._viewer_kind = viewer_kind
+        self._redaction_policy = redaction_policy
 
     def issue(self) -> ProjectionRequest:
         nonce = secrets.token_hex(16)
         request = ProjectionRequest(
             schema_version="world-v2.1",
-            request_id=f"request:http-v2-dashboard:{nonce}",
+            request_id=f"request:http-v2-{self._viewer_kind}:{nonce}",
             world_id=self._world_id,
-            viewer_kind="room_renderer",
-            viewer_id=_DASHBOARD_VIEWER_ID,
+            viewer_kind=self._viewer_kind,
+            viewer_id=self._viewer_id,
             permissions=frozenset(),
-            trace_id=f"trace:http-v2-dashboard:{nonce}",
-            redaction_policy="room-public-v1",
+            trace_id=f"trace:http-v2-{self._viewer_kind}:{nonce}",
+            redaction_policy=self._redaction_policy,
         )
         return self._issuer.bind(request, credential=self._credential)
 
@@ -210,6 +221,7 @@ class HttpV2CaptureHost:
         transport: HttpCaptureTransport,
         primary_user_id: str,
         dashboard_request_issuer: _HttpDashboardRequestIssuer | None = None,
+        dashboard_public_request_issuer: _HttpDashboardRequestIssuer | None = None,
         owned_model: DeepSeekChatModel | None = None,
     ) -> None:
         if not primary_user_id:
@@ -218,6 +230,7 @@ class HttpV2CaptureHost:
         self._transport = transport
         self._primary_user_id = primary_user_id
         self._dashboard_request_issuer = dashboard_request_issuer
+        self._dashboard_public_request_issuer = dashboard_public_request_issuer
         self._owned_model = owned_model
         self._lock = asyncio.Lock()
         self._closed = False
@@ -352,6 +365,13 @@ class HttpV2CaptureHost:
             raise RuntimeError("World v2 dashboard capture is not configured")
         return self._host.capture_dashboard_room(self._dashboard_request_issuer.issue())
 
+    def dashboard_public(self) -> DashboardPublicProjectionDTO:
+        """Return the fixed, separately authorized public Dashboard DTO."""
+
+        if self._dashboard_public_request_issuer is None:
+            raise RuntimeError("World v2 dashboard public capture is not configured")
+        return self._host.capture_dashboard_public(self._dashboard_public_request_issuer.issue())
+
     async def aclose(self) -> None:
         if self._closed:
             return
@@ -400,6 +420,9 @@ def build_http_v2_capture_host(
     transport = HttpCaptureTransport()
     world_id = f"world:companion-v2:{primary_user_id}"
     dashboard_principal = _HttpDashboardPrincipalVerifier(world_id=world_id)
+    dashboard_public_principal = _HttpDashboardPrincipalVerifier(
+        world_id=world_id, principal_id=_DASHBOARD_PUBLIC_VIEWER_ID
+    )
     projection_authority = ProjectionAuthority(
         grants=(
             ProjectionGrant(
@@ -408,6 +431,13 @@ def build_http_v2_capture_host(
                 viewer_kind="room_renderer",
                 permissions=frozenset(),
                 redaction_policy="room-public-v1",
+            ),
+            ProjectionGrant(
+                world_id=world_id,
+                viewer_id=_DASHBOARD_PUBLIC_VIEWER_ID,
+                viewer_kind="dashboard_public",
+                permissions=frozenset(),
+                redaction_policy="dashboard-public-v1",
             ),
         )
     )
@@ -418,6 +448,20 @@ def build_http_v2_capture_host(
             principal_verifier=dashboard_principal,
         ),
         credential=dashboard_principal.credential,
+        viewer_id=_DASHBOARD_VIEWER_ID,
+        viewer_kind="room_renderer",
+        redaction_policy="room-public-v1",
+    )
+    dashboard_public_requests = _HttpDashboardRequestIssuer(
+        world_id=world_id,
+        issuer=ProjectionCapabilityIssuer(
+            authority=projection_authority,
+            principal_verifier=dashboard_public_principal,
+        ),
+        credential=dashboard_public_principal.credential,
+        viewer_id=_DASHBOARD_PUBLIC_VIEWER_ID,
+        viewer_kind="dashboard_public",
+        redaction_policy="dashboard-public-v1",
     )
     application = build_sqlite_world_v2_turn_application(
         path=Path(settings.database_path),
@@ -445,7 +489,7 @@ def build_http_v2_capture_host(
     return HttpV2CaptureHost(
         host=WorldV2PlatformHost(
             application=application,
-            dashboard_capture=DashboardProjectionAdapter(
+                dashboard_capture=DashboardProjectionAdapter(
                 source=application,
                 # These are renderer route names, not world facts.  Only
                 # public labels represented by the shipped room are mapped;
@@ -459,12 +503,26 @@ def build_http_v2_capture_host(
                         "focused_work": "study",
                         "relax": "relax",
                     },
+                    ),
                 ),
-            ),
+                dashboard_public_capture=DashboardPublicProjectionAdapter(
+                    source=application,
+                    routes=DashboardPublicRouteCatalog(
+                        room_routes=DashboardRoomRouteCatalog(
+                            location_routes={
+                                "location:studio": "zhizhi-home-legacy",
+                                "location:apartment": "zhizhi-home-legacy",
+                            },
+                            activity_routes={"focused_work": "study", "relax": "relax"},
+                        ),
+                        activity_labels={"focused_work": "在看资料", "relax": "放松一下"},
+                    ),
+                ),
         ),
         transport=transport,
         primary_user_id=primary_user_id,
         dashboard_request_issuer=dashboard_requests,
+        dashboard_public_request_issuer=dashboard_public_requests,
         owned_model=owned_model,
     )
 

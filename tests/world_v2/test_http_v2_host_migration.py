@@ -314,6 +314,116 @@ def test_http_public_room_route_is_read_only_v2_dto_without_engine_or_bootstrap(
     assert len(payload["projection_hash"]) == 64
 
 
+def test_http_dashboard_public_route_is_operator_gated_cacheable_and_never_reads_legacy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    host = build_http_v2_capture_host(
+        settings=Settings(database_path=tmp_path / "http-dashboard-public-v2.sqlite"),
+        bootstrap_at=NOW,
+        model=FakeCompanionModel(),
+    )
+
+    class _NoLegacyEngine:
+        async def aclose(self) -> None:
+            return None
+
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"public dashboard route touched legacy Engine {name!r}")
+
+    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    monkeypatch.setattr(app_module, "http_v2_capture", host)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings",
+        lambda: Settings(DELIVERY_RECONCILIATION_TOKEN="dashboard-public-secret"),
+    )
+    try:
+        client = TestClient(app_module.app)
+        denied = client.get("/world-v2/dashboard")
+        response = client.get(
+            "/world-v2/dashboard",
+            headers={"X-World-V2-Internal-Token": "dashboard-public-secret"},
+        )
+        not_modified = client.get(
+            "/world-v2/dashboard",
+            headers={
+                "X-World-V2-Internal-Token": "dashboard-public-secret",
+                "If-None-Match": response.headers["etag"],
+            },
+        )
+    finally:
+        asyncio.run(host.aclose())
+
+    assert denied.status_code == 403
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["etag"] == f'"{response.json()["projection_hash"]}"'
+    assert not_modified.status_code == 304
+    payload = response.json()
+    assert set(payload) == {
+        "schema_version",
+        "cursor",
+        "projection_hash",
+        "room",
+        "now",
+        "agenda",
+        "notices",
+        "freshness",
+    }
+    assert payload["schema_version"] == "world-v2-dashboard.1"
+    assert set(payload["cursor"]) == {"world_revision", "ledger_sequence"}
+    assert set(payload["room"]) == {"scene_id", "action_id", "availability"}
+    assert set(payload["now"]) == {"activity_id", "activity_label", "availability"}
+    assert payload["agenda"] == []
+    assert payload["notices"] == []
+    assert set(payload["freshness"]) == {"observed_at", "stale_after_seconds"}
+    wire = str(payload)
+    for forbidden in (
+        "world_id",
+        "semantic_hash",
+        "affect",
+        "participant",
+        "media",
+        "debug",
+        "operator",
+        "plan_id",
+    ):
+        assert forbidden not in wire
+
+
+def test_http_dashboard_public_route_never_bootstraps_or_falls_back_to_legacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NoLegacyEngine:
+        async def aclose(self) -> None:
+            return None
+
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"cold public dashboard route touched legacy Engine {name!r}")
+
+    def _must_not_compose(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("dashboard public GET must not construct a writable World v2 host")
+
+    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    monkeypatch.setattr(app_module, "http_v2_capture", None)
+    monkeypatch.setattr(app_module, "build_http_v2_capture_host", _must_not_compose)
+    monkeypatch.setattr(
+        app_module,
+        "get_settings",
+        lambda: Settings(DELIVERY_RECONCILIATION_TOKEN="dashboard-public-secret"),
+    )
+
+    response = TestClient(app_module.app).get(
+        "/world-v2/dashboard",
+        headers={"X-World-V2-Internal-Token": "dashboard-public-secret"},
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "World v2 dashboard projection is unavailable until the platform host is initialized"
+    )
+
+
 def test_http_public_room_route_never_bootstraps_or_falls_back_to_legacy(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

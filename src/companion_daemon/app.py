@@ -6,7 +6,7 @@ from pathlib import Path
 import secrets
 from typing import Literal
 
-from fastapi import FastAPI, Header, HTTPException, Query, Request
+from fastapi import FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -386,6 +386,37 @@ def world_v2_public_room() -> dict[str, object]:
         raise HTTPException(status_code=403, detail="World v2 room projection denied") from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.get("/world-v2/dashboard")
+def world_v2_dashboard_public(
+    if_none_match: str | None = Header(default=None),
+    x_world_v2_internal_token: str | None = Header(default=None),
+) -> Response:
+    """Read the fixed public Dashboard DTO without bootstrapping World v2.
+
+    This is operator-gated during the staged browser cutover.  Authentication
+    grants only access to this already-redacted DTO; request parameters never
+    choose world, cursor, viewer policy, or diagnostic permissions.
+    """
+
+    _require_world_v2_internal_access(x_world_v2_internal_token)
+    if http_v2_capture is None:
+        raise HTTPException(
+            status_code=503,
+            detail="World v2 dashboard projection is unavailable until the platform host is initialized",
+        )
+    try:
+        payload = http_v2_capture.dashboard_public().to_payload()
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="World v2 dashboard projection denied") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    etag = f'"{payload["projection_hash"]}"'
+    headers = {"Cache-Control": "no-store", "ETag": etag}
+    if if_none_match == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(content=payload, headers=headers)
 
 
 @app.post("/proactive/{canonical_user_id}", response_model=ProactiveDecision)

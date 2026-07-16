@@ -10,7 +10,13 @@ delivery approval).
 
 from __future__ import annotations
 
-from .schemas import LedgerProjection, PublicSituationProjection, RoomProjectionView
+from .schemas import (
+    DashboardPublicProjectionView,
+    LedgerProjection,
+    PublicAgendaProjection,
+    PublicSituationProjection,
+    RoomProjectionView,
+)
 
 
 _ROOM_VISIBLE_PRIVACY = frozenset({"public", "shareable"})
@@ -145,4 +151,40 @@ class RoomProjectionMaterializer:
         return None
 
 
-__all__ = ["RoomProjectionMaterializer"]
+class DashboardPublicProjectionMaterializer:
+    """Materialize the small Dashboard-only public facts at one cursor.
+
+    The browser never receives this intermediate model.  It exists so that a
+    dashboard capture cannot join a room view to a separately read plan list
+    (and accidentally mix cursors), while preserving the same public/privacy
+    ceilings used by the minimal room renderer.
+    """
+
+    @classmethod
+    def materialize(cls, projection: LedgerProjection) -> DashboardPublicProjectionView:
+        room = RoomProjectionMaterializer.materialize(projection)
+        actor_ref = RoomProjectionMaterializer._companion_actor_ref(projection)
+        if actor_ref is None:
+            return DashboardPublicProjectionView(situation=room.situation)
+        agenda = tuple(
+            PublicAgendaProjection(
+                activity=item.activity_kind,
+                status="active" if item.status == "active" else "scheduled",
+                starts_at=item.scheduled_window.opens_at,
+            )
+            for item in sorted(
+                (
+                    plan
+                    for plan in projection.plans
+                    if plan.owner_actor_ref == actor_ref
+                    and plan.privacy_class in _ROOM_VISIBLE_PRIVACY
+                    and plan.status in {"planned", "active"}
+                    and plan.scheduled_window is not None
+                ),
+                key=lambda plan: (plan.scheduled_window.opens_at, plan.activity_kind, plan.plan_id),
+            )[:8]
+        )
+        return DashboardPublicProjectionView(situation=room.situation, agenda=agenda)
+
+
+__all__ = ["DashboardPublicProjectionMaterializer", "RoomProjectionMaterializer"]
