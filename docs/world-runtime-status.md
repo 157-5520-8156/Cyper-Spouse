@@ -12,7 +12,7 @@ World v2 已经拥有可运行、可回放的独立账本纵切：`WorldRuntime`
 receipt/unknown/recovery 生命周期。HTTP 已接入该宿主；兼容配置下的 QQ 私聊纯文本也会走
 该路径。
 
-这**不等于**整个产品已经完全切换到 v2，更不等于已证明“人味优于裸聊”。Dashboard/Godot
+这**不等于**整个产品已经完全切换到 v2，更不等于已证明“人味优于裸聊”。Web Dashboard
 主展示、全部 QQ/NapCat/OneBot 形态、真实可恢复图片 provider 的部署，以及真人/真实模型
 盲评仍是未关闭的工作。旧 `WorldKernel`、`CompanionEngine` 和旧行为表也仍存在于兼容与
 归档区域；它们不能被描述为 v2 的当前写权威。
@@ -45,7 +45,7 @@ HTTP / 兼容 QQ C2C 文本 / 离线 harness
 - `event_media` 是图片机的 public seam。图片机只能返回 provider 结果；机会、批准、预算、
   投递和 `MediaDeliveryShared` 均由 v2 账本决定。
 - Dashboard 的 v2 room endpoint 只读、受 operator gate 保护，并且在 v2 host 冷启动时
-  fail closed；这不是 Dashboard/Godot 主展示已经迁移的证明。
+  fail closed。Godot 已消费相同的公共 DTO；Web Dashboard 主页面仍是遗留读路径。
 
 ## 阶段状态
 
@@ -58,7 +58,7 @@ HTTP / 兼容 QQ C2C 文本 / 离线 harness
 | 4 Deliberation / acceptance | 部分完成 | source-bound proposal/manifest/atomic recorder、appraisal/affect/outcome/media thread lanes | 不应把未开放的 proposal family 或 fallback 当作已完成行为能力 |
 | 5 Action / recovery | 部分完成 | Action lifecycle、lease、unknown reconciliation、expression/deferred-reply tests | reaction/typing/sticker 仍是 adapter-only；不是可用生产 grammar |
 | 6 Media preview | 部分完成 | freeze → plan → render/inspect → preview → approval/delivery/recovery fixtures | 真正部署的 durable provider、operator approval 和 production transport 覆盖仍需验证 |
-| 7 平台与展示 | 部分完成 | HTTP v2、兼容 QQ C2C text v2、v2 dashboard read DTO | NapCat/OneBot 其他形态、Dashboard/Godot 默认读路径未迁移 |
+| 7 平台与展示 | 部分完成 | HTTP v2、兼容 QQ C2C text v2、v2 dashboard read DTO、Godot room consumer | NapCat/OneBot 其他形态、Web Dashboard 默认读路径未迁移 |
 | 8 Evaluator / 清理 | 部分完成 | frozen scenario corpus、mechanism baseline、test-economy、blind artifact pipeline | synthetic/offline 证据不能替代真实模型、真人盲评或线上 SLO |
 
 “已完成（代码层）”仅表示对应 v2 contract 已有回放/攻击/合同测试；它不表示所有平台已经
@@ -103,8 +103,8 @@ WorldKernel：
    机制和离线场景，不是长期真人校准、讽刺/权力差异理解或语言自然度的外部证明。
 5. **热启动、冷启动和首 Action P95 达标。** test-economy 和 trace schema 已存在；真实部署的
    queue/provider 数据、SLO 分位数和回归基线尚未采集。
-6. **Dashboard/Godot 只读消费 v2 projection。** 仅有 v2 room DTO seam；默认可视化链路仍需
-   迁移并做 privacy/redaction 回归。
+6. **所有展示端只读消费 v2 projection。** Godot 已迁到 v2 room DTO；Web Dashboard 默认读
+   路径仍需迁移并做 privacy/redaction 回归。
 
 ## 验收与后续工作顺序
 
@@ -112,7 +112,7 @@ WorldKernel：
 
 1. 对每个仍标为 `partial` 的 production lane，补齐可执行的 source、consumer、Action、
    receipt/recovery 和 next-turn trace，或者把它明确保留为 archive/adapter-only。
-2. 迁移 Dashboard/Godot 与剩余平台 adapter 到 `project()` / `WorldRuntime`；迁移期间不允许
+2. 迁移 Web Dashboard 与剩余平台 adapter 到 `project()` / `WorldRuntime`；迁移期间不允许
    同一 observation 同时写旧账本和 v2 账本。
 3. 在有 durable provider 与 operator approval 后，做真实媒体 preview 样本和恢复演练；此前
    不默认开启自动 delivery。
