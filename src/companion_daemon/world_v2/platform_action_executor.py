@@ -372,15 +372,24 @@ class ProviderMediaActionExecutor(ActionExecutor):
 class RoutedActionExecutor(ActionExecutor):
     """One ActionPump-facing executor without mixing platform and media seams."""
 
-    def __init__(self, *, platform: ActionExecutor, media: ActionExecutor) -> None:
-        self._platform, self._media = platform, media
+    def __init__(
+        self, *, platform: ActionExecutor, media: ActionExecutor | None = None,
+        tool: ActionExecutor | None = None,
+    ) -> None:
+        if media is None and tool is None:
+            raise ValueError("routed executor needs a non-platform route")
+        self._platform, self._media, self._tool = platform, media, tool
 
     def _delegate(self, action: Action) -> ActionExecutor:
-        return (
-            self._media
-            if action.kind in {"media_planning", "media_render", "media_inspection", "media_repair"}
-            else self._platform
-        )
+        if action.kind == "read_only_tool":
+            if self._tool is None:
+                raise ValueError("read-only tool route is not composed")
+            return self._tool
+        if action.kind in {"media_planning", "media_render", "media_inspection", "media_repair"}:
+            if self._media is None:
+                raise ValueError("media provider route is not composed")
+            return self._media
+        return self._platform
 
     async def assert_dispatch_authorized(
         self, *, action: Action, projection: LedgerProjection

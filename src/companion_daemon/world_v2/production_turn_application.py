@@ -88,6 +88,12 @@ from .platform_action_executor import (
     PlatformActionExecutor, PlatformTransport, MediaProviderTransport,
     ProviderMediaActionExecutor, RoutedActionExecutor,
 )
+from .read_only_tool_deliberation import compose_injected_read_only_tool_deliberation
+from .read_only_tool_authorization_resolver import ProjectionReadOnlyToolAuthorizationResolver
+from .read_only_tool_executor import ReadOnlyToolActionExecutor, ReadOnlyToolTransport
+from .read_only_tool_proposal_compiler import ReadOnlyToolProposalCompiler
+from .read_only_tool_query_reader import AuditedReadOnlyToolQueryReader
+from .read_only_tool_trigger_runtime import ReadOnlyToolTriggerRuntime
 from .runtime import WorldRuntime
 from .projection import ProjectionAuthority
 from .replay_evidence import ReplayEvidence
@@ -128,6 +134,10 @@ class WorldV2TurnApplicationConfig:
     expression_reconsideration_owner: str = "worker:world-v2:expression-reconsideration"
     media_planning_worker_owner: str = "worker:world-v2:media-planning"
     media_cost_profile: CostProfile | None = None
+    tool_account_id: str = "account:world-v2:tool"
+    tool_window_id: str = "window:world-v2:tool"
+    tool_budget_limit: int = 0
+    tool_worker_owner: str = "worker:world-v2:read-only-tool"
 
     def __post_init__(self) -> None:
         for name in (
@@ -142,6 +152,7 @@ class WorldV2TurnApplicationConfig:
             "interaction_bid_worker_owner",
             "expression_reconsideration_owner",
             "media_planning_worker_owner",
+            "tool_worker_owner",
         ):
             if not getattr(self, name):
                 raise ValueError(f"{name} must not be empty")
@@ -151,6 +162,8 @@ class WorldV2TurnApplicationConfig:
             raise ValueError("chat budget limits are invalid")
         if not self.reply_recovery_policy:
             raise ValueError("reply recovery policy must not be empty")
+        if not self.tool_account_id or not self.tool_window_id or self.tool_budget_limit < 0:
+            raise ValueError("tool budget config is invalid")
 
 
 class WorldV2TurnApplication:
@@ -593,6 +606,8 @@ def build_sqlite_world_v2_turn_application(
     interaction_bid_model: DeliberationModelAdapter | None = None,
     fact_model: FactDraftChatModel | None = None,
     memory_model: FactMemoryDraftChatModel | None = None,
+    read_only_tool_model: DeliberationModelAdapter | None = None,
+    read_only_tool_transport: ReadOnlyToolTransport | None = None,
     expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
     now: datetime,
     projection_authority: ProjectionAuthority | None = None,
@@ -613,7 +628,10 @@ def build_sqlite_world_v2_turn_application(
         occurrence_content = OccurrenceContentCoordinator(
             ledger=ledger, store=life_content_store
         )
-        _bootstrap(ledger=ledger, config=config, now=now)
+        tool_requested = read_only_tool_model is not None or read_only_tool_transport is not None
+        if (read_only_tool_model is None) != (read_only_tool_transport is None):
+            raise ValueError("read-only tool model and transport must be explicitly injected together")
+        _bootstrap(ledger=ledger, config=config, now=now, include_tool=tool_requested)
         capsules = context_capsule_compiler_from_ledger(
             ledger=ledger,
             relevance_scope=ContextRelevanceScope(
@@ -785,17 +803,52 @@ def build_sqlite_world_v2_turn_application(
             if fact_model is not None
             else None
         )
+        tool_turn = (
+            PinnedTurnCompiler(
+                ledger=ledger,
+                capsule_compiler=capsules,
+                deliberation=compose_injected_read_only_tool_deliberation(
+                    router=router, model=read_only_tool_model
+                ),
+                companion_actor_ref=config.companion_actor_ref,
+            )
+            if read_only_tool_model is not None
+            else None
+        )
+        tool_trigger_runtime = (
+            ReadOnlyToolTriggerRuntime(
+                ledger=ledger,
+                turn=tool_turn,  # type: ignore[arg-type]
+                compiler=ReadOnlyToolProposalCompiler(
+                    ledger=ledger,
+                    authorization_resolver=ProjectionReadOnlyToolAuthorizationResolver(),
+                    actor_ref=config.companion_actor_ref,
+                ),
+                owner_id=config.tool_worker_owner,
+            )
+            if tool_turn is not None
+            else None
+        )
         platform_executor = build_platform_action_executor(
             ledger=ledger, transport=transport, expression_payload_store=expression_payload_store,
             media_payload_store=media_payload_store,
         )
         action_executor: ActionExecutor = platform_executor
-        if media_transport is not None:
+        tool_executor = (
+            ReadOnlyToolActionExecutor(
+                queries=AuditedReadOnlyToolQueryReader(ledger=ledger),
+                transport=read_only_tool_transport,
+            )
+            if read_only_tool_transport is not None
+            else None
+        )
+        if media_transport is not None or tool_executor is not None:
             action_executor = RoutedActionExecutor(
                 platform=platform_executor,
-                media=ProviderMediaActionExecutor(
+                media=(ProviderMediaActionExecutor(
                     payloads=MediaSidecarPayloadReader(store=media_payload_store), transport=media_transport,
-                ),
+                ) if media_transport is not None else None),
+                tool=tool_executor,
             )
         runtime = WorldRuntime(
             world_id=config.world_id,
@@ -885,6 +938,8 @@ def build_sqlite_world_v2_turn_application(
                 else None
             ),
             expression_reconsideration_reviewer=expression_reconsideration_reviewer,
+            read_only_tool_owner=(config.tool_worker_owner if tool_trigger_runtime is not None else None),
+            read_only_tool_trigger_runtime=tool_trigger_runtime,
         )
         media_execution = MediaExecutionRuntime(
             ledger=ledger,
@@ -953,28 +1008,29 @@ def build_platform_action_executor(
 
 
 def _bootstrap(
-    *, ledger: SQLiteWorldLedger, config: WorldV2TurnApplicationConfig, now: datetime
+    *, ledger: SQLiteWorldLedger, config: WorldV2TurnApplicationConfig, now: datetime,
+    include_tool: bool = False,
 ) -> None:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("World v2 bootstrap time must be timezone-aware")
     projection = ledger.project()
-    account = BudgetAccount(
-        account_id=config.chat_account_id,
-        category="chat",
-        window_id=config.chat_window_id,
-        limit=config.chat_budget_limit,
-    )
-    existing = next(
-        (
-            item
-            for item in projection.budget_accounts
-            if item.account_id == account.account_id and item.window_id == account.window_id
-        ),
-        None,
-    )
-    if existing is not None:
-        if existing.category != account.category or existing.limit != account.limit:
-            raise ValueError("existing World v2 chat budget conflicts with composition config")
+    accounts = [
+        BudgetAccount(account_id=config.chat_account_id, category="chat",
+                      window_id=config.chat_window_id, limit=config.chat_budget_limit),
+    ]
+    if include_tool:
+        accounts.append(BudgetAccount(account_id=config.tool_account_id, category="tool",
+                                      window_id=config.tool_window_id, limit=config.tool_budget_limit))
+    missing: list[BudgetAccount] = []
+    for account in accounts:
+        existing = next(
+            (item for item in projection.budget_accounts if item.account_id == account.account_id), None
+        )
+        if existing is None:
+            missing.append(account)
+        elif existing.category != account.category or existing.window_id != account.window_id or existing.limit != account.limit:
+            raise ValueError("existing World v2 budget conflicts with composition config")
+    if not missing:
         return
     if projection.world_revision and not any(
         item.event_type == "WorldStarted" for item in projection.committed_world_event_refs
@@ -983,13 +1039,10 @@ def _bootstrap(
     events: list[WorldEvent] = []
     if projection.world_revision == 0:
         events.append(_bootstrap_event(config=config, now=now, event_type="WorldStarted", payload={}))
-    events.append(
-        _bootstrap_event(
-            config=config,
-            now=now,
-            event_type="BudgetAccountConfigured",
-            payload={"account": account.model_dump(mode="json")},
-        )
+    events.extend(
+        _bootstrap_event(config=config, now=now, event_type="BudgetAccountConfigured",
+                         payload={"account": account.model_dump(mode="json")})
+        for account in missing
     )
     ledger.commit(
         events,

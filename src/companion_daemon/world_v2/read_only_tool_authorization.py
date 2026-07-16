@@ -7,7 +7,7 @@ from datetime import datetime
 from .schemas import Action, LedgerProjection, ReadOnlyToolAuthorizationBinding
 
 
-_TOOL_DATA_SCOPE = {
+TOOL_DATA_SCOPE = {
     "tool:weather": "data:location",
     "tool:web_search": "data:message_content",
     "tool:calendar_read": "data:user_profile",
@@ -29,7 +29,7 @@ def require_read_only_tool_authorization(
     binding = action.read_only_tool_authorization
     if binding is None:
         raise ValueError("read-only tool Action lacks enforcement authorization binding")
-    required_data = _TOOL_DATA_SCOPE.get(action.target)
+    required_data = TOOL_DATA_SCOPE.get(action.target)
     if required_data is None:
         raise ValueError("read-only tool Action has an unsupported target")
 
@@ -91,4 +91,4 @@ def _exact(items: tuple[object, ...], attribute: str, value: str, label: str):
     return matches[0]
 
 
-__all__ = ["require_read_only_tool_authorization"]
+__all__ = ["TOOL_DATA_SCOPE", "require_read_only_tool_authorization"]

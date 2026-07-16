@@ -75,6 +75,11 @@ from .external_result_trigger_runtime import (
     ExternalResultTriggerRuntime,
     ToolResultDeliberator,
 )
+from .read_only_tool_trigger import read_only_tool_trigger_event
+from .read_only_tool_trigger_runtime import (
+    ReadOnlyToolTriggerRunResult,
+    ReadOnlyToolTriggerRuntime,
+)
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -156,6 +161,8 @@ class WorldRuntime:
         expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
         external_result_owner: str | None = None,
         external_result_deliberator: ToolResultDeliberator | None = None,
+        read_only_tool_owner: str | None = None,
+        read_only_tool_trigger_runtime: ReadOnlyToolTriggerRuntime | None = None,
     ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
@@ -267,6 +274,12 @@ class WorldRuntime:
             raise ValueError("external result owner and deliberator must be configured together")
         self._external_result_owner = external_result_owner
         self._external_result_deliberator = external_result_deliberator
+        if (read_only_tool_owner is None) != (read_only_tool_trigger_runtime is None):
+            raise ValueError("read-only tool owner and trigger runtime must be configured together")
+        if read_only_tool_trigger_runtime is not None and read_only_tool_trigger_runtime.ledger is not self._ledger:
+            raise ValueError("read-only tool trigger runtime must own this exact ledger")
+        self._read_only_tool_owner = read_only_tool_owner
+        self._read_only_tool_trigger_runtime = read_only_tool_trigger_runtime
         self._lock = asyncio.Lock()
 
     @property
@@ -285,6 +298,7 @@ class WorldRuntime:
         | FactTriggerRunResult
         | ExpressionReconsiderationRunResult
         | ExternalResultTriggerRunResult
+        | ReadOnlyToolTriggerRunResult
         | None
     ):
         """Run one low-priority mental-state job without delaying an interactive turn.
@@ -295,6 +309,10 @@ class WorldRuntime:
         """
 
         async with self._lock:
+            if self._read_only_tool_trigger_runtime is not None:
+                tool = await self._read_only_tool_trigger_runtime.drain_one()
+                if tool.status != "idle":
+                    return tool
             if self._external_result_owner is not None:
                 assert self._external_result_deliberator is not None
                 external_result = await ExternalResultTriggerRuntime(
@@ -893,6 +911,16 @@ class WorldRuntime:
                 trigger_head = await self._project_for_write()
                 committed = await self._commit(
                     [fact_event],
+                    world_revision=trigger_head.world_revision,
+                    deliberation_revision=trigger_head.deliberation_revision,
+                )
+            if self._read_only_tool_owner is not None:
+                tool_event = read_only_tool_trigger_event(
+                    observation=observation, observation_event=event
+                )
+                trigger_head = await self._project_for_write()
+                committed = await self._commit(
+                    [tool_event],
                     world_revision=trigger_head.world_revision,
                     deliberation_revision=trigger_head.deliberation_revision,
                 )

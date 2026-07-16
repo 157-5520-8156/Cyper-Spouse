@@ -94,6 +94,10 @@ CHANGE_TRANSITION_REGISTRY: dict[str, frozenset[str]] = {
     "photo_candidate_transition": frozenset({"open", "select", "skip", "expire"}),
     "media_continuation": frozenset({"plan_to_render", "render_to_inspect", "inspect_to_delivery"}),
     "media_repair_transition": frozenset({"authorize", "abandon"}),
+    # This is deliberately a request proposal, not a generic external
+    # Action.  The specialized compiler below the envelope resolves the
+    # current enforcement grant and creates the only executable Action.
+    "read_only_tool_request": frozenset({"request"}),
     "grant_request": frozenset({"request", "grant", "revoke"}),
 }
 
@@ -326,6 +330,15 @@ PAYLOAD_CONTRACTS: dict[str, _PayloadContract] = {
             "artifact_ref": str,
             "inspection_ref": str,
             "defect_scope": list,
+        }
+    ),
+    "read_only_tool_request": _PayloadContract(
+        {
+            "tool_name": str,
+            "target": str,
+            "query": str,
+            "budget_account_id": str,
+            "budget_limit": int,
         }
     ),
     "grant_request": _PayloadContract(
@@ -785,6 +798,21 @@ class MediaRepairPayload(FrozenModel):
     defect_scope: list[BoundedLabel] = Field(min_length=1, max_length=32)
 
 
+class ReadOnlyToolRequestPayload(FrozenModel):
+    """Bounded model suggestion consumed only by the tool request compiler.
+
+    ``query`` is frozen in the audited proposal.  The model cannot name a
+    grant, consent, privacy policy, Action id or provider: those values are
+    resolved by the enforcement-aware compiler at the current ledger cursor.
+    """
+
+    tool_name: BoundedLabel
+    target: Literal["tool:weather", "tool:web_search", "tool:calendar_read"]
+    query: str = Field(min_length=2, max_length=8_192)
+    budget_account_id: BoundedRef
+    budget_limit: int = Field(ge=0, le=10_000_000)
+
+
 class GrantRequestPayload(FrozenModel):
     grant_kind: BoundedLabel
     actor: BoundedRef
@@ -820,6 +848,7 @@ PAYLOAD_MODEL_REGISTRY: dict[str, type[FrozenModel]] = {
     "photo_candidate_transition": PhotoCandidatePayload,
     "media_continuation": MediaContinuationPayload,
     "media_repair_transition": MediaRepairPayload,
+    "read_only_tool_request": ReadOnlyToolRequestPayload,
     "grant_request": GrantRequestPayload,
 }
 
