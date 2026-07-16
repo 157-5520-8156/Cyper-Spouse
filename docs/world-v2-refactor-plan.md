@@ -2041,7 +2041,7 @@ Phase 2 不再按“把所有 projection 一起写完”的宽任务施工，而
 
 - 实现拟真人味 replay suite。
 - 固化 scenario gold set、judge/rubric/statistics version、裸聊与归档 baseline、热冷性能与 test-economy profile。
-- 离线机制 CI 的输入 corpus 与机制基线必须分开版本化。`world-v2-offline-mechanism-baseline.2` 曾记录 source-bound `private_impressions` Context slice 的加入；其冻结 hash 已在后续接受路径变更中陈旧。当前 `world-v2-offline-mechanism-baseline.3` 固化完整的 120 场景 manifest：read-only tool 的 enforcement authorization 进入 `Action` canonical payload 后，普通 Action 也显式记录 `read_only_tool_authorization: null`，因此 acceptance/event/replay identity 合法改变。升级前后 120 条场景逐行比较的 output、event types、terminal states、trigger kinds、room projection、模型调用和验证结果均不变，只有 replay identity 链变化；它不是人味盲测或真人体验提升的证据。
+- 离线机制 CI 的输入 corpus 与机制基线必须分开版本化。`world-v2-offline-mechanism-baseline.2` 曾记录 source-bound `private_impressions` Context slice 的加入；其冻结 hash 已在后续接受路径变更中陈旧。`world-v2-offline-mechanism-baseline.3` 原本记录 read-only tool 的 enforcement authorization 进入 `Action` canonical payload 后的身份链变化，但其提交的 hash 不是 clean worktree 的可执行 120 场景结果。当前 `world-v2-offline-mechanism-baseline.4` 以 clean worktree 重跑完整 manifest 固化该结果；并已逐字段比较 event-ecology 调度接入前后 120 条 output、event types、terminal states、trigger kinds、room projection、模型调用、验证结果与 replay 状态，均完全相同。故 `.4` 是失效 fixture identity 的更正，不能被解释为世界生态行为、人味盲测或真人体验的提升证据。
 - 建立机制闭环 CI。
 - 删除或隔离旧行为入口。
 - World v2 切为默认运行时。

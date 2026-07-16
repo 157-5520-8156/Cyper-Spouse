@@ -56,19 +56,25 @@ class ScenarioVerificationError(AssertionError):
 
 
 # This identifies the executable mechanism baseline independently from the
-# frozen input corpus. ``.3`` supersedes a stale ``.2`` manifest after the
+# frozen input corpus. ``.4`` supersedes a stale ``.3`` manifest after a
+# clean-worktree rerun exposed that the hash recorded for ``.3`` did not match
+# the executable 120-case suite.  The clean manifest was compared before and
+# after the event-ecology composition change: every exported run field is
+# identical, so this is a correction of the invalid fixture identity, not a
+# claim that event ecology changed frozen observable behaviour.  ``.3`` had
+# superseded a stale ``.2`` manifest after the
 # enforcement-grade read-only-tool authorization binding was added to
 # ``Action``.  Even ordinary Actions now carry the explicit, non-authorizing
 # ``read_only_tool_authorization: null`` member in their canonical ledger
 # payload.  That deliberately changes acceptance/event/replay identities,
 # while the frozen suite proves that its observable scenario behaviour did not
 # change.  It is not human-likeness evidence.
-FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.3"
+FROZEN_OFFLINE_SUITE_BASELINE_VERSION = "world-v2-offline-mechanism-baseline.4"
 
 # Filled only after the complete, fixed fake suite has been run. A change to
 # this value requires the corresponding baseline-version rationale; it must
 # not be rewritten merely to silence a scenario failure.
-FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "7eec620a1ca3889801ea485171be7cd8673bde03ef05f1329dbbdb1b587d389a"
+FROZEN_OFFLINE_SUITE_MANIFEST_HASH = "9be374805c19fb3302287ca375310eb81830fd89934f1cacf5708ff70cf2c02e"
 
 
 class _FixedScenarioRouter:
