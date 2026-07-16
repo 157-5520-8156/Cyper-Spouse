@@ -812,6 +812,96 @@ async def test_production_p1_selection_acceptance_commits_the_source_bound_plann
 
 
 @pytest.mark.asyncio
+async def test_production_p2_character_selection_acceptance_freezes_a_v2_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The installed SQLite composition accepts an ordinary, fact-bound selfie."""
+
+    config = WorldV2TurnApplicationConfig(
+        world_id="world:production-p2-selection-acceptance",
+        companion_actor_ref="agent:companion", reply_target="user:user.1",
+        action_pump_owner="pump:production-p2-selection-acceptance",
+        event_ecology_policy=EcologyPolicy(max_candidates_per_drain=1),
+        media_selection_acceptance=MediaSelectionAcceptanceComposition(
+            grant=ProviderMediaGrantBinding(grant_id="grant:production-media", grant_revision=1),
+            account_id="account:production-media", account_window_id="window:production-media",
+            account_limit=5, amount_limit=1,
+        ),
+    )
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "world-v2-production-p2-selection.sqlite", config=config,
+        identities=_Identities(), router=_Router(), main_model=_InvalidModel(),
+        quick_recovery=_InvalidQuick(), transport=_Transport(),
+        media_selection_model=_SelectingMediaSelectionModel(), now=NOW,
+    )
+    try:
+        await app.respond(InboundTurn(
+            platform="test", platform_user_id="user.1", platform_message_id="message:production-p2",
+            text="今天想去公园散步。", observed_at=NOW, trace_id="trace:production-p2:inbound",
+        ))
+        plan = await app.plan_activity(ActivityPlanCommand(
+            command_id="command:production-p2:plan", world_id=config.world_id,
+            source_observation_id="observation:test:user.1:message:production-p2",
+            plan_id="plan:production-p2", activity_id="activity:production-p2", activity_kind="walk",
+            importance_bp=4_000, location_ref="location:park", participant_refs=("agent:companion",),
+            privacy_class="shareable",
+        ), logical_time=NOW, created_at=NOW, trace_id="trace:production-p2:plan",
+            causation_id="cause:production-p2:plan", correlation_id="correlation:production-p2")
+        started = await app.transition_activity(ActivityPlanTransitionCommand(
+            command_id="command:production-p2:start", world_id=config.world_id,
+            source_observation_id="observation:test:user.1:message:production-p2",
+            plan_id="plan:production-p2", operation="start",
+        ), logical_time=NOW, created_at=NOW, trace_id="trace:production-p2:start",
+            causation_id=plan.event_ids[-1], correlation_id="correlation:production-p2")
+        declaration = await app.declare_image_evidence(ImageEvidenceDeclarationCommand(
+            command_id="command:production-p2:evidence", source_event_ref=started.event_ids[-1],
+            image_evidence=ImageEvidenceV1(
+                visibility="shareable",
+                activity={
+                    "evidence_visibility": "shareable", "id": "activity:production-p2",
+                    "kind": "walk", "description": "公园散步", "phase": "active",
+                },
+                character_media=CharacterMediaEvidenceV1(
+                    character_ref="agent:companion", present=True,
+                    capture_capabilities=("character_front_camera",),
+                ),
+            ),
+        ), logical_time=NOW, created_at=NOW, trace_id="trace:production-p2:evidence",
+            correlation_id="correlation:production-p2")
+        candidates = await app.drain_character_media_candidates_once(
+            wake_event_ref=declaration.event_ids[-1], logical_time=NOW,
+            trace_id="trace:production-p2:candidates", correlation_id="correlation:production-p2",
+        )
+        assert len(candidates) == 1
+        selection = await app.drain_media_selection_once(
+            logical_time=NOW, trace_id="trace:production-p2:selection",
+            correlation_id="correlation:production-p2",
+        )
+        assert selection is not None and selection.status == "proposed"
+        assert selection.proposal_event_ref is not None
+        monkeypatch.setattr(
+            "companion_daemon.world_v2.reducers.require_provider_media_grant", lambda **_kwargs: object()
+        )
+        accepted = await app.accept_media_selection_once(
+            proposal_event_ref=selection.proposal_event_ref, logical_time=NOW,
+            trace_id="trace:production-p2:acceptance", correlation_id="correlation:production-p2",
+        )
+        projection = app._ledger.project()  # type: ignore[attr-defined]
+        sidecar = app._media_payload_store  # type: ignore[attr-defined]
+        frozen = sidecar.read_exact(payload_ref=projection.media_opportunities[0].event_snapshot_ref)
+    finally:
+        app.close()
+
+    assert accepted is not None and len(accepted.event_ids) == 4
+    assert projection.photo_candidates[0].family == "character_media"
+    assert projection.photo_candidates[0].status == "selected"
+    opportunity = projection.media_opportunities[0]
+    assert opportunity.family == "character_media"
+    assert opportunity.candidate_source_event_refs == projection.photo_candidates[0].source_event_refs
+    assert frozen is not None and '"world-image-event-snapshot-v2"' in frozen.body
+
+
+@pytest.mark.asyncio
 async def test_production_application_materializes_a_chat_draft_and_settles_one_platform_reply(
     tmp_path: Path,
 ) -> None:
