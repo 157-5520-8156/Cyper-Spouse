@@ -67,6 +67,7 @@ _ECOLOGY_WAKE_EVENT_TYPES = frozenset({
     "ClockAdvanced",
     "ActivityStarted", "ActivityResumed", "ActivityCompleted", "ActivityAbandoned",
     "WorldOccurrenceSettled", "ExperienceCommitted", "FactCommitted", "FactCorrected",
+    "ImageEvidenceDeclared",
     "NpcRegistered",
 })
 _ECOLOGY_CATEGORY_SET = frozenset({

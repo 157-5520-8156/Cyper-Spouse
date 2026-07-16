@@ -95,6 +95,10 @@ from .media_candidate_maintenance import (
     MediaCandidateMaintenanceResult,
     MediaCandidateMaintenanceRuntime,
 )
+from .image_evidence_runtime import (
+    ImageEvidenceDeclarationCommand,
+    ImageEvidenceDeclarationRuntime,
+)
 from .media_selection_acceptance_runtime import MediaSelectionProposalRecorder
 from .media_selection_draft import MediaSelectionDraftAdapter, MediaSelectionDraftModel
 from .media_selection_worker import MediaSelectionRunResult, MediaSelectionWorker
@@ -264,6 +268,7 @@ class WorldV2TurnApplication:
         media_selection_worker_actor: str,
         media_candidate_maintenance: MediaCandidateMaintenanceRuntime,
         media_candidate_maintenance_actor: str,
+        image_evidence: ImageEvidenceDeclarationRuntime,
         media_delivery: MediaDeliveryRuntime,
         occurrence_content: OccurrenceContentCoordinator,
         activity_plans: ActivityPlanRuntime,
@@ -285,6 +290,7 @@ class WorldV2TurnApplication:
         self._media_selection_worker_actor = media_selection_worker_actor
         self._media_candidate_maintenance = media_candidate_maintenance
         self._media_candidate_maintenance_actor = media_candidate_maintenance_actor
+        self._image_evidence = image_evidence
         self._media_delivery = media_delivery
         self._occurrence_content = occurrence_content
         self._activity_plans = activity_plans
@@ -545,6 +551,34 @@ class WorldV2TurnApplication:
         if self._ledger.blocks_event_loop:
             return await asyncio.to_thread(self._activity_plans.transition, **kwargs)
         return self._activity_plans.transition(**kwargs)
+
+    async def declare_image_evidence(
+        self,
+        command: ImageEvidenceDeclarationCommand,
+        *,
+        logical_time: datetime,
+        created_at: datetime,
+        trace_id: str,
+        correlation_id: str,
+    ) -> CommitResult:
+        """Append a source-bound visual declaration through the World seam.
+
+        The command has no source hash, event type, or privacy field: the
+        runtime derives all three from the pinned life projection before it
+        writes the declaration.
+        """
+
+        kwargs = dict(
+            command=command,
+            logical_time=logical_time,
+            created_at=created_at,
+            actor=self._event_ecology_worker_actor,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._image_evidence.declare, **kwargs)
+        return self._image_evidence.declare(**kwargs)
 
     async def replace_activity(
         self,
@@ -1243,6 +1277,7 @@ def build_sqlite_world_v2_turn_application(
             media_selection_worker_actor=config.media_selection_worker_actor,
             media_candidate_maintenance=MediaCandidateMaintenanceRuntime(ledger=ledger),
             media_candidate_maintenance_actor=config.media_candidate_maintenance_actor,
+            image_evidence=ImageEvidenceDeclarationRuntime(ledger=ledger),
             media_delivery=MediaDeliveryRuntime(ledger=ledger),
             occurrence_content=occurrence_content,
             activity_plans=ActivityPlanRuntime(

@@ -25,6 +25,8 @@ from companion_daemon.world_v2.activity_plan_runtime import (
     ActivityPlanCommand,
     ActivityPlanTransitionCommand,
 )
+from companion_daemon.world_v2.image_evidence_contract import ImageEvidenceV1
+from companion_daemon.world_v2.image_evidence_runtime import ImageEvidenceDeclarationCommand
 from companion_daemon.world_v2.event_ecology_media import EcologyPolicy
 from companion_daemon.world_v2.life_ecology_runtime import LifeEcologyRunResult
 from companion_daemon.world_v2.production_turn_application import LifeEcologyComposition
@@ -500,6 +502,78 @@ async def test_production_ecology_runs_only_after_a_durable_life_wake_and_only_o
         assert not any(action.kind == "media_planning" for action in projection.actions)
     finally:
         ledger.close()
+
+
+@pytest.mark.asyncio
+async def test_production_life_event_declaration_opens_one_source_bound_candidate(
+    tmp_path: Path,
+) -> None:
+    config = WorldV2TurnApplicationConfig(
+        world_id="world:production-declared-ecology",
+        companion_actor_ref="agent:companion",
+        reply_target="user:user.1",
+        action_pump_owner="pump:production-declared-ecology",
+        event_ecology_policy=EcologyPolicy(max_candidates_per_drain=1),
+    )
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "world-v2-declared-ecology.sqlite",
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_InvalidModel(),
+        quick_recovery=_InvalidQuick(),
+        transport=_Transport(),
+        now=NOW,
+    )
+    try:
+        await app.respond(InboundTurn(
+            platform="test", platform_user_id="user.1", platform_message_id="message:declared-ecology",
+            text="我晚点想去公园散散步。", observed_at=NOW, trace_id="trace:declared-ecology:inbound",
+        ))
+        plan = await app.plan_activity(
+            ActivityPlanCommand(
+                command_id="command:declared-ecology:plan", world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:declared-ecology",
+                plan_id="plan:declared-ecology", activity_id="activity:declared-ecology",
+                activity_kind="walk", importance_bp=4_000, location_ref="location:park",
+                participant_refs=("agent:companion",), privacy_class="shareable",
+            ),
+            logical_time=NOW, created_at=NOW, trace_id="trace:declared-ecology:plan",
+            causation_id="cause:declared-ecology:plan", correlation_id="correlation:declared-ecology",
+        )
+        started = await app.transition_activity(
+            ActivityPlanTransitionCommand(
+                command_id="command:declared-ecology:start", world_id=config.world_id,
+                source_observation_id="observation:test:user.1:message:declared-ecology",
+                plan_id="plan:declared-ecology", operation="start",
+            ),
+            logical_time=NOW, created_at=NOW, trace_id="trace:declared-ecology:start",
+            causation_id=plan.event_ids[-1], correlation_id="correlation:declared-ecology",
+        )
+        declaration = await app.declare_image_evidence(
+            ImageEvidenceDeclarationCommand(
+                command_id="command:declared-ecology:evidence",
+                source_event_ref=started.event_ids[-1],
+                image_evidence=ImageEvidenceV1(
+                    visibility="shareable",
+                    activity={
+                        "evidence_visibility": "shareable", "id": "activity:declared-ecology",
+                        "kind": "walk", "description": "傍晚在公园散步", "phase": "active",
+                    },
+                ),
+            ),
+            logical_time=NOW, created_at=NOW, trace_id="trace:declared-ecology:evidence",
+            correlation_id="correlation:declared-ecology",
+        )
+        result = await app.drain_media_ecology_once(
+            wake_event_ref=declaration.event_ids[-1], logical_time=NOW,
+            trace_id="trace:declared-ecology:worker", correlation_id="correlation:declared-ecology",
+        )
+    finally:
+        app.close()
+
+    assert result is not None and result.status == "created"
+    assert len(result.candidate_ids) == 1
 
 
 @pytest.mark.asyncio
