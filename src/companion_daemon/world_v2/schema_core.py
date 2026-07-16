@@ -49,6 +49,7 @@ class EvidenceRef(FrozenModel):
         "current_fact",
         "past_experience",
         "future_plan",
+        "life_transition",
         "private_hypothesis",
         "action_authorization",
         "conversation_continuity",
