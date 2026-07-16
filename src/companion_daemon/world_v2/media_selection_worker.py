@@ -35,10 +35,10 @@ class MediaSelectionWorker:
         projection = self._ledger.project()
         if projection.logical_time != logical_time:
             return MediaSelectionRunResult(status="blocked", reason_code="media_selection.logical_time_not_current")
-        cursor = ProjectionCursor(world_revision=projection.world_revision, deliberation_revision=projection.deliberation_revision, ledger_sequence=projection.ledger_sequence)
         candidates = tuple(item for item in projection.photo_candidates if item.status == "available" and item.opened_at is not None and item.expires_at is not None and item.expires_at > logical_time and item.source_events)
         if not candidates:
             return MediaSelectionRunResult(status="no_op", reason_code="media_selection.no_available_candidates")
+        cursor = ProjectionCursor(world_revision=projection.world_revision, deliberation_revision=projection.deliberation_revision, ledger_sequence=projection.ledger_sequence)
         # The token is deliberately distinct from the candidate id: model text
         # cannot become an authority-bearing identifier by coincidence.
         tokens = {"media-candidate:" + hashlib.sha256(item.candidate_id.encode()).hexdigest(): item for item in candidates}
