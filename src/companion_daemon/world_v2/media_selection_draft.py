@@ -34,6 +34,7 @@ class MediaCandidateChoice(FrozenModel):
 
 class MediaSelectionCapsule(FrozenModel):
     candidates: tuple[MediaCandidateChoice, ...] = Field(default=(), max_length=32)
+    draw_suggestion: dict[str, object] | None = None
 
     @model_validator(mode="after")
     def tokens_are_unique(self) -> "MediaSelectionCapsule":
@@ -68,7 +69,10 @@ class MediaSelectionDraftAdapter:
                     '{"decision":"no_op"} or {"decision":"select","token":"offered"}. '
                     "A token is not permission to create, send, or describe an image."
                 )},
-                {"role": "user", "content": json.dumps({"candidates": [item.model_dump() for item in capsule.candidates]}, ensure_ascii=False)},
+                {"role": "user", "content": json.dumps({
+                    "candidates": [item.model_dump() for item in capsule.candidates],
+                    "draw_suggestion": capsule.draw_suggestion,
+                }, ensure_ascii=False)},
             ],
             temperature=self._temperature,
         )

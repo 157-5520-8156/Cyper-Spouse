@@ -15,6 +15,7 @@ from .media_selection_draft import (
 )
 from .media_selection_proposal import MediaSelectionProposalCompiler
 from .media_candidate_advisory import MediaCandidateAdvisoryCompiler
+from .random_authority import RandomAuthority
 from .schema_core import FrozenModel
 from .schemas import ProjectionCursor
 
@@ -32,6 +33,7 @@ class MediaSelectionWorker:
         self._ledger, self._draft, self._recorder = ledger, draft_adapter, proposal_recorder
         self._compiler, self._source = MediaSelectionProposalCompiler(catalog_version=catalog_version), source
         self._advisory = MediaCandidateAdvisoryCompiler()
+        self._random = RandomAuthority(ledger=ledger)
 
     async def select_once(self, *, logical_time: datetime, actor: str, trace_id: str, correlation_id: str) -> MediaSelectionRunResult:
         projection = self._ledger.project()
@@ -72,6 +74,27 @@ class MediaSelectionWorker:
         # The token is deliberately distinct from the candidate id: model text
         # cannot become an authority-bearing identifier by coincidence.
         tokens = {"media-candidate:" + hashlib.sha256(item.candidate_id.encode()).hexdigest(): item for item in candidates}
+        draw_suggestion = None
+        # Production ledgers persist the draw before Deliberation.  Narrow
+        # embedded test adapters without durable lookup retain a no-draw path;
+        # they cannot claim replayable variability.
+        if callable(getattr(self._ledger, "lookup_event_commit", None)):
+            draw = self._random.draw(
+                attempt_id="media-selection:" + hashlib.sha256(
+                    (projection.world_id + logical_time.isoformat() + ":" + ",".join(sorted(item.candidate_id for item in candidates))).encode()
+                ).hexdigest(),
+                candidate_refs=tuple(item.candidate_id for item in candidates),
+                catalog_version="media-selection-random.1", logical_time=logical_time,
+                actor=actor, trace_id=trace_id, correlation_id=correlation_id,
+            )
+            suggested_token = next(token for token, item in tokens.items() if item.candidate_id == draw.selected_candidate_ref)
+            draw_suggestion = {"selected_token": suggested_token, "sampler_version": draw.sampler_version}
+            projection = self._ledger.project()
+            cursor = ProjectionCursor(
+                world_revision=projection.world_revision,
+                deliberation_revision=projection.deliberation_revision,
+                ledger_sequence=projection.ledger_sequence,
+            )
         draft = await self._draft.deliberate(capsule=MediaSelectionCapsule(candidates=tuple(
             MediaCandidateChoice(
                 token=token,
@@ -79,7 +102,7 @@ class MediaSelectionWorker:
                 advisory=self._advisory.compile(projection=projection, candidate=tokens[token]).model_material(),
             )
             for token in sorted(tokens)
-        )))
+        ), draw_suggestion=draw_suggestion))
         if draft.decision == "no_op":
             return MediaSelectionRunResult(status="no_op", reason_code="media_selection.model_declined")
         assert draft.token is not None and draft.model and draft.raw_output_hash and draft.normalized_output_hash
