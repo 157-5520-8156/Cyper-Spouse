@@ -10,6 +10,9 @@ from companion_daemon.world_v2.accepted_ledger_batch import (
     AcceptedLedgerBatchError,
     AcceptedLedgerBatchIssuer,
 )
+from companion_daemon.world_v2.activity_lifecycle_acceptance_manifest import (
+    ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
+)
 from companion_daemon.world_v2.schemas import ProjectionCursor, WorldEvent
 
 
@@ -105,3 +108,28 @@ def test_issuer_requires_a_v3_acceptance_followed_by_effects() -> None:
             registry_digest="b" * 64,
             commit_id="commit:reordered",
         )
+
+
+def test_issuer_accepts_the_closed_activity_lifecycle_manifest_family() -> None:
+    issuer = AcceptedLedgerBatchIssuer()
+    events = (
+        _event(
+            event_id="event:activity-acceptance",
+            event_type="AcceptanceRecorded",
+            payload={"manifest_version": ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION},
+        ),
+        _events()[1],
+    )
+
+    handle = issuer.issue(
+        world_id=WORLD_ID,
+        expected_cursor=CURSOR,
+        events=events,
+        manifest_hash="a" * 64,
+        registry_digest="b" * 64,
+        commit_id="commit:activity-lifecycle",
+    )
+
+    assert issuer.verify(
+        handle=handle, world_id=WORLD_ID, expected_cursor=CURSOR
+    ) == (events, "commit:activity-lifecycle")

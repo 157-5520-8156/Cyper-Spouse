@@ -18,6 +18,9 @@ from weakref import WeakKeyDictionary
 from .schemas import ProjectionCursor, WorldEvent
 from .appraisal_acceptance_manifest import APPRAISAL_ACCEPTANCE_MANIFEST_VERSION
 from .affect_acceptance_manifest import AFFECT_ACCEPTANCE_MANIFEST_VERSION
+from .activity_lifecycle_acceptance_manifest import (
+    ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
+)
 from .minimal_reply_manifest import MINIMAL_REPLY_MANIFEST_VERSION
 from .outcome_acceptance_manifest import OUTCOME_ACCEPTANCE_MANIFEST_VERSION
 from .expression_plan_manifest import EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION
@@ -136,6 +139,7 @@ class AcceptedLedgerBatchIssuer:
             MINIMAL_REPLY_MANIFEST_VERSION,
             APPRAISAL_ACCEPTANCE_MANIFEST_VERSION,
             AFFECT_ACCEPTANCE_MANIFEST_VERSION,
+            ACTIVITY_LIFECYCLE_ACCEPTANCE_MANIFEST_VERSION,
             OUTCOME_ACCEPTANCE_MANIFEST_VERSION,
             EXPRESSION_PLAN_ACCEPTANCE_MANIFEST_VERSION,
             INTERACTION_BID_ACCEPTANCE_MANIFEST_VERSION,
