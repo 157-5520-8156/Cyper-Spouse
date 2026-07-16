@@ -64,7 +64,12 @@ func _unhandled_input(event: InputEvent) -> void:
 func request_daemon_context() -> void:
 	if daemon_poll.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
 		return
-	var daemon_url := String(ProjectSettings.get_setting("zhizhi/daemon_context_url"))
+	var daemon_url: String = ProjectSettings.get_setting("zhizhi/daemon_room_url", "")
+	if daemon_url.is_empty():
+		bridge_online = false
+		actor.set_offline(true)
+		_update_status("offline · room reader not configured")
+		return
 	var request_error := daemon_poll.request(daemon_url)
 	if request_error != OK:
 		bridge_online = false
@@ -83,7 +88,7 @@ func _on_daemon_context(
 		actor.set_offline(true)
 		_update_status("offline · HTTP %d" % response_code)
 		return
-	var scene_state := state_bridge.scene_state_from_body(body)
+	var scene_state := state_bridge.scene_state_from_public_room_body(body)
 	if scene_state.is_empty():
 		bridge_online = false
 		actor.set_offline(true)

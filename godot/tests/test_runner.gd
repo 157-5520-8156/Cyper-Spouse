@@ -43,6 +43,11 @@ func _init() -> void:
 	_expect(bridge.scene_state_from_body(valid_body) == {"location": "desk", "action": "study"}, "bridge extracts daemon scene state")
 	_expect(bridge.scene_state_from_body("not-json".to_utf8_buffer()).is_empty(), "bridge rejects invalid JSON")
 	_expect(bridge.scene_state_from_body(JSON.stringify({"dashboard": {}}).to_utf8_buffer()).is_empty(), "bridge rejects missing scene")
+	var world_v2_body := JSON.stringify({"schema_version": "world-v2-dashboard-room.1", "cursor": {"world_revision": 7, "ledger_sequence": 12}, "projection_hash": "a".repeat(64), "route": {"scene_id": "zhizhi-home", "action_id": "study", "availability": "busy"}}).to_utf8_buffer()
+	_expect(bridge.scene_state_from_public_room_body(world_v2_body) == {"location": "desk", "action": "study"}, "bridge maps a public World v2 route")
+	var unavailable_body := JSON.stringify({"schema_version": "world-v2-dashboard-room.1", "cursor": {"world_revision": 7, "ledger_sequence": 12}, "projection_hash": "a".repeat(64), "route": {"scene_id": "unavailable", "action_id": "idle", "availability": "unavailable"}}).to_utf8_buffer()
+	_expect(bridge.scene_state_from_public_room_body(unavailable_body).is_empty(), "bridge keeps prior scene for unavailable World v2 routes")
+	_expect(bridge.scene_state_from_public_room_body(valid_body).is_empty(), "World v2 parser never falls back to archived dashboard data")
 
 	var navigation := NavigationGrid.new()
 	navigation.configure(room)

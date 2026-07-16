@@ -23,6 +23,8 @@ func _init() -> void:
 	var bridge := RoomStateBridge.new()
 	var state := bridge.scene_state_from_body(JSON.stringify({"dashboard": {"scene": {"location": "desk", "action": "study"}}}).to_utf8_buffer())
 	_expect(room.interaction_for(state).get("object") == "desk", "daemon study state maps to desk interaction")
+	var world_v2_state := bridge.scene_state_from_public_room_body(JSON.stringify({"schema_version": "world-v2-dashboard-room.1", "cursor": {"world_revision": 7, "ledger_sequence": 12}, "projection_hash": "a".repeat(64), "route": {"scene_id": "zhizhi-home", "action_id": "study", "availability": "busy"}}).to_utf8_buffer())
+	_expect(room.interaction_for(world_v2_state).get("object") == "desk", "public World v2 study route maps to desk interaction")
 	_expect(room.interaction_for({"location": "living", "action": "phone"}).get("object") == "sofa", "explicit phone action wins over living fallback")
 	if failures.is_empty():
 		print("Top-down room tests passed")

@@ -363,6 +363,31 @@ def world_v2_dashboard_room(
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+@app.get("/world-v2/room")
+def world_v2_public_room() -> dict[str, object]:
+    """Return the public-only Room DTO for a read-only room renderer.
+
+    Unlike the internal dashboard endpoint this route is deliberately safe for
+    a local Godot/browser renderer to poll without acquiring an operator
+    credential.  It exposes exactly the same fixed ``room_renderer`` DTO: no
+    raw world identifier, ledger data, affect, diagnostic view, or legacy
+    dashboard state.  A cold reader never bootstraps a writable v2 host and a
+    missing capture never falls back to the archived Engine.
+    """
+
+    if http_v2_capture is None:
+        raise HTTPException(
+            status_code=503,
+            detail="World v2 room projection is unavailable until the platform host is initialized",
+        )
+    try:
+        return http_v2_capture.dashboard_room().to_payload()
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail="World v2 room projection denied") from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @app.post("/proactive/{canonical_user_id}", response_model=ProactiveDecision)
 async def proactive(canonical_user_id: str) -> ProactiveDecision:
     return await engine.proactive_tick(canonical_user_id)

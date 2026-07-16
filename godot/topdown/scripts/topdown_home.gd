@@ -55,7 +55,11 @@ func _ready() -> void:
 func request_daemon_context() -> void:
 	if daemon_poll.get_http_client_status() != HTTPClient.STATUS_DISCONNECTED:
 		return
-	var error := daemon_poll.request(String(ProjectSettings.get_setting("zhizhi/daemon_context_url")))
+	var room_url: String = ProjectSettings.get_setting("zhizhi/daemon_room_url", "")
+	if room_url.is_empty():
+		status_label.text = "Zhizhi Home · room reader not configured"
+		return
+	var error := daemon_poll.request(room_url)
 	if error != OK:
 		status_label.text = "Zhizhi Home · offline preview"
 
@@ -64,7 +68,7 @@ func _on_daemon_context(_result: int, response_code: int, _headers: PackedString
 	if response_code < 200 or response_code >= 300:
 		status_label.text = "Zhizhi Home · offline · keeping activity"
 		return
-	var scene_state := state_bridge.scene_state_from_body(body)
+	var scene_state := state_bridge.scene_state_from_public_room_body(body)
 	if scene_state.is_empty():
 		status_label.text = "Zhizhi Home · offline · invalid scene"
 		return

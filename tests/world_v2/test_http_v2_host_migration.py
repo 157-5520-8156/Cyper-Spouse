@@ -275,6 +275,70 @@ def test_http_dashboard_room_route_is_operator_gated_and_returns_only_the_v2_pub
         assert forbidden not in wire
 
 
+def test_http_public_room_route_is_read_only_v2_dto_without_engine_or_bootstrap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Godot's public route has no archive fallback or write-on-read escape hatch."""
+
+    host = build_http_v2_capture_host(
+        settings=Settings(database_path=tmp_path / "http-public-room-v2.sqlite"),
+        bootstrap_at=NOW,
+        model=FakeCompanionModel(),
+    )
+
+    class _NoLegacyEngine:
+        async def aclose(self) -> None:
+            return None
+
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"public v2 room route touched legacy Engine attribute {name!r}")
+
+    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    monkeypatch.setattr(app_module, "http_v2_capture", host)
+    try:
+        response = TestClient(app_module.app).get("/world-v2/room")
+    finally:
+        asyncio.run(host.aclose())
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert set(payload) == {"schema_version", "cursor", "projection_hash", "route"}
+    assert payload["schema_version"] == "world-v2-dashboard-room.1"
+    assert set(payload["cursor"]) == {"world_revision", "ledger_sequence"}
+    assert all(isinstance(value, int) and value >= 0 for value in payload["cursor"].values())
+    assert payload["route"] == {
+        "scene_id": "unavailable",
+        "action_id": "idle",
+        "availability": "unavailable",
+    }
+    assert len(payload["projection_hash"]) == 64
+
+
+def test_http_public_room_route_never_bootstraps_or_falls_back_to_legacy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NoLegacyEngine:
+        async def aclose(self) -> None:
+            return None
+
+        def __getattr__(self, name: str) -> object:
+            raise AssertionError(f"public room fallback touched legacy Engine {name!r}")
+
+    def _must_not_compose(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("public room GET must not construct a writable World v2 host")
+
+    monkeypatch.setattr(app_module, "engine", _NoLegacyEngine())
+    monkeypatch.setattr(app_module, "http_v2_capture", None)
+    monkeypatch.setattr(app_module, "build_http_v2_capture_host", _must_not_compose)
+
+    response = TestClient(app_module.app).get("/world-v2/room")
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == (
+        "World v2 room projection is unavailable until the platform host is initialized"
+    )
+
+
 def test_http_dashboard_room_route_never_falls_back_to_legacy_when_v2_capture_lacks_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

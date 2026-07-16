@@ -22,7 +22,9 @@ anti_aliasing/quality/msaa_3d=0
 anti_aliasing/quality/screen_space_aa=0
 
 [zhizhi]
-daemon_context_url="http://127.0.0.1:8767/debug/geoff/context"
+# The default room reader is a public, read-only World v2 projection.  It is
+# intentionally not the old /debug/<user>/context dashboard shape.
+daemon_room_url="http://127.0.0.1:8767/world-v2/room"
 manifest_path="res://scenes/zhizhi-home.json"
 topdown_manifest_path="res://topdown/scenes/zhizhi-home-topdown.json"
 capture_mode=false

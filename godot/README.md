@@ -1,13 +1,16 @@
 # Godot 小屋（迁移中）
 
 默认运行时现在是星露谷式俯视 2D 小屋。Godot 工程通过 daemon 的只读
-`/debug/<user>/context` 投影获得 `location/action/expression`，不会写入世界或 daemon。
+`/world-v2/room` 公共 Room DTO 获得预声明的 `scene_id/action_id/availability` 路由，
+不会写入世界或 daemon，也不会读取旧 `/debug/<user>/context` 的 dashboard 状态。
 旧的 3D 等距场景保留在 `scenes/main.tscn`，仅作迁移前的视觉回退，不再是默认入口。
 
 ## 运行
 
 需要 Godot 4.7。导入此目录中的 `project.godot`，运行主场景；它每三秒读取一次 daemon
-状态。工程内部以 `696×543` 渲染，再用 nearest-neighbor 放大到 `1392×1086`。开发时先启动 daemon：
+状态。该入口只会读取已经初始化的 v2 平台宿主；宿主未初始化时保持上一帧，不会由小屋
+请求启动写入或回退旧 Engine。工程内部以 `696×543` 渲染，再用 nearest-neighbor 放大到
+`1392×1086`。开发时先启动 daemon：
 
 ```sh
 .venv/bin/uvicorn companion_daemon.app:app --port 8767
