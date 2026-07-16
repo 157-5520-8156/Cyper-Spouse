@@ -194,7 +194,10 @@ class MediaEvidenceSnapshotCompiler:
             snapshot_hash=media_payload_hash(snapshot_body),
             image_event_snapshot_body=image_event_snapshot_body,
             image_event_snapshot_hash=media_payload_hash(image_event_snapshot_body),
-            evidence_index_digest=media_digest(image_snapshot.evidence_index),
+            evidence_index_digest=media_digest({
+                pointer: entry.model_dump(mode="json")
+                for pointer, entry in image_snapshot.evidence_index.items()
+            }),
         )
 
     @staticmethod
