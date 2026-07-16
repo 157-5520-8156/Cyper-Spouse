@@ -747,7 +747,10 @@ class EventMediaPlannerAdapter:
 def _snapshot_leaves(value: object, pointer: str = "") -> set[str]:
     """Return RFC 6901 pointers for evidence-bearing leaves only."""
     if value is None:
-        return set()
+        # The top-level absent relationship slot is wire structure in P0/P2.
+        # Nested nulls, however, are explicit values in a V3 typed context and
+        # must match the compiler's closed evidence index exactly.
+        return set() if pointer == "/relationship_media_context" else {pointer}
     if isinstance(value, dict):
         leaves: set[str] = set()
         for key, item in value.items():

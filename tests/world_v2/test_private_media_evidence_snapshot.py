@@ -1,13 +1,21 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
+
+from companion_daemon import event_media
+from companion_daemon.world_v2.event_media_planner_adapter import EventMediaPlannerAdapter
 
 from companion_daemon.world_v2.media_v2 import (
     CharacterMediaCandidateContract,
     MediaEvidenceSource,
+    InMemoryImmutableMediaPayloadStore,
+    MediaPlanningResult,
     PhotoCandidate,
+    StoredMediaPayload,
     character_media_contract_digest,
+    planning_request_id,
 )
 from companion_daemon.world_v2.media_evidence_snapshot import MediaEvidenceSnapshotCompiler
 from companion_daemon.world_v2.media_opportunity_authorizer import MediaOpportunityAuthorizer
@@ -63,6 +71,27 @@ class _Ledger:
     def lookup_event_commit(self, event_id: str):
         event = self._events.get(event_id)
         return (event, None) if event is not None else None
+
+
+class _ResultStore:
+    def __init__(self) -> None:
+        self.values: dict[str, MediaPlanningResult] = {}
+
+    async def lookup(self, *, planning_request_id: str) -> MediaPlanningResult | None:
+        return self.values.get(planning_request_id)
+
+    async def put_if_absent(self, *, planning_request_id: str, result: MediaPlanningResult) -> None:
+        self.values.setdefault(planning_request_id, result)
+
+
+class _PrivateLegacyPlanner:
+    def __init__(self) -> None:
+        self.calls: list[event_media.MediaOpportunity] = []
+
+    async def plan(self, opportunity: event_media.MediaOpportunity, recent_media=()):  # type: ignore[no-untyped-def]
+        assert recent_media == ()
+        self.calls.append(opportunity)
+        return event_media.NotRenderable(opportunity.opportunity_id, "fixture_stop")
 
 
 def test_private_compiler_freezes_recipient_context_and_keeps_authorization_outer() -> None:
@@ -175,3 +204,20 @@ def test_private_compiler_freezes_recipient_context_and_keeps_authorization_oute
     assert opportunity.media_lane == "alluring_life"
     assert opportunity.p3_authorization_digest == authorized.snapshot.private_media_authorization.authorization_digest
     assert authorized.snapshot.image_event_snapshot.relationship_media_context.private_expression_basis.kind == "private_transition"
+
+    sidecar = InMemoryImmutableMediaPayloadStore()
+    sidecar.put_if_absent(StoredMediaPayload(
+        payload_ref=opportunity.event_snapshot_ref, payload_hash=opportunity.event_snapshot_hash,
+        content_type="application/vnd.world-v2.media-opportunity+json", body=authorized.snapshot_body,
+    ))
+    legacy = _PrivateLegacyPlanner()
+    adapter = EventMediaPlannerAdapter(sidecar=sidecar, legacy_planner=legacy, result_store=_ResultStore())
+    result = asyncio.run(adapter.plan(
+        opportunity=opportunity, planning_request_id=planning_request_id(opportunity.opportunity_id)
+    ))
+    assert result.not_renderable is not None and result.not_renderable.reason_code == "fixture_stop"
+    assert legacy.calls[0].privacy_ceiling == "intimate"
+    assert legacy.calls[0].audience_context is not None
+    assert legacy.calls[0].audience_context.recipient_ref == "user:1"
+    assert legacy.calls[0].private_expression_basis is not None
+    assert legacy.calls[0].private_expression_basis.kind == "private_transition"
