@@ -21,6 +21,8 @@ from companion_daemon.world_v2.reducers import ReducerState
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.typed_proposal_families import family_for_mutation
 from companion_daemon.world_v2.goal_authority_reducers import (
+    GOAL_AUTHORITY_LANE_NOT_INSTALLED,
+    GOAL_CHARACTER_CORE_SOURCE_NOT_INSTALLED,
     _INSTALLED_GOAL_LANES_BY_OPERATION,
     V2_GOAL_INTERNAL_BASIS_POLICY_DIGEST,
     V2_GOAL_INTERNAL_BASIS_POLICY_VERSION,
@@ -1531,7 +1533,7 @@ def test_goal_replay_rejects_bypassed_settlement_write_lane() -> None:
     ).model_copy(
         update={"authority_lane": "settlement", "cause_authority": settled}
     )
-    with pytest.raises(ValueError, match="lane is not installed"):
+    with pytest.raises(ValueError, match=GOAL_AUTHORITY_LANE_NOT_INSTALLED):
         reduce_v2_goal(
             (before,),
             (),
@@ -1584,7 +1586,7 @@ def test_character_core_wire_source_is_fail_closed_for_goal_deliberation() -> No
         payload_hash="c" * 64,
         logical_time=NOW,
     )
-    with pytest.raises(ValueError, match="not an installed Goal deliberative source"):
+    with pytest.raises(ValueError, match=GOAL_CHARACTER_CORE_SOURCE_NOT_INSTALLED):
         reduce_v2_goal(
             (),
             (),

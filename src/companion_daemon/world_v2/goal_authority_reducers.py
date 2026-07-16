@@ -172,6 +172,19 @@ V2_GOAL_POLICY_DIGEST = hashlib.sha256(
     json.dumps(_POLICY_ARTIFACT, sort_keys=True, separators=(",", ":")).encode()
 ).hexdigest()
 
+# Stable fail-closed domain codes.  Keep “not installed” separate from the
+# existing “lacks exact … authority” errors: callers may retry malformed
+# evidence after correcting it, but they must not retry an uninstalled lane as
+# though another evidence reference could make it legal.
+GOAL_AUTHORITY_LANE_NOT_INSTALLED = "goal_authority_lane_not_installed"
+GOAL_SETTLEMENT_WRITE_AUTHORITY_NOT_INSTALLED = (
+    "goal_settlement_write_authority_not_installed"
+)
+GOAL_CHARACTER_CORE_SOURCE_NOT_INSTALLED = (
+    "goal_character_core_source_not_installed"
+)
+GOAL_CLOCK_WRITE_AUTHORITY_NOT_INSTALLED = "goal_clock_write_authority_not_installed"
+
 # This is deliberately narrower than the shared V16 authority union.  The
 # union is shared by several domains and preserves versioned wire shapes; it
 # is not itself a capability grant.  In particular a settled event can be a
@@ -212,6 +225,7 @@ def _require_installed_goal_transition_authority(
         raise ValueError(f"unsupported GoalAuthority operation {payload.operation!r}")
     if payload.authority_lane not in installed_lanes:
         raise ValueError(
+            f"{GOAL_AUTHORITY_LANE_NOT_INSTALLED}: "
             "Goal authority lane is not installed for this operation"
         )
     expected_cause = _EXPECTED_GOAL_CAUSE_BY_LANE.get(payload.authority_lane)
@@ -593,6 +607,7 @@ def _resolve_cause(
                 # is not a capability grant and accepting it would allow a
                 # slow identity revision to impersonate a current outcome.
                 raise ValueError(
+                    f"{GOAL_CHARACTER_CORE_SOURCE_NOT_INSTALLED}: "
                     "character_core is not an installed Goal deliberative source"
                 )
             committed = next(
@@ -731,6 +746,7 @@ def _resolve_cause(
         # ``CommittedEvidenceBasis`` in a later accepted deliberation.  It is
         # not a direct Goal write lane in the frozen .16 capability matrix.
         raise ValueError(
+            f"{GOAL_SETTLEMENT_WRITE_AUTHORITY_NOT_INSTALLED}: "
             "goal settlement write authority is not installed; "
             "use an accepted deliberative committed-evidence basis"
         )
@@ -779,7 +795,10 @@ def _resolve_cause(
     if isinstance(cause, ClockCauseAuthority):
         # Expiry has a separate mechanical payload/reducer; it is never a
         # V2GoalChanged mutation and cannot be smuggled through this path.
-        raise ValueError("Clock authority is only installed for mechanical Goal expiry")
+        raise ValueError(
+            f"{GOAL_CLOCK_WRITE_AUTHORITY_NOT_INSTALLED}: "
+            "Clock authority is only installed for mechanical Goal expiry"
+        )
     raise ValueError("Goal cause authority kind is not installed")
 
 
