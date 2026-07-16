@@ -33,7 +33,9 @@ HTTP / 兼容 QQ C2C 文本 / 离线 harness
   WorldLedger → deterministic ReducerState → viewer projections
                   │                  │
                   │                  ├─ Situation / Context Capsule / Advisory
-                  │                  └─ Action, Budget, Receipt, recovery
+                  │                  ├─ Action, Budget, Receipt, recovery
+                  │                  ├─ source-bound event ecology → media opportunity
+                  │                  └─ injected perception → opaque result trigger
                   ▼
        transport / media provider / read-only projection adapter
 ```
@@ -42,10 +44,17 @@ HTTP / 兼容 QQ C2C 文本 / 离线 harness
   路径；adapter 不能直接写 reducer 或旧行为表。
 - 旧 `WorldKernel` 不是 v2 的替代账本，也不是 v2 机制的实现依据。它仍服务于尚未迁移的
   旧入口、历史数据和兼容代码，因而“全产品唯一写模型”目前尚不能宣称成立。
-- `event_media` 是图片机的 public seam。图片机只能返回 provider 结果；机会、批准、预算、
-  投递和 `MediaDeliveryShared` 均由 v2 账本决定。
-- Dashboard 的 v2 room endpoint 只读、受 operator gate 保护，并且在 v2 host 冷启动时
-  fail closed。Godot 已消费相同的公共 DTO；Web Dashboard 主页面仍是遗留读路径。
+- `event_media` 是图片机的 public seam。`EventEcologyMediaCandidateRuntime` 已能从已提交且
+  可分享的活动、结果、经历和有限可见事实冻结候选机会，并带有持久化的频率/cooldown 约束；它
+  不生成图片 prompt、不替图片机规划/渲染/投递，也不从未提交计划或私密内心推断画面。图片机
+  只能返回 provider 结果；机会、批准、预算、投递和 `MediaDeliveryShared` 均由 v2 账本决定。
+- 感知（vision/transcription）已有独立、source-bound 的注入式 vertical：输入类型、同意、
+  隐私、预算和最终 pump 授权都被绑定，provider 结果只会成为后续的 opaque trigger。它尚未
+  进入默认 production proposal grammar/provider composition，且当前 result deliberation 只
+  支持 no-visible-action。
+- Dashboard 的 v2 room endpoint 与新的 `/world-v2/dashboard` 公共 DTO 都是只读、受固定
+  capability gate 保护，并且在 v2 host 冷启动时 fail closed。后者有 ETag/no-store 与 public
+  whitelist；Godot 已消费 room DTO，但 Web Dashboard 主页面仍是遗留读路径。
 
 ## 阶段状态
 
@@ -56,9 +65,9 @@ HTTP / 兼容 QQ C2C 文本 / 离线 harness
 | 2 Ledger / projection | 已完成核心纵切 | SQLite replay、revision/CAS、source-bound Fact/Experience/Memory/Core、Goal/Location/Resource/Attention fixtures | 其他业务域仍按逐条 authority vertical 继续收口 |
 | 3 Situation / matrix | 部分完成 | deterministic Capsule、budget slices、advisory、matrix catalog tests | 仍有 unavailable/private slices，需继续验证所有生产决策均消费同一 revision |
 | 4 Deliberation / acceptance | 部分完成 | source-bound proposal/manifest/atomic recorder、appraisal/affect/outcome/media thread lanes | 不应把未开放的 proposal family 或 fallback 当作已完成行为能力 |
-| 5 Action / recovery | 部分完成 | Action lifecycle、lease、unknown reconciliation、expression/deferred-reply tests | reaction/typing/sticker 仍是 adapter-only；不是可用生产 grammar |
-| 6 Media preview | 部分完成 | freeze → plan → render/inspect → preview → approval/delivery/recovery fixtures | 真正部署的 durable provider、operator approval 和 production transport 覆盖仍需验证 |
-| 7 平台与展示 | 部分完成 | HTTP v2、兼容 QQ C2C text v2、v2 dashboard read DTO、Godot room consumer | NapCat/OneBot 其他形态、Web Dashboard 默认读路径未迁移 |
+| 5 Action / recovery | 部分完成 | Action lifecycle、lease、unknown reconciliation、expression/deferred-reply、注入式 perception source/authorization/result-trigger tests | reaction/typing/sticker 仍是 adapter-only；perception 没有默认 grammar/provider，结果暂不产生可见表达 |
+| 6 Media preview | 部分完成 | freeze → plan → render/inspect → preview → approval/delivery/recovery fixtures、source-bound event ecology 候选/冷却/重放测试 | ecology 只开 preview 机会；真正部署的 durable provider、operator approval 和 production transport 覆盖仍需验证 |
+| 7 平台与展示 | 部分完成 | HTTP v2、兼容 QQ C2C text v2、room/public-dashboard DTO、Godot room consumer | NapCat/OneBot 其他形态、Web Dashboard 默认读路径未迁移 |
 | 8 Evaluator / 清理 | 部分完成 | frozen scenario corpus、mechanism baseline、test-economy、blind artifact pipeline | synthetic/offline 证据不能替代真实模型、真人盲评或线上 SLO |
 
 “已完成（代码层）”仅表示对应 v2 contract 已有回放/攻击/合同测试；它不表示所有平台已经
@@ -81,6 +90,15 @@ WorldKernel：
   terminal lifecycle 均已有 v2 合同。未投递 beat 不得被当作已说过。
 - 媒体默认 preview；只有被批准且收到 delivery receipt 才可形成 `MediaDeliveryShared` 和
   后续互动 trigger。inspection repair 被限制为同一 frozen plan 的一次修复。
+- 事件生态可把已提交的、可分享的生活事实映射为有限的图片候选类别，并冻结同一份证据
+  snapshot；私密来源、未提交事项、LLM 猜测和重复类别会被拒绝或压制。它证明的是候选机会的
+  来源与重放安全，不证明事件内容已经覆盖足够丰富的真实生活。
+- 注入式感知 Action 可以在最终授权检查后结算 vision/transcription 的 immutable result
+  descriptor，并只创建一次后续 deliberation trigger；这不代表默认对话已会主动调用或把
+  感知结果自然地说出来。
+- 公共 Dashboard 后端 DTO 仅从固定 `dashboard_public` viewer projection 编译，未知/私密
+  路由降级或省略，HTTP 读取不 bootstrap 或回退 legacy。它不是当前 `/dashboard` 浏览器的
+  默认数据源。
 - 固定 corpus 的 deterministic replay、测试经济 trace 与机制 baseline 已在 CI 侧可运行。
 
 具体 mechanism-to-evidence 映射在
@@ -99,24 +117,31 @@ WorldKernel：
    next-turn consumption 的 trace 逐项验收。
 3. **图片机已可安全自动投递。** 本地 planning/preview/repair 合同可用；真实 provider、审批
    样本、失效策略和部署 receipt 仍需分别验收。
-4. **情绪已经达到“难以察觉是 AI”。** 目前证明的是可追踪的 affect/relationship/state
+4. **图片机会已覆盖丰富的生活事件。** 当前 event ecology 只消费已有的 activity/outcome/
+   experience/有限可见 fact 权威，并且仍缺少经验证的 object/food 内容 sidecar；候选类别和
+   画面多样性需要随着世界事件权威扩展而验证。
+5. **情绪已经达到“难以察觉是 AI”。** 目前证明的是可追踪的 affect/relationship/state
    机制和离线场景，不是长期真人校准、讽刺/权力差异理解或语言自然度的外部证明。
-5. **热启动、冷启动和首 Action P95 达标。** test-economy 和 trace schema 已存在；真实部署的
+6. **热启动、冷启动和首 Action P95 达标。** test-economy 和 trace schema 已存在；真实部署的
    queue/provider 数据、SLO 分位数和回归基线尚未采集。
-6. **所有展示端只读消费 v2 projection。** Godot 已迁到 v2 room DTO；Web Dashboard 默认读
+7. **所有展示端只读消费 v2 projection。** Godot 已迁到 v2 room DTO；Web Dashboard 默认读
    路径仍需迁移并做 privacy/redaction 回归。
 
 ## 验收与后续工作顺序
 
 下一轮工作应以可观察的闭环而非继续堆模型规则为准：
 
-1. 对每个仍标为 `partial` 的 production lane，补齐可执行的 source、consumer、Action、
-   receipt/recovery 和 next-turn trace，或者把它明确保留为 archive/adapter-only。
-2. 迁移 Web Dashboard 与剩余平台 adapter 到 `project()` / `WorldRuntime`；迁移期间不允许
+1. 先扩展已提交生活事件的可视内容 authority（尤其 object/food 的已验证 sidecar），并用
+   candidate-category/recency/replay fixtures 验证 event ecology 的覆盖，不让图片机或 LLM 补造
+   世界细节。
+2. 对每个仍标为 `partial` 的 production lane，补齐可执行的 source、consumer、Action、
+   receipt/recovery 和 next-turn trace，或者把它明确保留为 archive/adapter-only。感知 vertical
+   只有在默认 grammar、provider composition 和可见结果决策均有证据后才能升格。
+3. 迁移 Web Dashboard 与剩余平台 adapter 到 `project()` / `WorldRuntime`；迁移期间不允许
    同一 observation 同时写旧账本和 v2 账本。
-3. 在有 durable provider 与 operator approval 后，做真实媒体 preview 样本和恢复演练；此前
+4. 在有 durable provider 与 operator approval 后，做真实媒体 preview 样本和恢复演练；此前
    不默认开启自动 delivery。
-4. 收集与版本绑定的真实模型评审、真人长期会话和线上 latency/cost trace。只有这些证据满足
+5. 收集与版本绑定的真实模型评审、真人长期会话和线上 latency/cost trace。只有这些证据满足
    `world-v2-refactor-plan.md` 的统计门槛，才可声称 v2 不低于裸聊或达到目标 SLO。
 
 建议的本地验证入口：

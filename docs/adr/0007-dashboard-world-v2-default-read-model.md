@@ -1,8 +1,19 @@
 # ADR-0007: Dashboard 默认迁移为 World v2 公共只读投影
 
-- 状态：accepted for implementation
+- 状态：部分实施；后端 public projection/route 已完成，默认浏览器切换未完成
 - 日期：2026-07-16
 - 范围：`/dashboard` 的默认浏览体验、其浏览器数据契约及 HTTP read seam；不改像素房间素材、room runtime 或 Dashboard 的视觉布局
+
+## 实施检查点（2026-07-16）
+
+已落地的部分仅为后端读 seam：`dashboard_public` 的固定 capability、
+`DashboardPublicProjectionAdapter`、`GET /world-v2/dashboard`、public DTO whitelist、ETag/
+`Cache-Control: no-store` 和 cold-host fail-closed 行为。合同测试同时证明该路由不读取
+legacy Engine，也不 bootstrap 可写 host。
+
+尚未落地本 ADR 的关键 cutover：`dashboard_ui.py` 默认浏览器读路径仍使用 legacy data；因此
+不得据此声称 `/dashboard` 已迁移、旧 endpoint 已移除，或默认 Dashboard 已只读 World v2。
+`notices` 也仍为空，直到具备独立、typed 的公开 authority；不能用旧 social task 补齐。
 
 ## 决策
 

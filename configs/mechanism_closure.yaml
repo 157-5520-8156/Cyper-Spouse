@@ -255,6 +255,23 @@ mechanisms:
       - tests/world_v2/test_read_only_tool_vertical.py::test_tool_executor_rejects_a_revoked_capability_on_final_projection
       - tests/world_v2/test_read_only_tool_production_lane.py::test_injected_tool_lane_compiles_enforced_request_then_settles_a_real_result
 
+  - id: injected-perception-tool
+    phase: 5
+    status: partial
+    runtime_activation: not-wired
+    limitations: [requires-explicit-provider-and-authority-injection, no-default-production-proposal-grammar-or-provider-composition, result-deliberation-is-currently-no-visible-action-only]
+    sources: [source-bound-media-input, perception-capability-consent-and-privacy-binding, provider-result-descriptor]
+    events: [PerceptionRequestAccepted, PerceptionResultAccepted]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [perception-requests, perception-results, perception-result-trigger]
+    decision_consumers: [PerceptionAcceptanceRuntime, PerceptionActionExecutor, PerceptionResultTriggerRuntime, NoopPerceptionResultDeliberator]
+    actions: [perception-tool]
+    terminal_states: [delivered, failed, cancelled, expired, unknown]
+    adapters: [injected-vision-or-transcription-provider]
+    tests:
+      - tests/world_v2/test_perception_vertical.py::test_injected_perception_provider_is_source_bound_private_and_result_triggered_once
+      - tests/world_v2/test_perception_vertical.py::test_perception_executor_fails_closed_without_final_pump_authorization
+
   - id: media-preview-and-approval
     phase: 6
     status: partial
@@ -273,6 +290,24 @@ mechanisms:
       - tests/world_v2/test_media_v2_planning.py::test_repairable_inspection_has_one_source_bound_repair_then_second_failure_is_terminal
       - tests/world_v2/test_media_delivery_approval.py::test_share_materializes_only_after_delivered_receipt
       - tests/world_v2/test_media_provider_results.py::test_worker_only_materializes_provider_bytes_bound_to_terminal_receipt
+
+  - id: event-ecology-media-candidates
+    phase: 6
+    status: partial
+    runtime_activation: limited-production
+    limitations: [requires-explicit-policy-and-scheduler-drain, opens-preview-opportunities-only-and-never-plans-renders-or-delivers, visual-fact-sidecars-remain-reference-only-without-invented-detail]
+    sources: [committed-shareable-activity-outcome-experience-or-visual-fact, committed-life-or-clock-wake, persisted-media-opportunity-history]
+    events: [PhotoCandidateOpened, MediaOpportunityFrozen]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [source-bound-photo-candidates, frozen-media-opportunities, immutable-evidence-snapshots]
+    decision_consumers: [EventEcologyMediaCandidateRuntime, MediaPlanningWorker]
+    actions: []
+    terminal_states: []
+    adapters: [production-turn-application-scheduler]
+    tests:
+      - tests/world_v2/test_event_ecology_media.py::test_ecology_derives_diverse_candidates_only_from_existing_shareable_authority
+      - tests/world_v2/test_event_ecology_media.py::test_ecology_is_replay_safe_and_category_cooldown_uses_persisted_opportunities
+      - tests/world_v2/test_production_turn_application.py::test_production_ecology_runs_only_after_a_durable_life_wake_and_only_opens_preview_opportunities
 
   - id: http-v2-ingress
     phase: 7
@@ -317,7 +352,7 @@ mechanisms:
     sources: [v2-viewer-request, internal-room-projection]
     events: [WorldStarted]
     reducers: [src/companion_daemon/world_v2/reducers.py]
-    projections: [RoomProjection, dashboard-public-dto]
+    projections: [RoomProjection, dashboard-room-dto]
     decision_consumers: [RoomProjectionMaterializer, DashboardProjectionAdapter]
     actions: []
     terminal_states: []
@@ -327,6 +362,25 @@ mechanisms:
       - tests/world_v2/test_dashboard_projection_adapter.py::test_dashboard_adapter_is_a_read_only_projection_consumer
       - tests/world_v2/test_http_v2_host_migration.py::test_http_dashboard_room_route_is_operator_gated_and_returns_only_the_v2_public_dto
       - tests/world_v2/test_display_architecture_guard.py::test_selected_v2_display_consumers_remain_public_projection_readers
+
+  - id: public-dashboard-projection
+    phase: 7
+    status: partial
+    runtime_activation: limited-production
+    limitations: [backend-route-and-fixed-public-dto-exist, web-dashboard-default-browser-path-remains-legacy, notices-are-omitted-until-a-typed-public-authority-is-installed]
+    sources: [fixed-dashboard-public-viewer-request, public-situation-and-agenda-projection]
+    events: [WorldStarted]
+    reducers: [src/companion_daemon/world_v2/reducers.py]
+    projections: [DashboardPublicProjectionView, world-v2-dashboard-dto, public-etag]
+    decision_consumers: [DashboardPublicProjectionMaterializer, DashboardPublicProjectionAdapter]
+    actions: []
+    terminal_states: []
+    adapters: [http-world-v2-dashboard]
+    tests:
+      - tests/world_v2/test_dashboard_public_projection_adapter.py::test_public_adapter_compiles_one_cursor_whitelisted_dashboard_dto
+      - tests/world_v2/test_dashboard_public_projection_adapter.py::test_public_adapter_omits_unknown_agenda_and_never_forwards_private_route_values
+      - tests/world_v2/test_http_v2_host_migration.py::test_http_dashboard_public_route_is_operator_gated_cacheable_and_never_reads_legacy
+      - tests/world_v2/test_http_v2_host_migration.py::test_http_dashboard_public_route_never_bootstraps_or_falls_back_to_legacy
 
   - id: offline-mechanism-evaluation
     phase: 8
