@@ -63,6 +63,11 @@ from .ledger_payload_reader import LedgerAuthorizedPayloadReader
 from .life_content_store import SQLiteImmutableLifeContentStore
 from .expression_payload_store import SQLiteImmutableExpressionPayloadStore
 from .media_v2 import MediaPlanner, SQLiteImmutableMediaPayloadStore
+from .event_ecology_media import (
+    EcologyDrainResult,
+    EcologyPolicy,
+    EventEcologyMediaCandidateRuntime,
+)
 from .test_economy import CostProfile
 from .media_execution_runtime import MediaExecutionRuntime, MediaExecutionWorker
 from .media_planning_runtime import MediaPlanningRuntime
@@ -134,6 +139,8 @@ class WorldV2TurnApplicationConfig:
     interaction_bid_worker_owner: str = "worker:world-v2:interaction-bid"
     expression_reconsideration_owner: str = "worker:world-v2:expression-reconsideration"
     media_planning_worker_owner: str = "worker:world-v2:media-planning"
+    event_ecology_worker_actor: str = "worker:world-v2:event-ecology"
+    event_ecology_policy: EcologyPolicy | None = None
     media_cost_profile: CostProfile | None = None
     tool_account_id: str = "account:world-v2:tool"
     tool_window_id: str = "window:world-v2:tool"
@@ -153,6 +160,7 @@ class WorldV2TurnApplicationConfig:
             "interaction_bid_worker_owner",
             "expression_reconsideration_owner",
             "media_planning_worker_owner",
+            "event_ecology_worker_actor",
             "tool_worker_owner",
         ):
             if not getattr(self, name):
@@ -182,6 +190,8 @@ class WorldV2TurnApplication:
         media_execution_worker: MediaExecutionWorker | None,
         media_planning: MediaPlanningRuntime,
         media_planning_worker: MediaPlanningWorker,
+        media_ecology: EventEcologyMediaCandidateRuntime | None,
+        event_ecology_worker_actor: str,
         media_delivery: MediaDeliveryRuntime,
         occurrence_content: OccurrenceContentCoordinator,
         activity_plans: ActivityPlanRuntime,
@@ -196,6 +206,8 @@ class WorldV2TurnApplication:
         self._media_execution_worker = media_execution_worker
         self._media_planning = media_planning
         self._media_planning_worker = media_planning_worker
+        self._media_ecology = media_ecology
+        self._event_ecology_worker_actor = event_ecology_worker_actor
         self._media_delivery = media_delivery
         self._occurrence_content = occurrence_content
         self._activity_plans = activity_plans
@@ -516,6 +528,33 @@ class WorldV2TurnApplication:
         """
 
         return await self._media_planning_worker.drain_once()
+
+    async def drain_media_ecology_once(
+        self, *, wake_event_ref: str, logical_time: datetime, trace_id: str,
+        correlation_id: str,
+    ) -> EcologyDrainResult | None:
+        """Freeze source-bound life-media opportunities after a durable wake.
+
+        This is intentionally a scheduler-only seam.  It accepts an exact
+        committed life/clock event ref, not an inbound message or a free-form
+        media request.  The ecology may open preview opportunities only; it
+        neither chooses one for planning nor authorizes, renders, or sends it.
+        If the composition did not explicitly inject an ecology policy, it is
+        unavailable rather than falling back to any legacy image mechanism.
+        """
+
+        if self._media_ecology is None:
+            return None
+        kwargs = dict(
+            wake_event_ref=wake_event_ref,
+            logical_time=logical_time,
+            actor=self._event_ecology_worker_actor,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._media_ecology.drain_once, **kwargs)
+        return self._media_ecology.drain_once(**kwargs)
 
     async def approve_media_automatic_delivery(
         self, *, approval: MediaAutomaticDeliveryApproval, trace_id: str,
@@ -963,6 +1002,15 @@ def build_sqlite_world_v2_turn_application(
             else None
         )
         media_planning = MediaPlanningRuntime(ledger=ledger, sidecar=media_payload_store)
+        media_ecology = (
+            EventEcologyMediaCandidateRuntime(
+                ledger=ledger,
+                sidecar=media_payload_store,
+                policy=config.event_ecology_policy,
+            )
+            if config.event_ecology_policy is not None
+            else None
+        )
         return WorldV2TurnApplication(
             turns=WorldTurnRuntime(runtime=runtime, identities=identities),
             ledger=ledger,
@@ -978,6 +1026,8 @@ def build_sqlite_world_v2_turn_application(
                 planner=media_planner,
                 owner_id=config.media_planning_worker_owner,
             ),
+            media_ecology=media_ecology,
+            event_ecology_worker_actor=config.event_ecology_worker_actor,
             media_delivery=MediaDeliveryRuntime(ledger=ledger),
             occurrence_content=occurrence_content,
             activity_plans=ActivityPlanRuntime(

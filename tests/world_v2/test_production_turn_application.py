@@ -21,6 +21,11 @@ from companion_daemon.world_v2.production_turn_application import (
     WorldV2TurnApplicationConfig,
     build_sqlite_world_v2_turn_application,
 )
+from companion_daemon.world_v2.activity_plan_runtime import (
+    ActivityPlanCommand,
+    ActivityPlanTransitionCommand,
+)
+from companion_daemon.world_v2.event_ecology_media import EcologyPolicy
 from companion_daemon.world_v2.schemas import ClockObservation, ProjectionCursor
 from companion_daemon.world_v2.sqlite_ledger import SQLiteWorldLedger
 from companion_daemon.world_v2.world_turn_runtime import InboundTurn
@@ -307,6 +312,79 @@ async def test_production_application_advances_clock_without_exposing_ledger_wri
         app.close()
 
     assert outcome.status == "observed_only"
+
+
+@pytest.mark.asyncio
+async def test_production_ecology_runs_only_after_a_durable_life_wake_and_only_opens_preview_opportunities(
+    tmp_path: Path,
+) -> None:
+    config = WorldV2TurnApplicationConfig(
+        world_id="world:production-ecology",
+        companion_actor_ref="agent:companion",
+        reply_target="user:user.1",
+        action_pump_owner="pump:production-ecology",
+        event_ecology_policy=EcologyPolicy(max_candidates_per_drain=1),
+    )
+    app = build_sqlite_world_v2_turn_application(
+        path=tmp_path / "world-v2-ecology.sqlite",
+        config=config,
+        identities=_Identities(),
+        router=_Router(),
+        main_model=_InvalidModel(),
+        quick_recovery=_InvalidQuick(),
+        transport=_Transport(),
+        now=NOW,
+    )
+    observation_id = "observation:test:user.1:message:ecology"
+    try:
+        # Normal chat is not an ecology wake, even with an enabled policy.
+        await app.respond(InboundTurn(
+            platform="test", platform_user_id="user.1", platform_message_id="message:ecology",
+            text="我想晚点去公园散步。", observed_at=NOW, trace_id="trace:ecology:inbound",
+        ))
+        plan = await app.plan_activity(
+            ActivityPlanCommand(
+                command_id="command:ecology:plan", world_id=config.world_id,
+                source_observation_id=observation_id, plan_id="plan:ecology",
+                activity_id="activity:ecology", activity_kind="walk", importance_bp=4_000,
+                location_ref="location:park", participant_refs=("agent:companion",),
+                privacy_class="shareable",
+            ),
+            logical_time=NOW, created_at=NOW, trace_id="trace:ecology:plan",
+            causation_id="cause:ecology:plan", correlation_id="correlation:ecology",
+        )
+        started = await app.transition_activity(
+            ActivityPlanTransitionCommand(
+                command_id="command:ecology:start", world_id=config.world_id,
+                source_observation_id=observation_id, plan_id="plan:ecology", operation="start",
+            ),
+            logical_time=NOW, created_at=NOW, trace_id="trace:ecology:start",
+            causation_id=plan.event_ids[-1], correlation_id="correlation:ecology",
+        )
+        result = await app.drain_media_ecology_once(
+            wake_event_ref=started.event_ids[-1], logical_time=NOW,
+            trace_id="trace:ecology:worker", correlation_id="correlation:ecology",
+        )
+        # A repeat joins the immutable candidate; no media planning Action is
+        # created by this worker and no image can be sent from this seam.
+        replay = await app.drain_media_ecology_once(
+            wake_event_ref=started.event_ids[-1], logical_time=NOW,
+            trace_id="trace:ecology:worker", correlation_id="correlation:ecology",
+        )
+    finally:
+        app.close()
+
+    assert result is not None and result.status == "created"
+    assert replay is not None and replay.status == "idle"
+    ledger = SQLiteWorldLedger(path=tmp_path / "world-v2-ecology.sqlite", world_id=config.world_id)
+    try:
+        projection = ledger.project()
+        assert len(projection.photo_candidates) == 1
+        assert len(projection.media_opportunities) == 1
+        assert not any(action.kind == "media_planning" for action in projection.actions)
+        assert projection.media_opportunities[0].delivery_mode == "preview"
+    finally:
+        ledger.close()
 
 
 @pytest.mark.asyncio

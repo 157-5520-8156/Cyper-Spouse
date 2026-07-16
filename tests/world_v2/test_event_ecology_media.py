@@ -225,3 +225,32 @@ def test_ecology_refuses_an_uncommitted_or_non_life_wake() -> None:
             wake_event_ref="event:not-committed", logical_time=NOW, actor="worker:event-ecology",
             trace_id="trace:reject", correlation_id="correlation:reject",
         )
+
+
+def test_ecology_fails_closed_before_any_ledger_write_when_snapshot_sidecar_is_unavailable() -> None:
+    source = _ref("activity-sidecar", "ActivityStarted")
+    projection = _projection(
+        refs=(source,),
+        plans=(SimpleNamespace(
+            status="active", authority_origin=_origin(source.event_id), privacy_class="shareable",
+            last_transitioned_at=NOW, activity_kind="walk", location_ref="location:park",
+            participant_refs=("companion:celia",),
+        ),),
+    )
+    ledger = _Ledger(projection)
+
+    class _UnavailableSidecar:
+        def put_if_absent(self, _record) -> None:  # type: ignore[no-untyped-def]
+            raise OSError("sidecar offline")
+
+        def read_exact(self, *, payload_ref: str):  # type: ignore[no-untyped-def]
+            del payload_ref
+            return None
+
+    runtime = EventEcologyMediaCandidateRuntime(ledger=ledger, sidecar=_UnavailableSidecar())
+    with pytest.raises(OSError, match="sidecar offline"):
+        runtime.drain_once(
+            wake_event_ref=source.event_id, logical_time=NOW, actor="worker:event-ecology",
+            trace_id="trace:sidecar", correlation_id="correlation:sidecar",
+        )
+    assert ledger.commits == []
