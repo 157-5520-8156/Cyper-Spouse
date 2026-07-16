@@ -13,7 +13,7 @@
 | `reaction` / `typing` / `sticker` | adapter_only | 不变 payload 和中性 provider receipt binding | proposal materializer、平台专用 transport、provider lookup/recovery |
 | `vision` | planned | 无 v2 production seam | source-bound request、acceptance/budget、provider、`VisionResultAccepted` projection、deterministic result trigger、recovery |
 | `transcription` | planned | 无 v2 production seam | source-bound request、acceptance/budget、provider、`TranscriptionResultAccepted` projection、deterministic result trigger、recovery |
-| `read_only_tool` | planned | 无 v2 production seam | source-bound request、acceptance/budget、provider、`ToolResultAccepted` projection、deterministic result trigger、recovery |
+| `read_only_tool` | adapter_only | source-bound request、acceptance/budget、provider adapter、`ToolResultAccepted` projection、deterministic result trigger、recovery | production request deliberation、部署 provider composition、result-response lane |
 | 用户创意媒体请求 | planned | 旧 `image_requests.py` 可作为 parser 参考，但不拥有 v2 权威 | creative request projection、source-bound Action、budget、provider、delivery receipt/recovery |
 
 ## 不可绕过的门槛

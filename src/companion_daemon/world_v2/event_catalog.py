@@ -75,6 +75,7 @@ from .expression_plan_manifest import (
 from .relationship_events import RELATIONSHIP_PAYLOAD_MODELS
 from .private_impression_events import PRIVATE_IMPRESSION_PAYLOAD_MODELS
 from .thread_events import THREAD_MECHANICAL_PAYLOAD_MODELS, THREAD_PAYLOAD_MODELS
+from .read_only_tool import ToolRequestAcceptedPayload, ToolResultAcceptedPayload
 from .schemas import (
     Action,
     ActionReconciliation,
@@ -296,6 +297,8 @@ _PAYLOAD_MODELS: Mapping[str, type[BaseModel]] = MappingProxyType(
                 "runtime_outcome_ref": _ID,
             },
         ),
+        "ToolRequestAccepted": ToolRequestAcceptedPayload,
+        "ToolResultAccepted": ToolResultAcceptedPayload,
         "ProposalRecorded": _payload_model(
             "ProposalRecordedPayload", {"proposal_id": _ID}, allow_audit_extensions=True
         ),
@@ -406,6 +409,8 @@ _IDEMPOTENCY_IDENTITIES: Mapping[str, str] = MappingProxyType(
         "TriggerProcessOpened": "world_id+trigger_id+opened",
         "TriggerProcessReclaimed": "world_id+trigger_id+attempt_id+reclaimed",
         "TriggerProcessCompleted": "world_id+trigger_id+attempt_id+completed",
+        "ToolRequestAccepted": "world_id+request_id",
+        "ToolResultAccepted": "world_id+result_id",
         "ProposalRecorded": "world_id+trigger_id+proposal_id",
         "ModelResultRecorded": "world_id+model_call_id+model_result_ref",
         "AcceptanceRecorded": "v2:world_id+manifest_version+acceptance_id;legacy:proposal+revision",
@@ -690,6 +695,23 @@ _CONTRACTS: Mapping[str, EventContract] = MappingProxyType(
                 allowed_predecessors=("ExternalObservationRecorded",),
                 evidence_types=("external_observation",),
                 successors=("TriggerProcessCompleted",),
+            ),
+            _contract(
+                "ToolRequestAccepted",
+                "read_only_tool_acceptance",
+                "world",
+                "ToolRequestAcceptedPayload",
+                evidence_types=("committed_observation_or_world_event", "tool_request_proposal"),
+                successors=("BudgetReserved", "ActionAuthorized"),
+            ),
+            _contract(
+                "ToolResultAccepted",
+                "tool_settlement",
+                "world",
+                "ToolResultAcceptedPayload",
+                allowed_predecessors=("ExecutionReceiptRecorded",),
+                evidence_types=("delivered_read_only_tool_action", "immutable_tool_result"),
+                successors=("TriggerProcessOpened",),
             ),
             _contract(
                 "TriggerProcessOpened",

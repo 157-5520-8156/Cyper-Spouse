@@ -284,6 +284,11 @@ from .thread_events import (
     ThreadExpiredPayload,
 )
 from .thread_reducers import expire_thread, reduce_thread
+from .read_only_tool import (
+    ToolRequestAcceptedPayload,
+    ToolResultAcceptedPayload,
+    external_result_trigger_id,
+)
 from .typed_proposal_families import INSTALLED_TYPED_PROPOSAL_FAMILIES
 from .typed_proposals import (
     TypedProposalRegistration,
@@ -366,12 +371,14 @@ from .schemas import (
     RelationshipProposalProjection,
     RelationshipSignalProjection,
     RelationshipStateProjection,
+    ReadOnlyToolRequestProjection,
     PrivateImpressionProjection,
     PrivateImpressionProposalProjection,
     ThreadProjection,
     ThreadProposalProjection,
     ThreadTransitionProjection,
     TriggerProcess,
+    ToolResultProjection,
     WorldOccurrenceProjection,
     WorldEvent,
     validate_actor_authority_event_bindings,
@@ -573,6 +580,8 @@ class ReducerState(FrozenModel):
     logical_time: datetime | None = None
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
+    read_only_tool_requests: tuple[ReadOnlyToolRequestProjection, ...] = ()
+    tool_results: tuple[ToolResultProjection, ...] = ()
     photo_candidates: tuple[PhotoCandidate, ...] = ()
     media_opportunities: tuple[MediaOpportunity, ...] = ()
     media_plans: tuple[MediaPlan, ...] = ()
@@ -5790,6 +5799,58 @@ def _execution_receipt_recorded(state: ReducerState, event: WorldEvent) -> Reduc
     return state.model_copy(update={"execution_receipts": (*state.execution_receipts, receipt)})
 
 
+def _tool_request_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
+    request = ToolRequestAcceptedPayload.model_validate_json(event.payload_json).request
+    source = next(
+        (item for item in state.committed_world_event_refs if item.event_id == request.source_event_ref),
+        None,
+    )
+    if (
+        source is None
+        or source.world_revision != request.source_world_revision
+        or source.payload_hash != request.source_payload_hash
+        or any(item.request_id == request.request_id for item in state.read_only_tool_requests)
+        or any(item.action_id == request.action_id for item in state.read_only_tool_requests)
+    ):
+        raise ValueError("read-only tool request is not bound to committed source authority")
+    return state.model_copy(
+        update={"read_only_tool_requests": (*state.read_only_tool_requests, request)}
+    )
+
+
+def _tool_result_accepted(state: ReducerState, event: WorldEvent) -> ReducerState:
+    result = ToolResultAcceptedPayload.model_validate_json(event.payload_json).result
+    request = next(
+        (item for item in state.read_only_tool_requests if item.request_id == result.request_id),
+        None,
+    )
+    receipt_event = next(
+        (item for item in state.committed_world_event_refs if item.event_id == result.receipt_event_ref),
+        None,
+    )
+    action = next((item for item in state.actions if item.action_id == result.action_id), None)
+    receipt = next((item for item in state.execution_receipts if item.result_id == result.external_result_id), None)
+    if (
+        request is None
+        or request.action_id != result.action_id
+        or action is None
+        or action.kind != "read_only_tool"
+        or action.layer != "read_only_tool"
+        or action.state != "delivered"
+        or receipt is None
+        or receipt.action_id != result.action_id
+        or receipt.result_ref != result.result_ref
+        or receipt.result_hash != result.result_hash
+        or receipt_event is None
+        or receipt_event.event_type != "ExecutionReceiptRecorded"
+        or receipt_event.payload_hash != result.receipt_event_payload_hash
+        or result.accepted_event_ref != event.event_id
+        or any(item.result_id == result.result_id for item in state.tool_results)
+    ):
+        raise ValueError("tool result is not bound to its delivered Action receipt")
+    return state.model_copy(update={"tool_results": (*state.tool_results, result)})
+
+
 def _budget_settlement_recorded(state: ReducerState, event: WorldEvent) -> ReducerState:
     settlement = _model_from_payload(event, "settlement", BudgetSettlement)
     if any(item.settlement_id == settlement.settlement_id for item in state.budget_settlements):
@@ -6038,6 +6099,29 @@ def _trigger_process_opened(state: ReducerState, event: WorldEvent) -> ReducerSt
             or process.trigger_ref != f"fact:{process.source_evidence_ref}"
         ):
             raise ValueError("interaction fact trigger identity is not deterministic")
+    if process.process_kind == "external_result_deliberation":
+        source = next(
+            (
+                item
+                for item in state.committed_world_event_refs
+                if item.event_id == process.source_evidence_ref
+            ),
+            None,
+        )
+        if source is None or source.event_type != "ToolResultAccepted":
+            raise ValueError("external result trigger requires an accepted tool result")
+        result = next(
+            (item for item in state.tool_results if item.accepted_event_ref == source.event_id),
+            None,
+        )
+        if result is None:
+            raise ValueError("external result trigger source projection is unavailable")
+        if (
+            process.trigger_id
+            != external_result_trigger_id(world_id=event.world_id, result_id=result.result_id)
+            or process.trigger_ref != f"external-result:{result.result_id}"
+        ):
+            raise ValueError("external result trigger identity is not deterministic")
     if process.process_kind == "npc_world_appraisal":
         source = next(
             (
@@ -8254,6 +8338,8 @@ _EVENTS = {
             RevisionClass.WORLD,
             _execution_receipt_recorded,
         ),
+        EventDefinition("ToolRequestAccepted", RevisionClass.WORLD, _tool_request_accepted),
+        EventDefinition("ToolResultAccepted", RevisionClass.WORLD, _tool_result_accepted),
         EventDefinition("BudgetSettled", RevisionClass.WORLD, _budget_settlement_recorded),
         EventDefinition("BudgetReleased", RevisionClass.WORLD, _budget_settlement_recorded),
         EventDefinition("BudgetAdjusted", RevisionClass.WORLD, _budget_settlement_recorded),
@@ -8643,6 +8729,8 @@ def make_projection(
         attention_proposal_ids=state.attention_proposal_ids,
         actions=state.actions,
         pending_actions=state.pending_actions,
+        read_only_tool_requests=state.read_only_tool_requests,
+        tool_results=state.tool_results,
         photo_candidates=state.photo_candidates,
         media_opportunities=state.media_opportunities,
         media_plans=state.media_plans,

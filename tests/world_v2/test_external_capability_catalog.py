@@ -22,10 +22,12 @@ def test_remaining_capability_verticals_are_explicit_and_fail_closed() -> None:
         assert capability.availability == "adapter_only"
         assert "concrete_transport" in capability.missing_closure
 
-    for action_kind in ("vision", "transcription", "read_only_tool", "creative_media_request"):
+    for action_kind in ("vision", "transcription", "creative_media_request"):
         capability = external_capability(action_kind)
         assert capability.availability == "planned"
         assert "source_bound_request" in capability.missing_closure
+    assert external_capability("read_only_tool").availability == "adapter_only"
+    assert "production_request_deliberation" in external_capability("read_only_tool").missing_closure
 
 
 def test_catalogue_has_no_implicit_or_duplicate_external_capabilities() -> None:

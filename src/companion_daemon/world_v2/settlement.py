@@ -10,6 +10,7 @@ from .event_identity import domain_idempotency_key
 from .expression_lifecycle_runtime import ExpressionReceiptLifecycle
 from .media_delivery_runtime import MediaDeliveryReceiptLifecycle
 from .media_delivery_interaction import media_delivery_interaction_trigger_event
+from .read_only_tool import accepted_tool_result_events
 from .schemas import (
     Action,
     ActionReconciliation,
@@ -157,6 +158,8 @@ class SettlementPlanner:
             error_class=result.error_class,
             received_at=result.observed_at,
             raw_payload_hash=result.raw_payload_hash,
+            result_ref=result.result_ref,
+            result_hash=result.result_hash,
         )
         if reason is None:
             if action is None:
@@ -262,6 +265,33 @@ class SettlementPlanner:
             ),
             receipt_event,
         ]
+        request = next(
+            (
+                item
+                for item in projection.read_only_tool_requests
+                if item.action_id == action.action_id
+            ),
+            None,
+        )
+        if action.kind == "read_only_tool":
+            if request is None:
+                raise ValueError("read-only tool Action has no accepted request authority")
+            for event_type, suffix, payload in accepted_tool_result_events(
+                world_id=self._world_id,
+                result=result,
+                receipt_event=receipt_event,
+                request=request,
+                accepted_event_ref=f"event:{trigger_id}:tool-result",
+            ):
+                events.append(
+                    self._event(
+                        result,
+                        trigger_id=trigger_id,
+                        event_type=event_type,
+                        suffix=suffix,
+                        payload=payload,
+                    )
+                )
         events.extend(
             self._event(
                 result,

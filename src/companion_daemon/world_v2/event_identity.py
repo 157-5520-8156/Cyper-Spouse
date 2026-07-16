@@ -115,6 +115,10 @@ def _life_identity_components(
         )
     if event_type == "MediaDeliveryShared":
         return world_id, _nested(payload, "delivery", "delivery_id")
+    if event_type == "ToolRequestAccepted":
+        return world_id, _nested(payload, "request", "request_id")
+    if event_type == "ToolResultAccepted":
+        return world_id, _nested(payload, "result", "result_id")
     if event_type == "MediaDeliveryThreadProposalRecorded":
         return world_id, payload.get("media_thread_proposal_id"), payload.get("change_id")
     if event_type in {"MediaDeliveryThreadOpened", "MediaDeliveryThreadUpdated"}:
@@ -371,6 +375,7 @@ def _life_identity_components(
             "outcome_deliberation",
             "media_delivery_interaction",
             "expression_reconsideration",
+            "external_result_deliberation",
         }:
             attempts = process.get("attempt_ids")
             attempt_id = attempts[-1] if isinstance(attempts, list) and attempts else None

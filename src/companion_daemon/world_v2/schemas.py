@@ -183,6 +183,14 @@ class ExternalObservation(FrozenModel):
     error_class: str | None = None
     retryability: Literal["retryable", "not_retryable", "unknown"] | None = None
     raw_payload_hash: str = Field(min_length=1)
+    result_ref: str | None = Field(default=None, min_length=1)
+    result_hash: str | None = Field(default=None, min_length=64, max_length=71)
+
+    @model_validator(mode="after")
+    def result_descriptor_is_complete(self) -> "ExternalObservation":
+        if (self.result_ref is None) != (self.result_hash is None):
+            raise ValueError("external result ref and hash must be supplied together")
+        return self
 
 
 class ProviderReceipt(FrozenModel):
@@ -199,6 +207,14 @@ class ProviderReceipt(FrozenModel):
     error_class: str | None = Field(default=None, min_length=1)
     received_at: datetime
     raw_payload_hash: str = Field(min_length=1)
+    result_ref: str | None = Field(default=None, min_length=1)
+    result_hash: str | None = Field(default=None, min_length=64, max_length=71)
+
+    @model_validator(mode="after")
+    def result_descriptor_is_complete(self) -> "ProviderReceipt":
+        if (self.result_ref is None) != (self.result_hash is None):
+            raise ValueError("provider result ref and hash must be supplied together")
+        return self
 
 
 class DispatchPending(FrozenModel):
@@ -491,6 +507,7 @@ class TriggerProcess(FrozenModel):
         "media_continuation",
         "media_repair",
         "media_delivery_interaction",
+        "external_result_deliberation",
     ]
     source_evidence_ref: str | None = None
     state: Literal["open", "claimed", "terminal"]
@@ -512,6 +529,7 @@ class TriggerProcess(FrozenModel):
                 "media_continuation",
                 "media_repair",
                 "media_delivery_interaction",
+                "external_result_deliberation",
             }
             and self.source_evidence_ref is not None
         ):
@@ -575,6 +593,8 @@ class ExecutionReceipt(FrozenModel):
     error_class: str | None = None
     received_at: datetime
     raw_payload_hash: str = Field(min_length=1)
+    result_ref: str | None = Field(default=None, min_length=1)
+    result_hash: str | None = Field(default=None, min_length=64, max_length=71)
 
     @model_validator(mode="after")
     def receipt_kind_matches_observed_state(self) -> ExecutionReceipt:
@@ -586,7 +606,38 @@ class ExecutionReceipt(FrozenModel):
             self.observed_state == "provider_accepted" or not self.is_terminal
         ):
             raise ValueError("terminal receipt must carry a terminal observed state")
+        if (self.result_ref is None) != (self.result_hash is None):
+            raise ValueError("receipt result ref and hash must be supplied together")
         return self
+
+
+class ReadOnlyToolRequestProjection(FrozenModel):
+    """Accepted request authority for one non-mutating external query."""
+
+    request_id: str = Field(min_length=1)
+    action_id: str = Field(min_length=1)
+    source_event_ref: str = Field(min_length=1)
+    source_world_revision: int = Field(ge=0)
+    source_payload_hash: str = Field(min_length=64, max_length=64)
+    tool_name: str = Field(min_length=1)
+    query_ref: str = Field(min_length=1)
+    query_hash: str = Field(min_length=64, max_length=71)
+    target: str = Field(min_length=1)
+
+
+class ToolResultProjection(FrozenModel):
+    """A result descriptor, not a world fact and never a generic receipt alias."""
+
+    result_id: str = Field(min_length=1)
+    request_id: str = Field(min_length=1)
+    action_id: str = Field(min_length=1)
+    result_ref: str = Field(min_length=1)
+    result_hash: str = Field(min_length=64, max_length=71)
+    receipt_event_ref: str = Field(min_length=1)
+    receipt_event_payload_hash: str = Field(min_length=64, max_length=64)
+    external_result_id: str = Field(min_length=1)
+    accepted_event_ref: str = Field(min_length=1)
+    accepted_at: datetime
 
 
 class BudgetSettlement(FrozenModel):
@@ -4474,6 +4525,8 @@ class LedgerProjection(FrozenModel):
     attention_proposal_ids: tuple[str, ...] = ()
     actions: tuple[Action, ...] = ()
     pending_actions: tuple[Action, ...] = ()
+    read_only_tool_requests: tuple[ReadOnlyToolRequestProjection, ...] = ()
+    tool_results: tuple[ToolResultProjection, ...] = ()
     photo_candidates: tuple[PhotoCandidate, ...] = ()
     media_opportunities: tuple[MediaOpportunity, ...] = ()
     media_plans: tuple[MediaPlan, ...] = ()

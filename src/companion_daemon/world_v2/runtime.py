@@ -70,6 +70,11 @@ from .expression_reconsideration_runtime import (
     ExpressionReconsiderationRunResult,
     ExpressionReconsiderationRuntime,
 )
+from .external_result_trigger_runtime import (
+    ExternalResultTriggerRunResult,
+    ExternalResultTriggerRuntime,
+    ToolResultDeliberator,
+)
 from .schemas import (
     ClockObservation,
     CommitResult,
@@ -149,6 +154,8 @@ class WorldRuntime:
         affect_acceptance_actor: str | None = None,
         expression_reconsideration_owner: str | None = None,
         expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
+        external_result_owner: str | None = None,
+        external_result_deliberator: ToolResultDeliberator | None = None,
     ) -> None:
         if not world_id:
             raise ValueError("world_id must not be empty")
@@ -256,6 +263,10 @@ class WorldRuntime:
             raise ValueError("expression reconsideration reviewer requires a worker owner")
         self._expression_reconsideration_owner = expression_reconsideration_owner
         self._expression_reconsideration_reviewer = expression_reconsideration_reviewer
+        if (external_result_owner is None) != (external_result_deliberator is None):
+            raise ValueError("external result owner and deliberator must be configured together")
+        self._external_result_owner = external_result_owner
+        self._external_result_deliberator = external_result_deliberator
         self._lock = asyncio.Lock()
 
     @property
@@ -273,6 +284,7 @@ class WorldRuntime:
         | AffectTriggerRunResult
         | FactTriggerRunResult
         | ExpressionReconsiderationRunResult
+        | ExternalResultTriggerRunResult
         | None
     ):
         """Run one low-priority mental-state job without delaying an interactive turn.
@@ -283,6 +295,15 @@ class WorldRuntime:
         """
 
         async with self._lock:
+            if self._external_result_owner is not None:
+                assert self._external_result_deliberator is not None
+                external_result = await ExternalResultTriggerRuntime(
+                    ledger=self._ledger,
+                    deliberator=self._external_result_deliberator,
+                    owner_id=self._external_result_owner,
+                ).drain_one()
+                if external_result.status != "idle":
+                    return external_result
             if self._expression_reconsideration_owner is not None:
                 reconsideration = await ExpressionReconsiderationRuntime(
                     ledger=self._ledger,

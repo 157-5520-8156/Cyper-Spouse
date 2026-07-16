@@ -145,14 +145,19 @@ EXTERNAL_CAPABILITIES: tuple[ExternalCapability, ...] = (
         capability_id="tool.read_only",
         action_kind="read_only_tool",
         family="read_only_tool",
-        availability="planned",
-        missing_closure=(
+        availability="adapter_only",
+        installed_closure=(
             "source_bound_request",
             "acceptance_budget",
             "provider_adapter",
             "tool_result_projection",
             "deterministic_result_trigger",
             "receipt_recovery",
+        ),
+        missing_closure=(
+            "production_request_deliberation",
+            "deployment_provider_composition",
+            "result_response_lane",
         ),
     ),
     ExternalCapability(
