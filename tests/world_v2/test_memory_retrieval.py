@@ -3,11 +3,20 @@ from __future__ import annotations
 from datetime import UTC, datetime
 import hashlib
 
+import pytest
+
 from companion_daemon.world_v2.ledger import HistoricalLedgerEvent
+from companion_daemon.world_v2.life_content_store import (
+    InMemoryImmutableLifeContentStore,
+    StoredLifeContent,
+    life_content_payload_hash,
+)
 from companion_daemon.world_v2.memory_retrieval import MemoryRetrievalCompiler
 from companion_daemon.world_v2.schemas import (
+    CommittedWorldEventRef,
     EvidenceRef,
     FactAssertionBinding,
+    LifeContentDescriptorProjection,
     MessageObservationRef,
     Observation,
     ProjectionCursor,
@@ -201,3 +210,171 @@ def test_memory_retrieval_does_not_turn_an_operator_fact_ref_into_model_content(
 
     assert result.items == ()
     assert result.suppressions[0].reasons == ("content_unavailable",)
+
+
+def _experience_memory_read_fixture() -> tuple[object, object, ProjectionCursor, object, WorldEvent]:
+    experience, transition, committed, source = authority.hardened_experience_authority()
+    text = "今天下班路上遇到一场很短的雨，反而觉得很轻松。"
+    summary_hash = life_content_payload_hash(text)
+    values = experience.values.model_copy(update={"summary_payload_hash": summary_hash})
+    semantic_fingerprint = authority.experience_semantic_fingerprint(
+        values=values, policy_refs=experience.origin.policy_refs
+    )
+    experience = experience.model_copy(
+        update={"values": values, "semantic_fingerprint": semantic_fingerprint}
+    )
+    transition = transition.model_copy(
+        update={
+            "values_after": values,
+            "semantic_fingerprint_after": semantic_fingerprint,
+        }
+    )
+    source = source.model_copy(
+        update={"source_values_hash": authority.canonical_hash(values)}
+    )
+    candidate = authority.candidate(
+        source,
+        candidate_id="memory:experience",
+        status="active",
+        reviewed_at=NOW,
+        opened_at=NOW,
+        updated_at=NOW,
+    )
+    descriptor_payload_hash = "9" * 64
+    descriptor = LifeContentDescriptorProjection(
+        content_id="life-content:experience:1",
+        content_kind="experience_summary",
+        content_ref=experience.values.summary_ref,
+        content_payload_hash=summary_hash,
+        privacy_class=experience.values.privacy_class,
+        source_kind="experience",
+        source_event_ref=committed.event_id,
+        source_world_revision=committed.world_revision,
+        source_payload_hash=committed.payload_hash,
+        source_entity_id=experience.experience_id,
+        source_entity_revision=experience.entity_revision,
+        descriptor_event_ref="event:life-content:experience:1",
+        descriptor_world_revision=2,
+        descriptor_payload_hash=descriptor_payload_hash,
+    )
+    base_ledger, _ = authority.initialized_ledger_with_fact()
+    base = base_ledger.project()
+    cursor = ProjectionCursor(
+        world_revision=2,
+        deliberation_revision=base.deliberation_revision,
+        ledger_sequence=base.ledger_sequence,
+    )
+    projection = base.model_copy(
+        update={
+            "world_revision": cursor.world_revision,
+            "experiences": (experience,),
+            "experience_transitions": (transition,),
+            "memory_candidates": (candidate,),
+            "life_content_descriptors": (descriptor,),
+            "committed_world_event_refs": (
+                committed,
+                CommittedWorldEventRef(
+                    event_id=descriptor.descriptor_event_ref,
+                    event_type="LifeContentRecorded",
+                    world_revision=descriptor.descriptor_world_revision,
+                    payload_hash=descriptor.descriptor_payload_hash,
+                    logical_time=NOW,
+                ),
+            ),
+        }
+    )
+    store = InMemoryImmutableLifeContentStore()
+    store.put_if_absent(
+        StoredLifeContent(
+            content_ref=experience.values.summary_ref,
+            content_kind="experience_summary",
+            content_payload_hash=summary_hash,
+            text=text,
+        )
+    )
+    event = WorldEvent.from_payload(
+        schema_version="world-v2.1",
+        event_id="event:unused",
+        world_id=authority.WORLD,
+        event_type="ObservationRecorded",
+        logical_time=NOW,
+        created_at=NOW,
+        actor="actor:companion",
+        source="test",
+        trace_id="trace:unused",
+        causation_id="cause:unused",
+        correlation_id="correlation:unused",
+        idempotency_key="unused",
+        payload={"observation_id": "unused"},
+    )
+    return projection, candidate, cursor, store, event
+
+
+def test_experience_backed_memory_retrieval_reads_the_exact_life_summary_sidecar() -> None:
+    projection, candidate, cursor, store, event = _experience_memory_read_fixture()
+    ledger = _MemoryReadLedger(projection=projection, event=event, cursor=cursor)
+
+    result = MemoryRetrievalCompiler(
+        ledger=ledger,
+        life_content_store=store,
+    ).compile(
+        cursor=cursor,
+        candidates=(candidate,),
+        viewer_privacy_ceiling="private",
+    )
+
+    assert result.suppressions == ()
+    assert result.items[0].source_excerpts[0].source_kind == "experience"
+    assert result.items[0].source_excerpts[0].text == "今天下班路上遇到一场很短的雨，反而觉得很轻松。"
+
+
+@pytest.mark.parametrize(
+    "broken_link",
+    ("transition", "descriptor_event", "descriptor_source", "sidecar"),
+)
+def test_experience_backed_memory_retrieval_fails_closed_on_any_missing_or_stale_link(
+    broken_link: str,
+) -> None:
+    projection, candidate, cursor, store, event = _experience_memory_read_fixture()
+    if broken_link == "transition":
+        projection = projection.model_copy(update={"experience_transitions": ()})
+    elif broken_link == "descriptor_event":
+        descriptor = projection.life_content_descriptors[0]
+        projection = projection.model_copy(
+            update={
+                "committed_world_event_refs": tuple(
+                    item
+                    for item in projection.committed_world_event_refs
+                    if item.event_id != descriptor.descriptor_event_ref
+                )
+            }
+        )
+    elif broken_link == "descriptor_source":
+        descriptor = projection.life_content_descriptors[0].model_copy(
+            update={"source_payload_hash": "7" * 64}
+        )
+        projection = projection.model_copy(update={"life_content_descriptors": (descriptor,)})
+    else:
+        store = InMemoryImmutableLifeContentStore()
+        wrong_text = "另一段摘要"
+        store.put_if_absent(
+            StoredLifeContent(
+                content_ref=projection.experiences[0].values.summary_ref,
+                content_kind="experience_summary",
+                content_payload_hash=life_content_payload_hash(wrong_text),
+                text=wrong_text,
+            )
+        )
+    ledger = _MemoryReadLedger(projection=projection, event=event, cursor=cursor)
+
+    result = MemoryRetrievalCompiler(ledger=ledger, life_content_store=store).compile(
+        cursor=cursor,
+        candidates=(candidate,),
+        viewer_privacy_ceiling="private",
+    )
+
+    assert result.items == ()
+    assert result.suppressions[0].reasons in {
+        ("content_unavailable",),
+        ("stale_source",),
+    }

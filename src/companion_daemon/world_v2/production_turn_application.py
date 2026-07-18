@@ -10,11 +10,14 @@ second Engine or Ledger write path.
 from __future__ import annotations
 
 import asyncio
+from collections import Counter
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, UTC
 import hashlib
 import json
+import logging
 from pathlib import Path
+import time
 from typing import Literal, Mapping
 
 from companion_daemon import event_media
@@ -33,26 +36,39 @@ from .activity_lifecycle_runtime import (
 )
 from .activity_lifecycle_worker import ActivityLifecycleWorker
 from .life_ecology_activity import ActivityOpeningCatalog
-from .deferred_reply_runtime import DeferredReplyRuntime, ReplyLaterCommand
+from .deferred_reply_runtime import DeferredReplyRuntime
 from .affect_trigger_runtime import AffectTriggerRunResult
 from .fact_draft_adapter import FactDraftChatModel, FactObservationProposalAdapter
 from .fact_memory_candidate_lifecycle import FactMemoryCandidateLifecycle
+from .experience_memory_candidate_lifecycle import ExperienceMemoryCandidateLifecycle
 from .fact_memory_draft import FactMemoryDraftChatModel, FactMemoryDraftAdapter
 from .fact_v2_acceptance_runtime import FactV2AcceptanceRuntime
 from .interaction_fact_trigger_runtime import FactTriggerRunResult
 from .affect_acceptance_runtime import AffectAcceptanceRuntime
 from .affect_deliberation_worker import AffectDeliberationWorker
 from .affect_proposal_compiler import AffectProposalCompiler
+from .relationship_acceptance_runtime import RelationshipAcceptanceRuntime
+from .relationship_adjustment_acceptance_runtime import (
+    RelationshipAdjustmentAcceptanceRuntime,
+)
+from .relationship_adjustment_compiler import RelationshipAdjustmentCompiler
+from .relationship_adjustment_worker import RelationshipAdjustmentWorker
+from .relationship_deliberation_worker import RelationshipDeliberationWorker
+from .relationship_proposal_compiler import RelationshipProposalCompiler
 from .appraisal_acceptance_runtime import AppraisalAcceptanceRuntime
+from .appraisal_chat_model_adapter import AppraisalDraftDeliberationAdapter
 from .appraisal_proposal_compiler import AppraisalProposalCompiler
 from .appraisal_proposal_worker import AppraisalProposalWorker
+from .immediate_emotion_proposal_worker import ImmediateEmotionProposalWorker
 from .interaction_appraisal_trigger_runtime import AppraisalTriggerRunResult
 from .outcome_acceptance_runtime import OutcomeAcceptanceRuntime
 from .outcome_candidate_reader import OutcomeCandidateReader
+from .outcome_draft_deliberation_adapter import OutcomeDraftDeliberationAdapter
 from .outcome_deliberation_turn import OutcomeDeliberationTurn
 from .outcome_proposal_compiler import OutcomeProposalCompiler
 from .outcome_proposal_worker import OutcomeProposalWorker
 from .outcome_trigger_runtime import OutcomeTriggerRunResult
+from .outcome_selection_draft import OutcomeSelectionModel
 from .interaction_bid_acceptance_runtime import InteractionBidAcceptanceRuntime
 from .interaction_bid_deliberation_turn import InteractionBidDeliberationTurn
 from .interaction_bid_proposal_compiler import InteractionBidProposalCompiler
@@ -68,8 +84,11 @@ from .deliberation import (
 )
 from .production_proposal_grammar import compose_production_deliberation
 from .ledger_context_resolver import ContextRelevanceScope, context_capsule_compiler_from_ledger
+from .context_capsule import ContextCapsuleBudgetPolicy, SliceBudget
 from .ledger_payload_reader import LedgerAuthorizedPayloadReader
+from .local_chronology import LocalChronology
 from .life_content_store import SQLiteImmutableLifeContentStore
+from .situation_compiler import SituationCompiler
 from .expression_payload_store import SQLiteImmutableExpressionPayloadStore
 from .media_v2 import MediaPlanner, SQLiteImmutableMediaPayloadStore
 from .event_media_planner_adapter import (
@@ -78,6 +97,7 @@ from .event_media_planner_adapter import (
 )
 from .media_evidence_snapshot import MediaEvidenceSnapshotCompiler
 from .event_ecology_media import (
+    EcologySourceTaxon,
     EcologyDrainResult,
     EcologyPolicy,
     EventEcologyMediaCandidateRuntime,
@@ -88,8 +108,18 @@ from .life_ecology_runtime import (
     LifeEcologyRuntime,
 )
 from .life_ecology_trigger_store import LedgerLifeEcologyTriggerStore
+from .life_author_runtime import LifeAuthorRuntime
+from .life_author_seed import ReviewedLifeSeedCatalog
+from .life_aftermath_runtime import LifeAftermathRuntime
+from .life_events import LIFE_PAYLOAD_MODELS, NpcRegisteredPayload
+from .event_identity import domain_idempotency_key
 from .test_economy import CostProfile
 from .media_execution_runtime import MediaExecutionRuntime, MediaExecutionWorker
+from .media_continuation_runtime import (
+    MediaContinuationActionPolicy,
+    MediaContinuationRuntime,
+    MediaContinuationWorker,
+)
 from .media_planning_runtime import MediaPlanningRuntime
 from .media_planning_worker import MediaPlanningRunResult, MediaPlanningWorker
 from .media_candidate_maintenance import (
@@ -108,12 +138,18 @@ from .appearance_state import AppearanceStateRecordCommand
 from .appearance_state_runtime import AppearanceStateRuntime
 from .visible_physical_state import VisiblePhysicalStateRecordCommand
 from .visible_physical_state_runtime import VisiblePhysicalStateRuntime
+from .visual_fact import VisualFactRecordCommand, VisualFactRuntime
 from .character_media_fact_binder import CharacterMediaCandidateRuntime
 from .media_selection_acceptance_runtime import MediaSelectionProposalRecorder
 from .media_selection_acceptance_runtime import MediaSelectionAcceptanceRuntime
 from .media_opportunity_authorizer import MediaOpportunityAuthorizer
 from .media_selection_draft import MediaSelectionDraftAdapter, MediaSelectionDraftModel
 from .media_selection_worker import MediaSelectionRunResult, MediaSelectionWorker
+from .media_preview_conductor import (
+    MediaPreviewAcceptanceOutcome,
+    MediaPreviewConductor,
+    MediaPreviewConductorResult,
+)
 from .media_payload_reader import MediaSidecarPayloadReader, PlatformAndMediaPayloadReader
 from .media_delivery_runtime import MediaDeliveryRuntime
 from .media_v2 import MediaAutomaticDeliveryApproval
@@ -130,6 +166,35 @@ from .expression_reconsideration_runtime import (
     ExpressionReconsiderationRunResult,
 )
 from .pinned_turn import PinnedTurnCompiler
+from .production_latency_trace import (
+    ProductionLatencyRecorder,
+    ProductionLatencySample,
+    TraceEnvironment,
+)
+from .production_performance_evidence import (
+    ProductionPerformanceEvidence,
+    ProductionPerformanceEvidenceReader,
+)
+from .social_action_acceptance import SocialDeferredPolicy
+from .social_action_worker import SocialActionRunResult, SocialActionWorker
+from .chat_model_deliberation_adapter import ChatCompletionModel, CompanionIdentityFrame
+from .proactive_action import (
+    ProactiveActionRuntime,
+    ProactiveDeliberationTurn,
+    ProactiveDraftAdapter,
+)
+from .social_initiative import (
+    SocialInitiativeCompiler,
+    SocialInitiativeContextPolicy,
+    SocialInitiativePolicy,
+    social_initiative_attempt_id,
+)
+from .random_authority import RandomDrawRecordedPayload
+from .memory_withdrawal_review import (
+    MemoryWithdrawalReviewAdapter,
+    MemoryWithdrawalReviewRunResult,
+    MemoryWithdrawalReviewRuntime,
+)
 from .settled_world_appraisal_turn import SettledWorldAppraisalTurn
 from .platform_action_executor import (
     PlatformActionExecutor, PlatformTransport, MediaProviderTransport,
@@ -142,6 +207,13 @@ from .read_only_tool_proposal_compiler import ReadOnlyToolProposalCompiler
 from .read_only_tool_query_reader import AuditedReadOnlyToolQueryReader
 from .read_only_tool_trigger_runtime import ReadOnlyToolTriggerRuntime
 from .external_result_trigger_runtime import NoopToolResultDeliberator
+from .perception_authorization_resolver import ProjectionPerceptionAuthorizationResolver
+from .perception_deliberation import compose_injected_perception_deliberation
+from .perception_executor import PerceptionActionExecutor, PerceptionTransport
+from .perception_input_source import PerceptionInputSource
+from .perception_proposal_compiler import PerceptionProposalCompiler
+from .perception_result_trigger_runtime import NoopPerceptionResultDeliberator
+from .perception_trigger_runtime import PerceptionTriggerRuntime
 from .runtime import WorldRuntime
 from .projection import ProjectionAuthority
 from .replay_evidence import ReplayEvidence
@@ -149,17 +221,22 @@ from .schemas import (
     BudgetAccount,
     ClockObservation,
     CommitResult,
+    EvidenceRef,
     ExternalObservation,
     OutcomeObservation,
     ProjectionCursor,
     ProjectionRequest,
     ProviderMediaGrantBinding,
+    NpcProjection,
     RuntimeOutcome,
     WorldEvent,
     WorldProjection,
 )
-from .sqlite_ledger import SQLiteWorldLedger
+from .sqlite_ledger import SQLiteWalMaintenanceResult, SQLiteWorldLedger
 from .world_turn_runtime import InboundIdentityResolver, InboundTurn, WorldTurnRuntime
+
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,13 +250,17 @@ class LifeEcologyComposition:
 
     catalog_version: str
     media_policy: EcologyPolicy
+    seed_catalog_path: Path = Path("configs/world_seed.yaml")
     worker_actor: str = "worker:world-v2:life-ecology"
     lease_seconds: int = 120
 
     @classmethod
-    def production_v1(cls) -> "LifeEcologyComposition":
+    def production_v1(
+        cls, *, seed_catalog_path: Path = Path("configs/world_seed.yaml")
+    ) -> "LifeEcologyComposition":
         return cls(
             catalog_version="life-ecology.1",
+            seed_catalog_path=seed_catalog_path,
             # Production P1 publishes evidence-backed candidates only.  An
             # opportunity, budget reservation, and planning Action can arise
             # only from the separately accepted selection path; the old
@@ -188,7 +269,10 @@ class LifeEcologyComposition:
         )
 
     def __post_init__(self) -> None:
-        if not self.catalog_version or not self.worker_actor or self.lease_seconds <= 0:
+        if (
+            not self.catalog_version or not self.worker_actor or self.lease_seconds <= 0
+            or not str(self.seed_catalog_path)
+        ):
             raise ValueError("life ecology composition is invalid")
 
 
@@ -215,6 +299,64 @@ class MediaSelectionAcceptanceComposition:
 
 
 @dataclass(frozen=True, slots=True)
+class MediaContinuationComposition:
+    """Separate render/inspection provider authority and budget envelopes."""
+
+    render_grant: ProviderMediaGrantBinding
+    render_account_id: str
+    render_window_id: str
+    render_account_limit: int
+    render_amount_limit: int
+    inspection_grant: ProviderMediaGrantBinding
+    inspection_account_id: str
+    inspection_window_id: str
+    inspection_account_limit: int
+    inspection_amount_limit: int
+    actor: str = "worker:world-v2:media-continuation"
+    owner_id: str = "worker:world-v2:media-continuation"
+
+    def __post_init__(self) -> None:
+        if (
+            not self.actor or not self.owner_id
+            or not self.render_account_id or not self.render_window_id
+            or not self.inspection_account_id or not self.inspection_window_id
+            or self.render_account_id == self.inspection_account_id
+            or self.render_amount_limit < 0
+            or self.inspection_amount_limit < 0
+            or self.render_account_limit < self.render_amount_limit
+            or self.inspection_account_limit < self.inspection_amount_limit
+        ):
+            raise ValueError("media continuation composition is invalid")
+
+
+@dataclass(frozen=True, slots=True)
+class MediaPreviewDeployment:
+    """Opt-in dependencies for the media preview lane.
+
+    Each supplied stage is complete and explicit.  Grant bindings must already
+    refer to independently provisioned enforcement authority; this composition
+    never manufactures or signs that authority.
+    ``continuation=None`` intentionally installs only the candidate-to-plan
+    prefix.  It is not a complete preview pipeline and cannot render or
+    inspect; full preview requires the separate render/inspection authority.
+    """
+
+    selection_model: MediaSelectionDraftModel
+    planner: MediaPlanner
+    acceptance: MediaSelectionAcceptanceComposition
+    continuation: MediaContinuationComposition | None = None
+
+    def __post_init__(self) -> None:
+        if self.selection_model is None or self.planner is None or self.acceptance is None:
+            raise ValueError("media preview deployment requires selector, planner and acceptance")
+        if self.continuation is not None and self.acceptance.account_id in {
+            self.continuation.render_account_id,
+            self.continuation.inspection_account_id,
+        }:
+            raise ValueError("selection, render and inspection require separate budget accounts")
+
+
+@dataclass(frozen=True, slots=True)
 class WorldV2TurnApplicationConfig:
     """Composition-owned facts for one persistent companion world."""
 
@@ -222,22 +364,32 @@ class WorldV2TurnApplicationConfig:
     companion_actor_ref: str
     reply_target: str
     action_pump_owner: str
+    counterpart_actor_ref: str | None = None
+    local_timezone: str = "Asia/Shanghai"
     chat_account_id: str = "account:world-v2:chat"
     chat_window_id: str = "window:world-v2:chat"
     chat_budget_limit: int = 10_000
     reply_budget_amount: int = 10
     reply_recovery_policy: str = "effect_once"
+    expression_action_kinds: frozenset[str] = frozenset(
+        {"reply", "followup", "proactive_message"}
+    )
     appraisal_worker_owner: str = "worker:world-v2:appraisal"
     affect_worker_owner: str = "worker:world-v2:affect"
+    relationship_worker_owner: str = "worker:world-v2:relationship"
+    relationship_adjustment_worker_owner: str = "worker:world-v2:relationship-adjustment"
     fact_worker_owner: str = "worker:world-v2:fact"
+    memory_review_worker_owner: str = "worker:world-v2:memory-review"
     outcome_worker_owner: str = "worker:world-v2:outcome"
     interaction_bid_worker_owner: str = "worker:world-v2:interaction-bid"
     expression_reconsideration_owner: str = "worker:world-v2:expression-reconsideration"
+    social_action_worker_owner: str = "worker:world-v2:social-action"
     media_planning_worker_owner: str = "worker:world-v2:media-planning"
     event_ecology_worker_actor: str = "worker:world-v2:event-ecology"
     media_selection_worker_actor: str = "worker:world-v2:media-selection"
     media_candidate_maintenance_actor: str = "worker:world-v2:media-candidate-maintenance"
     media_selection_acceptance: MediaSelectionAcceptanceComposition | None = None
+    media_continuation: MediaContinuationComposition | None = None
     event_ecology_policy: EcologyPolicy | None = None
     life_ecology: LifeEcologyComposition | None = None
     media_cost_profile: CostProfile | None = None
@@ -245,6 +397,21 @@ class WorldV2TurnApplicationConfig:
     tool_window_id: str = "window:world-v2:tool"
     tool_budget_limit: int = 0
     tool_worker_owner: str = "worker:world-v2:read-only-tool"
+    perception_account_id: str = "account:world-v2:perception"
+    perception_window_id: str = "window:world-v2:perception"
+    perception_budget_limit: int = 0
+    perception_worker_owner: str = "worker:world-v2:perception"
+    trace_environment: TraceEnvironment = "offline_in_process"
+    proactive_account_id: str = "account:world-v2:proactive"
+    proactive_window_id: str = "window:world-v2:proactive"
+    proactive_budget_limit: int = 1_000
+    proactive_amount_per_action: int = 10
+    proactive_worker_owner: str = "worker:world-v2:proactive"
+    social_initiative_policy: SocialInitiativePolicy = SocialInitiativePolicy()
+    # Production platform hosts may gate the expensive same-turn emotion lane
+    # to high-signal relational turns; fixtures keep the historical eager
+    # behavior unless they opt in.
+    immediate_emotion_signal_gate: bool = False
 
     def __post_init__(self) -> None:
         for name in (
@@ -254,26 +421,51 @@ class WorldV2TurnApplicationConfig:
             "action_pump_owner",
             "appraisal_worker_owner",
             "affect_worker_owner",
+            "relationship_worker_owner",
+            "relationship_adjustment_worker_owner",
             "fact_worker_owner",
+            "memory_review_worker_owner",
             "outcome_worker_owner",
             "interaction_bid_worker_owner",
             "expression_reconsideration_owner",
+            "social_action_worker_owner",
             "media_planning_worker_owner",
             "event_ecology_worker_actor",
             "media_selection_worker_actor",
             "media_candidate_maintenance_actor",
             "tool_worker_owner",
+            "perception_worker_owner",
+            "proactive_worker_owner",
         ):
             if not getattr(self, name):
                 raise ValueError(f"{name} must not be empty")
         if not self.chat_account_id or not self.chat_window_id:
             raise ValueError("chat account identity must not be empty")
+        if self.counterpart_actor_ref is not None and not self.counterpart_actor_ref:
+            raise ValueError("counterpart_actor_ref must be absent or non-empty")
+        LocalChronology(self.local_timezone)
         if not 0 <= self.reply_budget_amount <= self.chat_budget_limit <= 10_000_000:
             raise ValueError("chat budget limits are invalid")
         if not self.reply_recovery_policy:
             raise ValueError("reply recovery policy must not be empty")
+        if not self.expression_action_kinds:
+            raise ValueError("expression action capability set must not be empty")
         if not self.tool_account_id or not self.tool_window_id or self.tool_budget_limit < 0:
             raise ValueError("tool budget config is invalid")
+        if (
+            not self.perception_account_id
+            or not self.perception_window_id
+            or self.perception_budget_limit < 0
+        ):
+            raise ValueError("perception budget config is invalid")
+        if self.trace_environment not in {"offline_in_process", "real_transport"}:
+            raise ValueError("trace environment is invalid")
+        if (
+            not self.proactive_account_id
+            or not self.proactive_window_id
+            or not 0 <= self.proactive_amount_per_action <= self.proactive_budget_limit <= 10_000_000
+        ):
+            raise ValueError("proactive budget config is invalid")
         if (
             self.life_ecology is not None
             and self.event_ecology_policy is not None
@@ -295,6 +487,7 @@ class WorldV2TurnApplication:
         media_payload_store: SQLiteImmutableMediaPayloadStore,
         media_execution: MediaExecutionRuntime,
         media_execution_worker: MediaExecutionWorker | None,
+        media_continuation_worker: MediaContinuationWorker | None,
         media_planning: MediaPlanningRuntime,
         media_planning_worker: MediaPlanningWorker,
         media_ecology: EventEcologyMediaCandidateRuntime | None,
@@ -309,12 +502,17 @@ class WorldV2TurnApplication:
         recipient_scoped_image_evidence: RecipientScopedImageEvidenceDeclarationRuntime,
         appearance_states: AppearanceStateRuntime,
         visible_physical_states: VisiblePhysicalStateRuntime,
+        visual_facts: VisualFactRuntime,
         media_selection_acceptance: MediaSelectionAcceptanceRuntime | None,
         media_selection_acceptance_config: MediaSelectionAcceptanceComposition | None,
+        media_preview_conductor_enabled: bool,
         media_delivery: MediaDeliveryRuntime,
         occurrence_content: OccurrenceContentCoordinator,
         activity_plans: ActivityPlanRuntime,
         deferred_replies: DeferredReplyRuntime,
+        latency_recorder: ProductionLatencyRecorder,
+        trace_environment: TraceEnvironment,
+        social_initiative_policy: SocialInitiativePolicy,
     ) -> None:
         self._turns = turns
         self._ledger = ledger
@@ -323,6 +521,7 @@ class WorldV2TurnApplication:
         self._media_payload_store = media_payload_store
         self.media_execution = media_execution
         self._media_execution_worker = media_execution_worker
+        self._media_continuation_worker = media_continuation_worker
         self._media_planning = media_planning
         self._media_planning_worker = media_planning_worker
         self._media_ecology = media_ecology
@@ -337,12 +536,30 @@ class WorldV2TurnApplication:
         self._recipient_scoped_image_evidence = recipient_scoped_image_evidence
         self._appearance_states = appearance_states
         self._visible_physical_states = visible_physical_states
+        self._visual_facts = visual_facts
         self._media_selection_acceptance = media_selection_acceptance
         self._media_selection_acceptance_config = media_selection_acceptance_config
+        self._media_preview_conductor = (
+            MediaPreviewConductor(
+                select=self._select_media_preview_candidate,
+                accept=self._accept_media_preview_selection,
+                planning=media_planning_worker,
+            )
+            if (
+                media_preview_conductor_enabled
+                and media_selection_worker is not None
+                and media_selection_acceptance is not None
+                and media_selection_acceptance_config is not None
+            )
+            else None
+        )
         self._media_delivery = media_delivery
         self._occurrence_content = occurrence_content
         self._activity_plans = activity_plans
         self._deferred_replies = deferred_replies
+        self._latency = latency_recorder
+        self._trace_environment = trace_environment
+        self._social_initiative_policy = social_initiative_policy
 
     async def respond(self, inbound: InboundTurn) -> RuntimeOutcome:
         return await self._turns.respond(inbound)
@@ -367,6 +584,10 @@ class WorldV2TurnApplication:
         rather than importing ``WorldTurnRuntime`` or a ledger implementation.
         """
 
+        self._start_ingress_trace(
+            trace_id=trace_id,
+            coalescing_metadata=coalescing_metadata,
+        )
         return await self.respond(
             InboundTurn(
                 platform=platform,
@@ -379,6 +600,73 @@ class WorldV2TurnApplication:
                 coalescing_metadata=dict(coalescing_metadata or {}),
             )
         )
+
+    def _start_ingress_trace(
+        self, *, trace_id: str, coalescing_metadata: Mapping[str, object] | None
+    ):
+        metadata = dict(coalescing_metadata or {})
+        opened = _parse_trace_time(metadata.get("window_opened_at"))
+        closed = _parse_trace_time(metadata.get("window_closed_at"))
+        processing = _parse_trace_time(metadata.get("processing_started_at"))
+        coalescing_ms = 0.0
+        queue_ms = 0.0
+        if opened is not None and closed is not None and closed >= opened:
+            coalescing_ms = (closed - opened).total_seconds() * 1_000
+            now = processing.astimezone(UTC) if processing is not None else datetime.now(UTC)
+            queue_ms = max(0.0, (now - closed.astimezone(UTC)).total_seconds() * 1_000)
+        trace = self._latency.start_ingress(
+            trace_id=trace_id,
+            environment=self._trace_environment,
+            elapsed_before_registration_ms=coalescing_ms + queue_ms,
+        )
+        # Zero is real evidence for an application ingress with no configured
+        # coalescer or pre-runtime queue; it is not a model/provider estimate.
+        if not any(sample.segment == "coalescing" for sample in trace.samples()):
+            trace.record_duration("coalescing", duration_ms=coalescing_ms)
+        if not any(sample.segment == "queue" for sample in trace.samples()):
+            trace.record_duration("queue", duration_ms=queue_ms)
+        return trace
+
+    def latency_samples(self) -> tuple[ProductionLatencySample, ...]:
+        return self._latency.samples()
+
+    def visible_mood(self) -> str:
+        """Project the strongest accepted affect into the HTTP mood vocabulary.
+
+        This is a read-only presentation mapping.  Affect episodes remain the
+        World authority; the legacy-compatible ``mood`` field must not be
+        hard-coded to calm after an accepted hurt/anger transition.
+        """
+
+        projection = self._ledger.project()
+        weights: dict[str, int] = {}
+        for episode in projection.affect_episodes:
+            if episode.status != "active":
+                continue
+            for component in episode.components:
+                weights[component.dimension] = max(
+                    weights.get(component.dimension, 0), component.intensity_bp
+                )
+        if not weights:
+            return "calm"
+        dimension, intensity = max(weights.items(), key=lambda item: item[1])
+        if intensity < 1_800:
+            return "calm"
+        return {
+            "anger": "hurt",
+            "resentment": "sulking",
+            "hurt": "hurt",
+            "sadness": "worried",
+            "loneliness": "miss_you",
+            "anxiety": "worried",
+            "warmth": "affectionate",
+            "joy": "happy",
+        }.get(dimension, "calm")
+
+    def performance_evidence(self) -> ProductionPerformanceEvidence:
+        return ProductionPerformanceEvidenceReader(
+            ledger=self._ledger, latency_recorder=self._latency
+        ).capture()
 
     async def advance(self, clock: ClockObservation) -> RuntimeOutcome:
         """Advance logical time through the sole World v2 host seam."""
@@ -628,6 +916,35 @@ class WorldV2TurnApplication:
             return await asyncio.to_thread(self._image_evidence.declare, **kwargs)
         return self._image_evidence.declare(**kwargs)
 
+    async def record_visual_fact(
+        self,
+        command: VisualFactRecordCommand,
+        *,
+        logical_time: datetime,
+        created_at: datetime,
+        trace_id: str,
+        correlation_id: str,
+    ) -> CommitResult:
+        """Record one trusted object/food slice without exposing source hashes.
+
+        The exact JSON is persisted in the immutable media sidecar before its
+        descriptor is ledger-visible.  Later media code resolves that same
+        ref/hash, rather than interpreting a fact value or asking a model to
+        fill in visual details.
+        """
+
+        kwargs = dict(
+            command=command,
+            logical_time=logical_time,
+            created_at=created_at,
+            actor=self._event_ecology_worker_actor,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+        if self._ledger.blocks_event_loop:
+            return await asyncio.to_thread(self._visual_facts.record, **kwargs)
+        return self._visual_facts.record(**kwargs)
+
     async def declare_recipient_scoped_image_evidence(
         self,
         command: RecipientScopedImageEvidenceDeclarationCommand,
@@ -730,30 +1047,65 @@ class WorldV2TurnApplication:
             return await asyncio.to_thread(self._activity_plans.replace, **kwargs)
         return self._activity_plans.replace(**kwargs)
 
-    async def defer_reply(
-        self,
-        command: ReplyLaterCommand,
-        *,
-        logical_time: datetime,
-        created_at: datetime,
-        trace_id: str,
-        causation_id: str,
-        correlation_id: str,
-    ) -> CommitResult:
-        """Open exactly one source-bound reply-later commitment and Action."""
-        kwargs = dict(command=command, logical_time=logical_time, created_at=created_at,
-                      trace_id=trace_id, causation_id=causation_id, correlation_id=correlation_id)
-        if self._ledger.blocks_event_loop:
-            return await asyncio.to_thread(self._deferred_replies.defer, **kwargs)
-        return self._deferred_replies.defer(**kwargs)
-
     async def drain_actions_once(self) -> ActionPumpResult | None:
-        return await self._turns.drain_actions_once()
+        result = await self._turns.drain_actions_once()
+        await self._join_deferred_terminal_action(result)
+        return result
 
     async def drain_action(self, action_id: str) -> ActionPumpResult | None:
         """Drain an ingress-bound Action without globally scheduling siblings."""
 
-        return await self._turns.drain_action(action_id)
+        result = await self._turns.drain_action(action_id)
+        await self._join_deferred_terminal_action(result)
+        return result
+
+    async def _join_deferred_terminal_action(
+        self, result: ActionPumpResult | None
+    ) -> None:
+        """Join a pump-written terminal receipt to its reply-later Commitment.
+
+        The Action pump owns dispatch and receipt settlement.  This application
+        seam owns the platform-neutral continuation join so hosts cannot forget
+        it and a restart cannot strand a delivered promise as still due.
+        """
+
+        if result is None or result.action_id is None:
+            return
+        projection = (
+            await asyncio.to_thread(self._ledger.project)
+            if self._ledger.blocks_event_loop
+            else self._ledger.project()
+        )
+        action = next(
+            (item for item in projection.actions if item.action_id == result.action_id), None
+        )
+        if action is None or action.state not in {
+            "delivered", "failed", "cancelled", "expired", "unknown"
+        }:
+            return
+        receipt = next(
+            (
+                item
+                for item in reversed(projection.execution_receipts)
+                if item.action_id == action.action_id and item.is_terminal
+            ),
+            None,
+        )
+        if receipt is None:
+            return
+        logical_time = projection.logical_time or receipt.received_at
+        kwargs = dict(
+            action_id=action.action_id,
+            logical_time=logical_time,
+            created_at=receipt.received_at,
+            trace_id=action.trace_id,
+            causation_id=receipt.receipt_id,
+            correlation_id=action.correlation_id,
+        )
+        if self._ledger.blocks_event_loop:
+            await asyncio.to_thread(self._deferred_replies.settle_terminal_action, **kwargs)
+        else:
+            self._deferred_replies.settle_terminal_action(**kwargs)
 
     async def drain_media_results_once(self, *, logical_time: datetime) -> str | None:
         """Materialize one verified Media v2 provider result sidecar.
@@ -767,6 +1119,15 @@ class WorldV2TurnApplication:
         if self._media_execution_worker is None:
             return None
         return await self._media_execution_worker.drain_once(logical_time=logical_time)
+
+    async def drain_media_continuation_once(
+        self, *, logical_time: datetime, trace_id: str, correlation_id: str,
+    ) -> str | None:
+        if self._media_continuation_worker is None:
+            return None
+        return self._media_continuation_worker.drain_once(
+            logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id,
+        )
 
     async def drain_media_planning_once(self) -> MediaPlanningRunResult:
         """Advance one already-frozen Media v2 planning Action.
@@ -870,6 +1231,80 @@ class WorldV2TurnApplication:
             return await asyncio.to_thread(self._accept_media_selection, **kwargs)
         return self._accept_media_selection(**kwargs)
 
+    async def _select_media_preview_candidate(
+        self, *, logical_time: datetime, trace_id: str, correlation_id: str,
+    ) -> MediaSelectionRunResult:
+        """Adapt the configured selector to the conductor's small Interface."""
+
+        result = await self.drain_media_selection_once(
+            logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id,
+        )
+        if result is None:
+            # The conductor is composed only when a selector exists.  This is
+            # an invariant breach rather than a reason to quietly skip a
+            # candidate or use a legacy image path.
+            raise RuntimeError("media preview conductor lost its selection worker")
+        return result
+
+    async def _accept_media_preview_selection(
+        self, *, proposal_event_ref: str, logical_time: datetime, trace_id: str,
+        correlation_id: str,
+    ) -> MediaPreviewAcceptanceOutcome | None:
+        """Translate Acceptance's durable batch into conductor semantics."""
+
+        commit = await self.accept_media_selection_once(
+            proposal_event_ref=proposal_event_ref,
+            logical_time=logical_time,
+            trace_id=trace_id,
+            correlation_id=correlation_id,
+        )
+        if commit is None:
+            return None
+        event_types: list[str] = []
+        for event_id in commit.event_ids:
+            located = (
+                await asyncio.to_thread(self._ledger.lookup_event_commit, event_id)
+                if self._ledger.blocks_event_loop
+                else self._ledger.lookup_event_commit(event_id)
+            )
+            if located is None:
+                raise RuntimeError("media preview Acceptance event is unavailable")
+            event_types.append(located[0].event_type)
+        if event_types == ["PhotoCandidateUnrenderable"]:
+            disposition = "not_renderable"
+        elif event_types == [
+            "AcceptanceRecorded", "MediaOpportunityFrozen", "BudgetReserved", "ActionAuthorized",
+        ]:
+            disposition = "planning_authorized"
+        else:
+            raise RuntimeError("media preview Acceptance produced an unknown event batch")
+        return MediaPreviewAcceptanceOutcome(
+            disposition=disposition, event_ids=commit.event_ids,
+        )
+
+    async def drain_media_preview_once(
+        self, *, trace_id: str, correlation_id: str,
+    ) -> MediaPreviewConductorResult:
+        """Advance the bounded candidate → preview-plan prefix once.
+
+        This deep scheduler seam is deliberately unavailable unless the
+        composition has injected a selector, acceptance grant/budget and a
+        durable planner together.  It neither renders nor sends media.
+        """
+
+        if self._media_preview_conductor is None:
+            return MediaPreviewConductorResult(
+                status="blocked", reason_code="media_preview.conductor_unavailable",
+            )
+        logical_time = await self.current_logical_time()
+        if logical_time is None:
+            return MediaPreviewConductorResult(
+                status="idle", reason_code="media_preview.logical_time_unavailable",
+            )
+        return await self._media_preview_conductor.advance_once(
+            logical_time=logical_time, trace_id=trace_id, correlation_id=correlation_id,
+        )
+
     def _accept_media_selection(
         self,
         *,
@@ -941,6 +1376,13 @@ class WorldV2TurnApplication:
             correlation_id=correlation_id,
         )
 
+    def event_ecology_source_taxonomy(self) -> tuple[EcologySourceTaxon, ...]:
+        """Expose source richness separately from visual declaration eligibility."""
+
+        if self._media_ecology is None:
+            return ()
+        return self._media_ecology.discover_source_taxonomy()
+
     async def approve_media_automatic_delivery(
         self, *, approval: MediaAutomaticDeliveryApproval, trace_id: str,
         correlation_id: str, causation_id: str,
@@ -974,7 +1416,9 @@ class WorldV2TurnApplication:
         | InteractionBidTriggerRunResult
         | AffectTriggerRunResult
         | FactTriggerRunResult
+        | MemoryWithdrawalReviewRunResult
         | ExpressionReconsiderationRunResult
+        | SocialActionRunResult
         | None
     ):
         """Run one separately scheduled mental-state or memory work unit."""
@@ -995,6 +1439,325 @@ class WorldV2TurnApplication:
             else self._ledger.project()
         )
         return projection.logical_time
+
+    async def world_health_diagnostics(self) -> dict[str, object]:
+        """Return deterministic read-only liveness evidence for health checks.
+
+        The projection supplies current state; exact committed draw payloads
+        are looked up only to distinguish a due spontaneous candidate from an
+        already-recorded ``act`` decision.  This seam never deliberates, draws
+        randomness, claims work, or appends ledger events.
+        """
+
+        projection = (
+            await asyncio.to_thread(self._ledger.project)
+            if self._ledger.blocks_event_loop
+            else self._ledger.project()
+        )
+        proactive_processes = tuple(
+            item
+            for item in projection.trigger_processes
+            if item.process_kind == "proactive_action_deliberation"
+        )
+        processed_sources = {
+            item.source_evidence_ref
+            for item in proactive_processes
+            if item.source_evidence_ref is not None
+        }
+        opportunity_sources = {
+            item.settlement_event_ref
+            for item in projection.world_occurrences
+            if item.status == "settled"
+            and item.visibility in {"public", "shareable"}
+            and item.settlement_event_ref is not None
+        }
+        spontaneous_candidate_due = False
+        logical_time = projection.logical_time
+        if logical_time is not None:
+            for thread in projection.threads:
+                values = thread.values
+                if (
+                    values.status == "open"
+                    and values.due_window is not None
+                    and values.due_window.opens_at
+                    <= logical_time
+                    < values.due_window.closes_at
+                ):
+                    transition = next(
+                        (
+                            item
+                            for item in reversed(projection.thread_transitions)
+                            if item.thread_id == thread.thread_id
+                            and item.entity_revision == thread.entity_revision
+                        ),
+                        None,
+                    )
+                    if transition is not None:
+                        opportunity_sources.add(transition.accepted_event_ref)
+
+            policy = self._social_initiative_policy
+            recent_contact = max(
+                (
+                    item.logical_time
+                    for item in projection.actions
+                    if item.kind in {"proactive_message", "followup"}
+                    and item.state not in {"failed", "cancelled", "expired"}
+                ),
+                default=None,
+            )
+            contact_on_cooldown = recent_contact is not None and (
+                logical_time - recent_contact
+            ).total_seconds() < policy.contact_cooldown_seconds
+            response_gaps: list[tuple[datetime, str]] = []
+            if not contact_on_cooldown:
+                for manifest in projection.expression_plan_manifests:
+                    expectation = manifest.response_expectation
+                    if expectation is None or not (
+                        expectation.not_before <= logical_time < expectation.expires_at
+                    ):
+                        continue
+                    plan = next(
+                        (
+                            item
+                            for item in projection.expression_plans
+                            if item.plan_id == manifest.plan_id
+                        ),
+                        None,
+                    )
+                    beat = next(
+                        (
+                            item
+                            for item in manifest.beats
+                            if item.beat_id == expectation.source_beat_id
+                        ),
+                        None,
+                    )
+                    action = next(
+                        (
+                            item
+                            for item in projection.actions
+                            if beat is not None
+                            and item.action_id == beat.action.action_id
+                        ),
+                        None,
+                    )
+                    accepted = any(
+                        item.action_id == action.action_id
+                        and item.observed_state in {"provider_accepted", "delivered"}
+                        for item in projection.execution_receipts
+                    ) if action is not None else False
+                    delivery_ready = action is not None and accepted and (
+                        action.state == "delivered"
+                        if expectation.delivery_requirement == "confirmed_delivered"
+                        else action.state in {"provider_accepted", "delivered"}
+                    )
+                    answered = any(
+                        item.world_revision > manifest.recorded_at_world_revision
+                        for item in projection.message_observations
+                    )
+                    if (
+                        plan is not None
+                        and plan.state in {"authorized", "completed"}
+                        and beat is not None
+                        and delivery_ready
+                        and not answered
+                    ):
+                        response_gaps.append(
+                            (expectation.not_before, manifest.acceptance_event_ref)
+                        )
+                if response_gaps:
+                    opportunity_sources.add(min(response_gaps)[1])
+                elif projection.message_observations:
+                    latest_message = projection.message_observations[-1]
+                    source_ref = next(
+                        (
+                            item
+                            for item in projection.committed_world_event_refs
+                            if item.world_revision == latest_message.world_revision
+                            and item.event_type == "ObservationRecorded"
+                        ),
+                        None,
+                    )
+                    if source_ref is not None:
+                        idle_seconds = (
+                            logical_time - source_ref.logical_time
+                        ).total_seconds()
+                        profile = SocialInitiativeContextPolicy(
+                            policy=policy
+                        ).compile(
+                            projection=projection,
+                            logical_time=logical_time,
+                        )
+                        if (
+                            profile.not_before_seconds
+                            <= idle_seconds
+                            < policy.spontaneous_expiry_seconds
+                        ):
+                            spontaneous_candidate_due = True
+                            expected_attempt_id = social_initiative_attempt_id(
+                                source_event_ref=source_ref.event_id,
+                                profile=profile,
+                            )
+                            for draw_ref in projection.committed_world_event_refs:
+                                if draw_ref.event_type != "RandomDrawRecorded":
+                                    continue
+                                located = (
+                                    await asyncio.to_thread(
+                                        self._ledger.lookup_event_commit,
+                                        draw_ref.event_id,
+                                    )
+                                    if self._ledger.blocks_event_loop
+                                    else self._ledger.lookup_event_commit(draw_ref.event_id)
+                                )
+                                if located is None:
+                                    continue
+                                draw = RandomDrawRecordedPayload.model_validate_json(
+                                    located[0].payload_json
+                                )
+                                if (
+                                    draw.attempt_id == expected_attempt_id
+                                    and draw.sampler_version == "random-authority.2"
+                                    and draw.weight_policy_version
+                                    == SocialInitiativeContextPolicy.version
+                                    and draw.candidate_refs == ("act", "hold")
+                                    and draw.selected_candidate_ref == "act"
+                                ):
+                                    opportunity_sources.add(source_ref.event_id)
+                                    break
+            for commitment in projection.commitments:
+                values = commitment.values
+                if (
+                    values.status in {"open", "due"}
+                    and values.due_window.opens_at
+                    <= logical_time
+                    < values.due_window.closes_at
+                    and not any(
+                        action.action_id
+                        == values.fulfillment_contract.expected_action_id
+                        for action in projection.actions
+                    )
+                ):
+                    transition = next(
+                        (
+                            item
+                            for item in reversed(projection.commitment_transitions)
+                            if item.commitment_id == commitment.commitment_id
+                            and item.entity_revision == commitment.entity_revision
+                        ),
+                        None,
+                    )
+                    if transition is not None:
+                        opportunity_sources.add(transition.accepted_event_ref)
+
+        latest = proactive_processes[-1] if proactive_processes else None
+        last_status: str | None = latest.state if latest is not None else None
+        last_reason: str | None = None
+        if latest is not None and latest.runtime_outcome_ref:
+            outcome = latest.runtime_outcome_ref.removeprefix("proactive:")
+            status, separator, reason = outcome.partition(":")
+            last_status = status.replace("-", "_")
+            last_reason = reason if separator else None
+
+        # Registration and proposal/audit records prove infrastructure, not
+        # that the character has actually lived through anything.
+        lived_world_event_types = frozenset(LIFE_PAYLOAD_MODELS) - {
+            "NpcRegistered",
+            "ActivityLifecycleProposalRecorded",
+            "OutcomeObservationRecorded",
+            "OutcomeProposalRecorded",
+        }
+        life_event_count = sum(
+            item.event_type in lived_world_event_types
+            for item in projection.committed_world_event_refs
+        )
+        occurrence_count = len(projection.world_occurrences)
+        experience_count = len(projection.experiences)
+        plans_by_status = Counter(item.status for item in projection.plans)
+        active_plans = tuple(item for item in projection.plans if item.status == "active")
+        trigger_counts = Counter(item.process_kind for item in projection.trigger_processes)
+        pending_trigger_counts = Counter(
+            item.process_kind
+            for item in projection.trigger_processes
+            if item.state != "terminal"
+        )
+        mechanisms = {
+            # This is deliberately a read-only projection of what reached the
+            # ledger.  It distinguishes "the mechanism has no state yet" from
+            # "the mechanism has state but its trigger is still pending".
+            "current_situation": {
+                "active_activity_count": len(active_plans),
+                "active_activity_kinds": sorted(
+                    {item.activity_kind for item in active_plans}
+                ),
+                "planned_activity_count": plans_by_status.get("planned", 0),
+                "paused_activity_count": plans_by_status.get("paused", 0),
+            },
+            "life_ecology": {
+                "plans_by_status": dict(sorted(plans_by_status.items())),
+                "world_occurrence_count": occurrence_count,
+                "experience_count": experience_count,
+            },
+            "affect": {
+                "active_episode_count": sum(
+                    item.status == "active" for item in projection.affect_episodes
+                ),
+                "episode_count": len(projection.affect_episodes),
+                "appraisal_count": len(projection.appraisals),
+            },
+            "memory": {
+                "fact_count": sum(
+                    item.values.status == "active" for item in projection.facts
+                ),
+                "candidate_count": len(projection.memory_candidates),
+                "active_candidate_count": sum(
+                    item.values.status == "active"
+                    for item in projection.memory_candidates
+                ),
+            },
+            "relationship": {
+                "state_count": len(projection.relationship_states),
+                "signal_count": len(projection.relationship_signals),
+                "adjustment_count": len(projection.relationship_adjustments),
+            },
+            "npc": {
+                "registered_count": len(projection.npcs),
+                "world_appraisal_count": trigger_counts.get("npc_world_appraisal", 0),
+            },
+            "triggers": {
+                "by_kind": dict(sorted(trigger_counts.items())),
+                "pending_by_kind": dict(sorted(pending_trigger_counts.items())),
+            },
+        }
+        return {
+            "initiative_last_status": last_status,
+            "initiative_last_reason": last_reason,
+            "pending_proactive_opportunity_count": len(
+                opportunity_sources - processed_sources
+            ),
+            "pending_proactive_process_count": sum(
+                item.state != "terminal" for item in proactive_processes
+            ),
+            "pending_proactive_action_count": sum(
+                item.kind in {"proactive_message", "followup"}
+                for item in projection.pending_actions
+            ),
+            "spontaneous_candidate_due": spontaneous_candidate_due,
+            "life_event_count": life_event_count,
+            "occurrence_count": occurrence_count,
+            "experience_count": experience_count,
+            "starved": not (life_event_count or occurrence_count or experience_count),
+            "mechanisms": mechanisms,
+        }
+
+    async def maintain_wal_once(self) -> SQLiteWalMaintenanceResult:
+        """Run one bounded SQLite WAL maintenance pass off the event loop.
+
+        This is scheduler upkeep only.  It never participates in an inbound
+        reply and does not mutate World authority; passive checkpointing merely
+        compacts already-committed WAL frames.
+        """
+
+        return await asyncio.to_thread(self._ledger.maintain_wal_if_needed)
 
     def export_replay_evidence(self) -> ReplayEvidence:
         """Export a cursor-consistent, read-only replay snapshot for evaluation.
@@ -1029,7 +1792,9 @@ def build_sqlite_world_v2_turn_application(
     advisory_compiler: AdvisoryCompiler | None = None,
     appraisal_model: DeliberationModelAdapter | None = None,
     affect_model: DeliberationModelAdapter | None = None,
+    relationship_model: DeliberationModelAdapter | None = None,
     outcome_model: DeliberationModelAdapter | None = None,
+    outcome_draft_model: OutcomeSelectionModel | None = None,
     interaction_bid_model: DeliberationModelAdapter | None = None,
     fact_model: FactDraftChatModel | None = None,
     memory_model: FactMemoryDraftChatModel | None = None,
@@ -1037,9 +1802,15 @@ def build_sqlite_world_v2_turn_application(
     media_selection_model: MediaSelectionDraftModel | None = None,
     read_only_tool_model: DeliberationModelAdapter | None = None,
     read_only_tool_transport: ReadOnlyToolTransport | None = None,
+    perception_model: DeliberationModelAdapter | None = None,
+    perception_input_source: PerceptionInputSource | None = None,
+    perception_transport: PerceptionTransport | None = None,
+    proactive_model: ChatCompletionModel | None = None,
+    proactive_identity_frame: CompanionIdentityFrame | None = None,
     expression_reconsideration_reviewer: ExpressionReconsiderationReviewer | None = None,
     now: datetime,
     projection_authority: ProjectionAuthority | None = None,
+    latency_recorder: ProductionLatencyRecorder | None = None,
 ) -> WorldV2TurnApplication:
     """Build one durable v2 chat lane without importing the legacy application.
 
@@ -1050,11 +1821,32 @@ def build_sqlite_world_v2_turn_application(
 
     if media_planner is not None and legacy_event_media_planner is not None:
         raise ValueError("inject either a World v2 media planner or legacy event-media planner, not both")
+    if config.media_continuation is not None and media_transport is None:
+        raise ValueError("media continuation composition requires durable media transport")
+    if outcome_model is not None and outcome_draft_model is not None:
+        raise ValueError("inject either an outcome proposal adapter or an outcome draft model, not both")
+    build_started = time.perf_counter()
     issuer = AcceptedLedgerBatchIssuer()
-    ledger = SQLiteWorldLedger(path=path, world_id=config.world_id, accepted_batch_issuer=issuer)
+    latency = latency_recorder or ProductionLatencyRecorder()
+    ledger = SQLiteWorldLedger(
+        path=path,
+        world_id=config.world_id,
+        accepted_batch_issuer=issuer,
+        latency_recorder=latency,
+    )
+    _LOG.warning(
+        "world v2 application ledger ready world=%s duration_ms=%.1f",
+        config.world_id,
+        (time.perf_counter() - build_started) * 1000,
+    )
     life_content_store = SQLiteImmutableLifeContentStore(path=str(path), world_id=config.world_id)
     expression_payload_store = SQLiteImmutableExpressionPayloadStore(path=str(path), world_id=config.world_id)
     media_payload_store = SQLiteImmutableMediaPayloadStore(path=str(path), world_id=config.world_id)
+    _LOG.warning(
+        "world v2 application sidecars ready world=%s duration_ms=%.1f",
+        config.world_id,
+        (time.perf_counter() - build_started) * 1000,
+    )
     try:
         occurrence_content = OccurrenceContentCoordinator(
             ledger=ledger, store=life_content_store
@@ -1064,27 +1856,153 @@ def build_sqlite_world_v2_turn_application(
             raise ValueError("read-only tool model and transport must be explicitly injected together")
         if tool_requested and config.tool_budget_limit <= 0:
             raise ValueError("injected read-only tool lane needs a positive deployment budget")
-        _bootstrap(ledger=ledger, config=config, now=now, include_tool=tool_requested)
+        perception_dependencies = (
+            perception_model,
+            perception_input_source,
+            perception_transport,
+        )
+        perception_requested = any(item is not None for item in perception_dependencies)
+        if perception_requested and not all(item is not None for item in perception_dependencies):
+            raise ValueError(
+                "perception model, durable input source and lookup-capable transport "
+                "must be explicitly injected together"
+            )
+        if perception_requested and config.perception_budget_limit <= 0:
+            raise ValueError("injected perception lane needs a positive deployment budget")
+        life_seed_catalog = (
+            ReviewedLifeSeedCatalog.from_yaml(
+                path=config.life_ecology.seed_catalog_path,
+                chronology=LocalChronology(config.local_timezone),
+            )
+            if config.life_ecology is not None
+            else None
+        )
+        _bootstrap(
+            ledger=ledger,
+            config=config,
+            now=now,
+            include_tool=tool_requested,
+            include_perception=perception_requested,
+            include_proactive=proactive_model is not None,
+            life_seed_catalog=life_seed_catalog,
+        )
+        _LOG.warning(
+            "world v2 application bootstrap ready world=%s duration_ms=%.1f",
+            config.world_id,
+            (time.perf_counter() - build_started) * 1000,
+        )
+        # Background appraisal/relationship/proactive turns are triggered by
+        # domain events rather than the original Observation, so their scope
+        # cannot be rediscovered from the current trigger.  Legacy hosts whose
+        # reply target is already a canonical actor retain that as the safe
+        # fallback; transports such as QQ must provide the distinct counterpart.
+        relevance_scope = ContextRelevanceScope(
+            actor_ref=config.companion_actor_ref,
+            related_subject_refs=(config.counterpart_actor_ref or config.reply_target,),
+        )
         capsules = context_capsule_compiler_from_ledger(
             ledger=ledger,
-            relevance_scope=ContextRelevanceScope(
-                actor_ref=config.companion_actor_ref,
-                related_subject_refs=(config.reply_target,),
+            situation_compiler=SituationCompiler(
+                local_chronology=LocalChronology(config.local_timezone)
             ),
+            relevance_scope=relevance_scope,
             life_content_store=life_content_store,
+            perception_result_reader=perception_transport,
+            expression_payload_store=expression_payload_store,
+        )
+        chat_capsules = context_capsule_compiler_from_ledger(
+            ledger=ledger,
+            situation_compiler=SituationCompiler(
+                local_chronology=LocalChronology(config.local_timezone)
+            ),
+            policy=ContextCapsuleBudgetPolicy(
+                # Preserve dialogue/world/affect continuity even when their
+                # complete proof envelopes coincide.  Chat still trims low-
+                # value capability and accounting slices below.
+                hard_max_characters=32_000,
+                available_capabilities=SliceBudget(
+                    max_items=4, max_fields=48, max_characters=1_200
+                ),
+                action_budget=SliceBudget(
+                    max_items=4, max_fields=40, max_characters=1_200
+                ),
+            ),
+            relevance_scope=relevance_scope,
+            life_content_store=life_content_store,
+            perception_result_reader=perception_transport,
+            expression_payload_store=expression_payload_store,
         )
         pinned = PinnedTurnCompiler(
             ledger=ledger,
-            capsule_compiler=capsules,
+            capsule_compiler=chat_capsules,
             deliberation=compose_production_deliberation(
                 lane_id="chat_reply",
                 router=router,
                 main_model=main_model,
                 quick_recovery=quick_recovery,
+                # Keep the primary Flash/Thinking budget intact.  Recovery is
+                # intentionally compact: when a provider misses the primary
+                # deadline, another long provider wait is not a human-like
+                # pause and only produces a scripted failsafe.  High-signal
+                # appraisal keeps its own same-turn 1s recovery budget below.
+                quick_timeout_seconds=1.0,
+                expression_action_kinds=config.expression_action_kinds,
             ),
             companion_actor_ref=config.companion_actor_ref,
             advisory_compiler=advisory_compiler,
+            latency_recorder=latency,
         )
+        social_action_worker = SocialActionWorker(
+            ledger=ledger,
+            pinned_turn=None,
+            batch_issuer=issuer,
+            policy=SocialDeferredPolicy(
+                expression=ExpressionPlanBudgetPolicy(
+                    account_id=config.chat_account_id,
+                    amount_limit_per_action=config.reply_budget_amount,
+                    actor=config.companion_actor_ref,
+                    allowed_targets=(config.reply_target,),
+                    recovery_policy=config.reply_recovery_policy,
+                )
+            ),
+            actor=config.companion_actor_ref,
+            source=config.social_action_worker_owner,
+        )
+        proactive_runtime = None
+        if proactive_model is not None:
+            proactive_adapter = ProactiveDraftAdapter(
+                model=proactive_model,
+                target=config.reply_target,
+                identity_frame=proactive_identity_frame,
+            )
+            proactive_runtime = ProactiveActionRuntime(
+                ledger=ledger,
+                turn=ProactiveDeliberationTurn(
+                    ledger=ledger,
+                    capsule_compiler=capsules,
+                    deliberation=compose_production_deliberation(
+                        lane_id="proactive",
+                        router=router,
+                        main_model=proactive_adapter,
+                        quick_recovery=proactive_adapter,
+                    ),
+                    companion_actor_ref=config.companion_actor_ref,
+                ),
+                batch_issuer=issuer,
+                policy=ExpressionPlanBudgetPolicy(
+                    account_id=config.proactive_account_id,
+                    amount_limit_per_action=config.proactive_amount_per_action,
+                    actor=config.companion_actor_ref,
+                    allowed_targets=(config.reply_target,),
+                    recovery_policy=config.reply_recovery_policy,
+                    category="proactive",
+                ),
+                owner_id=config.proactive_worker_owner,
+                social_initiative=SocialInitiativeCompiler(
+                    ledger=ledger,
+                    policy=config.social_initiative_policy,
+                ),
+            )
         appraisal_acceptance = (
             AppraisalAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
             if appraisal_model is not None
@@ -1111,9 +2029,21 @@ def build_sqlite_world_v2_turn_application(
                     router=router,
                     main_model=appraisal_model,
                     quick_recovery=appraisal_model,
+                    # Keep semantic appraisal on the interactive budget. A
+                    # provider that cannot finish here must not add a second
+                    # long wait before expression; the paired adapter then
+                    # supplies a grounded local repair and records the
+                    # provider failure for later diagnosis.
+                    main_timeout_seconds=6.0,
+                    quick_timeout_seconds=1.0,
                 ),
                 companion_actor_ref=config.companion_actor_ref,
+                # The combined inbound cognition pass also drafts the later
+                # expression.  Give it the same non-authoritative semantic
+                # matrix advice as the ordinary reply lane; acceptance still
+                # happens before any cached draft can become an Action.
                 advisory_compiler=advisory_compiler,
+                latency_recorder=latency,
             )
             if appraisal_model is not None
             else None
@@ -1134,9 +2064,20 @@ def build_sqlite_world_v2_turn_application(
             else None
         )
         outcome_reader = OutcomeCandidateReader(store=life_content_store)
+        outcome_deliberation_model = (
+            outcome_model
+            if outcome_model is not None
+            else (
+                OutcomeDraftDeliberationAdapter(
+                    ledger=ledger, candidate_reader=outcome_reader, model=outcome_draft_model
+                )
+                if outcome_draft_model is not None
+                else None
+            )
+        )
         outcome_acceptance = (
             OutcomeAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-            if outcome_model is not None
+            if outcome_deliberation_model is not None
             else None
         )
         outcome_turn = (
@@ -1146,13 +2087,13 @@ def build_sqlite_world_v2_turn_application(
                 deliberation=compose_production_deliberation(
                     lane_id="outcome",
                     router=router,
-                    main_model=outcome_model,
-                    quick_recovery=outcome_model,
+                    main_model=outcome_deliberation_model,
+                    quick_recovery=outcome_deliberation_model,
                 ),
                 candidate_reader=outcome_reader,
                 companion_actor_ref=config.companion_actor_ref,
             )
-            if outcome_model is not None
+            if outcome_deliberation_model is not None
             else None
         )
         outcome_worker = (
@@ -1200,9 +2141,12 @@ def build_sqlite_world_v2_turn_application(
             if interaction_bid_acceptance is not None and media_thread_acceptance is not None
             else None
         )
+        immediate_emotion_enabled = isinstance(
+            appraisal_model, AppraisalDraftDeliberationAdapter
+        ) or getattr(appraisal_model, "supports_immediate_emotion", False) is True
         affect_acceptance = (
             AffectAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
-            if affect_model is not None
+            if affect_model is not None or immediate_emotion_enabled
             else None
         )
         affect_turn = (
@@ -1229,6 +2173,65 @@ def build_sqlite_world_v2_turn_application(
                 actor=config.affect_worker_owner,
             )
             if affect_acceptance is not None and affect_turn is not None
+            else None
+        )
+        immediate_emotion_worker = (
+            ImmediateEmotionProposalWorker(
+                appraisal_worker=appraisal_worker,
+                affect_compiler=AffectProposalCompiler(ledger=ledger),
+                affect_acceptance=affect_acceptance,
+                actor=config.affect_worker_owner,
+            )
+            if immediate_emotion_enabled
+            and appraisal_worker is not None
+            and affect_acceptance is not None
+            else None
+        )
+        relationship_acceptance = (
+            RelationshipAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
+            if relationship_model is not None
+            else None
+        )
+        relationship_turn = (
+            PinnedTurnCompiler(
+                ledger=ledger,
+                capsule_compiler=capsules,
+                deliberation=compose_production_deliberation(
+                    lane_id="relationship",
+                    router=router,
+                    main_model=relationship_model,
+                    quick_recovery=relationship_model,
+                ),
+                companion_actor_ref=config.companion_actor_ref,
+                relationship_evaluation=True,
+            )
+            if relationship_model is not None
+            else None
+        )
+        relationship_worker = (
+            RelationshipDeliberationWorker(
+                ledger=ledger,
+                pinned_turn=relationship_turn,
+                compiler=RelationshipProposalCompiler(ledger=ledger),
+                acceptance=relationship_acceptance,
+                actor=config.relationship_worker_owner,
+            )
+            if relationship_acceptance is not None and relationship_turn is not None
+            else None
+        )
+        relationship_adjustment_acceptance = (
+            RelationshipAdjustmentAcceptanceRuntime(ledger=ledger, batch_issuer=issuer)
+            if relationship_acceptance is not None
+            else None
+        )
+        relationship_adjustment_worker = (
+            RelationshipAdjustmentWorker(
+                ledger=ledger,
+                compiler=RelationshipAdjustmentCompiler(ledger=ledger),
+                acceptance=relationship_adjustment_acceptance,
+                actor=config.relationship_adjustment_worker_owner,
+            )
+            if relationship_adjustment_acceptance is not None
             else None
         )
         fact_acceptance = (
@@ -1264,9 +2267,39 @@ def build_sqlite_world_v2_turn_application(
             if tool_turn is not None
             else None
         )
+        perception_turn = (
+            PinnedTurnCompiler(
+                ledger=ledger,
+                capsule_compiler=capsules,
+                deliberation=compose_injected_perception_deliberation(
+                    router=router, model=perception_model
+                ),
+                companion_actor_ref=config.companion_actor_ref,
+            )
+            if perception_model is not None
+            else None
+        )
+        perception_trigger_runtime = (
+            PerceptionTriggerRuntime(
+                ledger=ledger,
+                turn=perception_turn,  # type: ignore[arg-type]
+                compiler=PerceptionProposalCompiler(
+                    ledger=ledger,
+                    authorization_resolver=ProjectionPerceptionAuthorizationResolver(),
+                    actor_ref=config.companion_actor_ref,
+                    budget_account_id=config.perception_account_id,
+                    budget_limit=config.perception_budget_limit,
+                    input_source=perception_input_source,  # type: ignore[arg-type]
+                ),
+                owner_id=config.perception_worker_owner,
+            )
+            if perception_turn is not None
+            else None
+        )
         platform_executor = build_platform_action_executor(
             ledger=ledger, transport=transport, expression_payload_store=expression_payload_store,
             media_payload_store=media_payload_store,
+            latency_recorder=latency,
         )
         action_executor: ActionExecutor = platform_executor
         tool_executor = (
@@ -1277,18 +2310,28 @@ def build_sqlite_world_v2_turn_application(
             if read_only_tool_transport is not None
             else None
         )
-        if media_transport is not None or tool_executor is not None:
+        perception_executor = (
+            PerceptionActionExecutor(
+                inputs=perception_input_source,  # type: ignore[arg-type]
+                transport=perception_transport,  # type: ignore[arg-type]
+            )
+            if perception_transport is not None
+            else None
+        )
+        if media_transport is not None or tool_executor is not None or perception_executor is not None:
             action_executor = RoutedActionExecutor(
                 platform=platform_executor,
                 media=(ProviderMediaActionExecutor(
                     payloads=MediaSidecarPayloadReader(store=media_payload_store), transport=media_transport,
                 ) if media_transport is not None else None),
                 tool=tool_executor,
+                perception=perception_executor,
             )
         runtime = WorldRuntime(
             world_id=config.world_id,
             ledger=ledger,
             projection_authority=projection_authority,
+            latency_recorder=latency,
             pinned_turn=pinned,
             reply_policy=ReplyBudgetPolicy(
                 account_id=config.chat_account_id,
@@ -1316,6 +2359,8 @@ def build_sqlite_world_v2_turn_application(
             ),
             appraisal_worker=appraisal_worker,
             interaction_appraisal_turn=appraisal_turn,
+            immediate_emotion_worker=immediate_emotion_worker,
+            immediate_emotion_signal_gate=config.immediate_emotion_signal_gate,
             npc_world_appraisal_turn=npc_world_appraisal_turn,
             outcome_deliberation_turn=outcome_turn,
             outcome_worker=outcome_worker,
@@ -1352,6 +2397,15 @@ def build_sqlite_world_v2_turn_application(
                 if fact_acceptance is not None and memory_model is not None
                 else None
             ),
+            memory_withdrawal_review=(
+                MemoryWithdrawalReviewRuntime(
+                    ledger=ledger,
+                    reviewer=MemoryWithdrawalReviewAdapter(model=memory_model),
+                    owner_id=config.memory_review_worker_owner,
+                )
+                if memory_model is not None
+                else None
+            ),
             affect_deliberation_owner=(
                 config.affect_worker_owner if affect_worker is not None else None
             ),
@@ -1360,6 +2414,16 @@ def build_sqlite_world_v2_turn_application(
             affect_acceptance_actor=(
                 config.affect_worker_owner if affect_acceptance is not None else None
             ),
+            relationship_deliberation_owner=(
+                config.relationship_worker_owner if relationship_worker is not None else None
+            ),
+            relationship_worker=relationship_worker,
+            relationship_adjustment_owner=(
+                config.relationship_adjustment_worker_owner
+                if relationship_adjustment_worker is not None
+                else None
+            ),
+            relationship_adjustment_worker=relationship_adjustment_worker,
             action_executor=action_executor,
             action_pump_owner=config.action_pump_owner,
             # Planning settles a MediaPlan/NotRenderable domain result in one
@@ -1373,10 +2437,24 @@ def build_sqlite_world_v2_turn_application(
                 else None
             ),
             expression_reconsideration_reviewer=expression_reconsideration_reviewer,
+            social_action_worker=social_action_worker,
+            proactive_action_runtime=proactive_runtime,
             read_only_tool_owner=(config.tool_worker_owner if tool_trigger_runtime is not None else None),
             read_only_tool_trigger_runtime=tool_trigger_runtime,
+            perception_owner=(
+                config.perception_worker_owner if perception_trigger_runtime is not None else None
+            ),
+            perception_trigger_runtime=perception_trigger_runtime,
             external_result_owner=(config.tool_worker_owner if tool_trigger_runtime is not None else None),
             external_result_deliberator=(NoopToolResultDeliberator() if tool_trigger_runtime is not None else None),
+            perception_result_owner=(
+                config.perception_worker_owner if perception_trigger_runtime is not None else None
+            ),
+            perception_result_deliberator=(
+                NoopPerceptionResultDeliberator()
+                if perception_trigger_runtime is not None
+                else None
+            ),
         )
         media_execution = MediaExecutionRuntime(
             ledger=ledger,
@@ -1390,6 +2468,30 @@ def build_sqlite_world_v2_turn_application(
                 transport=media_transport,  # type: ignore[arg-type]
             )
             if media_transport is not None and hasattr(media_transport, "lookup_execution_result")
+            else None
+        )
+        media_continuation_worker = (
+            MediaContinuationWorker(
+                runtime=MediaContinuationRuntime(
+                    ledger=ledger, execution=media_execution, batch_issuer=issuer,
+                ),
+                ledger=ledger,
+                render_policy=MediaContinuationActionPolicy(
+                    actor=config.media_continuation.actor,
+                    owner_id=config.media_continuation.owner_id,
+                    grant=config.media_continuation.render_grant,
+                    account_id=config.media_continuation.render_account_id,
+                    amount_limit=config.media_continuation.render_amount_limit,
+                ),
+                inspection_policy=MediaContinuationActionPolicy(
+                    actor=config.media_continuation.actor,
+                    owner_id=config.media_continuation.owner_id,
+                    grant=config.media_continuation.inspection_grant,
+                    account_id=config.media_continuation.inspection_account_id,
+                    amount_limit=config.media_continuation.inspection_amount_limit,
+                ),
+            )
+            if config.media_continuation is not None and media_transport is not None
             else None
         )
         media_planning = MediaPlanningRuntime(ledger=ledger, sidecar=media_payload_store)
@@ -1410,6 +2512,9 @@ def build_sqlite_world_v2_turn_application(
                 ledger=ledger,
                 sidecar=media_payload_store,
                 policy=ecology_policy,
+                compiler=MediaEvidenceSnapshotCompiler(
+                    ledger=ledger, visual_fact_sidecar=media_payload_store,
+                ),
             )
             if ecology_policy is not None
             else None
@@ -1428,7 +2533,10 @@ def build_sqlite_world_v2_turn_application(
             MediaSelectionAcceptanceRuntime(
                 ledger=ledger,
                 authorizer=MediaOpportunityAuthorizer(
-                    ledger=ledger, compiler=MediaEvidenceSnapshotCompiler(ledger=ledger),
+                    ledger=ledger,
+                    compiler=MediaEvidenceSnapshotCompiler(
+                        ledger=ledger, visual_fact_sidecar=media_payload_store,
+                    ),
                     catalog_version=ecology_policy.catalog_version,
                 ),
                 sidecar=media_payload_store,
@@ -1451,6 +2559,38 @@ def build_sqlite_world_v2_turn_application(
             if config.life_ecology is not None and activity_lifecycle_model is not None
             else None
         )
+        life_author = (
+            LifeAuthorRuntime(
+                ledger=ledger,
+                catalog=life_seed_catalog,
+                model=activity_lifecycle_model,
+                owner_actor_ref=config.companion_actor_ref,
+                actor=config.life_ecology.worker_actor,
+            )
+            if config.life_ecology is not None and activity_lifecycle_model is not None
+            else None
+        )
+        life_aftermath = (
+            LifeAftermathRuntime(
+                ledger=ledger,
+                catalog=life_seed_catalog,
+                occurrence_content=occurrence_content,
+                content_store=life_content_store,
+                owner_actor_ref=config.companion_actor_ref,
+                actor=config.life_ecology.worker_actor,
+                experience_memory_lifecycle=(
+                    ExperienceMemoryCandidateLifecycle(
+                        ledger=ledger,
+                        actor=config.life_ecology.worker_actor,
+                        source="world-v2:experience-memory-lifecycle",
+                    )
+                    if memory_model is not None
+                    else None
+                ),
+            )
+            if config.life_ecology is not None and life_seed_catalog is not None
+            else None
+        )
         life_ecology = (
             LifeEcologyRuntime(
                 ledger=ledger,
@@ -1460,7 +2600,9 @@ def build_sqlite_world_v2_turn_application(
                     lease_seconds=config.life_ecology.lease_seconds,
                 ),
                 media_followup=media_ecology,
+                life_author_followup=life_author,
                 activity_followup=activity_lifecycle,
+                aftermath_followup=life_aftermath,
                 availability=LifeEcologyAvailability(
                     state="installed_and_active",
                     catalog_version=config.life_ecology.catalog_version,
@@ -1478,6 +2620,7 @@ def build_sqlite_world_v2_turn_application(
             media_payload_store=media_payload_store,
             media_execution=media_execution,
             media_execution_worker=media_execution_worker,
+            media_continuation_worker=media_continuation_worker,
             media_planning=media_planning,
             media_planning_worker=MediaPlanningWorker(
                 ledger=ledger,
@@ -1500,8 +2643,14 @@ def build_sqlite_world_v2_turn_application(
             recipient_scoped_image_evidence=RecipientScopedImageEvidenceDeclarationRuntime(ledger=ledger),
             appearance_states=AppearanceStateRuntime(ledger=ledger),
             visible_physical_states=VisiblePhysicalStateRuntime(ledger=ledger),
+            visual_facts=VisualFactRuntime(ledger=ledger, sidecar=media_payload_store),
             media_selection_acceptance=media_selection_acceptance,
             media_selection_acceptance_config=config.media_selection_acceptance,
+            media_preview_conductor_enabled=(
+                media_selection_worker is not None
+                and media_selection_acceptance is not None
+                and composed_media_planner is not None
+            ),
             media_delivery=MediaDeliveryRuntime(ledger=ledger),
             occurrence_content=occurrence_content,
             activity_plans=ActivityPlanRuntime(
@@ -1512,6 +2661,9 @@ def build_sqlite_world_v2_turn_application(
                 ledger=ledger,
                 actor=config.companion_actor_ref,
             ),
+            latency_recorder=latency,
+            trace_environment=config.trace_environment,
+            social_initiative_policy=config.social_initiative_policy,
         )
     except Exception:
         life_content_store.close()
@@ -1525,6 +2677,7 @@ def build_platform_action_executor(
     *, ledger: SQLiteWorldLedger, transport: PlatformTransport,
     expression_payload_store: SQLiteImmutableExpressionPayloadStore | None = None,
     media_payload_store: SQLiteImmutableMediaPayloadStore | None = None,
+    latency_recorder: ProductionLatencyRecorder | None = None,
 ) -> ActionExecutor:
     """Bind the platform executor to a read-only accepted-payload capability."""
 
@@ -1535,12 +2688,28 @@ def build_platform_action_executor(
         payloads = PlatformAndMediaPayloadReader(
             platform=payloads, media=MediaSidecarPayloadReader(store=media_payload_store),
         )
-    return PlatformActionExecutor(payloads=payloads, transport=transport)
+    return PlatformActionExecutor(
+        payloads=payloads, transport=transport, latency_recorder=latency_recorder
+    )
+
+
+def _parse_trace_time(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        return None
+    return parsed
 
 
 def _bootstrap(
     *, ledger: SQLiteWorldLedger, config: WorldV2TurnApplicationConfig, now: datetime,
-    include_tool: bool = False,
+    include_tool: bool = False, include_perception: bool = False,
+    include_proactive: bool = False,
+    life_seed_catalog: ReviewedLifeSeedCatalog | None = None,
 ) -> None:
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("World v2 bootstrap time must be timezone-aware")
@@ -1552,6 +2721,22 @@ def _bootstrap(
     if include_tool:
         accounts.append(BudgetAccount(account_id=config.tool_account_id, category="tool",
                                       window_id=config.tool_window_id, limit=config.tool_budget_limit))
+    if include_perception:
+        accounts.append(
+            BudgetAccount(
+                account_id=config.perception_account_id,
+                category="tool",
+                window_id=config.perception_window_id,
+                limit=config.perception_budget_limit,
+            )
+        )
+    if include_proactive:
+        accounts.append(BudgetAccount(
+            account_id=config.proactive_account_id,
+            category="proactive",
+            window_id=config.proactive_window_id,
+            limit=config.proactive_budget_limit,
+        ))
     if config.media_selection_acceptance is not None:
         media = config.media_selection_acceptance
         accounts.append(BudgetAccount(
@@ -1559,6 +2744,20 @@ def _bootstrap(
             category="image",
             window_id=media.account_window_id,
             limit=media.account_limit,
+        ))
+    if config.media_continuation is not None:
+        continuation = config.media_continuation
+        accounts.extend((
+            BudgetAccount(
+                account_id=continuation.render_account_id, category="image",
+                window_id=continuation.render_window_id,
+                limit=continuation.render_account_limit,
+            ),
+            BudgetAccount(
+                account_id=continuation.inspection_account_id, category="image",
+                window_id=continuation.inspection_window_id,
+                limit=continuation.inspection_account_limit,
+            ),
         ))
     missing: list[BudgetAccount] = []
     for account in accounts:
@@ -1569,20 +2768,100 @@ def _bootstrap(
             missing.append(account)
         elif existing.category != account.category or existing.window_id != account.window_id or existing.limit != account.limit:
             raise ValueError("existing World v2 budget conflicts with composition config")
-    if not missing:
+    existing_npcs = {item.npc_id: item for item in projection.npcs}
+    missing_npcs = [] if life_seed_catalog is None else [
+        item for item in life_seed_catalog.reviewed_npcs if item.npc_id not in existing_npcs
+    ]
+    if life_seed_catalog is not None:
+        locations = {item.id: item for item in life_seed_catalog.reviewed_locations}
+        for item in life_seed_catalog.reviewed_npcs:
+            current = existing_npcs.get(item.npc_id)
+            expected_location = (
+                locations[item.location_id].location_ref if item.location_id is not None else None
+            )
+            if current is not None and (
+                current.stable_identity_ref != item.stable_identity_ref
+                or current.known_trait_refs != item.known_trait_refs
+                or current.privacy_class != item.privacy
+                or current.current_location_ref != expected_location
+                or current.status != "active"
+            ):
+                raise ValueError("existing reviewed NPC conflicts with life seed catalog")
+    if not missing and not missing_npcs:
         return
     if projection.world_revision and not any(
         item.event_type == "WorldStarted" for item in projection.committed_world_event_refs
     ):
         raise ValueError("World v2 ledger has state but no WorldStarted authority")
     events: list[WorldEvent] = []
+    world_started = next(
+        (
+            item for item in projection.committed_world_event_refs
+            if item.event_type == "WorldStarted"
+        ),
+        None,
+    )
     if projection.world_revision == 0:
-        events.append(_bootstrap_event(config=config, now=now, event_type="WorldStarted", payload={}))
+        started_event = _bootstrap_event(
+            config=config, now=now, event_type="WorldStarted", payload={}
+        )
+        events.append(started_event)
+        world_started_ref = EvidenceRef(
+            ref_id=started_event.event_id,
+            evidence_type="committed_world_event",
+            claim_purpose="current_fact",
+            source_world_revision=1,
+            immutable_hash=started_event.payload_hash,
+        )
+    else:
+        assert world_started is not None
+        world_started_ref = EvidenceRef(
+            ref_id=world_started.event_id,
+            evidence_type="committed_world_event",
+            claim_purpose="current_fact",
+            source_world_revision=world_started.world_revision,
+            immutable_hash=world_started.payload_hash,
+        )
     events.extend(
         _bootstrap_event(config=config, now=now, event_type="BudgetAccountConfigured",
                          payload={"account": account.model_dump(mode="json")})
         for account in missing
     )
+    if missing_npcs:
+        assert life_seed_catalog is not None
+        locations = {item.id: item for item in life_seed_catalog.reviewed_locations}
+        event_time = projection.logical_time or now
+        for item in missing_npcs:
+            location_ref = (
+                locations[item.location_id].location_ref if item.location_id is not None else None
+            )
+            payload = NpcRegisteredPayload(
+                change_id=f"change:life-seed:npc:{item.npc_id}",
+                transition_id=f"transition:life-seed:npc:{item.npc_id}",
+                expected_entity_revision=0,
+                evidence_refs=(world_started_ref,),
+                policy_refs=(
+                    f"policy:life-author-catalog:{life_seed_catalog.version}",
+                    f"catalog-hash:{life_seed_catalog.catalog_hash}",
+                ),
+                npc=NpcProjection(
+                    npc_id=item.npc_id,
+                    entity_revision=1,
+                    stable_identity_ref=item.stable_identity_ref,
+                    known_trait_refs=item.known_trait_refs,
+                    privacy_class=item.privacy,
+                    current_location_ref=location_ref,
+                    status="active",
+                ),
+            )
+            events.append(
+                _bootstrap_event(
+                    config=config,
+                    now=event_time,
+                    event_type="NpcRegistered",
+                    payload=payload.model_dump(mode="json"),
+                )
+            )
     ledger.commit(
         events,
         expected_world_revision=projection.world_revision,
@@ -1600,6 +2879,9 @@ def _bootstrap_event(
         separators=(",", ":"),
     )
     digest = hashlib.sha256(material.encode("utf-8")).hexdigest()
+    idempotency_key = domain_idempotency_key(
+        event_type=event_type, world_id=config.world_id, payload=payload
+    )
     return WorldEvent.from_payload(
         schema_version="world-v2.1",
         event_id=f"event:world-v2-bootstrap:{event_type}:{digest}",
@@ -1612,13 +2894,15 @@ def _bootstrap_event(
         trace_id=f"trace:world-v2-bootstrap:{digest}",
         causation_id=f"bootstrap:{config.world_id}",
         correlation_id=f"bootstrap:{config.world_id}",
-        idempotency_key=f"world-v2:bootstrap:{event_type}:{digest}",
+        idempotency_key=idempotency_key or f"world-v2:bootstrap:{event_type}:{digest}",
         payload=payload,
     )
 
 
 __all__ = [
     "LifeEcologyComposition",
+    "MediaPreviewDeployment",
+    "MediaContinuationComposition",
     "MediaSelectionAcceptanceComposition",
     "WorldV2TurnApplication",
     "WorldV2TurnApplicationConfig",

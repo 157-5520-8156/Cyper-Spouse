@@ -11,6 +11,8 @@ from __future__ import annotations
 from datetime import datetime
 import hashlib
 import json
+import logging
+import time
 from typing import Iterable
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -19,6 +21,7 @@ from .context_capsule import (
     ContextCapsuleBudgetPolicy,
     ContextCapsuleCompiler,
     ContextCapsuleRequest,
+    FactRecallItem,
     InnerAdvisoryProjection,
     MAX_INPUT_ITEMS_PER_SLICE,
     MAX_RESOLVER_DOMAIN_SCAN_ITEMS,
@@ -40,6 +43,7 @@ from .context_capsule import (
     resolved_result_set_hash,
     source_bindings_hash,
 )
+from .fact_accepted_contracts import rehydrate_fact_commit_materialized_v2_json
 from .context_resolver import (
     ContextCompileQuery,
     ResolvedContextResult,
@@ -51,12 +55,20 @@ from .ledger import LedgerPort
 from .memory_retrieval import MemoryRetrievalCompiler, MemoryRetrievalItem
 from .life_content import LifeContentCompiler
 from .life_content_store import ImmutableLifeContentStore
+from .perception_result_context import (
+    PerceptionResultContextCompiler,
+    PerceptionResultContextItem,
+    PerceptionResultReader,
+)
+from .expression_payload_store import ImmutableExpressionPayloadStore
+from .recent_dialogue import RecentDialogueCompiler, RecentDialogueItem
 from .schema_core import PrivacyClass
 from .schemas import (
     BudgetAccount,
     CommittedWorldEventRef,
     FactProjection,
     LedgerProjection,
+    Observation,
     PrivateImpressionProjection,
 )
 from .situation_compiler import SituationCompiler, request_from_ledger_projection
@@ -66,6 +78,7 @@ from .world_life_context import WorldLifeContextCompiler, WorldLifeContextItem
 _PRIVACY_FLOOR: dict[SliceName, PrivacyClass] = {
     "character_core": "withhold",
     "current_situation": "private",
+    "recent_dialogue": "private",
     "relationship_slice": "private",
     "appraisals": "private",
     "affect_episodes": "private",
@@ -73,6 +86,7 @@ _PRIVACY_FLOOR: dict[SliceName, PrivacyClass] = {
     "relevant_facts": "personal",
     "recent_experiences": "personal",
     "world_life": "personal",
+    "perception_results": "private",
     "active_memory_candidates": "personal",
     "available_capabilities": "private",
     "action_budget": "withhold",
@@ -81,9 +95,12 @@ _PRIVACY_FLOOR: dict[SliceName, PrivacyClass] = {
 }
 _PRIVACY_RANK = {"public": 0, "shareable": 1, "personal": 2, "private": 3, "withhold": 4}
 
+_LOG = logging.getLogger(__name__)
+
 _ITEM_ID: dict[SliceName, str] = {
     "character_core": "core_id",
     "current_situation": "actor_ref",
+    "recent_dialogue": "dialogue_id",
     "relationship_slice": "relationship_id",
     "appraisals": "appraisal_id",
     "affect_episodes": "episode_id",
@@ -91,6 +108,7 @@ _ITEM_ID: dict[SliceName, str] = {
     "relevant_facts": "fact_id",
     "recent_experiences": "experience_id",
     "world_life": "occurrence_id",
+    "perception_results": "result_id",
     "active_memory_candidates": "candidate_id",
     "available_capabilities": "grant_id",
     "action_budget": "account_id",
@@ -138,6 +156,8 @@ def context_capsule_compiler_from_ledger(
     policy: ContextCapsuleBudgetPolicy | None = None,
     relevance_scope: ContextRelevanceScope | None = None,
     life_content_store: ImmutableLifeContentStore | None = None,
+    perception_result_reader: PerceptionResultReader | None = None,
+    expression_payload_store: ImmutableExpressionPayloadStore | None = None,
 ) -> ContextCapsuleCompiler:
     """Composition-root factory for the production ledger-backed seam."""
 
@@ -147,6 +167,8 @@ def context_capsule_compiler_from_ledger(
             situation_compiler=situation_compiler or SituationCompiler(),
             relevance_scope=relevance_scope,
             life_content_store=life_content_store,
+            perception_result_reader=perception_result_reader,
+            expression_payload_store=expression_payload_store,
         ),
         policy=policy,
     )
@@ -184,15 +206,24 @@ def _observation_event_aliases(projection: LedgerProjection) -> dict[str, str]:
 
 
 def _typed_refs(item: BaseModel, *, observation_aliases: dict[str, str]) -> tuple[str, ...] | None:
+    if isinstance(item, RecentDialogueItem):
+        return tuple(sorted(claim.authority_event_ref for claim in item.source_claims))
     if isinstance(item, MemoryRetrievalItem):
         return tuple(sorted({source.authority_event_ref for source in item.source_excerpts}))
     if isinstance(item, WorldLifeContextItem):
-        return (item.source.authority_event_ref,)
+        refs = {item.source.authority_event_ref}
+        if item.content is not None:
+            refs.add(item.content.descriptor_event_ref)
+        return tuple(sorted(refs))
+    if isinstance(item, PerceptionResultContextItem):
+        return tuple(sorted({item.source.result_event_ref, item.source.receipt_event_ref}))
     if isinstance(item, FactProjection):
         # A Fact's full assertion/evidence structure is committed by this
         # exact Fact event. Its retained observation id is an internal anchor,
         # not a second event authority that Context must resolve as an event.
         return (item.origin.accepted_event_ref,)
+    if isinstance(item, FactRecallItem):
+        return tuple(sorted((item.accepted_fact_event_ref, item.observation_event_ref)))
     if isinstance(item, PrivateImpressionProjection):
         # Only accepted impressions are a valid Context source.  Their source
         # refs are recorded event identities, never a model-generated summary.
@@ -249,18 +280,64 @@ def _typed_authority_claims(
 ) -> tuple[tuple[str, int, str], ...] | None:
     """Return exact embedded event claims, or None for an incomplete claim."""
 
+    if isinstance(item, RecentDialogueItem):
+        return tuple(
+            sorted(
+                (
+                    claim.authority_event_ref,
+                    claim.authority_world_revision,
+                    claim.authority_payload_hash,
+                )
+                for claim in item.source_claims
+            )
+        )
     if isinstance(item, FactProjection):
         # The source evidence remains immutable inside the Fact event payload
         # and was verified by the Fact reducer. Context binds that complete
         # payload through ``origin.accepted_event_ref`` instead of attempting
         # to reinterpret its durable observation identifier as an event id.
         return ()
+    if isinstance(item, FactRecallItem):
+        return tuple(sorted((
+            (
+                item.accepted_fact_event_ref,
+                item.accepted_fact_world_revision,
+                item.accepted_fact_payload_hash,
+            ),
+            (
+                item.observation_event_ref,
+                item.observation_world_revision,
+                item.observation_event_payload_hash,
+            ),
+        )))
     if isinstance(item, WorldLifeContextItem):
-        return (
+        authorities = {
             (
                 item.source.authority_event_ref,
                 item.source.authority_world_revision,
                 item.source.authority_payload_hash,
+            ),
+        }
+        if item.content is not None:
+            authorities.add(
+                (
+                    item.content.descriptor_event_ref,
+                    item.content.descriptor_world_revision,
+                    item.content.descriptor_payload_hash,
+                )
+            )
+        return tuple(sorted(authorities))
+    if isinstance(item, PerceptionResultContextItem):
+        return (
+            (
+                item.source.receipt_event_ref,
+                item.source.receipt_world_revision,
+                item.source.receipt_payload_hash,
+            ),
+            (
+                item.source.result_event_ref,
+                item.source.result_world_revision,
+                item.source.result_payload_hash,
             ),
         )
     values = getattr(item, "values", None)
@@ -323,6 +400,7 @@ def _recency_bp(item: BaseModel, logical_time: datetime | None) -> int:
         getattr(item, "opened_at", None),
         getattr(getattr(item, "values", None), "occurred_to", None),
         getattr(item, "settled_at", None),
+        getattr(item, "occurred_at", None),
     )
     instant = next((value for value in instants if value is not None), None)
     if instant is None:
@@ -390,6 +468,126 @@ def _binding(event: CommittedWorldEventRef) -> ResolvedSourceBinding:
     )
 
 
+def _fact_recall_items(
+    *,
+    ledger: LedgerPort,
+    projection: LedgerProjection,
+    facts: tuple[FactProjection, ...],
+) -> tuple[FactRecallItem, ...]:
+    """Close active Facts over the exact messages which asserted them.
+
+    This is the only semantic reconstruction seam for persistent Facts.  Any
+    missing, legacy, ambiguous, or contradictory authority drops that item;
+    opaque refs and hashes are never presented as if they were prose.
+    """
+
+    committed = {item.event_id: item for item in projection.committed_world_event_refs}
+    observations_by_id: dict[str, list[object]] = {}
+    for item in projection.message_observations:
+        observations_by_id.setdefault(item.observation_id, []).append(item)
+    output: list[FactRecallItem] = []
+    for fact in facts:
+        binding = fact.values.assertion_binding
+        if binding.source_kind != "observed_message" or binding.payload_ref is None:
+            continue
+        fact_ref = committed.get(fact.origin.accepted_event_ref)
+        fact_located = ledger.lookup_event_commit(fact.origin.accepted_event_ref)
+        if (
+            fact_ref is None
+            or fact_ref.event_type != "FactCommittedV2"
+            or fact_located is None
+        ):
+            continue
+        fact_event, fact_commit = fact_located
+        if (
+            fact_event.event_id != fact_ref.event_id
+            or fact_event.event_type != fact_ref.event_type
+            or fact_event.payload_hash != fact_ref.payload_hash
+            or fact_commit.world_revision != fact_ref.world_revision
+            or fact_ref.world_revision > projection.world_revision
+        ):
+            continue
+        try:
+            materialized = rehydrate_fact_commit_materialized_v2_json(fact_event.payload_json)
+        except ValueError:
+            continue
+        if (
+            materialized.fact_id != fact.fact_id
+            or materialized.values.model_dump(mode="json")
+            != fact.values.model_dump(mode="json")
+        ):
+            continue
+
+        observation_candidates = observations_by_id.get(binding.source_ref, [])
+        if len(observation_candidates) != 1:
+            continue
+        observation_ref = observation_candidates[0]
+        if (
+            observation_ref.actor != binding.actor_ref
+            or observation_ref.channel != binding.channel
+            or observation_ref.payload_ref != binding.payload_ref
+            or observation_ref.content_payload_hash != binding.content_payload_hash
+        ):
+            continue
+        source_event_candidates = tuple(
+            item
+            for item in projection.committed_world_event_refs
+            if item.event_type == "ObservationRecorded"
+            and item.world_revision == observation_ref.world_revision
+            and item.payload_hash == observation_ref.event_payload_hash
+        )
+        if len(source_event_candidates) != 1:
+            continue
+        source_ref = source_event_candidates[0]
+        source_located = ledger.lookup_event_commit(source_ref.event_id)
+        if source_located is None:
+            continue
+        source_event, source_commit = source_located
+        if (
+            source_event.event_id != source_ref.event_id
+            or source_event.event_type != source_ref.event_type
+            or source_event.payload_hash != source_ref.payload_hash
+            or source_commit.world_revision != source_ref.world_revision
+            or source_ref.world_revision >= fact_ref.world_revision
+        ):
+            continue
+        try:
+            observation = Observation.model_validate_json(source_event.payload_json)
+        except ValueError:
+            continue
+        if (
+            observation.observation_id != binding.source_ref
+            or observation.world_id != projection.world_id
+            or observation.actor != binding.actor_ref
+            or observation.channel != binding.channel
+            or observation.payload_ref != binding.payload_ref
+            or observation.payload_hash != binding.content_payload_hash
+            or not observation.text
+            or binding.asserted_subject_ref != fact.values.subject_ref
+        ):
+            continue
+        output.append(FactRecallItem(
+            fact_id=fact.fact_id,
+            subject_ref=fact.values.subject_ref,
+            predicate_code=fact.values.predicate_code,
+            source_excerpt=observation.text,
+            confidence_bp=fact.values.confidence_bp,
+            privacy_class=fact.values.privacy_class,
+            committed_at=fact.committed_at,
+            updated_at=fact.updated_at,
+            accepted_fact_event_ref=fact_ref.event_id,
+            accepted_fact_world_revision=fact_ref.world_revision,
+            accepted_fact_payload_hash=fact_ref.payload_hash,
+            observation_event_ref=source_ref.event_id,
+            observation_world_revision=source_ref.world_revision,
+            observation_event_payload_hash=source_ref.payload_hash,
+            source_observation_id=observation.observation_id,
+            assertion_payload_ref=observation.payload_ref,
+            assertion_payload_hash=observation.payload_hash,
+        ))
+    return tuple(output)
+
+
 class LedgerProjectionContextResolver(TrustedInternalContextResolver):
     """Resolve Context domains from exactly one ledger projection cursor."""
 
@@ -400,14 +598,27 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         situation_compiler: SituationCompiler,
         relevance_scope: ContextRelevanceScope | None = None,
         life_content_store: ImmutableLifeContentStore | None = None,
+        perception_result_reader: PerceptionResultReader | None = None,
+        expression_payload_store: ImmutableExpressionPayloadStore | None = None,
     ) -> None:
         super().__init__()
         self._ledger = ledger
         self._situation_compiler = situation_compiler
         self._relevance_scope = relevance_scope
-        self._memory_retrieval = MemoryRetrievalCompiler(ledger=ledger)
+        self._memory_retrieval = MemoryRetrievalCompiler(
+            ledger=ledger,
+            life_content_store=life_content_store,
+        )
+        self._recent_dialogue = RecentDialogueCompiler(
+            ledger=ledger, expression_payload_store=expression_payload_store
+        )
         self._world_life = WorldLifeContextCompiler(
             life_content=LifeContentCompiler(store=life_content_store)
+        )
+        self._perception_results = (
+            PerceptionResultContextCompiler(reader=perception_result_reader)
+            if perception_result_reader is not None
+            else None
         )
 
     def _scope_for_query(
@@ -478,6 +689,20 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             "BudgetAdjusted",
         }
 
+        # The action-budget slice has one bounded authority closure shared by
+        # all accounts.  Once the projection already contains more budget
+        # events than that envelope can hold, the slice is necessarily
+        # unavailable; walking every historical reservation just to discover
+        # that fact turns a normal chat Context build into an O(history)
+        # series of verified SQLite lookups.  Returning the optional slice as
+        # unavailable is the same fail-closed result as the bounded loop
+        # below, and does not expose or infer any balance.
+        if (
+            sum(ref.event_type in budget_event_types for ref in projection.committed_world_event_refs)
+            > MAX_SOURCE_REFS_PER_ITEM
+        ):
+            return {account_id: None for account_id in accounts}
+
         for ref in projection.committed_world_event_refs:
             if ref.event_type not in budget_event_types:
                 continue
@@ -512,6 +737,13 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 account_id = reservation_accounts.get(reservation_id)
             if account_id in refs_by_account:
                 refs_by_account[account_id].append(ref.event_id)
+                # Once one live account exceeds the bounded authority closure,
+                # the slice is unavailable by contract.  Stop walking the
+                # remaining historical budget events instead of performing a
+                # verified SQLite lookup for every old reservation/settlement
+                # on every interactive turn.
+                if len(refs_by_account[account_id]) > MAX_SOURCE_REFS_PER_ITEM:
+                    return {account_id: None for account_id in accounts}
 
         result: dict[str, tuple[str, ...] | None] = {}
         for account_id, refs in refs_by_account.items():
@@ -519,9 +751,24 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 result[account_id] = None
             else:
                 result[account_id] = tuple(sorted(refs))
+        # ResolverProof bounds the authority closure for the whole slice, not
+        # only each account item.  Multiple individually valid long-lived
+        # accounts can otherwise exceed that envelope and crash an ordinary
+        # chat turn.  Until budget checkpoints provide a compact authority,
+        # fail the optional slice closed as unavailable instead of presenting
+        # a partial balance or raising after many turns.
+        slice_refs = {
+            ref
+            for refs in result.values()
+            if refs is not None
+            for ref in refs
+        }
+        if len(slice_refs) > MAX_SOURCE_REFS_PER_ITEM:
+            return {account_id: None for account_id in accounts}
         return result
 
     def resolve(self, query: ContextCompileQuery) -> ResolvedContextResult:
+        started = time.perf_counter()
         head = self._ledger.project()
         if (
             head.world_revision != query.world_revision
@@ -533,6 +780,7 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         self._validate_projection(query, projection)
         scope = self._scope_for_query(query, projection)
         observation_aliases = _observation_event_aliases(projection)
+        after_snapshot = time.perf_counter()
 
         situation_result = self._situation_compiler.compile(
             request_from_ledger_projection(
@@ -544,11 +792,26 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         situation = situation_result.internal
 
         subject_refs = scope.subject_refs
+        domain_phase_started = time.perf_counter()
+        recent_dialogue = self._recent_dialogue.compile(
+            projection=projection,
+            actor_ref=query.actor_ref,
+            subject_refs=subject_refs,
+        )
+        recent_dialogue_ms = (time.perf_counter() - domain_phase_started) * 1000
+        domain_phase_started = time.perf_counter()
         scoped_facts = tuple(
             item
             for item in projection.facts
             if item.values.status != "withdrawn" and item.values.subject_ref in subject_refs
         )
+        recalled_facts = _fact_recall_items(
+            ledger=self._ledger,
+            projection=projection,
+            facts=scoped_facts,
+        )
+        fact_ms = (time.perf_counter() - domain_phase_started) * 1000
+        domain_phase_started = time.perf_counter()
         scoped_threads = tuple(
             item for item in projection.threads if item.values.subject_ref in subject_refs
         )
@@ -563,6 +826,17 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             projection=projection,
             actor_ref=query.actor_ref,
             cursor=query.cursor,
+        )
+        world_life_ms = (time.perf_counter() - domain_phase_started) * 1000
+        domain_phase_started = time.perf_counter()
+        perception_results = (
+            self._perception_results.compile(
+                projection=projection,
+                cursor=query.cursor,
+                subject_refs=scope.subject_refs,
+            )
+            if self._perception_results is not None
+            else None
         )
         scoped_source_ids = {
             *(item.fact_id for item in scoped_facts),
@@ -583,6 +857,8 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             viewer_privacy_ceiling="private",
             projection=projection,
         )
+        memory_ms = (time.perf_counter() - domain_phase_started) * 1000
+        domain_phase_started = time.perf_counter()
         appraisal_by_id = {item.appraisal_id: item for item in projection.appraisals}
         active_affect = tuple(
             item for item in projection.affect_episodes if item.status == "active"
@@ -617,6 +893,8 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             if item.subject_ref in subject_refs and item.origin is not None
         )
         budget_authority_refs = self._budget_authority_refs(projection)
+        budget_ms = (time.perf_counter() - domain_phase_started) * 1000
+        after_domains = time.perf_counter()
 
         domains: dict[SliceName, tuple[BaseModel, ...] | None] = {
             "character_core": (
@@ -625,11 +903,12 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 and projection.character_core.actor_ref == query.actor_ref
                 else None
             ),
+            "recent_dialogue": recent_dialogue,
             "relationship_slice": scoped_relationships,
             "appraisals": scoped_appraisals,
             "affect_episodes": scoped_affect,
             "open_threads": tuple(item for item in scoped_threads if item.values.status == "open"),
-            "relevant_facts": scoped_facts,
+            "relevant_facts": recalled_facts,
             "recent_experiences": scoped_experiences,
             "world_life": world_life,
             "active_memory_candidates": memory_retrievals.items,
@@ -646,6 +925,8 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             ),
             "advisories": None,
         }
+        if perception_results is not None:
+            domains["perception_results"] = perception_results
         domains = {
             slice_name: (
                 None
@@ -671,11 +952,13 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     required_refs.update(refs)
 
         resolved_events = self._resolve_exact(required_refs, query.world_revision)
+        after_refs = time.perf_counter()
         resolved: dict[str, object] = {
             "situation": self._situation_slice(query, situation, scope),
         }
         request_fields = {
             "character_core": "character_core",
+            "recent_dialogue": "recent_dialogue",
             "relationship_slice": "relationship_slice",
             "appraisals": "appraisals",
             "affect_episodes": "affect_episodes",
@@ -689,6 +972,8 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             "private_impressions": "private_impressions",
             "advisories": "advisories",
         }
+        if perception_results is not None:
+            request_fields["perception_results"] = "perception_results"
         for slice_name, field in request_fields.items():
             items = domains[slice_name]
             if items is None:
@@ -715,8 +1000,28 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
             world_revision=query.world_revision,
             deliberation_revision=query.deliberation_revision,
             ledger_sequence=query.ledger_sequence,
-            logical_time=query.logical_time,
+            # Situation owns the deployment's civil-time presentation.  Keep
+            # the pinned instant, but expose the same local offset at the
+            # capsule root so the model does not receive contradictory UTC
+            # and local "current time" representations.
+            logical_time=situation.logical_time,
             **resolved,
+        )
+        _LOG.warning(
+            "world v2 Context resolve phases world=%s cursor=%s snapshot_ms=%.1f domains_ms=%.1f refs_ms=%.1f total_ms=%.1f required_refs=%d projection_events=%d recent_dialogue_ms=%.1f facts_ms=%.1f world_life_ms=%.1f memory_ms=%.1f budget_ms=%.1f",
+            query.world_id,
+            query.ledger_sequence,
+            (after_snapshot - started) * 1000,
+            (after_domains - after_snapshot) * 1000,
+            (after_refs - after_domains) * 1000,
+            (time.perf_counter() - started) * 1000,
+            len(required_refs),
+            len(projection.committed_world_event_refs),
+            recent_dialogue_ms,
+            fact_ms,
+            world_life_ms,
+            memory_ms,
+            budget_ms,
         )
         return ResolvedContextResult(
             query_hash=context_query_hash(query),
@@ -941,6 +1246,8 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
         observation_aliases: dict[str, str],
     ) -> ResolvedSlice | None:
         metadata: list[ResolvedItemMetadata] = []
+        selected_items: list[BaseModel] = []
+        selected_authority_refs: set[str] = set()
         for item in items:
             item_ref = _item_ref(slice_name, item)
             refs = refs_by_item[(slice_name, item_ref)]
@@ -954,7 +1261,24 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                 return None
             bindings = tuple(
                 sorted(
-                    (_binding(events[ref]) for ref in refs),
+                    (
+                        *(_binding(events[ref]) for ref in refs),
+                        *(
+                            (
+                                ResolvedSourceBinding(
+                                    source_kind="immutable_payload",
+                                    authority_type="ImmutableExpressionPayload",
+                                    ref=item.sidecar_ref,
+                                    source_world_revision=query.world_revision,
+                                    immutable_hash=item.sidecar_hash.removeprefix("sha256:"),
+                                ),
+                            )
+                            if isinstance(item, RecentDialogueItem)
+                            and item.sidecar_ref is not None
+                            and item.sidecar_hash is not None
+                            else ()
+                        ),
+                    ),
                     key=lambda value: (
                         value.source_kind,
                         value.authority_type,
@@ -964,6 +1288,16 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     ),
                 )
             )
+            candidate_refs = {binding.ref for binding in bindings}
+            if len(selected_authority_refs | candidate_refs) > MAX_SOURCE_REFS_PER_ITEM:
+                # ResolverProof has a fixed authority-closure bound. A long
+                # conversation may leave many independently valid appraisal
+                # or dialogue items; attempting to prove all of them used to
+                # raise during an ordinary reply once the 33rd ref appeared.
+                # Items arrive in deterministic relevance order, so retain the
+                # highest-ranked whole items that fit and keep every retained
+                # value fully source-bound.
+                continue
             metadata.append(
                 ResolvedItemMetadata(
                     item_ref=item_ref,
@@ -974,9 +1308,13 @@ class LedgerProjectionContextResolver(TrustedInternalContextResolver):
                     value_hash=canonical_value_hash(item),
                 )
             )
+            selected_items.append(item)
+            selected_authority_refs.update(candidate_refs)
+        if items and not selected_items:
+            return None
         ordered = tuple(
             sorted(
-                zip(items, metadata, strict=True),
+                zip(selected_items, metadata, strict=True),
                 key=lambda pair: (-pair[1].rank_score_bp, pair[1].item_ref),
             )
         )

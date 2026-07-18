@@ -15,6 +15,7 @@ from .life_events import (
     WorldOccurrenceSettledPayload,
     WorldOccurrenceTerminalPayload,
 )
+from .activity_timing import activity_completion_allowed
 from .experience_events import ExperienceCommittedPayload, LegacyExperienceCommittedPayload
 from .schemas import (
     Action,
@@ -51,9 +52,7 @@ def register_npc(
 ) -> tuple[NpcProjection, ...]:
     if any(npc.npc_id == payload.npc.npc_id for npc in npcs):
         raise ValueError(f"NPC {payload.npc.npc_id!r} already exists")
-    if any(
-        npc.stable_identity_ref == payload.npc.stable_identity_ref for npc in npcs
-    ):
+    if any(npc.stable_identity_ref == payload.npc.stable_identity_ref for npc in npcs):
         raise ValueError("NPC stable identity is already registered")
     return (*npcs, payload.npc)
 
@@ -84,11 +83,7 @@ def plan_activity(
             raise ValueError("plan cannot weaken participant NPC privacy")
     if payload.plan.supersedes_plan_id is not None:
         predecessor = next(
-            (
-                plan
-                for plan in plans
-                if plan.plan_id == payload.plan.supersedes_plan_id
-            ),
+            (plan for plan in plans if plan.plan_id == payload.plan.supersedes_plan_id),
             None,
         )
         if predecessor is None or predecessor.status != "abandoned":
@@ -157,6 +152,19 @@ def transition_activity(
         raise ValueError("activity transition is ahead of logical time")
     if payload.transitioned_at != logical_time:
         raise ValueError("activity transition must be pinned to authoritative logical time")
+    # The catalog's scheduler path must not manufacture an immediate
+    # completion merely because a wake occurred.  An explicit host/user
+    # transition is still allowed to record a real early finish (for example
+    # an activity was interrupted or completed sooner than expected); its
+    # reason/evidence is the authority for that decision.  Restrict the
+    # elapsed-time floor to the proposal-bound path where the reducer can
+    # distinguish an ordinary scheduler wake from such an explicit transition.
+    if (
+        event_type == "ActivityCompleted"
+        and payload.activity_lifecycle_proposal_id is not None
+        and not activity_completion_allowed(plan, logical_time=logical_time)
+    ):
+        raise ValueError("activity cannot complete before its minimum elapsed duration")
     if payload.transitioned_at.tzinfo is None or payload.transitioned_at.utcoffset() is None:
         raise ValueError("activity transition time must be timezone-aware")
     if (
@@ -189,9 +197,7 @@ def transition_activity(
             "status": target_status,
             "last_transitioned_at": payload.transitioned_at,
             "terminal_reason_ref": (
-                payload.reason_ref
-                if target_status in {"completed", "abandoned"}
-                else None
+                payload.reason_ref if target_status in {"completed", "abandoned"} else None
             ),
         }
     )
@@ -239,13 +245,10 @@ def commit_occurrence(
     if missing_npcs:
         raise ValueError("occurrence references an unregistered NPC")
     referenced_npcs = {
-        npc.npc_id: npc
-        for npc in npcs
-        if f"npc:{npc.npc_id}" in occurrence.participant_refs
+        npc.npc_id: npc for npc in npcs if f"npc:{npc.npc_id}" in occurrence.participant_refs
     }
     if any(
-        _PRIVACY_RANK[occurrence.visibility]
-        < _PRIVACY_RANK[npc.privacy_class]
+        _PRIVACY_RANK[occurrence.visibility] < _PRIVACY_RANK[npc.privacy_class]
         for npc in referenced_npcs.values()
     ):
         raise ValueError("occurrence cannot weaken participant NPC privacy")
@@ -267,14 +270,10 @@ def activate_occurrence(
     if occurrence.status != "committed":
         raise ValueError("only a committed occurrence can activate")
     if not (
-        occurrence.time_window.opens_at
-        <= payload.activated_at
-        < occurrence.time_window.closes_at
+        occurrence.time_window.opens_at <= payload.activated_at < occurrence.time_window.closes_at
     ):
         raise ValueError("occurrence activation is outside its committed window")
-    if not set(occurrence.precondition_refs) <= set(
-        payload.satisfied_precondition_refs
-    ):
+    if not set(occurrence.precondition_refs) <= set(payload.satisfied_precondition_refs):
         raise ValueError("occurrence activation is missing a precondition")
     updated = occurrence.model_copy(
         update={
@@ -334,9 +333,7 @@ def record_outcome_observation(
                 or evidence.source_world_revision != committed.world_revision
                 or evidence.immutable_hash != committed.payload_hash
             ):
-                raise ValueError(
-                    "outcome observation references unverified world evidence"
-                )
+                raise ValueError("outcome observation references unverified world evidence")
     updated = occurrence.model_copy(
         update={
             "entity_revision": occurrence.entity_revision + 1,
@@ -396,9 +393,7 @@ def settle_occurrence(
         raise ValueError("settlement result does not match outcome proposal")
     if proposal.trigger_ref != occurrence.trigger_ref:
         raise ValueError("outcome proposal trigger does not match occurrence")
-    if set(proposal.precondition_refs) != set(
-        occurrence.satisfied_precondition_refs
-    ):
+    if set(proposal.precondition_refs) != set(occurrence.satisfied_precondition_refs):
         raise ValueError("outcome proposal preconditions are stale")
     if set(proposal.observation_refs) != set(payload.observation_refs):
         raise ValueError("settlement observations do not match outcome proposal")
@@ -463,10 +458,7 @@ def record_outcome_proposal(
     outcome_proposals: tuple[OutcomeProposalProjection, ...],
     payload: OutcomeProposalRecordedPayload,
 ) -> tuple[OutcomeProposalProjection, ...]:
-    if any(
-        item.outcome_proposal_id == payload.outcome_proposal_id
-        for item in outcome_proposals
-    ):
+    if any(item.outcome_proposal_id == payload.outcome_proposal_id for item in outcome_proposals):
         raise ValueError("outcome proposal already exists")
     proposal = OutcomeProposalProjection.model_validate(payload.model_dump())
     return (*outcome_proposals, proposal)
@@ -711,9 +703,7 @@ def _canonical_model_hash(value: ExecutionReceipt) -> str:
 
 def _expect_revision(actual: int, expected: int) -> None:
     if actual != expected:
-        raise ValueError(
-            f"stale entity revision: expected {expected}, current {actual}"
-        )
+        raise ValueError(f"stale entity revision: expected {expected}, current {actual}")
 
 
 def _occurrence(
